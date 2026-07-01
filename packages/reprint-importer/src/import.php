@@ -56,6 +56,9 @@ require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 // Typed state objects for the persisted import state.
 require_once __DIR__ . '/lib/state/class-import-state.php';
 
+// Adaptive sizing for bounded local-to-remote upload chunks (push transfers)
+require_once __DIR__ . '/lib/upload/class-upload-chunk-sizer.php';
+
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
