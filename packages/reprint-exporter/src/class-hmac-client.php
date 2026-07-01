@@ -69,12 +69,15 @@ class Site_Export_HMAC_Client {
     /**
      * Compute the HMAC signature for a request.
      *
-     * The signature covers a SHA-256 hash of the body rather than the
-     * raw bytes.  This avoids having to predict the exact encoding that
-     * libcurl will produce for multipart/form-data uploads while still
-     * providing end-to-end integrity: the server independently hashes
-     * the received body and verifies it matches X-Auth-Content-Hash
-     * before checking the HMAC.
+     * The signature covers a SHA-256 hash of the body rather than the raw
+     * bytes. This avoids having to predict the exact encoding that libcurl
+     * will produce for multipart/form-data uploads while still binding the
+     * request to a digest: the server verifies the timestamp, nonce, and HMAC
+     * over X-Auth-Content-Hash before it computes or compares any body hash.
+     *
+     * This is intended for small control-plane requests. Large data transfers
+     * should use an authenticated session and per-chunk hashes instead of
+     * HMAC-signing one large request body.
      *
      * Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), secret)
      *

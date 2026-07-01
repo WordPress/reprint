@@ -143,6 +143,75 @@ final class HmacServerTest extends TestCase
         }
     }
 
+    public function testControlRequestVerifiesBoundedBody(): void
+    {
+        $body = '{"command":"preflight"}';
+        $headers = $this->buildHeadersForBody($body);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertNull($server->verify_control_request($headers, $body, 1700000001.0));
+    }
+
+    public function testControlRequestRejectsBodyAboveConfiguredLimit(): void
+    {
+        $body = '{"command":"preflight"}';
+        $headers = $this->buildHeadersForBody($body);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'HMAC control request body exceeds 8 bytes',
+            $server->verify_control_request($headers, $body, 1700000001.0, 8)
+        );
+    }
+
+    public function testPrecomputedContentHashVerifiesWithoutBody(): void
+    {
+        $body = '{"command":"commit","manifest":"abc123"}';
+        $headers = $this->buildHeadersForBody($body);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertNull($server->verify_content_hash($headers, hash('sha256', $body), 1700000001.0));
+    }
+
+    public function testSignedContentHashHeaderCanBeCheckedBeforeBodyIsRead(): void
+    {
+        $body = '{"command":"start-session"}';
+        $headers = $this->buildHeadersForBody($body);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $result = $server->verify_signed_content_hash($headers, 1700000001.0);
+
+        $this->assertNull($result['error']);
+        $this->assertSame(hash('sha256', $body), $result['content_hash']);
+    }
+
+    public function testInvalidSignatureDoesNotReadUploadedFiles(): void
+    {
+        $headers = $this->buildHeadersForBody('signed-body');
+        $headers['X-Auth-Signature'] = str_repeat('0', 64);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'HMAC signature verification failed',
+            $server->verify($headers, 'ignored-body', [
+                'bad_upload' => ['tmp_name' => __DIR__],
+            ], 1700000001.0)
+        );
+    }
+
+    public function testUploadedFileHashFailureReturnsVerificationError(): void
+    {
+        $headers = $this->buildHeadersForBody('signed-body');
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'Cannot hash uploaded file.',
+            $server->verify($headers, 'ignored-body', [
+                'bad_upload' => ['tmp_name' => __DIR__],
+            ], 1700000001.0)
+        );
+    }
+
     private function buildHeadersForBody(
         string $body,
         string $timestamp = '1700000000.000000',

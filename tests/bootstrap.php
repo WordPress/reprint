@@ -14,15 +14,15 @@ if (!function_exists('build_pdo_dsn')) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/utils.php';
 }
 
-if (!class_exists('Site_Export_HMAC_Client')) {
+if (!class_exists('Site_Export_HMAC_Client', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-hmac-client.php';
 }
 
-if (!class_exists('Site_Export_HMAC_Server')) {
+if (!class_exists('Site_Export_HMAC_Server', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-hmac-server.php';
 }
 
-if (!class_exists('Site_Export_HTTP_Server')) {
+if (!class_exists('Site_Export_HTTP_Server', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-http-server.php';
 }
 
