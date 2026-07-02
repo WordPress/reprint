@@ -44,18 +44,24 @@
  * Layout and state follow the pull importer's mechanics. Artifact bytes live
  * at their plain target-relative paths under files/ — no suffixes, so any
  * name a site can contain stages verbatim — and progress lives outside the
- * mirror: state.json holds the cursor for the single in-flight artifact,
- * verified.jsonl appends one line per artifact finalize() accepted, and lock
- * is the flock target. The lock cannot live on state.json itself: the cursor
- * is committed by rename, and a rename-replaced file leaves the held lock on
- * the orphaned inode.
+ * mirror: state.json holds the cursor for the single in-flight artifact and
+ * verified.jsonl appends one line per artifact finalize() accepted.
  *
  * Transfers are sequential, like pull: one artifact is in flight at a time
  * and the cursor tracks only it. Writing chunk 0 of another artifact moves
  * the cursor there; an unfinished predecessor keeps its bytes on disk but
- * restarts from offset 0 when the sender returns to it. Concurrency is not a
- * feature — the lock exists so a retry racing its timed-out predecessor gets
- * "busy" instead of interleaved writes.
+ * restarts from offset 0 when the sender returns to it.
+ *
+ * Locking: every mutator — write_chunks(), finalize(), discard() — holds one
+ * exclusive non-blocking flock on the lock file for its whole call, so a
+ * batch keeps the store to itself from its first chunk to its last. This is
+ * not for parallelism (transfers are sequential); it exists so a retry
+ * racing its timed-out predecessor gets "busy" instead of interleaving
+ * writes. The lock needs its own never-replaced file: state.json commits by
+ * rename, and renaming a locked file strands the held flock on the orphaned
+ * inode while the next opener locks the fresh one. Readers stay lock-free —
+ * state.json is rename-atomic, verified.jsonl is append-only, and
+ * committed_bytes only grows — so status() always reads a safe resume hint.
  *
  * Contract:
  *
@@ -358,6 +364,9 @@ final class Site_Export_Staged_Artifacts {
                 return $this->finalize_result('rejected', 'io_error', $committed, 'truncate_uncommitted_tail');
             }
 
+            // Reading through a second handle without locking the artifact
+            // file is safe: every writer serializes on the store lock held
+            // here.
             $actual_crc32 = hash_file('crc32b', $file_path);
             if ($actual_crc32 === false) {
                 return $this->finalize_result('rejected', 'io_error', $committed, 'artifact_crc32');
@@ -549,6 +558,10 @@ final class Site_Export_Staged_Artifacts {
 
     /**
      * Opens the flock target, creating the staging directory on first use.
+     *
+     * The lock file must never be written or rename-replaced: a rename
+     * strands a held flock on the orphaned inode and lets the next opener
+     * lock the store concurrently.
      *
      * @return resource|false
      */
