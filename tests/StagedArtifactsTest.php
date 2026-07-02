@@ -37,6 +37,16 @@ final class StagedArtifactsTest extends TestCase
         return $store->write_chunk($id, $offset, strlen($bytes), hash('crc32b', $bytes), $bytes);
     }
 
+    private function chunk(int $offset, string $bytes): array
+    {
+        return [
+            'offset' => $offset,
+            'length' => strlen($bytes),
+            'expected_crc32' => hash('crc32b', $bytes),
+            'source' => $bytes,
+        ];
+    }
+
     // ---------------------------------------------------------------
     // Assembly and finalize
     // ---------------------------------------------------------------
@@ -75,6 +85,48 @@ final class StagedArtifactsTest extends TestCase
         $this->assertSame('verified', $store->finalize('artifact-1', strlen($body), hash('crc32b', $body))['status']);
     }
 
+    public function testManyChunksCanBeWrittenInOneOpenLockedBatch(): void
+    {
+        $store = $this->makeStore();
+        $chunks = [];
+        $body = '';
+        $offset = 0;
+        for ($i = 0; $i < 1000; $i++) {
+            $bytes = chr(65 + ($i % 26));
+            $chunks[] = $this->chunk($offset, $bytes);
+            $body .= $bytes;
+            $offset++;
+        }
+
+        $result = $store->write_chunks('artifact-1', $chunks);
+
+        $this->assertSame('accepted', $result['status']);
+        $this->assertSame(strlen($body), $result['committed_bytes']);
+        $verified = $store->finalize('artifact-1', strlen($body), hash('crc32b', $body));
+        $this->assertSame('verified', $verified['status']);
+        $this->assertSame($body, file_get_contents($verified['path']));
+    }
+
+    public function testStreamingBatchKeepsTheArtifactLockAcrossChunks(): void
+    {
+        $store = $this->makeStore();
+        $busy_write = null;
+
+        $chunks = (function () use ($store, &$busy_write) {
+            yield $this->chunk(0, 'first');
+            $busy_write = $this->writeString($store, 'artifact-1', 5, 'blocked');
+            yield $this->chunk(5, 'second');
+        })();
+
+        $result = $store->write_chunks('artifact-1', $chunks);
+
+        $this->assertSame(['busy', 5], [$busy_write['status'], $busy_write['committed_bytes']]);
+        $this->assertSame('accepted', $result['status']);
+        $this->assertSame(11, $result['committed_bytes']);
+        $verified = $store->finalize('artifact-1', 11, hash('crc32b', 'firstsecond'));
+        $this->assertSame('firstsecond', file_get_contents($verified['path']));
+    }
+
     public function testZeroByteArtifactVerifiesWithoutChunks(): void
     {
         $store = $this->makeStore();
@@ -96,6 +148,30 @@ final class StagedArtifactsTest extends TestCase
         $this->assertSame('verified', $again['status']);
     }
 
+    public function testFinalizeOfUnknownArtifactReportsMissing(): void
+    {
+        $store = $this->makeStore();
+
+        $result = $store->finalize('never-uploaded', 5, hash('crc32b', 'bytes'));
+
+        $this->assertSame(['rejected', 'missing'], [$result['status'], $result['reason']]);
+    }
+
+    public function testRefinalizeWithDifferentChecksumIsRejected(): void
+    {
+        $store = $this->makeStore();
+        $this->writeString($store, 'artifact-1', 0, 'payload');
+        $store->finalize('artifact-1', 7, hash('crc32b', 'payload'));
+
+        $result = $store->finalize('artifact-1', 7, hash('crc32b', 'tampered'));
+
+        $this->assertSame(
+            ['rejected', 'hash_mismatch', 'verified_record'],
+            [$result['status'], $result['reason'], $result['detail']]
+        );
+        $this->assertTrue($store->status('artifact-1')['verified']);
+    }
+
     // ---------------------------------------------------------------
     // Idempotent retries and resume
     // ---------------------------------------------------------------
@@ -109,6 +185,104 @@ final class StagedArtifactsTest extends TestCase
 
         $this->assertSame('duplicate', $retry['status']);
         $this->assertSame(5, $retry['committed_bytes']);
+        $this->assertSame('accepted', $this->writeString($store, 'artifact-1', 5, 'second')['status']);
+    }
+
+    public function testDuplicateStreamChunkIsDrainedInsideBatch(): void
+    {
+        $store = $this->makeStore();
+        $this->writeString($store, 'artifact-1', 0, 'first');
+
+        $stream = fopen('php://temp', 'r+b');
+        fwrite($stream, 'firstsecond');
+        rewind($stream);
+        $result = $store->write_chunks('artifact-1', [
+            [
+                'offset' => 0,
+                'length' => 5,
+                'expected_crc32' => hash('crc32b', 'first'),
+                'source' => $stream,
+            ],
+            [
+                'offset' => 5,
+                'length' => 6,
+                'expected_crc32' => hash('crc32b', 'second'),
+                'source' => $stream,
+            ],
+        ]);
+        fclose($stream);
+
+        $this->assertSame('accepted', $result['status']);
+        $verified = $store->finalize('artifact-1', 11, hash('crc32b', 'firstsecond'));
+        $this->assertSame('firstsecond', file_get_contents($verified['path']));
+    }
+
+    public function testMidBatchRejectionKeepsEarlierChunksCommitted(): void
+    {
+        $store = $this->makeStore();
+
+        $result = $store->write_chunks('artifact-1', [
+            $this->chunk(0, 'first'),
+            [
+                'offset' => 5,
+                'length' => 6,
+                'expected_crc32' => hash('crc32b', 'other!'),
+                'source' => 'second',
+            ],
+        ]);
+
+        $this->assertSame(
+            ['rejected', 'hash_mismatch', 'chunk_body', 5],
+            [$result['status'], $result['reason'], $result['detail'], $result['committed_bytes']]
+        );
+
+        // The sender resumes from committed_bytes instead of restarting.
+        $this->assertSame('accepted', $this->writeString($store, 'artifact-1', 5, 'second')['status']);
+        $verified = $store->finalize('artifact-1', 11, hash('crc32b', 'firstsecond'));
+        $this->assertSame('firstsecond', file_get_contents($verified['path']));
+    }
+
+    public function testDuplicateDrainOfTruncatedStreamIsRejected(): void
+    {
+        $store = $this->makeStore();
+        $this->writeString($store, 'artifact-1', 0, 'first');
+
+        $stream = fopen('php://temp', 'r+b');
+        fwrite($stream, 'fir'); // Three of the duplicate chunk's five bytes.
+        rewind($stream);
+        $result = $store->write_chunks('artifact-1', [
+            [
+                'offset' => 0,
+                'length' => 5,
+                'expected_crc32' => hash('crc32b', 'first'),
+                'source' => $stream,
+            ],
+        ]);
+        fclose($stream);
+
+        $this->assertSame(
+            ['rejected', 'short_body', 'duplicate_drain', 5],
+            [$result['status'], $result['reason'], $result['detail'], $result['committed_bytes']]
+        );
+    }
+
+    public function testGeneratorFailureMidBatchReleasesTheLockAndKeepsProgress(): void
+    {
+        $store = $this->makeStore();
+        $chunks = (function () {
+            yield $this->chunk(0, 'first');
+            throw new DomainException('endpoint failed to parse the next chunk');
+        })();
+
+        try {
+            $store->write_chunks('artifact-1', $chunks);
+            $threw = false;
+        } catch (DomainException $exception) {
+            $threw = true;
+        }
+
+        $this->assertTrue($threw, 'The generator exception should propagate to the endpoint.');
+        $this->assertSame(5, $store->status('artifact-1')['committed_bytes']);
         $this->assertSame('accepted', $this->writeString($store, 'artifact-1', 5, 'second')['status']);
     }
 
@@ -163,6 +337,43 @@ final class StagedArtifactsTest extends TestCase
         $result = $store->finalize('artifact-1', strlen($body), hash('crc32b', $body));
         $this->assertSame('verified', $result['status']);
         $this->assertSame($body, file_get_contents($result['path']));
+    }
+
+    public function testExternallyShrunkenStagingFileFailsTheArtifactChecksum(): void
+    {
+        $store = $this->makeStore();
+        $this->writeString($store, 'artifact-1', 0, 'first');
+
+        // Simulate the staging file drifting between requests: something
+        // shrinks it below the committed size.
+        file_put_contents($this->staging_dir . '/artifact-1.part', 'fi');
+
+        // The next write zero-fills back to the committed size and appends;
+        // only finalize's whole-artifact checksum can see the damage.
+        $this->assertSame('accepted', $this->writeString($store, 'artifact-1', 5, 'second')['status']);
+
+        $result = $store->finalize('artifact-1', 11, hash('crc32b', 'firstsecond'));
+        $this->assertSame(
+            ['rejected', 'hash_mismatch', 'artifact_crc32'],
+            [$result['status'], $result['reason'], $result['detail']]
+        );
+        $this->assertFalse($store->status('artifact-1')['verified']);
+    }
+
+    public function testCorruptCommitRecordRestartsTheArtifact(): void
+    {
+        $store = $this->makeStore();
+        $this->writeString($store, 'artifact-1', 0, 'first');
+
+        file_put_contents($this->staging_dir . '/artifact-1.meta.json', 'not json {');
+
+        $this->assertSame(0, $store->status('artifact-1')['committed_bytes']);
+        $resumed = $this->writeString($store, 'artifact-1', 5, 'second');
+        $this->assertSame(
+            ['rejected', 'offset_gap', 0],
+            [$resumed['status'], $resumed['reason'], $resumed['committed_bytes']]
+        );
+        $this->assertSame('accepted', $this->writeString($store, 'artifact-1', 0, 'fresh')['status']);
     }
 
     public function testFinalizeRejectsWrongSizeAndWrongHash(): void
@@ -225,6 +436,39 @@ final class StagedArtifactsTest extends TestCase
 
         $bad_length = $store->write_chunk('artifact-1', 0, 0, hash('crc32b', ''), '');
         $this->assertSame(['rejected', 'invalid_length'], [$bad_length['status'], $bad_length['reason']]);
+
+        $bad_offset = $store->write_chunk('artifact-1', -1, 5, hash('crc32b', 'bytes'), 'bytes');
+        $this->assertSame(['rejected', 'invalid_offset'], [$bad_offset['status'], $bad_offset['reason']]);
+
+        $bad_source = $store->write_chunk('artifact-1', 0, 5, hash('crc32b', 'bytes'), 42);
+        $this->assertSame(['rejected', 'invalid_source'], [$bad_source['status'], $bad_source['reason']]);
+    }
+
+    public function testUppercaseChecksumsAreAccepted(): void
+    {
+        $store = $this->makeStore();
+
+        $result = $store->write_chunk('artifact-1', 0, 5, strtoupper(hash('crc32b', 'bytes')), 'bytes');
+
+        $this->assertSame('accepted', $result['status']);
+        $this->assertSame(
+            'verified',
+            $store->finalize('artifact-1', 5, strtoupper(hash('crc32b', 'bytes')))['status']
+        );
+    }
+
+    public function testEmptyBatchIsRejectedWithoutDisturbingCommittedBytes(): void
+    {
+        $store = $this->makeStore();
+        $this->writeString($store, 'artifact-1', 0, 'first');
+
+        $result = $store->write_chunks('artifact-1', []);
+
+        $this->assertSame(
+            ['rejected', 'empty_batch', 5],
+            [$result['status'], $result['reason'], $result['committed_bytes']]
+        );
+        $this->assertSame('accepted', $this->writeString($store, 'artifact-1', 5, 'second')['status']);
     }
 
     public function testStagingMirrorsTheArtifactPath(): void
@@ -242,7 +486,7 @@ final class StagedArtifactsTest extends TestCase
     {
         $store = $this->makeStore();
 
-        foreach (['../../outside/etc/passwd', '/etc/passwd', 'a/../b', 'a//b', './a', ''] as $hostile_id) {
+        foreach (['../../outside/etc/passwd', '/etc/passwd', 'a/../b', 'a//b', './a', '', 'a\\b', "a\0b"] as $hostile_id) {
             $result = $this->writeString($store, $hostile_id, 0, 'bytes');
             $this->assertSame(
                 ['rejected', 'invalid_artifact_id'],
@@ -259,7 +503,7 @@ final class StagedArtifactsTest extends TestCase
             $this->assertTrue($store->discard($hostile_id), "id: {$hostile_id}");
         }
 
-        $this->assertDirectoryDoesNotExist(dirname($this->staging_dir) . '/outside');
+        $this->assertDirectoryDoesNotExist(dirname(dirname($this->staging_dir)) . '/outside');
         $this->assertFileDoesNotExist('/etc/passwd.part');
     }
 
@@ -277,8 +521,10 @@ final class StagedArtifactsTest extends TestCase
         $holder = fopen($part_path, 'r+b');
         flock($holder, LOCK_EX);
 
-        $this->assertSame('busy', $this->writeString($store, 'artifact-1', 5, 'second')['status']);
-        $this->assertSame('busy', $store->finalize('artifact-1', 5, hash('crc32b', 'first'))['status']);
+        $busy_write = $this->writeString($store, 'artifact-1', 5, 'second');
+        $this->assertSame(['busy', 5], [$busy_write['status'], $busy_write['committed_bytes']]);
+        $busy_finalize = $store->finalize('artifact-1', 5, hash('crc32b', 'first'));
+        $this->assertSame(['busy', 5], [$busy_finalize['status'], $busy_finalize['committed_bytes']]);
         $this->assertFalse($store->discard('artifact-1'));
 
         flock($holder, LOCK_UN);
@@ -296,6 +542,35 @@ final class StagedArtifactsTest extends TestCase
         $status = $store->status('artifact-1');
         $this->assertSame(['exists' => false, 'committed_bytes' => 0, 'verified' => false], $status);
         $this->assertTrue($store->discard('never-existed'));
+    }
+
+    public function testDiscardedArtifactRestartsFromScratch(): void
+    {
+        $store = $this->makeStore();
+        $this->writeString($store, 'artifact-1', 0, 'first');
+        $store->discard('artifact-1');
+
+        $stale = $this->writeString($store, 'artifact-1', 5, 'second');
+
+        $this->assertSame(
+            ['rejected', 'offset_gap', 0],
+            [$stale['status'], $stale['reason'], $stale['committed_bytes']]
+        );
+        $this->assertSame('accepted', $this->writeString($store, 'artifact-1', 0, 'fresh')['status']);
+    }
+
+    public function testDiscardCleansUpAMetaOnlyResidue(): void
+    {
+        $store = $this->makeStore();
+        $this->writeString($store, 'artifact-1', 0, 'payload');
+        unlink($this->staging_dir . '/artifact-1.part');
+
+        $this->assertTrue($store->discard('artifact-1'));
+
+        $this->assertSame(
+            ['exists' => false, 'committed_bytes' => 0, 'verified' => false],
+            $store->status('artifact-1')
+        );
     }
 
     public function testStatusOfUnknownArtifact(): void

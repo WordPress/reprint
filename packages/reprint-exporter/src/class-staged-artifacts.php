@@ -55,7 +55,8 @@
  * - An artifact id is the staging-relative path the artifact will be applied
  *   from, mirroring the target tree — the staging dir reads like the site
  *   and apply is a rename. Ids with absolute, empty, "." or ".." segments
- *   are rejected, same as the importer's fs-root-relative path rule.
+ *   or any backslash are rejected — stricter than the importer's fs-root
+ *   path rule, which tolerates backslashes and empty segments.
  * - Writers hold an exclusive flock on the staging file; a concurrent writer
  *   gets "busy" instead of interleaved writes.
  *
@@ -83,44 +84,60 @@ final class Site_Export_Staged_Artifacts {
      * @param int             $length          Declared chunk length in bytes.
      * @param string          $expected_crc32  Hex CRC-32 (crc32b) of the chunk body.
      * @param resource|string $source          Chunk body, or a readable stream positioned at it.
-     * @return array{status:string,reason:?string,committed_bytes:int}
-     *   status "accepted"|"duplicate"|"busy"|"rejected"; reason is set on "rejected".
+     * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
+     *   status "accepted"|"duplicate"|"busy"|"rejected"; reason is set on
+     *   "rejected", and detail names the failing operation when the same
+     *   reason can come from more than one place.
      */
     public function write_chunk(string $artifact_id, int $offset, int $length, string $expected_crc32, $source): array {
-        // These parameters arrive verbatim from a remote client's request,
-        // and the sequencing/copy logic below assumes they are well-formed —
-        // a negative offset would misreport as "duplicate" success and a
-        // short string body would never finish copying. Reject malformed
-        // input with typed reasons before taking the lock or touching disk.
-        $expected_crc32 = strtolower($expected_crc32);
+        return $this->write_chunks($artifact_id, [
+            [
+                'offset' => $offset,
+                'length' => $length,
+                'expected_crc32' => $expected_crc32,
+                'source' => $source,
+            ],
+        ]);
+    }
+
+    /**
+     * Stage consecutive chunks from one request while keeping the staging file
+     * open and locked.
+     *
+     * The upload endpoint can pass a generator that yields parsed chunks from
+     * php://input, so a 100- or 1000-chunk request pays the open/flock/tail
+     * cleanup cost once while still committing each chunk independently for
+     * crash-safe resume.
+     *
+     * Because chunks commit one by one, a mid-batch rejection loses nothing:
+     * committed_bytes reports the durable progress made before the bad chunk,
+     * and the sender resumes from there.
+     *
+     * @param iterable<int,array{offset:int,length:int,expected_crc32:string,source:resource|string}> $chunks
+     * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
+     *   status "accepted"|"duplicate"|"busy"|"rejected"; reason is set on
+     *   "rejected", and detail names the failing operation when the same
+     *   reason can come from more than one place.
+     */
+    public function write_chunks(string $artifact_id, iterable $chunks): array {
         $paths = $this->artifact_paths($artifact_id);
         if ($paths === null) {
             return $this->write_result('rejected', 'invalid_artifact_id', 0);
         }
-        if ($length < 1 || $offset < 0) {
-            return $this->write_result('rejected', 'invalid_length', 0);
-        }
-        if (!preg_match('/^[0-9a-f]{8}$/', $expected_crc32)) {
-            return $this->write_result('rejected', 'invalid_hash', 0);
-        }
-        if (is_string($source) && strlen($source) !== $length) {
-            return $this->write_result('rejected', 'length_mismatch', 0);
-        }
-        if (!is_string($source) && !is_resource($source)) {
-            return $this->write_result('rejected', 'invalid_source', 0);
-        }
         if (!$this->ensure_parent_dir($paths['part'])) {
-            return $this->write_result('rejected', 'io_error', 0);
+            return $this->write_result('rejected', 'io_error', 0, 'create_staging_dir');
         }
 
+        // Open without truncating: a resumed transfer must keep committed
+        // bytes until the metadata check below decides what tail to discard.
         $part = @fopen($paths['part'], 'c+b');
         if ($part === false) {
-            return $this->write_result('rejected', 'io_error', 0);
+            return $this->write_result('rejected', 'io_error', 0, 'open_staging_file');
         }
 
         try {
             if (!flock($part, LOCK_EX | LOCK_NB)) {
-                return $this->write_result('busy', null, 0);
+                return $this->write_result('busy', null, $this->read_meta($paths['meta'])['committed_bytes']);
             }
 
             $meta = $this->read_meta($paths['meta']);
@@ -128,38 +145,87 @@ final class Site_Export_Staged_Artifacts {
             if ($meta['verified']) {
                 return $this->write_result('rejected', 'already_verified', $committed);
             }
-            if ($offset + $length <= $committed) {
+
+            // Discard any uncommitted tail from an interrupted earlier write,
+            // then append at the only offset the metadata says is committed.
+            if (!ftruncate($part, $committed) || fseek($part, $committed) !== 0) {
+                return $this->write_result('rejected', 'io_error', $committed, 'truncate_uncommitted_tail');
+            }
+
+            $accepted = false;
+            $duplicate = false;
+            foreach ($chunks as $chunk) {
+                // These parameters arrive verbatim from a remote client's
+                // request, and the sequencing/copy logic below assumes they
+                // are well-formed — a negative offset would misreport as
+                // "duplicate" success and a short string body would never
+                // finish copying. Reject malformed input with typed reasons
+                // before writing bytes.
+                $offset = isset($chunk['offset']) ? (int) $chunk['offset'] : -1;
+                $length = isset($chunk['length']) ? (int) $chunk['length'] : 0;
+                $expected_crc32 = isset($chunk['expected_crc32']) ? (string) $chunk['expected_crc32'] : '';
+                $expected_crc32 = strtolower($expected_crc32);
+                $source = $chunk['source'] ?? null;
+
+                if ($length < 1) {
+                    return $this->write_result('rejected', 'invalid_length', $committed);
+                }
+                if ($offset < 0) {
+                    return $this->write_result('rejected', 'invalid_offset', $committed);
+                }
+                if (!preg_match('/^[0-9a-f]{8}$/', $expected_crc32)) {
+                    return $this->write_result('rejected', 'invalid_hash', $committed);
+                }
+                if (is_string($source) && strlen($source) !== $length) {
+                    return $this->write_result('rejected', 'length_mismatch', $committed);
+                }
+                if (!is_string($source) && !is_resource($source)) {
+                    return $this->write_result('rejected', 'invalid_source', $committed);
+                }
+                if ($offset + $length <= $committed) {
+                    $drain_reason = $this->drain_source($source, $length);
+                    if ($drain_reason !== null) {
+                        return $this->write_result('rejected', $drain_reason, $committed, 'duplicate_drain');
+                    }
+                    $duplicate = true;
+                    continue;
+                }
+                if ($offset !== $committed) {
+                    return $this->write_result('rejected', 'offset_gap', $committed);
+                }
+
+                $copy_reason = $this->copy_and_hash($source, $part, $length, $expected_crc32);
+                if ($copy_reason !== null) {
+                    // A failed copy/hash can leave bytes past the committed
+                    // offset; trim them before the caller retries this chunk.
+                    ftruncate($part, $committed);
+                    return $this->write_result('rejected', $copy_reason, $committed, 'chunk_body');
+                }
+
+                // The data is flushed before the commit record moves: a crash
+                // between the two leaves a tail that the next write truncates.
+                if (!fflush($part)) {
+                    ftruncate($part, $committed);
+                    return $this->write_result('rejected', 'io_error', $committed, 'flush_chunk_body');
+                }
+
+                $meta['committed_bytes'] = $committed + $length;
+                if (!$this->write_meta($paths['meta'], $meta)) {
+                    ftruncate($part, $committed);
+                    return $this->write_result('rejected', 'io_error', $committed, 'persist_commit_record');
+                }
+
+                $committed = $meta['committed_bytes'];
+                $accepted = true;
+            }
+
+            if ($accepted) {
+                return $this->write_result('accepted', null, $committed);
+            }
+            if ($duplicate) {
                 return $this->write_result('duplicate', null, $committed);
             }
-            if ($offset !== $committed) {
-                return $this->write_result('rejected', 'offset_gap', $committed);
-            }
-
-            // Discard any uncommitted tail from an interrupted earlier write.
-            if (!ftruncate($part, $committed) || fseek($part, $committed) !== 0) {
-                return $this->write_result('rejected', 'io_error', $committed);
-            }
-
-            $copy_reason = $this->copy_and_hash($source, $part, $length, $expected_crc32);
-            if ($copy_reason !== null) {
-                ftruncate($part, $committed);
-                return $this->write_result('rejected', $copy_reason, $committed);
-            }
-
-            // The data is durable before the commit record moves: a crash
-            // between the two leaves a tail that the next write truncates.
-            if (!fflush($part)) {
-                ftruncate($part, $committed);
-                return $this->write_result('rejected', 'io_error', $committed);
-            }
-
-            $meta['committed_bytes'] = $committed + $length;
-            if (!$this->write_meta($paths['meta'], $meta)) {
-                ftruncate($part, $committed);
-                return $this->write_result('rejected', 'io_error', $committed);
-            }
-
-            return $this->write_result('accepted', null, $meta['committed_bytes']);
+            return $this->write_result('rejected', 'empty_batch', $committed);
         } finally {
             flock($part, LOCK_UN);
             fclose($part);
@@ -177,8 +243,10 @@ final class Site_Export_Staged_Artifacts {
      * reading cannot catch a resume that mixed two versions of the source
      * file — it would faithfully hash the mixed bytes.
      *
-     * @return array{status:string,reason:?string,committed_bytes:int,path:?string}
-     *   status "verified"|"busy"|"rejected"; path is set on "verified".
+     * @return array{status:string,reason:?string,detail:?string,committed_bytes:int,path:?string}
+     *   status "verified"|"busy"|"rejected"; path is set on "verified", and
+     *   detail names the failing operation when the same reason can come
+     *   from more than one place.
      */
     public function finalize(string $artifact_id, int $expected_total_bytes, string $expected_crc32): array {
         $expected_crc32 = strtolower($expected_crc32);
@@ -190,25 +258,29 @@ final class Site_Export_Staged_Artifacts {
             return $this->finalize_result('rejected', 'invalid_hash', 0);
         }
         if ($expected_total_bytes < 0) {
-            return $this->finalize_result('rejected', 'size_mismatch', 0);
+            return $this->finalize_result('rejected', 'invalid_total', 0);
         }
 
         $part_path = $paths['part'];
         if (!file_exists($part_path)) {
-            // A zero-byte artifact legitimately has no chunks.
-            if ($expected_total_bytes > 0 || !$this->ensure_parent_dir($part_path) || @touch($part_path) === false) {
+            // A zero-byte artifact legitimately has no chunks; the fopen
+            // below creates its empty part file.
+            if ($expected_total_bytes > 0) {
                 return $this->finalize_result('rejected', 'missing', 0);
+            }
+            if (!$this->ensure_parent_dir($part_path)) {
+                return $this->finalize_result('rejected', 'io_error', 0, 'create_staging_dir');
             }
         }
 
         $part = @fopen($part_path, 'c+b');
         if ($part === false) {
-            return $this->finalize_result('rejected', 'io_error', 0);
+            return $this->finalize_result('rejected', 'io_error', 0, 'open_staging_file');
         }
 
         try {
             if (!flock($part, LOCK_EX | LOCK_NB)) {
-                return $this->finalize_result('busy', null, 0);
+                return $this->finalize_result('busy', null, $this->read_meta($paths['meta'])['committed_bytes']);
             }
 
             $meta = $this->read_meta($paths['meta']);
@@ -218,8 +290,8 @@ final class Site_Export_Staged_Artifacts {
                     && is_string($meta['verified_crc32'])
                     && hash_equals($meta['verified_crc32'], $expected_crc32);
                 return $same
-                    ? $this->finalize_result('verified', null, $committed, $part_path)
-                    : $this->finalize_result('rejected', 'hash_mismatch', $committed);
+                    ? $this->finalize_result('verified', null, $committed, null, $part_path)
+                    : $this->finalize_result('rejected', 'hash_mismatch', $committed, 'verified_record');
             }
 
             if ($committed !== $expected_total_bytes) {
@@ -228,25 +300,27 @@ final class Site_Export_Staged_Artifacts {
 
             // Drop any uncommitted tail so the checksum covers committed bytes only.
             if (!ftruncate($part, $committed)) {
-                return $this->finalize_result('rejected', 'io_error', $committed);
+                return $this->finalize_result('rejected', 'io_error', $committed, 'truncate_uncommitted_tail');
             }
 
+            // Hash while holding the staging lock. hash_file() uses its own
+            // read handle, but all writers in this store respect this flock.
             $actual_crc32 = hash_file('crc32b', $part_path);
             if ($actual_crc32 === false) {
-                return $this->finalize_result('rejected', 'io_error', $committed);
+                return $this->finalize_result('rejected', 'io_error', $committed, 'artifact_crc32');
             }
             if (!hash_equals($expected_crc32, $actual_crc32)) {
-                return $this->finalize_result('rejected', 'hash_mismatch', $committed);
+                return $this->finalize_result('rejected', 'hash_mismatch', $committed, 'artifact_crc32');
             }
 
             $meta['verified'] = true;
             $meta['verified_total_bytes'] = $expected_total_bytes;
             $meta['verified_crc32'] = $expected_crc32;
             if (!$this->write_meta($paths['meta'], $meta)) {
-                return $this->finalize_result('rejected', 'io_error', $committed);
+                return $this->finalize_result('rejected', 'io_error', $committed, 'persist_commit_record');
             }
 
-            return $this->finalize_result('verified', null, $committed, $part_path);
+            return $this->finalize_result('verified', null, $committed, null, $part_path);
         } finally {
             flock($part, LOCK_UN);
             fclose($part);
@@ -254,6 +328,11 @@ final class Site_Export_Staged_Artifacts {
     }
 
     /**
+     * Returns the persisted staging state for an artifact.
+     *
+     * This is advisory and intentionally lock-free; writers still enforce the
+     * committed offset under flock before accepting bytes.
+     *
      * @return array{exists:bool,committed_bytes:int,verified:bool}
      */
     public function status(string $artifact_id): array {
@@ -287,21 +366,36 @@ final class Site_Export_Staged_Artifacts {
             return true;
         }
 
-        $part = @fopen($paths['part'], 'r+b');
-        if ($part !== false) {
+        if (!file_exists($paths['part']) && !file_exists($paths['meta'])) {
+            return true;
+        }
+
+        // 'c+b' so the lock exists even when only the meta record does, and
+        // the meta is unlinked before the part while the lock is held — a
+        // writer arriving after the part unlink locks a fresh inode, and
+        // stale meta it could still read would resurrect its committed_bytes
+        // over bytes that are gone.
+        $part = @fopen($paths['part'], 'c+b');
+        if ($part === false) {
+            return false;
+        }
+        try {
             if (!flock($part, LOCK_EX | LOCK_NB)) {
-                fclose($part);
                 return false;
             }
+            @unlink($paths['meta']);
             @unlink($paths['part']);
+            return true;
+        } finally {
             flock($part, LOCK_UN);
             fclose($part);
         }
-        @unlink($paths['meta']);
-        return true;
     }
 
     /**
+     * Copies exactly $length bytes to the staging file while hashing the same
+     * bytes that landed on disk.
+     *
      * @param resource|string $source
      * @return string|null Rejection reason, or null when $length bytes were
      *                     copied and their checksum matched.
@@ -311,6 +405,8 @@ final class Site_Export_Staged_Artifacts {
         $remaining = $length;
 
         while ($remaining > 0) {
+            // Read in bounded buffers so string and stream sources share the
+            // same write path without materializing a large stream body.
             if (is_string($source)) {
                 $buffer = substr($source, $length - $remaining, min($remaining, self::WRITE_BUFFER_BYTES));
             } else {
@@ -329,6 +425,34 @@ final class Site_Export_Staged_Artifacts {
 
         if (!hash_equals($expected_crc32, hash_final($context))) {
             return 'hash_mismatch';
+        }
+
+        return null;
+    }
+
+    /**
+     * Consumes exactly $length bytes from a duplicate chunk stream.
+     *
+     * Duplicate chunks are not written or re-hashed, but a batched upload may
+     * be reading consecutive chunk bodies from one request stream. Draining
+     * keeps the parser aligned for the next chunk.
+     *
+     * @param resource|string $source
+     * @return string|null Rejection reason, or null when there is no stream
+     *                     body left for this store to consume.
+     */
+    private function drain_source($source, int $length): ?string {
+        if (is_string($source)) {
+            return null;
+        }
+
+        $remaining = $length;
+        while ($remaining > 0) {
+            $buffer = fread($source, min($remaining, self::WRITE_BUFFER_BYTES));
+            if ($buffer === false || $buffer === '') {
+                return 'short_body';
+            }
+            $remaining -= strlen($buffer);
         }
 
         return null;
@@ -357,10 +481,16 @@ final class Site_Export_Staged_Artifacts {
 
     private function ensure_parent_dir(string $path): bool {
         $dir = dirname($path);
-        return is_dir($dir) || @mkdir($dir, 0700, true);
+        // A concurrent creator winning the mkdir race is success, not failure.
+        return is_dir($dir) || @mkdir($dir, 0700, true) || is_dir($dir);
     }
 
     /**
+     * Reads the commit record as best-effort state.
+     *
+     * A missing or unreadable record is treated as an empty artifact so the
+     * next writer must restart from offset 0 instead of trusting stale bytes.
+     *
      * @return array{committed_bytes:int,verified:bool,verified_total_bytes:?int,verified_crc32:?string}
      */
     private function read_meta(string $meta_path): array {
@@ -380,6 +510,8 @@ final class Site_Export_Staged_Artifacts {
             return $defaults;
         }
 
+        // Metadata is intentionally not trusted as schema: old/corrupt files
+        // fall back to defaults after keeping only recognized keys.
         $meta = array_merge($defaults, array_intersect_key($meta, $defaults));
         $meta['committed_bytes'] = max(0, (int) $meta['committed_bytes']);
         $meta['verified'] = (bool) $meta['verified'];
@@ -389,9 +521,14 @@ final class Site_Export_Staged_Artifacts {
 
     private function write_meta(string $meta_path, array $meta): bool {
         // Write-then-rename keeps the commit record atomic: readers see the
-        // old record or the new one, never a torn file.
+        // old record or the new one, never a torn file. Keep the temp file
+        // next to the target so rename stays on the same filesystem.
         $tmp_path = $meta_path . '.tmp';
-        if (@file_put_contents($tmp_path, json_encode($meta)) === false) {
+        $json = json_encode($meta);
+        // A short write (disk full) returns a byte count, not false — never
+        // rename a torn record over the good one.
+        if (@file_put_contents($tmp_path, $json) !== strlen($json)) {
+            @unlink($tmp_path);
             return false;
         }
         if (!@rename($tmp_path, $meta_path)) {
@@ -402,23 +539,25 @@ final class Site_Export_Staged_Artifacts {
     }
 
     /**
-     * @return array{status:string,reason:?string,committed_bytes:int}
+     * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
      */
-    private function write_result(string $status, ?string $reason, int $committed_bytes): array {
+    private function write_result(string $status, ?string $reason, int $committed_bytes, ?string $detail = null): array {
         return [
             'status' => $status,
             'reason' => $reason,
+            'detail' => $detail,
             'committed_bytes' => $committed_bytes,
         ];
     }
 
     /**
-     * @return array{status:string,reason:?string,committed_bytes:int,path:?string}
+     * @return array{status:string,reason:?string,detail:?string,committed_bytes:int,path:?string}
      */
-    private function finalize_result(string $status, ?string $reason, int $committed_bytes, ?string $path = null): array {
+    private function finalize_result(string $status, ?string $reason, int $committed_bytes, ?string $detail = null, ?string $path = null): array {
         return [
             'status' => $status,
             'reason' => $reason,
+            'detail' => $detail,
             'committed_bytes' => $committed_bytes,
             'path' => $path,
         ];
