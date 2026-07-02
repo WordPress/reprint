@@ -113,6 +113,11 @@ final class Site_Export_Staged_Artifacts {
      * committed_bytes reports the durable progress made before the bad chunk,
      * and the sender resumes from there.
      *
+     * The iterable is also the pause point: a generator can simply stop
+     * yielding when the endpoint's resource budget runs out, and the
+     * response's committed_bytes tells the sender where the next request
+     * should resume.
+     *
      * @param iterable<int,array{offset:int,length:int,expected_crc32:string,source:resource|string}> $chunks
      * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
      *   status "accepted"|"duplicate"|"busy"|"rejected"; reason is set on
