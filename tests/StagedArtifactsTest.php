@@ -217,6 +217,22 @@ final class StagedArtifactsTest extends TestCase
         $this->assertSame('firstsecond', file_get_contents($verified['path']));
     }
 
+    public function testSwitchingArtifactsRestartsTheAbandonedOne(): void
+    {
+        $store = $this->makeStore();
+        $this->writeString($store, 'artifact-a', 0, 'first');
+
+        // Sequential transfers: chunk 0 of another artifact moves the cursor.
+        $this->assertSame('accepted', $this->writeString($store, 'artifact-b', 0, 'bee')['status']);
+
+        $stale = $this->writeString($store, 'artifact-a', 5, 'second');
+        $this->assertSame(
+            ['rejected', 'offset_gap', 0],
+            [$stale['status'], $stale['reason'], $stale['committed_bytes']]
+        );
+        $this->assertSame('accepted', $this->writeString($store, 'artifact-a', 0, 'fresh')['status']);
+    }
+
     public function testMidBatchRejectionKeepsEarlierChunksCommitted(): void
     {
         $store = $this->makeStore();
@@ -327,10 +343,9 @@ final class StagedArtifactsTest extends TestCase
         $store = $this->makeStore();
         $this->writeString($store, 'artifact-1', 0, 'committed');
 
-        // Simulate a crash after data was written but before the commit
-        // record moved: garbage sits beyond committed_bytes in the file.
-        $part_path = $this->staging_dir . '/artifact-1.part';
-        file_put_contents($part_path, 'GARBAGE', FILE_APPEND);
+        // Simulate a crash after data was written but before the cursor
+        // moved: garbage sits beyond committed_bytes in the file.
+        file_put_contents($this->staging_dir . '/files/artifact-1', 'GARBAGE', FILE_APPEND);
 
         $this->assertSame('accepted', $this->writeString($store, 'artifact-1', 9, '-tail')['status']);
         $body = 'committed-tail';
@@ -346,7 +361,7 @@ final class StagedArtifactsTest extends TestCase
 
         // Simulate the staging file drifting between requests: something
         // shrinks it below the committed size.
-        file_put_contents($this->staging_dir . '/artifact-1.part', 'fi');
+        file_put_contents($this->staging_dir . '/files/artifact-1', 'fi');
 
         // The next write zero-fills back to the committed size and appends;
         // only finalize's whole-artifact checksum can see the damage.
@@ -365,7 +380,7 @@ final class StagedArtifactsTest extends TestCase
         $store = $this->makeStore();
         $this->writeString($store, 'artifact-1', 0, 'first');
 
-        file_put_contents($this->staging_dir . '/artifact-1.meta.json', 'not json {');
+        file_put_contents($this->staging_dir . '/state.json', 'not json {');
 
         $this->assertSame(0, $store->status('artifact-1')['committed_bytes']);
         $resumed = $this->writeString($store, 'artifact-1', 5, 'second');
@@ -478,8 +493,20 @@ final class StagedArtifactsTest extends TestCase
 
         $this->assertSame('accepted', $this->writeString($store, $id, 0, 'body { }')['status']);
 
-        $this->assertFileExists($this->staging_dir . '/' . $id . '.part');
-        $this->assertFileExists($this->staging_dir . '/' . $id . '.meta.json');
+        $this->assertFileExists($this->staging_dir . '/files/' . $id);
+        $this->assertFileExists($this->staging_dir . '/state.json');
+    }
+
+    public function testSiteFilenamesThatLookLikeStagingRecordsStageVerbatim(): void
+    {
+        $store = $this->makeStore();
+
+        foreach (['index.php', 'index.php.part', 'index.php.meta.json', 'state.json'] as $id) {
+            $this->assertSame('accepted', $this->writeString($store, $id, 0, "body of {$id}")['status']);
+            $verified = $store->finalize($id, strlen("body of {$id}"), hash('crc32b', "body of {$id}"));
+            $this->assertSame('verified', $verified['status'], "id: {$id}");
+            $this->assertSame("body of {$id}", file_get_contents($this->staging_dir . '/files/' . $id));
+        }
     }
 
     public function testIdsOutsideTheStagingDirAreRejected(): void
@@ -504,7 +531,7 @@ final class StagedArtifactsTest extends TestCase
         }
 
         $this->assertDirectoryDoesNotExist(dirname(dirname($this->staging_dir)) . '/outside');
-        $this->assertFileDoesNotExist('/etc/passwd.part');
+        $this->assertFileDoesNotExist($this->staging_dir . '/files/etc/passwd');
     }
 
     // ---------------------------------------------------------------
@@ -517,8 +544,7 @@ final class StagedArtifactsTest extends TestCase
         $this->writeString($store, 'artifact-1', 0, 'first');
 
         // Hold the lock the way a concurrent writer would.
-        $part_path = $this->staging_dir . '/artifact-1.part';
-        $holder = fopen($part_path, 'r+b');
+        $holder = fopen($this->staging_dir . '/lock', 'r+b');
         flock($holder, LOCK_EX);
 
         $busy_write = $this->writeString($store, 'artifact-1', 5, 'second');
@@ -559,11 +585,11 @@ final class StagedArtifactsTest extends TestCase
         $this->assertSame('accepted', $this->writeString($store, 'artifact-1', 0, 'fresh')['status']);
     }
 
-    public function testDiscardCleansUpAMetaOnlyResidue(): void
+    public function testDiscardClearsTheCursorWhenTheArtifactFileIsMissing(): void
     {
         $store = $this->makeStore();
         $this->writeString($store, 'artifact-1', 0, 'payload');
-        unlink($this->staging_dir . '/artifact-1.part');
+        unlink($this->staging_dir . '/files/artifact-1');
 
         $this->assertTrue($store->discard('artifact-1'));
 
