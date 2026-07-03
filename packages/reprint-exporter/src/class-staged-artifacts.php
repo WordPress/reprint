@@ -21,16 +21,27 @@
  * local directory but not for a web-served tree — so nothing here is
  * upload-specific: sequential offsets match pull's byte-offset resume model.
  *
- * Integrity checks are byte counts, the same discipline pull uses: every
- * chunk must supply exactly its declared length, and finalize() compares the
- * assembled size against the total declared at plan time. That catches
- * truncation, missing chunks, and resume-offset bugs; it does not read the
- * artifact back, so finalize() costs the same for a 1 KB file and a 50 GB
- * dump. Corruption that preserves length — including a staging file that
- * shrank between requests and was zero-filled back to the committed size by
- * the next write's ftruncate — is not detected, the same trust pull's
- * writer places in its local disk. The wire belongs to TLS and request
- * authorization to the control plane's HMAC.
+ * The caller drives the loop, matching the streaming producers: where a
+ * reader calls next_chunk() until the producer is done, a sender calls
+ * append() once per buffer it read, and the store performs exactly one
+ * bounded, individually-committed step per call. Nothing is held between
+ * calls, so the transfer can stop after any step and resume from
+ * committed_bytes — in the next request, the next process, or a test that
+ * stops the loop at a chosen iteration. Stopping inside a step leaves an
+ * uncommitted tail the next append truncates away. Reading the request
+ * body, sizing buffers, and skipping bytes the store reports as duplicate
+ * all belong to the caller's loop.
+ *
+ * Integrity checks are byte counts, the same discipline pull uses: an
+ * append is accepted only at the committed offset and only whole, and
+ * finalize() compares the assembled size against the total declared at plan
+ * time. That catches truncation, missing bytes, and resume-offset bugs; it
+ * does not read the artifact back, so finalize() costs the same for a 1 KB
+ * file and a 50 GB dump. Corruption that preserves length — including a
+ * staging file that shrank between requests and was zero-filled back to the
+ * committed size by the next append's ftruncate — is not detected, the same
+ * trust pull's writer places in its local disk. The wire belongs to TLS and
+ * request authorization to the control plane's HMAC.
  *
  * Layout and state follow the pull importer's mechanics. Artifact bytes live
  * at their plain target-relative paths under files/ — no suffixes, so any
@@ -46,29 +57,28 @@
  * re-uploading from offset 0. Senders must finish or discard one artifact
  * before starting the next; interleaving two uploads is not supported.
  *
- * Locking: every mutator — write_chunks(), finalize(), discard() — holds one
- * exclusive non-blocking flock on the lock file for its whole call, so a
- * batch keeps the store to itself from its first chunk to its last. This is
- * not for parallelism (transfers are sequential); it exists so a retry
- * racing its timed-out predecessor gets "busy" instead of interleaving
- * writes. The lock needs its own never-replaced file: state.json commits by
- * rename, and renaming a locked file strands the held flock on the orphaned
- * inode while the next opener locks the fresh one. Readers stay lock-free —
- * state.json is rename-atomic, verified.jsonl is append-only, and
- * committed_bytes only grows — so status() always reads a safe resume hint.
+ * Locking: every mutator — append(), finalize(), discard() — holds one
+ * exclusive non-blocking flock on the lock file for its single step and
+ * releases it before returning. This is not for parallelism (transfers are
+ * sequential); it exists so a retry racing its timed-out predecessor gets
+ * "busy" instead of interleaving writes. The lock needs its own
+ * never-replaced file: state.json commits by rename, and renaming a locked
+ * file strands the held flock on the orphaned inode while the next opener
+ * locks the fresh one. Readers stay lock-free — state.json is rename-atomic,
+ * verified.jsonl is append-only, and committed_bytes only grows — so
+ * status() always reads a safe resume hint.
  *
  * Contract:
  *
- * - Chunks are sequential. A chunk is accepted only at the committed offset.
- *   Retrying an already-committed chunk is an idempotent no-op ("duplicate"),
- *   and every response carries committed_bytes so an out-of-sync uploader can
- *   resume at the right offset.
- * - Bytes become committed only after the chunk arrived at exactly its
- *   declared length. The data is flushed before the cursor record moves, so
- *   a crash mid-chunk leaves an uncommitted tail that the next write
- *   discards.
+ * - Appends are sequential: a buffer is accepted only at the committed
+ *   offset, whole or not at all. Re-sending already-committed bytes is an
+ *   idempotent no-op ("duplicate"), and every response carries
+ *   committed_bytes so an out-of-sync sender can resume at the right offset.
+ * - Bytes become committed only after they are flushed and the cursor
+ *   record moved, in that order — a crash mid-step leaves an uncommitted
+ *   tail that the next append discards.
  * - finalize() compares the assembled size against the plan-declared total
- *   before recording the artifact in verified.jsonl; write_chunks() refuses
+ *   before recording the artifact in verified.jsonl; append() refuses
  *   verified artifacts.
  * - An artifact id is the files/-relative path the artifact will be applied
  *   from, mirroring the target tree — apply resolves artifacts by id, never
@@ -77,14 +87,12 @@
  *   importer's fs-root path rule, which tolerates backslashes and empty
  *   segments.
  *
- * The endpoint owns authentication and request-size limits. It must also
- * place the staging directory outside the web-served tree, and preferably on
- * the same filesystem as the apply target so the apply step can move
- * verified artifacts with an atomic rename().
+ * The endpoint owns authentication, request-size limits, and buffer sizing.
+ * It must also place the staging directory outside the web-served tree, and
+ * preferably on the same filesystem as the apply target so the apply step
+ * can move verified artifacts with an atomic rename().
  */
 final class Site_Export_Staged_Artifacts {
-
-    private const WRITE_BUFFER_BYTES = 262144;
 
     /** @var string */
     private $files_dir;
@@ -107,57 +115,44 @@ final class Site_Export_Staged_Artifacts {
     }
 
     /**
-     * Stage one chunk of an artifact at the given offset.
+     * Append one caller-provided buffer at the committed offset.
      *
-     * @param string          $artifact_id Opaque artifact identifier.
-     * @param int             $offset      Byte offset this chunk starts at.
-     * @param int             $length      Declared chunk length in bytes.
-     * @param resource|string $source      Chunk body, or a readable stream positioned at it.
+     * One call is one reentrant step: validate, lock, write the whole
+     * buffer, flush, move the cursor, unlock. The caller's loop reads its
+     * source and sizes the buffers; a "duplicate" response means these
+     * bytes are already committed and the caller should skip forward in
+     * its own source and continue from committed_bytes.
+     *
+     * @param string $artifact_id Opaque artifact identifier.
+     * @param int    $offset      Byte offset this buffer starts at.
+     * @param string $bytes       The buffer to append.
      * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
      *   status "accepted"|"duplicate"|"busy"|"rejected"; reason is set on
      *   "rejected", and detail names the failing operation when the same
      *   reason can come from more than one place.
      */
-    public function write_chunk(string $artifact_id, int $offset, int $length, $source): array {
-        return $this->write_chunks($artifact_id, [
-            [
-                'offset' => $offset,
-                'length' => $length,
-                'source' => $source,
-            ],
-        ]);
-    }
-
-    /**
-     * Stage consecutive chunks from one request while keeping the artifact
-     * file open and the store locked.
-     *
-     * The upload endpoint can pass a generator that yields parsed chunks from
-     * php://input, so a 100- or 1000-chunk request pays the open/flock/tail
-     * cleanup cost once while still committing each chunk independently for
-     * crash-safe resume.
-     *
-     * Because chunks commit one by one, a mid-batch rejection loses nothing:
-     * committed_bytes reports the durable progress made before the bad chunk,
-     * and the sender resumes from there.
-     *
-     * The iterable is also the pause point: a generator can simply stop
-     * yielding when the endpoint's resource budget runs out, and the
-     * response's committed_bytes tells the sender where the next request
-     * should resume.
-     *
-     * @param iterable<int,array{offset:int,length:int,source:resource|string}> $chunks
-     * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
-     *   status "accepted"|"duplicate"|"busy"|"rejected"; reason is set on
-     *   "rejected", and detail names the failing operation when the same
-     *   reason can come from more than one place.
-     */
-    public function write_chunks(string $artifact_id, iterable $chunks): array {
+    public function append(string $artifact_id, int $offset, string $bytes): array {
         $file_path = $this->artifact_path($artifact_id);
         if ($file_path === null) {
             return [
                 'status' => 'rejected',
                 'reason' => 'invalid_artifact_id',
+                'detail' => null,
+                'committed_bytes' => 0,
+            ];
+        }
+        if ($offset < 0) {
+            return [
+                'status' => 'rejected',
+                'reason' => 'invalid_offset',
+                'detail' => null,
+                'committed_bytes' => 0,
+            ];
+        }
+        if ($bytes === '') {
+            return [
+                'status' => 'rejected',
+                'reason' => 'empty_body',
                 'detail' => null,
                 'committed_bytes' => 0,
             ];
@@ -193,10 +188,27 @@ final class Site_Export_Staged_Artifacts {
                 ];
             }
 
-            // Sequential transfers: the cursor tracks one artifact. A write
-            // to any other artifact starts it from scratch.
+            // Sequential transfers: the cursor tracks one artifact. An
+            // append to any other artifact starts it from scratch.
             $state = $this->read_state();
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
+
+            if ($offset + strlen($bytes) <= $committed) {
+                return [
+                    'status' => 'duplicate',
+                    'reason' => null,
+                    'detail' => null,
+                    'committed_bytes' => $committed,
+                ];
+            }
+            if ($offset !== $committed) {
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'offset_gap',
+                    'detail' => null,
+                    'committed_bytes' => $committed,
+                ];
+            }
 
             if (!$this->ensure_parent_dir($file_path)) {
                 return [
@@ -221,7 +233,7 @@ final class Site_Export_Staged_Artifacts {
 
             try {
                 // Discard any uncommitted tail from an interrupted earlier
-                // write, then append at the only offset the cursor says is
+                // step, then append at the only offset the cursor says is
                 // committed.
                 if (!ftruncate($file, $committed) || fseek($file, $committed) !== 0) {
                     return [
@@ -232,133 +244,45 @@ final class Site_Export_Staged_Artifacts {
                     ];
                 }
 
-                $accepted = false;
-                $duplicate = false;
-                foreach ($chunks as $chunk) {
-                    // These parameters arrive verbatim from a remote client's
-                    // request, and the sequencing/copy logic below assumes they
-                    // are well-formed — a negative offset would misreport as
-                    // "duplicate" success and a short string body would never
-                    // finish copying. Reject malformed input with typed reasons
-                    // before writing bytes.
-                    $offset = isset($chunk['offset']) ? (int) $chunk['offset'] : -1;
-                    $length = isset($chunk['length']) ? (int) $chunk['length'] : 0;
-                    $source = $chunk['source'] ?? null;
-
-                    if ($length < 1) {
-                        return [
-                            'status' => 'rejected',
-                            'reason' => 'invalid_length',
-                            'detail' => null,
-                            'committed_bytes' => $committed,
-                        ];
-                    }
-                    if ($offset < 0) {
-                        return [
-                            'status' => 'rejected',
-                            'reason' => 'invalid_offset',
-                            'detail' => null,
-                            'committed_bytes' => $committed,
-                        ];
-                    }
-                    if (is_string($source) && strlen($source) !== $length) {
-                        return [
-                            'status' => 'rejected',
-                            'reason' => 'length_mismatch',
-                            'detail' => null,
-                            'committed_bytes' => $committed,
-                        ];
-                    }
-                    if (!is_string($source) && !is_resource($source)) {
-                        return [
-                            'status' => 'rejected',
-                            'reason' => 'invalid_source',
-                            'detail' => null,
-                            'committed_bytes' => $committed,
-                        ];
-                    }
-                    if ($offset + $length <= $committed) {
-                        $drain_reason = $this->drain_source($source, $length);
-                        if ($drain_reason !== null) {
-                            return [
-                                'status' => 'rejected',
-                                'reason' => $drain_reason,
-                                'detail' => 'duplicate_drain',
-                                'committed_bytes' => $committed,
-                            ];
-                        }
-                        $duplicate = true;
-                        continue;
-                    }
-                    if ($offset !== $committed) {
-                        return [
-                            'status' => 'rejected',
-                            'reason' => 'offset_gap',
-                            'detail' => null,
-                            'committed_bytes' => $committed,
-                        ];
-                    }
-
-                    $copy_reason = $this->copy_source($source, $file, $length);
-                    if ($copy_reason !== null) {
-                        // A failed copy can leave bytes past the committed
-                        // offset; trim them before the caller retries this chunk.
-                        ftruncate($file, $committed);
-                        return [
-                            'status' => 'rejected',
-                            'reason' => $copy_reason,
-                            'detail' => 'chunk_body',
-                            'committed_bytes' => $committed,
-                        ];
-                    }
-
-                    // The data is flushed before the cursor record moves: a crash
-                    // between the two leaves a tail that the next write truncates.
-                    if (!fflush($file)) {
-                        ftruncate($file, $committed);
-                        return [
-                            'status' => 'rejected',
-                            'reason' => 'io_error',
-                            'detail' => 'flush_chunk_body',
-                            'committed_bytes' => $committed,
-                        ];
-                    }
-
-                    if (!$this->write_state($artifact_id, $committed + $length)) {
-                        ftruncate($file, $committed);
-                        return [
-                            'status' => 'rejected',
-                            'reason' => 'io_error',
-                            'detail' => 'persist_cursor',
-                            'committed_bytes' => $committed,
-                        ];
-                    }
-
-                    $committed += $length;
-                    $accepted = true;
-                }
-
-                if ($accepted) {
+                if (fwrite($file, $bytes) !== strlen($bytes)) {
+                    // A partial write leaves bytes past the committed offset;
+                    // trim them before the caller retries this step.
+                    ftruncate($file, $committed);
                     return [
-                        'status' => 'accepted',
-                        'reason' => null,
-                        'detail' => null,
+                        'status' => 'rejected',
+                        'reason' => 'io_error',
+                        'detail' => 'write_body',
                         'committed_bytes' => $committed,
                     ];
                 }
-                if ($duplicate) {
+
+                // The data is flushed before the cursor record moves: a crash
+                // between the two leaves a tail that the next append truncates.
+                if (!fflush($file)) {
+                    ftruncate($file, $committed);
                     return [
-                        'status' => 'duplicate',
-                        'reason' => null,
-                        'detail' => null,
+                        'status' => 'rejected',
+                        'reason' => 'io_error',
+                        'detail' => 'flush_body',
                         'committed_bytes' => $committed,
                     ];
                 }
+
+                if (!$this->write_state($artifact_id, $committed + strlen($bytes))) {
+                    ftruncate($file, $committed);
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'io_error',
+                        'detail' => 'persist_cursor',
+                        'committed_bytes' => $committed,
+                    ];
+                }
+
                 return [
-                    'status' => 'rejected',
-                    'reason' => 'empty_batch',
+                    'status' => 'accepted',
+                    'reason' => null,
                     'detail' => null,
-                    'committed_bytes' => $committed,
+                    'committed_bytes' => $committed + strlen($bytes),
                 ];
             } finally {
                 fclose($file);
@@ -452,7 +376,7 @@ final class Site_Export_Staged_Artifacts {
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
 
             if (!file_exists($file_path)) {
-                // A zero-byte artifact legitimately has no chunks; the fopen
+                // A zero-byte artifact legitimately has no appends; the fopen
                 // below creates its empty file.
                 if ($expected_total_bytes > 0) {
                     return [
@@ -518,7 +442,7 @@ final class Site_Export_Staged_Artifacts {
             }
             if ($state['artifact_id'] === $artifact_id) {
                 // Best effort: a stale cursor is harmless once the verified
-                // record exists — already_verified wins on the next write.
+                // record exists — already_verified wins on the next append.
                 $this->write_state(null, 0);
             }
 
@@ -615,65 +539,6 @@ final class Site_Export_Staged_Artifacts {
             flock($lock, LOCK_UN);
             fclose($lock);
         }
-    }
-
-    /**
-     * Copies exactly $length bytes from the source to the artifact file.
-     *
-     * @param resource|string $source
-     * @return string|null Rejection reason, or null when $length bytes were
-     *                     copied.
-     */
-    private function copy_source($source, $file, int $length): ?string {
-        $remaining = $length;
-
-        while ($remaining > 0) {
-            // Read in bounded buffers so string and stream sources share the
-            // same write path without materializing a large stream body.
-            if (is_string($source)) {
-                $buffer = substr($source, $length - $remaining, min($remaining, self::WRITE_BUFFER_BYTES));
-            } else {
-                $buffer = fread($source, min($remaining, self::WRITE_BUFFER_BYTES));
-                if ($buffer === false || $buffer === '') {
-                    return 'short_body';
-                }
-            }
-
-            if (fwrite($file, $buffer) !== strlen($buffer)) {
-                return 'io_error';
-            }
-            $remaining -= strlen($buffer);
-        }
-
-        return null;
-    }
-
-    /**
-     * Consumes exactly $length bytes from a duplicate chunk stream.
-     *
-     * Duplicate chunks are not re-written, but a batched upload may be
-     * reading consecutive chunk bodies from one request stream. Draining
-     * keeps the parser aligned for the next chunk.
-     *
-     * @param resource|string $source
-     * @return string|null Rejection reason, or null when there is no stream
-     *                     body left for this store to consume.
-     */
-    private function drain_source($source, int $length): ?string {
-        if (is_string($source)) {
-            return null;
-        }
-
-        $remaining = $length;
-        while ($remaining > 0) {
-            $buffer = fread($source, min($remaining, self::WRITE_BUFFER_BYTES));
-            if ($buffer === false || $buffer === '') {
-                return 'short_body';
-            }
-            $remaining -= strlen($buffer);
-        }
-
-        return null;
     }
 
     /**
