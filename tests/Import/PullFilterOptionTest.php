@@ -71,31 +71,31 @@ class PullFilterFakeClient extends \ImportClient
     public function run_preflight(): void
     {
         $this->preflight_runs++;
-        $this->mutate_state(function (\ImportState $state) {
-            $state->preflight = [
-                "http_code" => 200,
-                "data" => [
-                    "ok" => true,
-                    "database" => [
-                        "wp" => [
-                            "wp_version" => "6.8",
-                        ],
-                    ],
-                    "runtime" => [
-                        "phpversion" => "8.2",
+        $state = $this->get_import_state();
+        $state->preflight = [
+            "http_code" => 200,
+            "data" => [
+                "ok" => true,
+                "database" => [
+                    "wp" => [
+                        "wp_version" => "6.8",
                     ],
                 ],
-            ];
-            $state->active_resumable_command->completion_state = "complete";
-            return $state;
-        });
+                "runtime" => [
+                    "phpversion" => "8.2",
+                ],
+            ],
+        ];
+        $state->active_resumable_command->completion_state = "complete";
+        $this->save_import_state();
     }
 
     public function run_files_sync(): void
     {
+        $state = $this->get_import_state();
         if (
-            ($this->state->active_resumable_command->command_name ?? null) === "files-pull" &&
-            ($this->state->active_resumable_command->completion_state ?? null) === "complete"
+            ($state->active_resumable_command->command_name ?? null) === "files-pull" &&
+            ($state->active_resumable_command->completion_state ?? null) === "complete"
         ) {
             return;
         }
@@ -110,37 +110,34 @@ class PullFilterFakeClient extends \ImportClient
             @unlink($this->state_dir . '/.import-download-list-skipped.jsonl');
         }
 
-        $this->mutate_state(function (\ImportState $state) {
-            $state->active_resumable_command->command_name = "files-pull";
-            $state->active_resumable_command->completion_state = "complete";
-            $state->active_resumable_command->current_stage = null;
-            $state->files_pull_summary->files_pulled = $this->files_pulled;
-            return $state;
-        });
+        $state = $this->get_import_state();
+        $state->active_resumable_command->command_name = "files-pull";
+        $state->active_resumable_command->completion_state = "complete";
+        $state->active_resumable_command->current_stage = null;
+        $state->files_pull_summary->files_pulled = $this->files_pulled;
+        $this->save_import_state();
     }
 
     public function run_db_sync(): void
     {
         $this->db_sync_runs++;
         file_put_contents($this->state_dir . '/db.sql', "SELECT 1;\n");
-        $this->mutate_state(function (\ImportState $state) {
-            $state->active_resumable_command->command_name = "db-pull";
-            $state->active_resumable_command->completion_state = "complete";
-            $state->active_resumable_command->current_stage = null;
-            return $state;
-        });
+        $state = $this->get_import_state();
+        $state->active_resumable_command->command_name = "db-pull";
+        $state->active_resumable_command->completion_state = "complete";
+        $state->active_resumable_command->current_stage = null;
+        $this->save_import_state();
     }
 
     public function run_db_apply(array $options): void
     {
         $this->db_apply_runs++;
-        $this->mutate_state(function (\ImportState $state) {
-            $state->active_resumable_command->command_name = "db-apply";
-            $state->active_resumable_command->completion_state = "complete";
-            $state->active_resumable_command->current_stage = null;
-            $state->apply->statements_executed = 42;
-            return $state;
-        });
+        $state = $this->get_import_state();
+        $state->active_resumable_command->command_name = "db-apply";
+        $state->active_resumable_command->completion_state = "complete";
+        $state->active_resumable_command->current_stage = null;
+        $state->apply->statements_executed = 42;
+        $this->save_import_state();
     }
 }
 
@@ -150,14 +147,13 @@ class PullFailingPreflightFakeClient extends PullFilterFakeClient
     {
         $this->preflight_runs++;
         $this->last_error_code = 'HTTP_ERROR';
-        $this->mutate_state(function (\ImportState $state) {
-            $state->preflight = [
-                "http_code" => 500,
-                "error" => "Exporter unavailable",
-            ];
-            $state->active_resumable_command->completion_state = "complete";
-            return $state;
-        });
+        $state = $this->get_import_state();
+        $state->preflight = [
+            "http_code" => 500,
+            "error" => "Exporter unavailable",
+        ];
+        $state->active_resumable_command->completion_state = "complete";
+        $this->save_import_state();
     }
 }
 

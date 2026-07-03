@@ -28,7 +28,9 @@
             <file>ExportHttpServerTest.php</file>
             <file>FileIndexDedupTest.php</file>
             <file>HmacServerTest.php</file>
+            <file>SiteExportPushSessionTest.php</file>
             <file>SiteExportSecretTest.php</file>
+            <file>StagedArtifactsTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">
             <file>NaiveQueryStreamTest.php</file>

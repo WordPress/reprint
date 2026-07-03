@@ -56,6 +56,9 @@ require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 // Typed state objects for the persisted import state.
 require_once __DIR__ . '/lib/state/class-import-state.php';
 
+// Adaptive sizing for bounded local-to-remote upload chunks (push transfers)
+require_once __DIR__ . '/lib/upload/class-upload-chunk-sizer.php';
+
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
@@ -1478,17 +1481,16 @@ class ImportClient
         }
     }
 
-    /**
-     * Apply a mutation to the state and persist it. Used by orchestrator
-     * commands (Pull) that need to update multiple fields atomically.
-     */
-    public function mutate_state(callable $mutator): void
+    /** Return the typed in-process import state. */
+    public function get_import_state(): ImportState
     {
-        $state = $mutator($this->import_state());
-        $this->state = $state instanceof ImportState
-            ? $state
-            : ImportState::from_array($this->normalize_state($state));
-        $this->save_state($this->state);
+        return $this->import_state();
+    }
+
+    /** Persist the current typed import state to disk. */
+    public function save_import_state(): void
+    {
+        $this->save_state($this->import_state());
     }
 
     /** Mark a pull pipeline stage as completed in state. */
@@ -2608,13 +2610,12 @@ class ImportClient
             exit(1);
         }
         $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
-        $this->mutate_state(function (ImportState $state) use ($ok) {
-            $state->active_resumable_command->command_name = "preflight";
-            $state->active_resumable_command->completion_state = $ok ? "complete" : "error";
-            $state->active_resumable_command->current_stage = null;
-            $state->active_resumable_command->remote_cursor = null;
-            return $state;
-        });
+        $command = $this->import_state()->active_resumable_command;
+        $command->command_name = "preflight";
+        $command->completion_state = $ok ? "complete" : "error";
+        $command->current_stage = null;
+        $command->remote_cursor = null;
+        $this->save_state($this->state);
         $this->write_status_file($ok ? null : "Preflight failed");
         if (defined('IMPORTER_WEB_ENTRY') && IMPORTER_WEB_ENTRY) {
             if (!$ok) {
@@ -12718,11 +12719,8 @@ class ImportClient
     private function persist_or_restore_relay_source_allowed_paths(): void
     {
         if (!empty($this->relay_source_allowed_paths)) {
-            $paths = $this->relay_source_allowed_paths;
-            $this->mutate_state(function (ImportState $state) use ($paths) {
-                $state->relay_source_allowed_paths = $paths;
-                return $state;
-            });
+            $this->import_state()->relay_source_allowed_paths = $this->relay_source_allowed_paths;
+            $this->save_state($this->state);
             return;
         }
 
@@ -12737,11 +12735,8 @@ class ImportClient
         $discovered = $this->extract_relay_allowed_paths_from_preflight($preflight);
         $merged = array_merge($this->relay_source_allowed_paths, $discovered);
         $this->relay_source_allowed_paths = $this->normalize_relay_source_allowed_paths($merged);
-        $paths = $this->relay_source_allowed_paths;
-        $this->mutate_state(function (ImportState $state) use ($paths) {
-            $state->relay_source_allowed_paths = $paths;
-            return $state;
-        });
+        $this->import_state()->relay_source_allowed_paths = $this->relay_source_allowed_paths;
+        $this->save_state($this->state);
     }
 
     /** @return array<int,string> */

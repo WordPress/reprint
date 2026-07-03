@@ -143,18 +143,39 @@ final class HmacServerTest extends TestCase
         }
     }
 
+    public function testControlRequestVerifiesBoundedBody(): void
+    {
+        $body = '{"command":"preflight"}';
+        $headers = $this->buildHeadersForBody($body);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertNull($server->verify_control_request($headers, $body, 1700000001.0));
+    }
+
+    public function testControlRequestRejectsBodyAboveConfiguredLimit(): void
+    {
+        $body = '{"command":"preflight"}';
+        $headers = $this->buildHeadersForBody($body);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'HMAC control request body exceeds 8 bytes',
+            $server->verify_control_request($headers, $body, 1700000001.0, 8)
+        );
+    }
+
     public function testPrecomputedContentHashVerifiesWithoutBody(): void
     {
-        $body = str_repeat('large-response-body', 1024);
+        $body = '{"command":"commit","manifest":"abc123"}';
         $headers = $this->buildHeadersForBody($body);
         $server = new Site_Export_HMAC_Server(self::SECRET);
 
         $this->assertNull($server->verify_content_hash($headers, hash('sha256', $body), 1700000001.0));
     }
 
-    public function testSignedContentHashVerifiesBeforeBodyIsAvailable(): void
+    public function testSignedContentHashHeaderCanBeCheckedBeforeBodyIsRead(): void
     {
-        $body = str_repeat('large-response-body', 1024);
+        $body = '{"command":"start-session"}';
         $headers = $this->buildHeadersForBody($body);
         $server = new Site_Export_HMAC_Server(self::SECRET);
 

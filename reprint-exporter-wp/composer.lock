@@ -362,7 +362,7 @@
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-exporter",
-                "reference": "0375711f76a9dd6102bcba14f45099920df8f116"
+                "reference": "4299e8cbe30ddce21de036bcef579a2e5d40159e"
             },
             "require": {
                 "php": ">=7.4",
@@ -384,6 +384,7 @@
                     "src/class-hmac-client.php",
                     "src/class-hmac-server.php",
                     "src/class-http-server.php",
+                    "src/class-staged-artifacts.php",
                     "src/class-sqlite-driver-pdo.php",
                     "src/class-wpdb-driver-pdo.php"
                 ],
