@@ -429,6 +429,9 @@ final class StagedApplyTest extends TestCase {
         file_put_contents($shared . '/keep.txt', 'shared');
         symlink($shared, $this->target_root . '/stale-link');
         $this->stageVerified('fresh.txt', 'new');
+        // An earlier resume staged bytes for a file the remote has since
+        // deleted; the delete pass must consume them with the deletion.
+        $this->stageVerified('stale.php', 'obsolete bytes');
         $manifest = $this->stageManifest([
             ['artifact_id' => 'fresh.txt', 'size' => 3],
             ['artifact_id' => 'stale.php', 'delete' => true],
@@ -451,6 +454,11 @@ final class StagedApplyTest extends TestCase {
                 'deleting the link must not follow it'
             );
             $this->assertSame('new', file_get_contents($this->target_root . '/fresh.txt'));
+            $this->assertFileDoesNotExist(
+                $this->staging_dir . '/files/stale.php',
+                'staged garbage under a deleted id is consumed'
+            );
+            $this->assertFileDoesNotExist($this->staging_dir . '/verified/stale.php');
         } finally {
             $this->removeDir($shared);
         }
@@ -458,14 +466,15 @@ final class StagedApplyTest extends TestCase {
 
     public function testDeletionsRunBeforeMovesRegardlessOfManifestOrder(): void
     {
-        // The old tree had a directory where the new tree lands a file, and
-        // the manifest lists the create before the delete. Move-first would
-        // rename the file in and then delete it.
-        mkdir($this->target_root . '/swap/nested', 0700, true);
-        file_put_contents($this->target_root . '/swap/nested/old.txt', 'old');
-        $this->stageVerified('swap', 'file now');
+        // The path was a file; the new tree turns it into a directory: the
+        // transfer deletes 'swap' and creates 'swap/new.txt'. Move-first
+        // would build the directory, land the file, and then have the
+        // delete pass tear down the freshly-created tree. The manifest
+        // lists the create first to prove passes, not line order, decide.
+        file_put_contents($this->target_root . '/swap', 'was a file');
+        $this->stageVerified('swap/new.txt', 'dir member');
         $manifest = $this->stageManifest([
-            ['artifact_id' => 'swap', 'size' => 8],
+            ['artifact_id' => 'swap/new.txt', 'size' => 10],
             ['artifact_id' => 'swap', 'delete' => true],
         ]);
 
@@ -473,7 +482,7 @@ final class StagedApplyTest extends TestCase {
 
         $this->assertSame('applied', $result['status']);
         $this->assertSame([1, 1], [$result['applied'], $result['deleted']]);
-        $this->assertSame('file now', file_get_contents($this->target_root . '/swap'));
+        $this->assertSame('dir member', file_get_contents($this->target_root . '/swap/new.txt'));
     }
 
     public function testDeletionsAreIdempotentAcrossReruns(): void
@@ -499,21 +508,47 @@ final class StagedApplyTest extends TestCase {
         $this->assertSame(1, $second['already_applied']);
     }
 
-    public function testPreserveLocalPoliciesProtectDeletions(): void
+    public function testSkipPolicyDoesNotProtectOwnedDeletions(): void
     {
-        // Preserve-local means never overwrite AND never delete.
-        file_put_contents($this->target_root . '/precious.txt', 'local');
+        // Delete entries only ever come from the sender's own ship record
+        // (pull's index, push's cache), so preserve-local — which protects
+        // what the sync never owned — does not stand in their way. This is
+        // trunk's diff-phase behavior: owned files delete under
+        // preserve-local too.
+        file_put_contents($this->target_root . '/shipped-earlier.txt', 'ours');
         $manifest = $this->stageManifest([
-            ['artifact_id' => 'precious.txt', 'delete' => true],
+            ['artifact_id' => 'shipped-earlier.txt', 'delete' => true],
         ]);
 
         $result = $this->makeApply(['on_existing' => 'skip'])->apply($manifest);
 
         $this->assertSame('applied', $result['status']);
-        $this->assertSame(0, $result['deleted']);
-        $this->assertSame(1, $result['skipped']);
-        $this->assertSame(['precious.txt'], $result['skipped_paths']);
-        $this->assertSame('local', file_get_contents($this->target_root . '/precious.txt'));
+        $this->assertSame(1, $result['deleted']);
+        $this->assertSame(0, $result['skipped']);
+        $this->assertFileDoesNotExist($this->target_root . '/shipped-earlier.txt');
+    }
+
+    public function testSkipPolicyDoesNotProtectOwnedEntries(): void
+    {
+        // An owned entry's occupant is the transfer's own previous copy:
+        // preserve-local must not freeze a file at the version the first
+        // pull shipped. The unowned sibling still gets protected.
+        file_put_contents($this->target_root . '/ours.php', 'v1 from a previous window');
+        file_put_contents($this->target_root . '/theirs.php', 'the user made this');
+        $this->stageVerified('ours.php', 'v2');
+        $this->stageVerified('theirs.php', 'remote bytes');
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'ours.php', 'size' => 2, 'owned' => true],
+            ['artifact_id' => 'theirs.php', 'size' => 12],
+        ]);
+
+        $result = $this->makeApply(['on_existing' => 'skip'])->apply($manifest);
+
+        $this->assertSame('applied', $result['status']);
+        $this->assertSame([1, 1], [$result['applied'], $result['skipped']]);
+        $this->assertSame(['theirs.php'], $result['skipped_paths']);
+        $this->assertSame('v2', file_get_contents($this->target_root . '/ours.php'));
+        $this->assertSame('the user made this', file_get_contents($this->target_root . '/theirs.php'));
     }
 
     public function testSymlinkedParentGuardProtectsDeletions(): void
@@ -583,6 +618,16 @@ final class StagedApplyTest extends TestCase {
         $this->stageVerified('hostile-delete.jsonl', json_encode(['artifact_id' => '../escape', 'delete' => true]) . "\n");
         $hostile = $this->makeApply()->apply('hostile-delete.jsonl');
         $this->assertStringContainsString('invalid artifact id', (string) $hostile['detail']);
+
+        // One verdict per path: a same-id create-plus-delete is ambiguous
+        // on rerun, and neither sender can produce it.
+        $this->stageVerified(
+            'twice.jsonl',
+            json_encode(['artifact_id' => 'x.txt', 'size' => 1]) . "\n"
+                . json_encode(['artifact_id' => 'x.txt', 'delete' => true]) . "\n"
+        );
+        $twice = $this->makeApply()->apply('twice.jsonl');
+        $this->assertStringContainsString('duplicates an artifact id', (string) $twice['detail']);
     }
 
     // ---------------------------------------------------------------

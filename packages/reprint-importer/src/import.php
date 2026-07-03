@@ -1247,6 +1247,9 @@ class ImportClient
     /** @var Site_Export_Staged_Artifacts|null Lazy staged pull store. */
     private $staged_pull_store = null;
 
+    /** @var array<string,true> Owned remote paths in the batch being fetched. */
+    private $staged_batch_owned = [];
+
     public function __construct(string $remote_url, string $state_dir, string $fs_root)
     {
         $this->remote_url = rtrim($remote_url, "?&");
@@ -3026,6 +3029,10 @@ class ImportClient
             } elseif ($has_skipped) {
                 $stage = "fetch-skipped";
             } else {
+                // Nothing to download, but a deletions-only delta still
+                // has a window to run: the manifest log holds whatever
+                // the diff just staged for removal.
+                $this->run_staged_pull_apply();
                 $stage = null;
             }
             $this->import_state()->active_resumable_command->current_stage = $stage;
@@ -4375,7 +4382,7 @@ class ImportClient
      *
      * @return string|null Failure reason, or null when the file verified.
      */
-    private function staged_pull_finalize_file(string $artifact_id, int $expected_size, int $ctime): ?string
+    private function staged_pull_finalize_file(string $artifact_id, int $expected_size, int $ctime, bool $owned = false): ?string
     {
         $result = $this->staged_pull_store()->finalize($artifact_id, $expected_size);
         if ($result["status"] !== "verified") {
@@ -4386,9 +4393,43 @@ class ImportClient
             // against the remote ctime.
             @touch($this->staged_pull_staging_dir() . "/files/" . $artifact_id, $ctime);
         }
-        $line = json_encode(["artifact_id" => $artifact_id, "size" => $expected_size]) . "\n";
-        @file_put_contents($this->staged_pull_manifest_log(), $line, FILE_APPEND);
+        $record = ["artifact_id" => $artifact_id, "size" => $expected_size];
+        if ($owned) {
+            $record["owned"] = true;
+        }
+        @file_put_contents($this->staged_pull_manifest_log(), json_encode($record) . "\n", FILE_APPEND);
         return null;
+    }
+
+    /**
+     * Records a diff-derived deletion for the apply window instead of
+     * removing the file at diff time — staged mode's whole point is that
+     * the tree flips in one window, deletions included. The index entry
+     * stays until the window confirms: a crash or --abort in between just
+     * re-derives the same deletion from the next diff, never orphaning a
+     * file the index has already forgotten.
+     */
+    private function record_staged_pull_deletion(string $remote_path): void
+    {
+        try {
+            $local_path = $this->remote_path_to_local_path_within_import_root($remote_path);
+            $artifact_id = $this->staged_pull_artifact_id($local_path);
+        } catch (RuntimeException $e) {
+            $this->audit_log(
+                "Security: refusing to stage a deletion for invalid path '{$remote_path}': " . $e->getMessage(),
+                true,
+            );
+            return;
+        }
+        // Any bytes staged under this id from an earlier resume are
+        // garbage now; the apply window's delete pass consumes them.
+        $line = json_encode([
+            "artifact_id" => $artifact_id,
+            "delete" => true,
+            "path" => $remote_path,
+        ]) . "\n";
+        @file_put_contents($this->staged_pull_manifest_log(), $line, FILE_APPEND);
+        $this->audit_log("Deletion staged for the apply window: {$remote_path}", false);
     }
 
     /**
@@ -4405,17 +4446,30 @@ class ImportClient
             return;
         }
 
+        // Last record wins per artifact id: a file staged by one resume
+        // and deleted remotely before the next accumulates both lines,
+        // and the later one reflects the newer remote truth.
         $entries = [];
         $raw = @file_get_contents($this->staged_pull_manifest_log());
         if (is_string($raw) && $raw !== "") {
             foreach (explode("\n", $raw) as $line) {
                 $record = json_decode($line, true);
-                if (
-                    is_array($record)
-                    && is_string($record["artifact_id"] ?? null)
-                    && is_int($record["size"] ?? null)
-                ) {
-                    $entries[$record["artifact_id"]] = $record["size"];
+                if (!is_array($record) || !is_string($record["artifact_id"] ?? null)) {
+                    continue;
+                }
+                if (!empty($record["delete"])) {
+                    $entries[$record["artifact_id"]] = [
+                        "delete" => true,
+                        "path" => is_string($record["path"] ?? null) ? $record["path"] : null,
+                    ];
+                    continue;
+                }
+                if (is_int($record["size"] ?? null)) {
+                    $entries[$record["artifact_id"]] = [
+                        "delete" => false,
+                        "size" => $record["size"],
+                        "owned" => !empty($record["owned"]),
+                    ];
                 }
             }
         }
@@ -4424,8 +4478,16 @@ class ImportClient
         }
 
         $lines = "";
-        foreach ($entries as $artifact_id => $size) {
-            $lines .= json_encode(["artifact_id" => $artifact_id, "size" => $size]) . "\n";
+        foreach ($entries as $artifact_id => $entry) {
+            if ($entry["delete"]) {
+                $lines .= json_encode(["artifact_id" => $artifact_id, "delete" => true]) . "\n";
+                continue;
+            }
+            $manifest_entry = ["artifact_id" => $artifact_id, "size" => $entry["size"]];
+            if ($entry["owned"]) {
+                $manifest_entry["owned"] = true;
+            }
+            $lines .= json_encode($manifest_entry) . "\n";
         }
 
         $store = $this->staged_pull_store();
@@ -4469,12 +4531,38 @@ class ImportClient
                 false,
             );
         }
+
+        // Deletions the window confirmed leave the index now, mirroring
+        // push's forget-after-confirm. Protected deletions (symlinked
+        // parents) keep their entries and re-derive next delta; past the
+        // skipped-paths cap we cannot tell the two apart, so everything
+        // stays and re-derives — a no-op, never an orphan.
+        $protected = array_fill_keys($skipped_paths, true);
+        $cap_overflowed = $result["skipped"] > count($skipped_paths);
+        $confirmed_deletes = 0;
+        foreach ($entries as $artifact_id => $entry) {
+            if (
+                !$entry["delete"]
+                || $entry["path"] === null
+                || $cap_overflowed
+                || isset($protected[$artifact_id])
+            ) {
+                continue;
+            }
+            $this->delete_index_entry($entry["path"]);
+            ++$confirmed_deletes;
+        }
+        if ($confirmed_deletes > 0) {
+            $this->finalize_index_updates();
+        }
+
         $this->audit_log(
             sprintf(
-                "STAGED APPLY COMPLETE | applied=%d already_applied=%d skipped=%d",
+                "STAGED APPLY COMPLETE | applied=%d already_applied=%d skipped=%d deleted=%d",
                 $result["applied"],
                 $result["already_applied"],
                 $result["skipped"],
+                $result["deleted"],
             ),
             true,
         );
@@ -4484,6 +4572,7 @@ class ImportClient
             "applied" => $result["applied"],
             "already_applied" => $result["already_applied"],
             "skipped" => $result["skipped"],
+            "deleted" => $result["deleted"],
         ], true);
     }
 
@@ -7031,8 +7120,14 @@ class ImportClient
                 // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-pull --only runs.
                 if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                    $this->delete_local_file_path($local["path"]);
-                    $this->delete_index_entry($local["path"]);
+                    if ($this->staged_apply_mode) {
+                        // Staged mode defers the deletion into the apply
+                        // window, so removals and arrivals flip together.
+                        $this->record_staged_pull_deletion($local["path"]);
+                    } else {
+                        $this->delete_local_file_path($local["path"]);
+                        $this->delete_index_entry($local["path"]);
+                    }
                 }
                 $local_after = $local["path"];
                 $local = $this->read_index_line($local_handle);
@@ -7054,6 +7149,7 @@ class ImportClient
                     $this->append_download_list(
                         $remote["path"],
                         $target_handle,
+                        true,
                     );
                 }
                 $local_after = $local["path"];
@@ -7085,8 +7181,12 @@ class ImportClient
 
         while ($local !== null) {
             if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                $this->delete_local_file_path($local["path"]);
-                $this->delete_index_entry($local["path"]);
+                if ($this->staged_apply_mode) {
+                    $this->record_staged_pull_deletion($local["path"]);
+                } else {
+                    $this->delete_local_file_path($local["path"]);
+                    $this->delete_index_entry($local["path"]);
+                }
             }
             $local_after = $local["path"];
             $local = $this->read_index_line($local_handle);
@@ -7197,6 +7297,17 @@ class ImportClient
                 "cursor" => null,
             ]));
             $this->save_state($this->state);
+        }
+
+        if ($this->staged_apply_mode) {
+            // The batch's ownership flags live in the download list slice
+            // the fetch state brackets; rebuilding from there covers
+            // resumed batches, whose batch file predates this process.
+            $this->staged_batch_owned = $this->read_download_list_owned(
+                $list_file,
+                $batch_offset,
+                $next_offset,
+            );
         }
 
         $post_data = [
@@ -7457,12 +7568,51 @@ class ImportClient
     /**
      * Append a path to the download list file.
      */
-    private function append_download_list(string $path, $handle): void
+    /**
+     * Owned paths within one batch's slice of the download list.
+     *
+     * @param int $from Byte offset of the batch's first list line.
+     * @param int $to   Byte offset just past its last line.
+     * @return array<string,true> keyed by remote path.
+     */
+    private function read_download_list_owned(string $list_file, int $from, int $to): array
     {
-        $line = json_encode(
-            ["path" => base64_encode($path)],
-            JSON_UNESCAPED_SLASHES,
-        );
+        $owned = [];
+        $handle = @fopen($list_file, "r");
+        if (!$handle) {
+            return $owned;
+        }
+        if ($from > 0) {
+            fseek($handle, $from);
+        }
+        while (ftell($handle) < $to) {
+            $line = fgets($handle);
+            if ($line === false) {
+                break;
+            }
+            $record = json_decode(trim($line), true);
+            if (!is_array($record) || empty($record["owned"]) || !isset($record["path"])) {
+                continue;
+            }
+            $path = base64_decode($record["path"]);
+            if (is_string($path) && $path !== "") {
+                $owned[$path] = true;
+            }
+        }
+        fclose($handle);
+        return $owned;
+    }
+
+    private function append_download_list(string $path, $handle, bool $owned = false): void
+    {
+        $record = ["path" => base64_encode($path)];
+        if ($owned) {
+            // The diff found this path in the local index: the pull owns
+            // it. Staged apply needs the distinction — preserve-local
+            // protects what the sync never owned, not its own copies.
+            $record["owned"] = true;
+        }
+        $line = json_encode($record, JSON_UNESCAPED_SLASHES);
         if ($line !== false) {
             fwrite($handle, $line . "\n");
         }
@@ -9568,6 +9718,7 @@ class ImportClient
             // position starts at 0 and the store's frontier absorbs any
             // committed prefix a resumed server re-sends.
             $context->staged_artifact_id = $this->staged_pull_artifact_id($local_path);
+            $context->staged_owned = isset($this->staged_batch_owned[$path]);
             $context->file_path = $local_path;
             $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
             $context->file_bytes_written = 0;
@@ -9621,6 +9772,7 @@ class ImportClient
                     // checkpointed this file: the server re-sends it from
                     // the start, so the stream position begins at 0.
                     $context->staged_artifact_id = $this->staged_pull_artifact_id($local_path);
+                    $context->staged_owned = isset($this->staged_batch_owned[$path]);
                 }
                 $this->staged_pull_write_chunk($context, $chunk["body"]);
             } elseif ($context->file_handle) {
@@ -9656,6 +9808,7 @@ class ImportClient
                     $context->staged_artifact_id,
                     $file_size,
                     $context->file_ctime ?? 0,
+                    $context->staged_owned === true,
                 );
                 if ($finalize_error !== null) {
                     $this->staged_pull_store()->discard($context->staged_artifact_id);
@@ -12192,6 +12345,8 @@ class StreamingContext
     public $skip_current_file = false;
     // Staged pull: fs-root-relative artifact id of the file being staged
     public $staged_artifact_id = null;
+    // Staged pull: whether the download list marked this file owned
+    public $staged_owned = false;
 }
 
 /**

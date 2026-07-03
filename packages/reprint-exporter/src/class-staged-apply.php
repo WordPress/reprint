@@ -41,11 +41,16 @@
  *
  * Policies cover the pull side of the same engine. on_existing "skip"
  * (pull's preserve-local) makes an occupied target path win: the entry is
- * not applied and its staged bytes are consumed. refuse_symlinked_parents
- * refuses to create anything through a symlinked directory. Protected
- * entries are classified before validation, so a rerun with nothing
- * staged does not reject a transfer over paths the policy was never going
- * to touch.
+ * not applied and its staged bytes are consumed. Entries the manifest
+ * marks "owned" are exempt — the sender's ship record (pull's local
+ * index, push's done cache) attests the transfer wrote that path, and
+ * preserve-local protects what the sync never owned, not its own previous
+ * copy. Delete entries are owned by construction: both senders derive
+ * them from those same records. refuse_symlinked_parents refuses to
+ * create or remove anything through a symlinked directory, owned or not.
+ * Protected entries are classified before validation, so a rerun with
+ * nothing staged does not reject a transfer over paths the policy was
+ * never going to touch.
  */
 final class Site_Export_Staged_Apply {
 
@@ -85,7 +90,9 @@ final class Site_Export_Staged_Apply {
      *   - on_existing ("replace"|"skip"): what an occupied target path
      *     means. "replace" is push's own-tree semantics; "skip" is pull's
      *     preserve-local — the local path wins and the staged bytes are
-     *     consumed unapplied.
+     *     consumed unapplied. Manifest entries marked "owned" (and every
+     *     delete entry) are exempt from "skip": the transfer's own ship
+     *     record vouches for those paths.
      *   - refuse_symlinked_parents (bool): never create anything through a
      *     symlinked directory. Hosting layouts symlink plugins, themes,
      *     and core from shared locations; apply must not write into those
@@ -215,12 +222,20 @@ final class Site_Export_Staged_Apply {
                         continue;
                     }
                     if (isset($already_applied[$index])) {
-                        // A rerun after a kill: the work is done; only a
-                        // leftover marker may remain to consume.
+                        // A rerun after a kill: the work is done; leftover
+                        // staged remains only need consuming. (For a
+                        // deletion, bytes an earlier resume staged under
+                        // the id can still sit here.)
+                        @unlink($this->files_dir . '/' . $entry['artifact_id']);
                         @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
                         continue;
                     }
                     if ($delete_pass) {
+                        // Staged bytes under a deleted id are garbage from
+                        // before the remote dropped the file; consume them
+                        // with the deletion.
+                        @unlink($this->files_dir . '/' . $entry['artifact_id']);
+                        @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
                         if (!$this->remove_path_without_following_symlinks($this->target_root . '/' . $entry['artifact_id'])) {
                             return $this->result('rejected', 'io_error', 'delete: ' . $entry['artifact_id'], $applied, count($already_applied), count($protected), $skipped_paths, $deleted);
                         }
@@ -342,6 +357,7 @@ final class Site_Export_Staged_Apply {
         }
 
         $entries = [];
+        $seen_ids = [];
         foreach (explode("\n", $raw) as $line_number => $line) {
             if (trim($line) === '') {
                 continue;
@@ -358,6 +374,15 @@ final class Site_Export_Staged_Apply {
             if ($entry['artifact_id'] === $manifest_id) {
                 return 'manifest lists itself';
             }
+            // One verdict per path. Neither sender can produce a duplicate
+            // (both derive deletions as own-record-minus-current-set), and
+            // a same-id create-plus-delete is ambiguous on rerun: once the
+            // create has landed, the delete cannot tell the old occupant
+            // from the new file.
+            if (isset($seen_ids[$entry['artifact_id']])) {
+                return 'manifest line ' . ( $line_number + 1 ) . ' duplicates an artifact id';
+            }
+            $seen_ids[$entry['artifact_id']] = true;
             // Manifest content is sender data; ids must satisfy the same
             // path rule the store enforces at upload time, or a crafted
             // manifest could probe or write outside the target root.
@@ -368,6 +393,7 @@ final class Site_Export_Staged_Apply {
                 'artifact_id' => $entry['artifact_id'],
                 'size' => $is_delete ? null : $entry['size'],
                 'delete' => $is_delete,
+                'owned' => ( $is_delete || !empty($entry['owned']) ),
             ];
         }
         return $entries;
@@ -410,15 +436,17 @@ final class Site_Export_Staged_Apply {
      */
     private function classify(array $entry): string {
         // Policy verdicts come first: a protected path is out of bounds no
-        // matter what is or is not staged for it. Preserve-local means
-        // never overwrite AND never delete.
+        // matter what is or is not staged for it. The symlinked-parent
+        // guard binds even for owned entries — stale ownership must never
+        // reach through a link into shared content.
         if ($this->refuse_symlinked_parents && $this->has_symlinked_parent($entry['artifact_id'])) {
             return 'protected';
         }
-        if ($this->on_existing === 'skip') {
+        if ($this->on_existing === 'skip' && empty($entry['owned'])) {
             $occupied = $this->target_root . '/' . $entry['artifact_id'];
             // is_link covers dangling symlinks, which file_exists misses;
-            // preserve-local protects those too.
+            // preserve-local protects those too. Owned entries skip this
+            // check: the occupant is the transfer's own previous copy.
             if (file_exists($occupied) || is_link($occupied)) {
                 return 'protected';
             }

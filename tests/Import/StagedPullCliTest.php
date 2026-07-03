@@ -314,6 +314,137 @@ class StagedPullCliTest extends TestCase
         }
     }
 
+    public function testPreserveLocalDeltaStillUpdatesFilesWeOwn(): void
+    {
+        // Trunk's contract: "preserve-local does not protect files we own"
+        // — a file the pull itself shipped re-downloads and replaces on
+        // delta. The apply window must not re-protect it just because its
+        // own previous copy occupies the path.
+        $this->seedSource();
+        $this->runCli('preflight');
+        [$output, $code] = $this->pullToCompletion([
+            '--staged-apply',
+            '--on-fs-root-nonempty=preserve-local',
+        ]);
+        $this->assertSame(0, $code, $output);
+        $this->assertSame(
+            '<?php // plugin v1',
+            file_get_contents($this->mappedRoot() . '/wp-content/plugins/my-plugin/my-plugin.php')
+        );
+
+        file_put_contents(
+            $this->source_dir . '/wp-content/plugins/my-plugin/my-plugin.php',
+            '<?php // plugin v2, still ours'
+        );
+        touch($this->source_dir . '/wp-content/plugins/my-plugin/my-plugin.php', time() + 5);
+        [$abort_output, $abort_code] = $this->runCli('files-pull', ['--abort']);
+        $this->assertSame(0, $abort_code, $abort_output);
+        [$delta_output, $delta_code] = $this->pullToCompletion([
+            '--staged-apply',
+            '--on-fs-root-nonempty=preserve-local',
+        ]);
+
+        $this->assertSame(0, $delta_code, $delta_output);
+        $this->assertSame(
+            '<?php // plugin v2, still ours',
+            file_get_contents($this->mappedRoot() . '/wp-content/plugins/my-plugin/my-plugin.php'),
+            'an owned file must update on delta even under preserve-local'
+        );
+    }
+
+    public function testRemoteDeletionsLandInsideTheApplyWindow(): void
+    {
+        $this->seedSource();
+        $this->runCli('preflight');
+        [$output, $code] = $this->pullToCompletion(['--staged-apply']);
+        $this->assertSame(0, $code, $output);
+        $mapped = $this->mappedRoot();
+        $this->assertFileExists($mapped . '/empty.txt');
+
+        // The remote drops two files and updates a third — a delta mixing
+        // deletions with an arrival.
+        unlink($this->source_dir . '/empty.txt');
+        unlink($this->source_dir . '/wp-content/plugins/my-plugin/my-plugin.php');
+        file_put_contents($this->source_dir . '/index.php', '<?php // remote index v2');
+        touch($this->source_dir . '/index.php', time() + 5);
+        [$abort_output, $abort_code] = $this->runCli('files-pull', ['--abort']);
+        $this->assertSame(0, $abort_code, $abort_output);
+
+        // A held store lock fails the delta mid-fetch. Deletions used to
+        // happen at diff time; in staged mode nothing — removals included —
+        // may touch the live tree before the window.
+        $holder = fopen($this->state_dir . '/.pull-staging/lock', 'c+b');
+        flock($holder, LOCK_EX);
+        [$held_output, $held_code] = $this->runCli('files-pull', ['--staged-apply']);
+        flock($holder, LOCK_UN);
+        fclose($holder);
+
+        $this->assertNotSame(0, $held_code, $held_output);
+        $this->assertFileExists(
+            $mapped . '/empty.txt',
+            'a deletion must wait for the apply window'
+        );
+        $this->assertFileExists($mapped . '/wp-content/plugins/my-plugin/my-plugin.php');
+        $this->assertSame('<?php // remote index', file_get_contents($mapped . '/index.php'));
+
+        // An abort in between must not orphan the pending deletions: the
+        // index still owns the files, so the fresh delta re-derives them.
+        [$abort_output, $abort_code] = $this->runCli('files-pull', ['--abort']);
+        $this->assertSame(0, $abort_code, $abort_output);
+        [$output, $code] = $this->pullToCompletion(['--staged-apply']);
+
+        $this->assertSame(0, $code, $output);
+        $this->assertFileDoesNotExist($mapped . '/empty.txt');
+        $this->assertFileDoesNotExist($mapped . '/wp-content/plugins/my-plugin/my-plugin.php');
+        $this->assertSame('<?php // remote index v2', file_get_contents($mapped . '/index.php'));
+        $audit = (string) @file_get_contents($this->state_dir . '/.import-audit.log');
+        $this->assertStringContainsString('Deletion staged for the apply window', $audit);
+        $this->assertStringContainsString('deleted=2', $audit);
+
+        // The confirmed deletions left the index; the next delta derives
+        // nothing new for them.
+        [$abort_output, $abort_code] = $this->runCli('files-pull', ['--abort']);
+        $this->assertSame(0, $abort_code, $abort_output);
+        [$output, $code] = $this->pullToCompletion(['--staged-apply']);
+        $this->assertSame(0, $code, $output);
+        $this->assertFileDoesNotExist($mapped . '/empty.txt');
+        $audit = (string) @file_get_contents($this->state_dir . '/.import-audit.log');
+        $this->assertSame(
+            0,
+            substr_count(explode('deleted=2', $audit, 2)[1] ?? '', 'Deletion staged for the apply window'),
+            'a confirmed deletion must not re-derive on the next delta'
+        );
+    }
+
+    public function testPreserveLocalStillDeletesFilesWeOwn(): void
+    {
+        // Ownership beats occupancy for deletions too: a file the pull
+        // shipped disappears remotely, and preserve-local — which protects
+        // what the sync never owned — does not keep our own stale copy.
+        $this->seedSource();
+        $this->runCli('preflight');
+        [$output, $code] = $this->pullToCompletion([
+            '--staged-apply',
+            '--on-fs-root-nonempty=preserve-local',
+        ]);
+        $this->assertSame(0, $code, $output);
+        $this->assertFileExists($this->mappedRoot() . '/empty.txt');
+
+        unlink($this->source_dir . '/empty.txt');
+        [$abort_output, $abort_code] = $this->runCli('files-pull', ['--abort']);
+        $this->assertSame(0, $abort_code, $abort_output);
+        [$delta_output, $delta_code] = $this->pullToCompletion([
+            '--staged-apply',
+            '--on-fs-root-nonempty=preserve-local',
+        ]);
+
+        $this->assertSame(0, $delta_code, $delta_output);
+        $this->assertFileDoesNotExist(
+            $this->mappedRoot() . '/empty.txt',
+            'preserve-local does not protect files we own from their own deletion'
+        );
+    }
+
     public function testCrossDeviceStateDirIsRefusedBeforeDownloading(): void
     {
         if (!is_dir('/dev/shm')) {
