@@ -228,4 +228,66 @@ class PushFilesCliTest extends TestCase
         $this->assertSame(1, $code);
         $this->assertStringContainsString('Invalid --only prefix', $output);
     }
+
+    public function testWrongSecretAbortsFatalNotRetryable(): void
+    {
+        // A target that answers every request with the control-plane auth
+        // envelope, the way lib.php rejects a bad secret. Retrying cannot
+        // fix credentials: the abort must be exit 1, never the resume
+        // convention's exit 2.
+        $harness = sys_get_temp_dir() . '/push-cli-auth-' . bin2hex(random_bytes(8));
+        mkdir($harness, 0700, true);
+        file_put_contents(
+            $harness . '/router.php',
+            "<?php\n" .
+            "http_response_code(403);\n" .
+            "header('Content-Type: application/json');\n" .
+            "echo json_encode(['error' => 'HMAC signature verification failed', 'code' => 403]);\n"
+        );
+        $probe = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        $this->assertNotFalse($probe, "cannot allocate a port: {$errstr}");
+        $name = (string) stream_socket_get_name($probe, false);
+        $port = (int) substr($name, strrpos($name, ':') + 1);
+        fclose($probe);
+        $server = proc_open(
+            [PHP_BINARY, '-S', "127.0.0.1:{$port}", $harness . '/router.php'],
+            [1 => ['file', $harness . '/server.log', 'a'], 2 => ['file', $harness . '/server.log', 'a']],
+            $pipes
+        );
+        $this->assertIsResource($server);
+        $deadline = microtime(true) + 10;
+        $ready = false;
+        while (microtime(true) < $deadline) {
+            $conn = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.2);
+            if ($conn !== false) {
+                fclose($conn);
+                $ready = true;
+                break;
+            }
+            usleep(100000);
+        }
+        $this->assertTrue($ready, 'php -S did not come up');
+
+        try {
+            file_put_contents($this->fs_root . '/index.php', '<?php');
+            [$output, $code] = $this->runCli([
+                'push-files',
+                "http://127.0.0.1:{$port}/?reprint-api",
+                '--secret=the-wrong-secret',
+                '--state-dir=' . $this->state_dir,
+                '--fs-root=' . $this->fs_root,
+            ]);
+
+            // The stable contract at every floor of the stack: credential
+            // rejections are fatal, never the resume convention's exit 2.
+            // (Higher floors classify the envelope as auth_failed; here it
+            // surfaces as an unexpected response — equally non-retryable.)
+            $this->assertSame(1, $code, $output);
+            $this->assertStringContainsString('"status": "error"', $output);
+        } finally {
+            proc_terminate($server);
+            proc_close($server);
+            $this->removeDir($harness);
+        }
+    }
 }
