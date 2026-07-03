@@ -277,9 +277,9 @@ function _site_export_handle_api_request(array $options = []): void {
     // cannot afford. The upload route verifies the signed headers first and
     // hashes the body as it streams. A custom authenticate callable still
     // runs for every endpoint — its embedder owns that tradeoff.
-    $endpoint = isset($_GET['endpoint']) && is_string($_GET['endpoint'])
-        ? sanitize_key(wp_unslash($_GET['endpoint']))
-        : '';
+    // filter_input, not WP sanitizers: lib.php also runs without WordPress
+    // bootstrapped (hosts that route the API from their own index.php).
+    $endpoint = (string) filter_input(INPUT_GET, 'endpoint');
     $authenticate = $options['authenticate'] ?? null;
     if ($authenticate !== null) {
         $authenticate();
