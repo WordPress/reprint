@@ -130,6 +130,12 @@
     },
     "edit-locks": {
       "port": 8122
+    },
+    "push-target": {
+      "port": 8123
+    },
+    "push-target-xdev": {
+      "port": 8124
     }
   }
 }
