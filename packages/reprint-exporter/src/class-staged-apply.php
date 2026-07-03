@@ -125,7 +125,7 @@ final class Site_Export_Staged_Apply {
      *   what a sender calls before uploading gigabytes: a staging
      *   directory that can never apply (cross_device) rejects here, at
      *   the start, not after the transfer.
-     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int,skipped:int}
+     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int,skipped:int,skipped_paths:array<int,string>}
      *   status "applied"|"ready"|"busy"|"rejected"; skipped counts entries
      *   the on_existing/symlink policies protected.
      */
