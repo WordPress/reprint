@@ -49,6 +49,9 @@
  */
 final class Site_Export_Staged_Apply {
 
+    /** Protected paths reported by name; beyond this, only the count. */
+    private const SKIPPED_PATHS_LIMIT = 1000;
+
     /** @var string */
     private $staging_dir;
 
@@ -158,6 +161,7 @@ final class Site_Export_Staged_Apply {
             // over a path the policy was never going to touch.
             $already_applied = [];
             $protected = [];
+            $skipped_paths = [];
             foreach ($entries as $index => $entry) {
                 $verdict = $this->classify($entry);
                 if ($verdict === 'staged') {
@@ -169,13 +173,19 @@ final class Site_Export_Staged_Apply {
                 }
                 if ($verdict === 'protected') {
                     $protected[$index] = true;
+                    // Callers audit-log each protected path (the
+                    // PRESERVE-LOCAL contract); capped so a 50k-skip
+                    // transfer stays a bounded response.
+                    if (count($skipped_paths) < self::SKIPPED_PATHS_LIMIT) {
+                        $skipped_paths[] = $entry['artifact_id'];
+                    }
                     continue;
                 }
                 return $this->result('rejected', $verdict, $entry['artifact_id']);
             }
 
             if ($check_only) {
-                return $this->result('ready', null, null, 0, count($already_applied), count($protected));
+                return $this->result('ready', null, null, 0, count($already_applied), count($protected), $skipped_paths);
             }
 
             // Apply holds the store's lock, so cleanup below unlinks the
@@ -202,7 +212,7 @@ final class Site_Export_Staged_Apply {
                     // Everything validated, so this is environmental
                     // (permissions, disk). Rerunning apply resumes: moved
                     // entries classify as applied, the rest re-validate.
-                    return $this->result('rejected', 'io_error', $move_error, $applied, count($already_applied), count($protected));
+                    return $this->result('rejected', 'io_error', $move_error, $applied, count($already_applied), count($protected), $skipped_paths);
                 }
                 ++$applied;
             }
@@ -214,7 +224,7 @@ final class Site_Export_Staged_Apply {
             @unlink($this->staging_dir . '/verified/' . $manifest_id);
             $this->clear_cursor_for($entries, $manifest_id);
 
-            return $this->result('applied', null, null, $applied, count($already_applied), count($protected));
+            return $this->result('applied', null, null, $applied, count($already_applied), count($protected), $skipped_paths);
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -405,9 +415,28 @@ final class Site_Export_Staged_Apply {
         $staged_path = $this->files_dir . '/' . $artifact_id;
         $target_path = $this->target_root . '/' . $artifact_id;
 
+        // Type swaps happen between transfers: a directory or symlink can
+        // occupy the path a file now belongs at. rename() replaces files
+        // and symlinks atomically but not directories, so clear anything
+        // that is not a plain file first — the same replacement the pull
+        // writer performs, and like it, never following links.
+        if (is_link($target_path) === false && is_dir($target_path)) {
+            if (!$this->remove_path_without_following_symlinks($target_path)) {
+                return 'clear_target_path: ' . $artifact_id;
+            }
+        }
+
         $parent = dirname($target_path);
-        if (!is_dir($parent) && !@mkdir($parent, 0755, true) && !is_dir($parent)) {
-            return 'create_target_dir: ' . $artifact_id;
+        if (!is_dir($parent)) {
+            // A file left where a directory now belongs blocks mkdir; the
+            // transfer's tree wins, same as above.
+            $blocking_error = $this->clear_blocking_parents($artifact_id);
+            if ($blocking_error !== null) {
+                return $blocking_error . ': ' . $artifact_id;
+            }
+            if (!@mkdir($parent, 0755, true) && !is_dir($parent)) {
+                return 'create_target_dir: ' . $artifact_id;
+            }
         }
         // Same filesystem by precheck, so this replaces atomically; the
         // tree never holds a partial file.
@@ -419,6 +448,56 @@ final class Site_Export_Staged_Apply {
         // costs this unlink again.
         @unlink($this->staging_dir . '/verified/' . $artifact_id);
         return null;
+    }
+
+    /**
+     * Removes a file or symlink sitting on the artifact's parent chain
+     * where a directory now belongs. Symlinked directories pass through:
+     * only an actual non-directory blocks mkdir.
+     *
+     * @return string|null Error detail, or null when the chain is clear.
+     */
+    private function clear_blocking_parents(string $artifact_id): ?string {
+        $parent_rel = dirname($artifact_id);
+        if ($parent_rel === '.') {
+            return null;
+        }
+        $path = $this->target_root;
+        foreach (explode('/', $parent_rel) as $segment) {
+            $path .= '/' . $segment;
+            if ((is_link($path) || file_exists($path)) && !is_dir($path)) {
+                if (!@unlink($path)) {
+                    return 'clear_blocking_parent';
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Trunk's replacement discipline: unlink files and symlinks directly
+     * (never following the link), recurse into real directories.
+     */
+    private function remove_path_without_following_symlinks(string $path): bool {
+        if (!file_exists($path) && !is_link($path)) {
+            return true;
+        }
+        if (is_link($path) || is_file($path)) {
+            return @unlink($path) === true;
+        }
+        $entries = @scandir($path);
+        if ($entries === false) {
+            return false;
+        }
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            if (!$this->remove_path_without_following_symlinks($path . '/' . $entry)) {
+                return false;
+            }
+        }
+        return @rmdir($path) === true;
     }
 
     /**
@@ -444,7 +523,7 @@ final class Site_Export_Staged_Apply {
         return false;
     }
 
-    private function result(string $status, ?string $reason, ?string $detail, int $applied = 0, int $already_applied = 0, int $skipped = 0): array {
+    private function result(string $status, ?string $reason, ?string $detail, int $applied = 0, int $already_applied = 0, int $skipped = 0, array $skipped_paths = []): array {
         return [
             'status' => $status,
             'reason' => $reason,
@@ -452,6 +531,7 @@ final class Site_Export_Staged_Apply {
             'applied' => $applied,
             'already_applied' => $already_applied,
             'skipped' => $skipped,
+            'skipped_paths' => $skipped_paths,
         ];
     }
 }

@@ -47,6 +47,9 @@ class StagedPushRunner
         "invalid_offset",
         "invalid_total",
         "invalid_artifact_entry",
+        // A source rewritten mid-push fails its artifact; the next run
+        // re-plans with the current mtime and pushes the fresh content.
+        "source_changed",
     ];
 
     private string $state_path;
@@ -198,7 +201,8 @@ class StagedPushRunner
                 $total_bytes,
                 function (int $committed, int $total) use ($files_done, $files_total, $artifact_id): void {
                     $this->report_progress($files_done, $files_total, $artifact_id, $committed, $total);
-                }
+                },
+                $mtime
             );
 
             if ($result["status"] === "verified") {

@@ -254,6 +254,7 @@ final class StagedApplyTest extends TestCase {
         $this->assertSame('applied', $result['status']);
         $this->assertSame(1, $result['applied']);
         $this->assertSame(1, $result['skipped']);
+        $this->assertSame(['index.php'], $result['skipped_paths'], 'callers audit-log the protected paths');
         $this->assertSame('local wins', file_get_contents($this->target_root . '/index.php'));
         $this->assertSame('lands', file_get_contents($this->target_root . '/fresh.txt'));
         $this->assertFileDoesNotExist(
@@ -353,6 +354,65 @@ final class StagedApplyTest extends TestCase {
         $this->expectException(InvalidArgumentException::class);
 
         $this->makeApply(['on_existing' => 'merge']);
+    }
+
+    // ---------------------------------------------------------------
+    // Type swaps between transfers
+    // ---------------------------------------------------------------
+
+    public function testReplacesADirectoryWithAFile(): void
+    {
+        // The previous site version had a directory here; the new one has
+        // a file. Trunk's writer replaces it, so apply must too.
+        mkdir($this->target_root . '/was-a-dir/nested', 0700, true);
+        file_put_contents($this->target_root . '/was-a-dir/nested/old.txt', 'old');
+        $this->stageVerified('was-a-dir', 'now a file');
+        $manifest = $this->stageManifest([['artifact_id' => 'was-a-dir', 'size' => 10]]);
+
+        $result = $this->makeApply()->apply($manifest);
+
+        $this->assertSame('applied', $result['status']);
+        $this->assertSame('now a file', file_get_contents($this->target_root . '/was-a-dir'));
+    }
+
+    public function testReplacesASymlinkWithoutFollowingIt(): void
+    {
+        // A symlinked directory occupies the path; replacing it must swap
+        // the link itself and never reach through into the shared target.
+        $shared = $this->target_root . '-shared';
+        mkdir($shared, 0700, true);
+        file_put_contents($shared . '/keep.txt', 'shared content');
+        symlink($shared, $this->target_root . '/linked');
+        $this->stageVerified('linked', 'plain file now');
+        $manifest = $this->stageManifest([['artifact_id' => 'linked', 'size' => 14]]);
+
+        try {
+            $result = $this->makeApply()->apply($manifest);
+
+            $this->assertSame('applied', $result['status']);
+            $this->assertFalse(is_link($this->target_root . '/linked'));
+            $this->assertSame('plain file now', file_get_contents($this->target_root . '/linked'));
+            $this->assertSame(
+                'shared content',
+                file_get_contents($shared . '/keep.txt'),
+                'the link target must survive untouched'
+            );
+        } finally {
+            $this->removeDir($shared);
+        }
+    }
+
+    public function testClearsAFileBlockingTheParentChain(): void
+    {
+        // wp-content used to be a file; the new tree needs it as a dir.
+        file_put_contents($this->target_root . '/wp-content', 'blocking file');
+        $this->stageVerified('wp-content/plugins/p.php', '<?php');
+        $manifest = $this->stageManifest([['artifact_id' => 'wp-content/plugins/p.php', 'size' => 5]]);
+
+        $result = $this->makeApply()->apply($manifest);
+
+        $this->assertSame('applied', $result['status']);
+        $this->assertSame('<?php', file_get_contents($this->target_root . '/wp-content/plugins/p.php'));
     }
 
     // ---------------------------------------------------------------
