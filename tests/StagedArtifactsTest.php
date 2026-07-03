@@ -296,12 +296,11 @@ final class StagedArtifactsTest extends TestCase
         $store->finalize('artifact-a', 3);
         $store->append('artifact-b', 0, 'bbbb');
 
-        // Simulate a kill halfway through recording artifact-b as verified:
-        // the record file ends in a torn line.
+        // A malformed marker (markers commit by rename, so this means
+        // external interference) must read as not verified.
         file_put_contents(
-            $this->staging_dir . '/verified.jsonl',
-            '{"artifact_id":"artifact-b","si',
-            FILE_APPEND
+            $this->staging_dir . '/verified/artifact-b',
+            '{"si'
         );
 
         $this->assertFalse($store->status('artifact-b')['verified']);
@@ -315,12 +314,12 @@ final class StagedArtifactsTest extends TestCase
         $store = $this->makeStore();
         $store->append('artifact-1', 0, 'payload');
 
-        // Simulate a kill after the verified record landed but before the
+        // Simulate a kill after the verified marker landed but before the
         // cursor was cleared.
+        mkdir($this->staging_dir . '/verified', 0700, true);
         file_put_contents(
-            $this->staging_dir . '/verified.jsonl',
-            "\n" . json_encode(['artifact_id' => 'artifact-1', 'size' => 7]) . "\n",
-            FILE_APPEND
+            $this->staging_dir . '/verified/artifact-1',
+            json_encode(['size' => 7])
         );
 
         $stale = $store->append('artifact-1', 7, 'more');
@@ -463,7 +462,7 @@ final class StagedArtifactsTest extends TestCase
     {
         $store = $this->makeStore();
 
-        foreach (['index.php', 'index.php.part', 'index.php.meta.json', 'state.json'] as $id) {
+        foreach (['index.php', 'index.php.part', 'index.php.meta.json', 'state.json', 'verified', 'verified.tmp'] as $id) {
             $this->assertSame('accepted', $store->append($id, 0, "body of {$id}")['status']);
             $verified = $store->finalize($id, strlen("body of {$id}"));
             $this->assertSame('verified', $verified['status'], "id: {$id}");
@@ -639,12 +638,12 @@ final class StagedArtifactsTest extends TestCase
         $store->append('artifact-1', 0, 'payload');
         $store->finalize('artifact-1', 7);
 
-        // Rewriting verified.jsonl needs its temp file in the staging dir.
-        chmod($this->staging_dir, 0500);
+        // Unlinking the marker needs write permission on verified/.
+        chmod($this->staging_dir . '/verified', 0500);
         $this->assertFalse($store->discard('artifact-1'));
         $this->assertTrue($store->status('artifact-1')['verified']);
 
-        chmod($this->staging_dir, 0700);
+        chmod($this->staging_dir . '/verified', 0700);
         $this->assertTrue($store->discard('artifact-1'));
         $this->assertFalse($store->status('artifact-1')['verified']);
     }
