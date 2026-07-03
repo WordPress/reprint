@@ -126,7 +126,18 @@ class PushFilesCliTest extends TestCase
      * bootstrap the atomic e2e scenarios use), the real CLI pushing with
      * --apply, files landing in the target root by rename.
      */
-    public function testFullPushWithApplyLandsFilesInTheTargetRoot(): void
+    /** @var resource|null */
+    private $apply_server = null;
+
+    private string $apply_harness = '';
+
+    /**
+     * Serves lib.php WP-less over php -S with staging and an apply root,
+     * like the atomic e2e sites do. Returns [url, site_root, staging_dir].
+     *
+     * @return array{0:string,1:string,2:string}
+     */
+    private function startApplyHarness(): array
     {
         $harness = sys_get_temp_dir() . '/push-cli-harness-' . bin2hex(random_bytes(8));
         $site_root = $harness . '/site';
@@ -156,7 +167,7 @@ class PushFilesCliTest extends TestCase
         $port = (int) substr($name, strrpos($name, ':') + 1);
         fclose($probe);
 
-        $server = proc_open(
+        $this->apply_server = proc_open(
             [PHP_BINARY, '-S', "127.0.0.1:{$port}", $harness . '/router.php'],
             [
                 1 => ['file', $harness . '/server.log', 'a'],
@@ -164,38 +175,60 @@ class PushFilesCliTest extends TestCase
             ],
             $pipes
         );
-        $this->assertIsResource($server);
+        $this->assertIsResource($this->apply_server);
+        $this->apply_harness = $harness;
 
-        try {
-            $deadline = microtime(true) + 10;
-            $ready = false;
-            while (microtime(true) < $deadline) {
-                $conn = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.2);
-                if ($conn !== false) {
-                    fclose($conn);
-                    $ready = true;
-                    break;
-                }
-                usleep(100000);
+        $deadline = microtime(true) + 10;
+        $ready = false;
+        while (microtime(true) < $deadline) {
+            $conn = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.2);
+            if ($conn !== false) {
+                fclose($conn);
+                $ready = true;
+                break;
             }
-            $this->assertTrue($ready, 'php -S did not come up');
+            usleep(100000);
+        }
+        $this->assertTrue($ready, 'php -S did not come up');
 
+        return ["http://127.0.0.1:{$port}/?reprint-api", $site_root, $harness . '/staging'];
+    }
+
+    private function stopApplyHarness(): void
+    {
+        if (is_resource($this->apply_server)) {
+            proc_terminate($this->apply_server);
+            proc_close($this->apply_server);
+            $this->apply_server = null;
+        }
+        if ($this->apply_harness !== '') {
+            $this->removeDir($this->apply_harness);
+            $this->apply_harness = '';
+        }
+    }
+
+    private function pushArgs(string $url): array
+    {
+        return [
+            'push-files',
+            $url,
+            '--secret=push-cli-e2e-secret',
+            '--state-dir=' . $this->state_dir,
+            '--fs-root=' . $this->fs_root,
+            '--apply',
+        ];
+    }
+
+    public function testFullPushWithApplyLandsFilesInTheTargetRoot(): void
+    {
+        [$url, $site_root] = $this->startApplyHarness();
+        try {
             file_put_contents($this->fs_root . '/index.php', '<?php // pushed');
             mkdir($this->fs_root . '/wp-content/uploads', 0700, true);
             $big = str_repeat('reprint!', 40000); // 320 KB: several append steps
             file_put_contents($this->fs_root . '/wp-content/uploads/a.bin', $big);
 
-            $url = "http://127.0.0.1:{$port}/?reprint-api";
-            $args = [
-                'push-files',
-                $url,
-                '--secret=push-cli-e2e-secret',
-                '--state-dir=' . $this->state_dir,
-                '--fs-root=' . $this->fs_root,
-                '--apply',
-            ];
-
-            [$output, $code] = $this->runCli($args);
+            [$output, $code] = $this->runCli($this->pushArgs($url));
             $this->assertSame(0, $code, $output);
             $this->assertSame('<?php // pushed', file_get_contents($site_root . '/index.php'));
             $this->assertSame($big, file_get_contents($site_root . '/wp-content/uploads/a.bin'));
@@ -203,12 +236,77 @@ class PushFilesCliTest extends TestCase
 
             // Re-pushing the identical tree is a no-op that still succeeds:
             // uploads cache-skip, apply classifies everything as applied.
-            [$again_output, $again_code] = $this->runCli($args);
+            [$again_output, $again_code] = $this->runCli($this->pushArgs($url));
             $this->assertSame(0, $again_code, $again_output);
         } finally {
-            proc_terminate($server);
-            proc_close($server);
-            $this->removeDir($harness);
+            $this->stopApplyHarness();
+        }
+    }
+
+    public function testInterruptedPushResumesFromTheCommittedOffset(): void
+    {
+        [$url, $site_root, $staging] = $this->startApplyHarness();
+        try {
+            mkdir($this->fs_root . '/wp-content/uploads', 0700, true);
+            $big = str_repeat('resumable-bytes', 20000); // 300 KB
+            file_put_contents($this->fs_root . '/wp-content/uploads/a.bin', $big);
+
+            // A previous push died mid-artifact: the target already holds a
+            // committed prefix. The next push must continue from it over
+            // HTTP, not restart or corrupt.
+            $store = new \Site_Export_Staged_Artifacts($staging);
+            $prefix = substr($big, 0, 100000);
+            $this->assertSame(
+                'accepted',
+                $store->append('wp-content/uploads/a.bin', 0, $prefix)['status']
+            );
+
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+
+            $this->assertSame(0, $code, $output);
+            $this->assertSame(
+                $big,
+                file_get_contents($site_root . '/wp-content/uploads/a.bin'),
+                'the resumed artifact must assemble byte-identical'
+            );
+        } finally {
+            $this->stopApplyHarness();
+        }
+    }
+
+    public function testAdversarialFilenamesSurviveTheWire(): void
+    {
+        [$url, $site_root] = $this->startApplyHarness();
+        try {
+            // Names that stress the query-string transport (space, plus,
+            // percent, ampersand, quotes, unicode) and the store's
+            // record-lookalike handling.
+            $names = [
+                'file with space.txt',
+                '100%+done.txt',
+                'name&param=value.txt',
+                "it's \"quoted\".txt",
+                'emoji-😀.php',
+                'wp-content/uploads/déjà vu.bin',
+            ];
+            foreach ($names as $index => $name) {
+                $path = $this->fs_root . '/' . $name;
+                @mkdir(dirname($path), 0700, true);
+                file_put_contents($path, "body #{$index} of {$name}");
+            }
+
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+
+            $this->assertSame(0, $code, $output);
+            foreach ($names as $index => $name) {
+                $this->assertSame(
+                    "body #{$index} of {$name}",
+                    file_get_contents($site_root . '/' . $name),
+                    "mangled in transit: {$name}"
+                );
+            }
+        } finally {
+            $this->stopApplyHarness();
         }
     }
 
