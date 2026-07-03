@@ -19,27 +19,18 @@
  * writer has the same needs whenever its target is a live site — today it
  * streams downloads straight to their final paths, which is fine for a fresh
  * local directory but not for a web-served tree — so nothing here is
- * upload-specific: sequential offsets match pull's byte-offset resume model,
- * and adopting this store there mainly needs source-declared checksums in the
- * file index/fetch protocol.
+ * upload-specific: sequential offsets match pull's byte-offset resume model.
  *
- * The checksums gate the apply step; they are not an auth scheme (the
- * control plane's HMAC owns authorization) and they do not guard the wire
- * (TLS does). They catch accidents neither can see: a sender reading the
- * wrong bytes (offset bugs, a live source file changing mid-transfer),
- * truncation in buffering layers behind the TLS edge, and the staging file
- * drifting between requests. finalize()'s whole-artifact checksum defines
- * "complete and correct"; the per-chunk checksum just localizes a bad chunk
- * to a one-chunk retry. CRC-32 is enough for that: the rest of the pipeline
- * moves data with no content hashing at all, nothing keys on content
- * digests, and error detection is the whole job.
- *
- * The sender hashes while reading and the store hashes while writing, so the
- * only extra pass is finalize() re-reading the artifact. That is deliberate:
- * chunk-time checks cannot see the staging file changing between requests
- * (a shrunken file is zero-filled back to the committed size by the next
- * write's ftruncate), and PHP 7.4 cannot resume a hash context across
- * requests.
+ * Integrity checks are byte counts, the same discipline pull uses: every
+ * chunk must supply exactly its declared length, and finalize() compares the
+ * assembled size against the total declared at plan time. That catches
+ * truncation, missing chunks, and resume-offset bugs; it does not read the
+ * artifact back, so finalize() costs the same for a 1 KB file and a 50 GB
+ * dump. Corruption that preserves length — including a staging file that
+ * shrank between requests and was zero-filled back to the committed size by
+ * the next write's ftruncate — is not detected, the same trust pull's
+ * writer places in its local disk. The wire belongs to TLS and request
+ * authorization to the control plane's HMAC.
  *
  * Layout and state follow the pull importer's mechanics. Artifact bytes live
  * at their plain target-relative paths under files/ — no suffixes, so any
@@ -72,12 +63,13 @@
  *   Retrying an already-committed chunk is an idempotent no-op ("duplicate"),
  *   and every response carries committed_bytes so an out-of-sync uploader can
  *   resume at the right offset.
- * - Bytes become committed only after the chunk's CRC-32 matched. The data
- *   is flushed before the cursor record moves, so a crash mid-chunk leaves
- *   an uncommitted tail that the next write discards.
- * - finalize() re-hashes the assembled artifact and compares size and checksum
- *   before recording it in verified.jsonl; write_chunks() refuses verified
- *   artifacts.
+ * - Bytes become committed only after the chunk arrived at exactly its
+ *   declared length. The data is flushed before the cursor record moves, so
+ *   a crash mid-chunk leaves an uncommitted tail that the next write
+ *   discards.
+ * - finalize() compares the assembled size against the plan-declared total
+ *   before recording the artifact in verified.jsonl; write_chunks() refuses
+ *   verified artifacts.
  * - An artifact id is the files/-relative path the artifact will be applied
  *   from, mirroring the target tree — apply resolves artifacts by id, never
  *   by enumerating the staging directory. Ids with absolute, empty, "." or
@@ -117,22 +109,20 @@ final class Site_Export_Staged_Artifacts {
     /**
      * Stage one chunk of an artifact at the given offset.
      *
-     * @param string          $artifact_id     Opaque artifact identifier.
-     * @param int             $offset          Byte offset this chunk starts at.
-     * @param int             $length          Declared chunk length in bytes.
-     * @param string          $expected_crc32  Hex CRC-32 (crc32b) of the chunk body.
-     * @param resource|string $source          Chunk body, or a readable stream positioned at it.
+     * @param string          $artifact_id Opaque artifact identifier.
+     * @param int             $offset      Byte offset this chunk starts at.
+     * @param int             $length      Declared chunk length in bytes.
+     * @param resource|string $source      Chunk body, or a readable stream positioned at it.
      * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
      *   status "accepted"|"duplicate"|"busy"|"rejected"; reason is set on
      *   "rejected", and detail names the failing operation when the same
      *   reason can come from more than one place.
      */
-    public function write_chunk(string $artifact_id, int $offset, int $length, string $expected_crc32, $source): array {
+    public function write_chunk(string $artifact_id, int $offset, int $length, $source): array {
         return $this->write_chunks($artifact_id, [
             [
                 'offset' => $offset,
                 'length' => $length,
-                'expected_crc32' => $expected_crc32,
                 'source' => $source,
             ],
         ]);
@@ -156,7 +146,7 @@ final class Site_Export_Staged_Artifacts {
      * response's committed_bytes tells the sender where the next request
      * should resume.
      *
-     * @param iterable<int,array{offset:int,length:int,expected_crc32:string,source:resource|string}> $chunks
+     * @param iterable<int,array{offset:int,length:int,source:resource|string}> $chunks
      * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
      *   status "accepted"|"duplicate"|"busy"|"rejected"; reason is set on
      *   "rejected", and detail names the failing operation when the same
@@ -180,7 +170,7 @@ final class Site_Export_Staged_Artifacts {
 
             $verified = $this->read_verified();
             if (isset($verified[$artifact_id])) {
-                return $this->write_result('rejected', 'already_verified', $verified[$artifact_id]['size']);
+                return $this->write_result('rejected', 'already_verified', $verified[$artifact_id]);
             }
 
             // Sequential transfers: the cursor tracks one artifact. A write
@@ -218,8 +208,6 @@ final class Site_Export_Staged_Artifacts {
                     // before writing bytes.
                     $offset = isset($chunk['offset']) ? (int) $chunk['offset'] : -1;
                     $length = isset($chunk['length']) ? (int) $chunk['length'] : 0;
-                    $expected_crc32 = isset($chunk['expected_crc32']) ? (string) $chunk['expected_crc32'] : '';
-                    $expected_crc32 = strtolower($expected_crc32);
                     $source = $chunk['source'] ?? null;
 
                     if ($length < 1) {
@@ -227,9 +215,6 @@ final class Site_Export_Staged_Artifacts {
                     }
                     if ($offset < 0) {
                         return $this->write_result('rejected', 'invalid_offset', $committed);
-                    }
-                    if (!preg_match('/^[0-9a-f]{8}$/', $expected_crc32)) {
-                        return $this->write_result('rejected', 'invalid_hash', $committed);
                     }
                     if (is_string($source) && strlen($source) !== $length) {
                         return $this->write_result('rejected', 'length_mismatch', $committed);
@@ -249,9 +234,9 @@ final class Site_Export_Staged_Artifacts {
                         return $this->write_result('rejected', 'offset_gap', $committed);
                     }
 
-                    $copy_reason = $this->copy_and_hash($source, $file, $length, $expected_crc32);
+                    $copy_reason = $this->copy_source($source, $file, $length);
                     if ($copy_reason !== null) {
-                        // A failed copy/hash can leave bytes past the committed
+                        // A failed copy can leave bytes past the committed
                         // offset; trim them before the caller retries this chunk.
                         ftruncate($file, $committed);
                         return $this->write_result('rejected', $copy_reason, $committed, 'chunk_body');
@@ -290,29 +275,25 @@ final class Site_Export_Staged_Artifacts {
     }
 
     /**
-     * Verify the assembled artifact and record it as applyable.
+     * Confirm the assembled artifact against its declared size and record it
+     * as applyable.
      *
      * Idempotent: finalizing an already-verified artifact with the same size
-     * and checksum succeeds again.
+     * succeeds again.
      *
-     * $expected_crc32 must be the checksum declared when the transfer was
-     * planned, before any bytes moved. A checksum the sender computes while
-     * reading cannot catch a resume that mixed two versions of the source
-     * file — it would faithfully hash the mixed bytes.
+     * $expected_total_bytes is the size declared when the transfer was
+     * planned. The check never reads the artifact back, so it costs the same
+     * regardless of artifact size.
      *
      * @return array{status:string,reason:?string,detail:?string,committed_bytes:int,path:?string}
      *   status "verified"|"busy"|"rejected"; path is set on "verified", and
      *   detail names the failing operation when the same reason can come
      *   from more than one place.
      */
-    public function finalize(string $artifact_id, int $expected_total_bytes, string $expected_crc32): array {
-        $expected_crc32 = strtolower($expected_crc32);
+    public function finalize(string $artifact_id, int $expected_total_bytes): array {
         $file_path = $this->artifact_path($artifact_id);
         if ($file_path === null) {
             return $this->finalize_result('rejected', 'invalid_artifact_id', 0);
-        }
-        if (!preg_match('/^[0-9a-f]{8}$/', $expected_crc32)) {
-            return $this->finalize_result('rejected', 'invalid_hash', 0);
         }
         if ($expected_total_bytes < 0) {
             return $this->finalize_result('rejected', 'invalid_total', 0);
@@ -330,12 +311,9 @@ final class Site_Export_Staged_Artifacts {
 
             $verified = $this->read_verified();
             if (isset($verified[$artifact_id])) {
-                $record = $verified[$artifact_id];
-                $same = $record['size'] === $expected_total_bytes
-                    && hash_equals($record['crc32'], $expected_crc32);
-                return $same
-                    ? $this->finalize_result('verified', null, $record['size'], null, $file_path)
-                    : $this->finalize_result('rejected', 'hash_mismatch', $record['size'], 'verified_record');
+                return $verified[$artifact_id] === $expected_total_bytes
+                    ? $this->finalize_result('verified', null, $verified[$artifact_id], null, $file_path)
+                    : $this->finalize_result('rejected', 'size_mismatch', $verified[$artifact_id], 'verified_record');
             }
 
             $state = $this->read_state();
@@ -360,25 +338,14 @@ final class Site_Export_Staged_Artifacts {
             if ($file === false) {
                 return $this->finalize_result('rejected', 'io_error', $committed, 'open_artifact_file');
             }
-            // Drop any uncommitted tail so the checksum covers committed bytes only.
+            // Drop any uncommitted tail so the artifact holds committed bytes only.
             $truncated = ftruncate($file, $committed);
             fclose($file);
             if (!$truncated) {
                 return $this->finalize_result('rejected', 'io_error', $committed, 'truncate_uncommitted_tail');
             }
 
-            // Reading through a second handle without locking the artifact
-            // file is safe: every writer serializes on the store lock held
-            // here.
-            $actual_crc32 = hash_file('crc32b', $file_path);
-            if ($actual_crc32 === false) {
-                return $this->finalize_result('rejected', 'io_error', $committed, 'artifact_crc32');
-            }
-            if (!hash_equals($expected_crc32, $actual_crc32)) {
-                return $this->finalize_result('rejected', 'hash_mismatch', $committed, 'artifact_crc32');
-            }
-
-            if (!$this->append_verified($artifact_id, $expected_total_bytes, $expected_crc32)) {
+            if (!$this->append_verified($artifact_id, $expected_total_bytes)) {
                 return $this->finalize_result('rejected', 'io_error', $committed, 'persist_verified_record');
             }
             if ($state['artifact_id'] === $artifact_id) {
@@ -416,7 +383,7 @@ final class Site_Export_Staged_Artifacts {
         if (isset($verified[$artifact_id])) {
             return [
                 'exists' => file_exists($file_path),
-                'committed_bytes' => $verified[$artifact_id]['size'],
+                'committed_bytes' => $verified[$artifact_id],
                 'verified' => true,
             ];
         }
@@ -477,15 +444,13 @@ final class Site_Export_Staged_Artifacts {
     }
 
     /**
-     * Copies exactly $length bytes to the artifact file while hashing the
-     * same bytes that landed on disk.
+     * Copies exactly $length bytes from the source to the artifact file.
      *
      * @param resource|string $source
      * @return string|null Rejection reason, or null when $length bytes were
-     *                     copied and their checksum matched.
+     *                     copied.
      */
-    private function copy_and_hash($source, $file, int $length, string $expected_crc32): ?string {
-        $context = hash_init('crc32b');
+    private function copy_source($source, $file, int $length): ?string {
         $remaining = $length;
 
         while ($remaining > 0) {
@@ -500,15 +465,10 @@ final class Site_Export_Staged_Artifacts {
                 }
             }
 
-            hash_update($context, $buffer);
             if (fwrite($file, $buffer) !== strlen($buffer)) {
                 return 'io_error';
             }
             $remaining -= strlen($buffer);
-        }
-
-        if (!hash_equals($expected_crc32, hash_final($context))) {
-            return 'hash_mismatch';
         }
 
         return null;
@@ -517,8 +477,8 @@ final class Site_Export_Staged_Artifacts {
     /**
      * Consumes exactly $length bytes from a duplicate chunk stream.
      *
-     * Duplicate chunks are not written or re-hashed, but a batched upload may
-     * be reading consecutive chunk bodies from one request stream. Draining
+     * Duplicate chunks are not re-written, but a batched upload may be
+     * reading consecutive chunk bodies from one request stream. Draining
      * keeps the parser aligned for the next chunk.
      *
      * @param resource|string $source
@@ -635,12 +595,13 @@ final class Site_Export_Staged_Artifacts {
     }
 
     /**
-     * Reads the verified-artifact records, keyed by artifact id.
+     * Reads the verified-artifact records: artifact id to verified size.
      *
      * Malformed lines — a tail torn by a crash mid-append — are skipped, so
-     * the worst case is re-verifying an artifact, never trusting a torn record.
+     * the worst case is re-finalizing an artifact, never trusting a torn
+     * record.
      *
-     * @return array<string,array{size:int,crc32:string}>
+     * @return array<string,int>
      */
     private function read_verified(): array {
         $raw = @file_get_contents($this->verified_path);
@@ -656,23 +617,18 @@ final class Site_Export_Staged_Artifacts {
                 || !is_string($record['artifact_id'] ?? null)
                 || !is_int($record['size'] ?? null)
                 || $record['size'] < 0
-                || !is_string($record['crc32'] ?? null)
             ) {
                 continue;
             }
-            $records[$record['artifact_id']] = [
-                'size' => $record['size'],
-                'crc32' => $record['crc32'],
-            ];
+            $records[$record['artifact_id']] = $record['size'];
         }
         return $records;
     }
 
-    private function append_verified(string $artifact_id, int $size, string $crc32): bool {
+    private function append_verified(string $artifact_id, int $size): bool {
         $line = json_encode([
             'artifact_id' => $artifact_id,
             'size' => $size,
-            'crc32' => $crc32,
         ]) . "\n";
         return @file_put_contents($this->verified_path, $line, FILE_APPEND) === strlen($line);
     }
@@ -685,11 +641,10 @@ final class Site_Export_Staged_Artifacts {
         unset($records[$artifact_id]);
 
         $lines = '';
-        foreach ($records as $id => $record) {
+        foreach ($records as $id => $size) {
             $lines .= json_encode([
                 'artifact_id' => $id,
-                'size' => $record['size'],
-                'crc32' => $record['crc32'],
+                'size' => $size,
             ]) . "\n";
         }
         $tmp_path = $this->verified_path . '.tmp';
