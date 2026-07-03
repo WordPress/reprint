@@ -180,6 +180,28 @@ function _site_export_default_authenticate(): void {
 }
 
 /**
+ * Server-side options for the staged artifact endpoints.
+ *
+ * The staging directory must live outside the web-served tree, and WordPress
+ * has no guaranteed writable directory there, so the default sits under the
+ * system temp dir, keyed by ABSPATH so co-hosted sites do not share staging
+ * state. A host that cleans its temp dir only costs a transfer its progress —
+ * artifacts re-upload from offset 0. Define SITE_EXPORT_STAGING_DIR to pick a
+ * durable location instead.
+ */
+function _site_export_staged_options(): array {
+    $staging_dir = defined('SITE_EXPORT_STAGING_DIR')
+        ? SITE_EXPORT_STAGING_DIR
+        : rtrim(sys_get_temp_dir(), '/') . '/reprint-staging-' . md5(ABSPATH);
+
+    return [
+        'staging_dir' => $staging_dir,
+        'secret' => _site_export_get_shared_secret(),
+        'timestamp_tolerance' => SITE_EXPORT_TIMESTAMP_TOLERANCE,
+    ];
+}
+
+/**
  * Handle an export API request.
  *
  * WordPress is already loaded at this point — DB credentials, $table_prefix,
@@ -250,8 +272,20 @@ function _site_export_handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    $authenticate = $options['authenticate'] ?? '_site_export_default_authenticate';
-    $authenticate();
+    // staged_upload authenticates inside its handler: the default handler
+    // here buffers the whole request body to hash it, which a chunk upload
+    // cannot afford. The upload route verifies the signed headers first and
+    // hashes the body as it streams. A custom authenticate callable still
+    // runs for every endpoint — its embedder owns that tradeoff.
+    $endpoint = isset($_GET['endpoint']) && is_string($_GET['endpoint'])
+        ? sanitize_key(wp_unslash($_GET['endpoint']))
+        : '';
+    $authenticate = $options['authenticate'] ?? null;
+    if ($authenticate !== null) {
+        $authenticate();
+    } elseif ($endpoint !== 'staged_upload') {
+        _site_export_default_authenticate();
+    }
 
     // Ensure the Composer autoloader is loaded so Site_Export_HTTP_Server
     // is resolvable. The class itself will require export.php on demand
@@ -267,6 +301,7 @@ function _site_export_handle_api_request(array $options = []): void {
     try {
         Site_Export_HTTP_Server::serve([
             'default_directory' => ABSPATH,
+            'staged' => _site_export_staged_options(),
         ]);
     } catch (Exception $e) {
         if (!headers_sent()) {
