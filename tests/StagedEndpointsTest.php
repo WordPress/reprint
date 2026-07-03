@@ -634,6 +634,51 @@ final class StagedEndpointsTest extends TestCase {
         $this->assertDirectoryDoesNotExist($this->staging_dir . '/files');
     }
 
+    public function testDuplicateIdWithinOneBatchIsIdempotent(): void
+    {
+        // A sender bug or a repartition edge can put the same file into
+        // one request twice. The second frame must land on the verified
+        // short-circuit — never doubled bytes, never a poisoned batch.
+        $endpoints = $this->makeEndpoints();
+        $frame = json_encode([
+            'artifact_id' => 'twice.txt',
+            'offset' => 0,
+            'length' => 5,
+            'total_bytes' => 5,
+            'final' => true,
+        ]) . "\nhello";
+
+        $result = $this->uploadBatch($endpoints, $frame . $frame);
+
+        $this->assertSame(200, $result['http_code'], json_encode($result['body']));
+        $this->assertCount(2, $result['body']['results']);
+        $this->assertSame('verified', $result['body']['results'][0]['status']);
+        $this->assertSame('verified', $result['body']['results'][1]['status']);
+        $this->assertSame('hello', file_get_contents($this->staging_dir . '/files/twice.txt'));
+    }
+
+    public function testHostileFrameFieldsAreTypedRejections(): void
+    {
+        $endpoints = $this->makeEndpoints();
+
+        // A negative length must not be fed to a read loop.
+        $negative = $this->uploadBatch(
+            $endpoints,
+            json_encode(['artifact_id' => 'n.txt', 'offset' => 0, 'length' => -5, 'total_bytes' => 5, 'final' => true]) . "\nhello"
+        );
+        $this->assertSame(400, $negative['http_code']);
+
+        // A traversal id inside a frame goes through the same path rule
+        // as the single-upload route: the store's typed rejection, and
+        // nothing lands outside the staging dir.
+        $hostile = $this->uploadBatch(
+            $endpoints,
+            json_encode(['artifact_id' => '../escape.txt', 'offset' => 0, 'length' => 5, 'total_bytes' => 5, 'final' => true]) . "\nhello"
+        );
+        $this->assertSame(409, $hostile['http_code']);
+        $this->assertFileDoesNotExist(dirname($this->staging_dir) . '/escape.txt');
+    }
+
     // ---------------------------------------------------------------
     // Dispatcher wiring
     // ---------------------------------------------------------------
