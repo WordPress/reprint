@@ -1250,6 +1250,13 @@ class ImportClient
     /** @var array<string,true> Owned remote paths in the batch being fetched. */
     private $staged_batch_owned = [];
 
+    /**
+     * True while the apply window replays deferred directory/symlink
+     * records through their regular handlers — the same code that runs at
+     * fetch time in unstaged mode, just at window time.
+     */
+    private $staged_replay = false;
+
     public function __construct(string $remote_url, string $state_dir, string $fs_root)
     {
         $this->remote_url = rtrim($remote_url, "?&");
@@ -2028,6 +2035,22 @@ class ImportClient
                     @unlink($this->volatile_files_file);
                     $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
                 }
+
+                // Staged leftovers are sync progress too: unapplied bytes
+                // and the pending window log go with the cursor. Nothing
+                // in them reached the live tree or the index, so the next
+                // diff re-derives whatever still applies.
+                $staging_dir = $this->staged_pull_staging_dir();
+                if (is_dir($staging_dir)) {
+                    $this->remove_local_path_without_following_symlinks($staging_dir);
+                    $this->audit_log("FILE DELETE | {$staging_dir} | staged leftovers cleared");
+                    $this->staged_pull_store = null;
+                }
+                if (file_exists($this->staged_pull_manifest_log())) {
+                    @unlink($this->staged_pull_manifest_log());
+                    $this->audit_log("FILE DELETE | {$this->staged_pull_manifest_log()}");
+                }
+
                 $this->import_state()->index = new RemoteFileIndexCursorState();
                 $this->import_state()->fetch = new DownloadListFetchProgressState();
                 $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
@@ -4382,7 +4405,7 @@ class ImportClient
      *
      * @return string|null Failure reason, or null when the file verified.
      */
-    private function staged_pull_finalize_file(string $artifact_id, int $expected_size, int $ctime, bool $owned = false): ?string
+    private function staged_pull_finalize_file(string $artifact_id, int $expected_size, int $ctime, bool $owned, string $remote_path): ?string
     {
         $result = $this->staged_pull_store()->finalize($artifact_id, $expected_size);
         if ($result["status"] !== "verified") {
@@ -4393,12 +4416,56 @@ class ImportClient
             // against the remote ctime.
             @touch($this->staged_pull_staging_dir() . "/files/" . $artifact_id, $ctime);
         }
-        $record = ["artifact_id" => $artifact_id, "size" => $expected_size];
+        // The remote path and ctime ride along so the window can update
+        // the local index after the file actually lands — the index must
+        // describe the live tree, never the staging area, or an abort
+        // between fetch and apply leaves a delta that skips files the
+        // tree never received.
+        $record = [
+            "artifact_id" => $artifact_id,
+            "size" => $expected_size,
+            "path" => $remote_path,
+            "ctime" => $ctime,
+        ];
         if ($owned) {
             $record["owned"] = true;
         }
-        @file_put_contents($this->staged_pull_manifest_log(), json_encode($record) . "\n", FILE_APPEND);
+        $this->staged_pull_append_log(json_encode($record) . "\n");
         return null;
+    }
+
+    /**
+     * Appends a deferred record to the manifest log, keyed by the path's
+     * fs-root-relative artifact id. Directory and symlink parts defer here
+     * in staged mode; the apply window replays them through their regular
+     * handlers.
+     */
+    private function staged_pull_defer_record(array $record): void
+    {
+        try {
+            $local_path = $this->remote_path_to_local_path_within_import_root($record["path"]);
+            $record["artifact_id"] = $this->staged_pull_artifact_id($local_path);
+        } catch (RuntimeException $e) {
+            $this->audit_log(
+                "Security: refusing to stage a {$record["type"]} record for invalid path '{$record["path"]}': " . $e->getMessage(),
+                true,
+            );
+            return;
+        }
+        $this->staged_pull_append_log(json_encode($record) . "\n");
+    }
+
+    /**
+     * All manifest-log appends go through here: a lost record is a file,
+     * directory, symlink, or deletion the window would silently never
+     * carry out, so short writes are fatal (disk full?) like the index
+     * updates writer's.
+     */
+    private function staged_pull_append_log(string $line): void
+    {
+        if (@file_put_contents($this->staged_pull_manifest_log(), $line, FILE_APPEND) !== strlen($line)) {
+            throw new RuntimeException("Failed to append to the staged manifest log (disk full?)");
+        }
     }
 
     /**
@@ -4423,12 +4490,11 @@ class ImportClient
         }
         // Any bytes staged under this id from an earlier resume are
         // garbage now; the apply window's delete pass consumes them.
-        $line = json_encode([
+        $this->staged_pull_append_log(json_encode([
             "artifact_id" => $artifact_id,
             "delete" => true,
             "path" => $remote_path,
-        ]) . "\n";
-        @file_put_contents($this->staged_pull_manifest_log(), $line, FILE_APPEND);
+        ]) . "\n");
         $this->audit_log("Deletion staged for the apply window: {$remote_path}", false);
     }
 
@@ -4439,6 +4505,12 @@ class ImportClient
      * accumulates across resumes and is deduplicated here; entries an
      * earlier window already applied classify as applied and only consume
      * their leftover markers.
+     *
+     * The window is: engine apply (file renames and deletions under the
+     * store lock), then a replay of deferred directory/symlink records
+     * through their regular handlers, then the index catch-up. Everything
+     * before the final log unlink is idempotent, so a kill anywhere in
+     * the window reruns cleanly.
      */
     private function run_staged_pull_apply(): void
     {
@@ -4457,18 +4529,37 @@ class ImportClient
                 if (!is_array($record) || !is_string($record["artifact_id"] ?? null)) {
                     continue;
                 }
+                $path = is_string($record["path"] ?? null) ? $record["path"] : null;
                 if (!empty($record["delete"])) {
+                    $entries[$record["artifact_id"]] = ["kind" => "delete", "path" => $path];
+                    continue;
+                }
+                $type = $record["type"] ?? null;
+                $ctime = is_int($record["ctime"] ?? null) ? $record["ctime"] : 0;
+                if ($type === "dir" && $path !== null) {
                     $entries[$record["artifact_id"]] = [
-                        "delete" => true,
-                        "path" => is_string($record["path"] ?? null) ? $record["path"] : null,
+                        "kind" => "dir",
+                        "path" => $path,
+                        "ctime" => $ctime,
                     ];
                     continue;
                 }
-                if (is_int($record["size"] ?? null)) {
+                if ($type === "symlink" && $path !== null && is_string($record["target"] ?? null)) {
                     $entries[$record["artifact_id"]] = [
-                        "delete" => false,
+                        "kind" => "symlink",
+                        "path" => $path,
+                        "target" => $record["target"],
+                        "ctime" => $ctime,
+                    ];
+                    continue;
+                }
+                if ($type === null && is_int($record["size"] ?? null)) {
+                    $entries[$record["artifact_id"]] = [
+                        "kind" => "file",
                         "size" => $record["size"],
                         "owned" => !empty($record["owned"]),
+                        "path" => $path,
+                        "ctime" => $ctime,
                     ];
                 }
             }
@@ -4477,10 +4568,16 @@ class ImportClient
             return;
         }
 
+        // Only files and deletions go through the store-backed engine;
+        // directories and symlinks replay through their own handlers after
+        // the renames land.
         $lines = "";
         foreach ($entries as $artifact_id => $entry) {
-            if ($entry["delete"]) {
+            if ($entry["kind"] === "delete") {
                 $lines .= json_encode(["artifact_id" => $artifact_id, "delete" => true]) . "\n";
+                continue;
+            }
+            if ($entry["kind"] !== "file") {
                 continue;
             }
             $manifest_entry = ["artifact_id" => $artifact_id, "size" => $entry["size"]];
@@ -4490,32 +4587,40 @@ class ImportClient
             $lines .= json_encode($manifest_entry) . "\n";
         }
 
-        $store = $this->staged_pull_store();
-        $store->discard(self::PULL_MANIFEST_ID);
-        $offset = 0;
-        foreach (str_split($lines, 262144) as $piece) {
-            $appended = $store->append(self::PULL_MANIFEST_ID, $offset, $piece);
-            if ($appended["status"] !== "accepted") {
+        $result = [
+            "applied" => 0,
+            "already_applied" => 0,
+            "skipped" => 0,
+            "skipped_paths" => [],
+            "deleted" => 0,
+        ];
+        if ($lines !== "") {
+            $store = $this->staged_pull_store();
+            $store->discard(self::PULL_MANIFEST_ID);
+            $offset = 0;
+            foreach (str_split($lines, 262144) as $piece) {
+                $appended = $store->append(self::PULL_MANIFEST_ID, $offset, $piece);
+                if ($appended["status"] !== "accepted") {
+                    throw new RuntimeException(
+                        "Staged apply could not stage its manifest: " . ($appended["reason"] ?? ""),
+                    );
+                }
+                $offset = $appended["committed_bytes"];
+            }
+            if ($store->finalize(self::PULL_MANIFEST_ID, strlen($lines))["status"] !== "verified") {
+                throw new RuntimeException("Staged apply could not verify its manifest.");
+            }
+
+            $this->audit_log("STAGED APPLY | " . count($entries) . " entries", true);
+            $result = $this->staged_pull_apply_engine()->apply(self::PULL_MANIFEST_ID);
+            if ($result["status"] !== "applied") {
                 throw new RuntimeException(
-                    "Staged apply could not stage its manifest: " . ($appended["reason"] ?? ""),
+                    "Staged apply failed: " . ($result["reason"] ?? $result["status"]) .
+                        " (" . ($result["detail"] ?? "") . ")",
                 );
             }
-            $offset = $appended["committed_bytes"];
-        }
-        if ($store->finalize(self::PULL_MANIFEST_ID, strlen($lines))["status"] !== "verified") {
-            throw new RuntimeException("Staged apply could not verify its manifest.");
         }
 
-        $this->audit_log("STAGED APPLY | " . count($entries) . " files", true);
-        $result = $this->staged_pull_apply_engine()->apply(self::PULL_MANIFEST_ID);
-        if ($result["status"] !== "applied") {
-            throw new RuntimeException(
-                "Staged apply failed: " . ($result["reason"] ?? $result["status"]) .
-                    " (" . ($result["detail"] ?? "") . ")",
-            );
-        }
-
-        @unlink($this->staged_pull_manifest_log());
         // Same audit contract as write-time preserve-local: every skipped
         // operation is logged with the PRESERVE-LOCAL prefix.
         $skipped_paths = is_array($result["skipped_paths"] ?? null) ? $result["skipped_paths"] : [];
@@ -4532,29 +4637,69 @@ class ImportClient
             );
         }
 
-        // Deletions the window confirmed leave the index now, mirroring
-        // push's forget-after-confirm. Protected deletions (symlinked
-        // parents) keep their entries and re-derive next delta; past the
-        // skipped-paths cap we cannot tell the two apart, so everything
-        // stays and re-derives — a no-op, never an orphan.
+        // The index merge consumes its updates as a path-sorted stream
+        // (trunk keeps it sorted by upserting in fetch order). Flush any
+        // fetch-phase leftovers as their own sorted run first, then walk
+        // the window's entries in path order so replays and index writes
+        // emit one sorted run of their own.
+        $this->finalize_index_updates();
+        uasort($entries, static function (array $a, array $b): int {
+            $a_path = (string) $a["path"];
+            $b_path = (string) $b["path"];
+            return strcmp($a_path, $b_path);
+        });
+
+        // The window's remaining effects, one path-ordered walk:
+        // directory and symlink records replay through the handlers that
+        // would have run at fetch time in unstaged mode — same policy
+        // checks, same validation, same audit lines, just at window time
+        // (their index upserts included). Applied files enter the index,
+        // confirmed deletions leave it — mirroring push's
+        // forget-after-confirm. Protected entries (and everything, past
+        // the skipped-paths cap, where protected and applied cannot be
+        // told apart) keep their old state and re-derive next delta —
+        // a re-download or a no-op, never an orphan. Every step is
+        // idempotent, so a kill here reruns cleanly from the log.
         $protected = array_fill_keys($skipped_paths, true);
         $cap_overflowed = $result["skipped"] > count($skipped_paths);
-        $confirmed_deletes = 0;
-        foreach ($entries as $artifact_id => $entry) {
-            if (
-                !$entry["delete"]
-                || $entry["path"] === null
-                || $cap_overflowed
-                || isset($protected[$artifact_id])
-            ) {
-                continue;
+        $this->staged_replay = true;
+        try {
+            foreach ($entries as $artifact_id => $entry) {
+                if ($entry["path"] === null) {
+                    continue;
+                }
+                if ($entry["kind"] === "dir") {
+                    $this->handle_directory_chunk(["headers" => [
+                        "x-directory-path" => base64_encode($entry["path"]),
+                        "x-directory-ctime" => (string) $entry["ctime"],
+                    ]]);
+                    continue;
+                }
+                if ($entry["kind"] === "symlink") {
+                    $this->handle_symlink_chunk(["headers" => [
+                        "x-symlink-path" => base64_encode($entry["path"]),
+                        "x-symlink-target" => base64_encode($entry["target"]),
+                        "x-symlink-ctime" => (string) $entry["ctime"],
+                    ]]);
+                    continue;
+                }
+                if ($cap_overflowed || isset($protected[$artifact_id])) {
+                    continue;
+                }
+                if ($entry["kind"] === "delete") {
+                    $this->delete_index_entry($entry["path"]);
+                } elseif ($entry["kind"] === "file" && $entry["ctime"] > 0) {
+                    $this->upsert_index_entry($entry["path"], $entry["ctime"], $entry["size"], "file");
+                }
             }
-            $this->delete_index_entry($entry["path"]);
-            ++$confirmed_deletes;
+        } finally {
+            $this->staged_replay = false;
         }
-        if ($confirmed_deletes > 0) {
-            $this->finalize_index_updates();
-        }
+        $this->finalize_index_updates();
+
+        // Unlinked last: everything above idempotently reruns from the
+        // log if the process dies mid-window.
+        @unlink($this->staged_pull_manifest_log());
 
         $this->audit_log(
             sprintf(
@@ -9809,6 +9954,7 @@ class ImportClient
                     $file_size,
                     $context->file_ctime ?? 0,
                     $context->staged_owned === true,
+                    $path,
                 );
                 if ($finalize_error !== null) {
                     $this->staged_pull_store()->discard($context->staged_artifact_id);
@@ -9816,13 +9962,9 @@ class ImportClient
                         "  Staged file did not verify ({$finalize_error}); discarded for refetch",
                         true,
                     );
-                } elseif ($context->file_ctime) {
-                    $this->upsert_index_entry(
-                        $path,
-                        $context->file_ctime,
-                        $file_size,
-                        "file",
-                    );
+                } else {
+                    // The index entry waits for the apply window; only
+                    // progress bookkeeping happens at stage time.
                     $this->files_imported++;
                     $this->clear_volatile_file($path);
                     $this->audit_log(
@@ -10121,6 +10263,17 @@ class ImportClient
             return;
         }
 
+        if ($this->staged_apply_mode && !$this->staged_replay) {
+            // Staged mode: the live tree stays untouched until the apply
+            // window, which replays this record through this same handler.
+            $this->staged_pull_defer_record([
+                "type" => "dir",
+                "path" => $path,
+                "ctime" => $ctime,
+            ]);
+            return;
+        }
+
         $local_path = $this->remote_path_to_local_path_within_import_root($path);
 
         // In preserve-local mode, if the directory already exists (as a real
@@ -10204,6 +10357,19 @@ class ImportClient
                     true,
                 );
             }
+            return;
+        }
+
+        if ($this->staged_apply_mode && !$this->staged_replay) {
+            // Staged mode: defer, window replays. The raw remote target is
+            // recorded; mapping and validation run at replay, in the same
+            // code they always run in.
+            $this->staged_pull_defer_record([
+                "type" => "symlink",
+                "path" => $path,
+                "target" => $target,
+                "ctime" => $ctime,
+            ]);
             return;
         }
 
@@ -12745,7 +12911,10 @@ if (
             'target' => 'staged_apply',
             'help' => 'Download into a staging area under --state-dir and move files into ' .
                 '--fs-root in one rename window at the end, so the tree never holds a ' .
-                'half-written file (requires --state-dir and --fs-root on one filesystem)',
+                'half-written file (requires --state-dir and --fs-root on one filesystem). ' .
+                'The mode persists in state: resumes and later deltas stay staged. ' .
+                'To switch modes, run --abort first (pending staged data is discarded ' .
+                'and re-derived by the next sync)',
             'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
 

@@ -164,6 +164,10 @@ class StagedPullCliTest extends TestCase
     {
         mkdir($this->source_dir . '/wp-content/uploads', 0700, true);
         mkdir($this->source_dir . '/wp-content/plugins/my-plugin', 0700, true);
+        // An empty directory and a symlink: parts that are not file
+        // content and must still respect the staged window.
+        mkdir($this->source_dir . '/wp-content/empty-dir', 0700, true);
+        symlink('index.php', $this->source_dir . '/link.php');
         // wp_detect needs these to recognize the directory as a root.
         file_put_contents($this->source_dir . '/wp-load.php', '<?php /* stub */');
         file_put_contents($this->source_dir . '/wp-config.php', '<?php /* stub config */');
@@ -171,6 +175,23 @@ class StagedPullCliTest extends TestCase
         file_put_contents($this->source_dir . '/empty.txt', '');
         file_put_contents($this->source_dir . '/wp-content/plugins/my-plugin/my-plugin.php', '<?php // plugin v1');
         file_put_contents($this->source_dir . '/wp-content/uploads/big.bin', str_repeat('reprint!', 40000));
+    }
+
+    /** Files, directories, and symlinks under $dir — the window must gate all three. */
+    private function countEntries(string $dir): int
+    {
+        if (!is_dir($dir)) {
+            return 0;
+        }
+        $count = 0;
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($iterator as $entry) {
+            ++$count;
+        }
+        return $count;
     }
 
     /**
@@ -260,8 +281,8 @@ class StagedPullCliTest extends TestCase
         $this->assertNotSame(0, $held_code, $held_output);
         $this->assertSame(
             0,
-            $this->countFiles($this->fs_root),
-            'an interrupted staged pull must leave the live tree untouched'
+            $this->countEntries($this->fs_root),
+            'an interrupted staged pull must leave the live tree untouched — no files, directories, or symlinks'
         );
 
         [$output, $code] = $this->pullToCompletion(['--staged-apply']);
@@ -269,6 +290,53 @@ class StagedPullCliTest extends TestCase
         $this->assertSame(0, $code, $output);
         exec('diff -r ' . escapeshellarg($this->source_dir) . ' ' . escapeshellarg($this->mappedRoot()) . ' 2>&1', $diff_lines, $diff_code);
         $this->assertSame(0, $diff_code, implode("\n", $diff_lines));
+        $this->assertTrue(is_link($this->mappedRoot() . '/link.php'), 'the deferred symlink lands with the window');
+        $this->assertDirectoryExists($this->mappedRoot() . '/wp-content/empty-dir');
+    }
+
+    public function testAbortSwitchesModesCleanlyInBothDirections(): void
+    {
+        // Modes are sticky per state dir (like preserve-local); --abort is
+        // the documented switch. Staged, interrupted, aborted, finished
+        // unstaged — then a remote change pulled staged again. The tree
+        // must come out complete every time: the index never claims
+        // anything the live tree does not have, so no delta ever skips a
+        // file the previous mode left behind.
+        $this->seedSource();
+        $this->runCli('preflight');
+
+        $staging = $this->state_dir . '/.pull-staging';
+        mkdir($staging, 0700, true);
+        $holder = fopen($staging . '/lock', 'c+b');
+        flock($holder, LOCK_EX);
+        [$held_output, $held_code] = $this->runCli('files-pull', ['--staged-apply']);
+        flock($holder, LOCK_UN);
+        fclose($holder);
+        $this->assertNotSame(0, $held_code, $held_output);
+
+        [$abort_output, $abort_code] = $this->runCli('files-pull', ['--abort']);
+        $this->assertSame(0, $abort_code, $abort_output);
+        $this->assertDirectoryDoesNotExist($staging, '--abort clears staged leftovers');
+
+        // Unstaged from here: no --staged-apply flag, fresh state.
+        [$output, $code] = $this->pullToCompletion();
+        $this->assertSame(0, $code, $output);
+        exec('diff -r ' . escapeshellarg($this->source_dir) . ' ' . escapeshellarg($this->mappedRoot()) . ' 2>&1', $diff_lines, $diff_code);
+        $this->assertSame(0, $diff_code, implode("\n", $diff_lines));
+
+        // Back to staged for a delta.
+        file_put_contents($this->source_dir . '/index.php', '<?php // remote index v2');
+        touch($this->source_dir . '/index.php', time() + 5);
+        [$abort_output, $abort_code] = $this->runCli('files-pull', ['--abort']);
+        $this->assertSame(0, $abort_code, $abort_output);
+        [$output, $code] = $this->pullToCompletion(['--staged-apply']);
+
+        $this->assertSame(0, $code, $output);
+        $this->assertSame(
+            '<?php // remote index v2',
+            file_get_contents($this->mappedRoot() . '/index.php')
+        );
+        $this->assertStringContainsString('staged_apply', $output, 'the delta ran through the window');
     }
 
     public function testPreserveLocalPoliciesHoldAtApplyTime(): void
@@ -372,7 +440,9 @@ class StagedPullCliTest extends TestCase
 
         // A held store lock fails the delta mid-fetch. Deletions used to
         // happen at diff time; in staged mode nothing — removals included —
-        // may touch the live tree before the window.
+        // may touch the live tree before the window. (--abort cleared the
+        // staging dir, so recreate the scaffolding to plant the lock.)
+        @mkdir($this->state_dir . '/.pull-staging', 0700, true);
         $holder = fopen($this->state_dir . '/.pull-staging/lock', 'c+b');
         flock($holder, LOCK_EX);
         [$held_output, $held_code] = $this->runCli('files-pull', ['--staged-apply']);
