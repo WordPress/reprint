@@ -65,6 +65,9 @@ require_once __DIR__ . '/lib/upload/class-staged-upload-client.php';
 // Batch orchestration over the upload client: plan in, verified artifacts out
 require_once __DIR__ . '/lib/upload/class-staged-push-runner.php';
 
+// Local-tree walk that produces the plan the push runner consumes
+require_once __DIR__ . '/lib/upload/class-push-plan-builder.php';
+
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
@@ -1604,6 +1607,7 @@ class ImportClient
             "files-pull",
             "files-index",
             "files-stats",
+            "push-files",
             "db-pull",
             "db-index",
             "db-domains",
@@ -1849,6 +1853,10 @@ class ImportClient
         }
         if ($command === "files-stats") {
             $this->run_files_stats();
+            return;
+        }
+        if ($command === "push-files") {
+            $this->run_push_files($options);
             return;
         }
         if ($command === "flat-docroot") {
@@ -3930,6 +3938,106 @@ class ImportClient
         }
 
         echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
+    }
+
+    /**
+     * Upload local files into the target's staged artifact store.
+     *
+     * The plan comes from walking --fs-root: each regular file becomes one
+     * artifact at its fs-root-relative path. Nothing on the target site
+     * changes — this command only fills staging; a later apply step moves
+     * verified artifacts into place. Rerunning resumes: finished artifacts
+     * are skipped from the local done cache, a half-uploaded artifact
+     * continues from the store's committed offset, and the chunk sizer
+     * restarts at its learned limits.
+     */
+    private function run_push_files(array $options): void
+    {
+        if ($this->hmac_client === null) {
+            throw new InvalidArgumentException(
+                "push-files requires --secret: the staged upload endpoints reject unsigned requests.",
+            );
+        }
+
+        $only = [];
+        foreach (($options["only"] ?? []) as $raw) {
+            // Push selection is fs-root-relative. The :token: forms --only
+            // accepts for pull describe remote paths and do not apply here.
+            $prefix = (string) $raw;
+            if (strpos($prefix, "./") === 0) {
+                $prefix = substr($prefix, 2);
+            }
+            $only[] = $prefix;
+        }
+
+        $build = PushPlanBuilder::build($this->fs_root, $only);
+        foreach ($build["skipped"] as $skip) {
+            $this->audit_log("PUSH-SKIP | {$skip["reason"]} | {$skip["path"]}", false);
+        }
+
+        $this->output_progress(
+            [
+                "type" => "push",
+                "status" => "starting",
+                "files_total" => count($build["plan"]),
+                "skipped" => count($build["skipped"]),
+            ],
+            true,
+        );
+
+        $persisted = StagedPushRunner::read_state($this->state_dir);
+        $sizer = new UploadChunkSizer([], $persisted["sizer"]);
+        $client = new StagedUploadClient([
+            "base_url" => $this->remote_url,
+            "hmac_client" => $this->hmac_client,
+            "sizer" => $sizer,
+        ]);
+        $runner = new StagedPushRunner([
+            "state_dir" => $this->state_dir,
+            "client" => $client,
+            "sizer" => $sizer,
+            "on_progress" => function (array $progress): void {
+                $this->output_progress([
+                    "type" => "push_progress",
+                    "files_done" => $progress["files_done"],
+                    "files_total" => $progress["files_total"],
+                    "path" => $progress["artifact_id"],
+                    "committed_bytes" => $progress["committed_bytes"],
+                    "total_bytes" => $progress["total_bytes"],
+                ]);
+            },
+        ]);
+
+        $result = $runner->push($build["plan"]);
+
+        $summary = [
+            "type" => "push",
+            "status" => $result["status"] === "completed" && $result["failed"] === []
+                ? "complete"
+                : "error",
+            "files_total" => $result["files_total"],
+            "files_done" => $result["files_done"],
+            "failed" => $result["failed"],
+            "skipped" => count($build["skipped"]),
+            "abort_reason" => $result["abort_reason"],
+            "abort_detail" => $result["abort_detail"],
+        ];
+        $this->output_progress($summary, true);
+        echo json_encode($summary, JSON_PRETTY_PRINT) . "\n";
+
+        if ($result["status"] === "aborted") {
+            $this->audit_log(
+                "PUSH ABORTED | {$result["abort_reason"]} | " . ($result["abort_detail"] ?? ""),
+                false,
+            );
+            // Transient transfer failures follow the resumable convention
+            // (exit 2: run the same command again); a bad secret or a chunk
+            // size the host can never accept will not fix itself.
+            $retryable = ["transport_failed", "busy_exhausted", "status_unavailable", "server_io_error"];
+            $this->exit_code = in_array($result["abort_reason"], $retryable, true) ? 2 : 1;
+            return;
+        }
+        $this->exit_code = $result["failed"] === [] ? 0 : 1;
     }
 
     /**
@@ -11659,7 +11767,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert', 'push-files'],
         ],
         [
             'name' => 'abort',
@@ -11676,7 +11784,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime', 'push-files'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11920,8 +12028,8 @@ if (
             'placeholder' => 'SOURCE',
             'repeatable' => true,
             'help' => 'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
-                'repeat for several. Default pulls everything',
-            'commands' => ['pull-files', 'files-pull'],
+                'repeat for several. Default pulls everything. For push-files, SOURCE is an fs-root-relative prefix',
+            'commands' => ['pull-files', 'files-pull', 'push-files'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
@@ -12590,6 +12698,35 @@ if (
                 "\n" .
                 "Does not download any file contents.\n",
             "extra" => null,
+        ],
+        "push-files" => [
+            "level" => "high",
+            "short" => "Upload local files into the remote staged store (push)",
+            "usage" => "reprint push-files <remote-url> --secret=TOKEN --state-dir=DIR --fs-root=DIR [options]",
+            "description" =>
+                "Walks --fs-root and uploads every regular file into the remote\n" .
+                "site's staged artifact store, in bounded resumable chunks. The\n" .
+                "remote site keeps running untouched: nothing changes there until\n" .
+                "a later apply step moves the verified artifacts into place.\n" .
+                "\n" .
+                "Rerunning the command resumes: finished files are skipped from\n" .
+                "the local done cache, a half-uploaded file continues from the\n" .
+                "byte offset the store confirmed, and chunk sizes start at the\n" .
+                "limits learned from the server last time.\n" .
+                "\n" .
+                "Symlinks are never followed; they are skipped and recorded in\n" .
+                "the audit log. Use --only with fs-root-relative prefixes to\n" .
+                "push a subset.\n",
+            "extra" =>
+                "Examples:\n" .
+                "  # Stage a full local tree on the remote:\n" .
+                "  reprint push-files https://example.com/?reprint-api \\\n" .
+                "    --secret=TOKEN --state-dir=./push-state --fs-root=./site\n" .
+                "\n" .
+                "  # Push only wp-content/uploads:\n" .
+                "  reprint push-files https://example.com/?reprint-api \\\n" .
+                "    --secret=TOKEN --state-dir=./push-state --fs-root=./site \\\n" .
+                "    --only=wp-content/uploads\n",
         ],
         "files-stats" => [
             "level" => "low",
