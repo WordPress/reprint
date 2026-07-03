@@ -462,12 +462,41 @@ final class StagedArtifactsTest extends TestCase
     {
         $store = $this->makeStore();
 
-        foreach (['index.php', 'index.php.part', 'index.php.meta.json', 'state.json', 'verified', 'verified.tmp'] as $id) {
+        // 'lock' and 'files' shadow the store's own scaffolding names;
+        // they must stage under files/ without touching the real lock
+        // file or the artifact tree root.
+        foreach (['index.php', 'index.php.part', 'index.php.meta.json', 'state.json', 'verified', 'verified.tmp', 'lock', 'files'] as $id) {
             $this->assertSame('accepted', $store->append($id, 0, "body of {$id}")['status']);
             $verified = $store->finalize($id, strlen("body of {$id}"));
             $this->assertSame('verified', $verified['status'], "id: {$id}");
             $this->assertSame("body of {$id}", file_get_contents($this->staging_dir . '/files/' . $id));
         }
+
+        // The store's own lock file must still be the lock, not an
+        // artifact: concurrency still excludes after staging id 'lock'.
+        $holder = fopen($this->staging_dir . '/lock', 'r+b');
+        $this->assertTrue(flock($holder, LOCK_EX | LOCK_NB), 'the base lock file survives as a lock');
+        $busy = $store->append('another.txt', 0, 'x');
+        $this->assertSame('busy', $busy['status']);
+        flock($holder, LOCK_UN);
+        fclose($holder);
+    }
+
+    public function testDeeplyNestedIdsStageAndDiscardCleanly(): void
+    {
+        // Hosting trees nest far deeper than fixtures; the files/ mirror,
+        // the verified/ marker tree, and discard must all handle it.
+        $store = $this->makeStore();
+        $id = implode('/', array_fill(0, 12, 'd')) . '/deep.txt';
+
+        $this->assertSame('accepted', $store->append($id, 0, 'deep bytes')['status']);
+        $this->assertSame('verified', $store->finalize($id, 10)['status']);
+        $this->assertFileExists($this->staging_dir . '/files/' . $id);
+        $this->assertTrue($store->status($id)['verified']);
+
+        $this->assertTrue($store->discard($id));
+        $this->assertFalse($store->status($id)['exists']);
+        $this->assertFileDoesNotExist($this->staging_dir . '/files/' . $id);
     }
 
     public function testIdsOutsideTheStagingDirAreRejected(): void
