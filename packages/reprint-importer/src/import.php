@@ -12579,7 +12579,9 @@ if (
             'type' => 'flag',
             'target' => 'apply',
             'help' => 'After staging completes, apply the transfer into the remote tree ' .
-                '(rename-only; the environment is probed before any upload)',
+                '(rename-only; the environment is probed before any upload). Files earlier ' .
+                'pushes shipped that no longer exist locally are deleted from the remote ' .
+                'tree in the same window',
             'commands' => ['push-files'],
         ],
         [
@@ -13276,7 +13278,12 @@ if (
                 "\n" .
                 "Symlinks are never followed; they are skipped and recorded in\n" .
                 "the audit log. Use --only with fs-root-relative prefixes to\n" .
-                "push a subset.\n",
+                "push a subset.\n" .
+                "\n" .
+                "With --apply, the verified transfer moves into the remote tree\n" .
+                "in one atomic window, and files that earlier pushes shipped but\n" .
+                "the local tree no longer has are deleted with it. A scoped push\n" .
+                "(--only) only deletes inside its prefixes.\n",
             "extra" =>
                 "Examples:\n" .
                 "  # Stage a full local tree on the remote:\n" .
