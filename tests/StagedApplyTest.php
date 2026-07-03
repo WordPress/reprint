@@ -254,6 +254,7 @@ final class StagedApplyTest extends TestCase {
         $this->assertSame('applied', $result['status']);
         $this->assertSame(1, $result['applied']);
         $this->assertSame(1, $result['skipped']);
+        $this->assertSame(['index.php'], $result['skipped_paths'], 'callers audit-log the protected paths');
         $this->assertSame('local wins', file_get_contents($this->target_root . '/index.php'));
         $this->assertSame('lands', file_get_contents($this->target_root . '/fresh.txt'));
         $this->assertFileDoesNotExist(
