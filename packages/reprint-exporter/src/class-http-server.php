@@ -333,6 +333,18 @@ final class Site_Export_HTTP_Server {
             'staged_apply' => static function (array $config) use ($endpoints): void {
                 self::emit_json_response($endpoints->apply($config, $_SERVER));
             },
+            'staged_upload_batch' => static function (array $config) use ($endpoints): void {
+                $input = @fopen('php://input', 'rb');
+                try {
+                    self::emit_json_response(
+                        $endpoints->upload_batch($config, $_SERVER, $input === false ? null : $input)
+                    );
+                } finally {
+                    if (is_resource($input)) {
+                        fclose($input);
+                    }
+                }
+            },
         ];
 
         foreach ($routes as $endpoint => $handler) {

@@ -383,6 +383,139 @@ class StagedUploadClient
     }
 
     /**
+     * Upload a batch of complete small files in one request.
+     *
+     * One HTTP conversation carries many files — push's answer to pull's
+     * multipart batching. Files are read whole (the caller only batches
+     * files that fit the sizer's budget), each with the same volatility
+     * checks as upload_artifact(); a file that changed underfoot fails
+     * "source_changed" locally and is excluded from the wire.
+     *
+     * @param array $files Entries: ['artifact_id','source_path','total_bytes','mtime'?].
+     * @return array{status:string,reason:?string,detail:?string,per_file:array<string,array{status:string,reason:?string}>}
+     *   "ok" means the request cycle finished and per_file holds each
+     *   file's outcome — "verified", "failed" (typed), or "not_attempted"
+     *   (the server stopped at an earlier frame; retry those). "failed"
+     *   carries a transfer-scoped reason; "batch_too_large" specifically
+     *   means the sizer shrank and the caller should repartition.
+     */
+    public function upload_batch(array $files): array
+    {
+        $per_file = [];
+        $body = "";
+        $sendable = [];
+        foreach ($files as $file) {
+            $artifact_id = (string) $file["artifact_id"];
+            $total_bytes = (int) $file["total_bytes"];
+            $source = @fopen((string) $file["source_path"], "rb");
+            if ($source === false) {
+                $per_file[$artifact_id] = ["status" => "failed", "reason" => "source_unreadable"];
+                continue;
+            }
+            $opened = fstat($source);
+            $expected_mtime = isset($file["mtime"]) ? (int) $file["mtime"] : null;
+            if (
+                $expected_mtime !== null
+                && is_array($opened)
+                && (int) $opened["mtime"] !== $expected_mtime
+            ) {
+                fclose($source);
+                $this->discard($artifact_id);
+                $per_file[$artifact_id] = ["status" => "failed", "reason" => "source_changed"];
+                continue;
+            }
+            $payload = $total_bytes > 0 ? $this->read_exactly($source, $total_bytes) : "";
+            fclose($source);
+            clearstatcache(true, (string) $file["source_path"]);
+            $now_stat = @stat((string) $file["source_path"]);
+            if ($payload === null) {
+                $per_file[$artifact_id] = ["status" => "failed", "reason" => "source_short"];
+                continue;
+            }
+            if (
+                !is_array($opened)
+                || $now_stat === false
+                || $now_stat["ino"] !== $opened["ino"]
+                || $now_stat["mtime"] !== $opened["mtime"]
+                || $now_stat["size"] !== $opened["size"]
+            ) {
+                $this->discard($artifact_id);
+                $per_file[$artifact_id] = ["status" => "failed", "reason" => "source_changed"];
+                continue;
+            }
+
+            $body .= json_encode([
+                "artifact_id" => $artifact_id,
+                "offset" => 0,
+                "length" => strlen($payload),
+                "total_bytes" => $total_bytes,
+                "final" => true,
+            ]) . "\n" . $payload;
+            $sendable[] = $artifact_id;
+        }
+
+        if ($sendable === []) {
+            return ["status" => "ok", "reason" => null, "detail" => null, "per_file" => $per_file];
+        }
+
+        $transport_failures = 0;
+        for ($attempt = 1; $attempt <= self::MAX_BUSY_RETRIES + self::MAX_TRANSPORT_RETRIES; $attempt++) {
+            $response = $this->request_json("POST", "staged_upload_batch", [], $body);
+            if ($response["error"] !== null) {
+                $decision = $this->sizer->record_transport_failure();
+                $transport_failures++;
+                if ($decision["action"] === "give_up" || $transport_failures > self::MAX_TRANSPORT_RETRIES) {
+                    return ["status" => "failed", "reason" => "transport_failed", "detail" => $response["error"], "per_file" => $per_file];
+                }
+                $this->backoff($transport_failures);
+                continue;
+            }
+            if ($this->is_auth_envelope($response)) {
+                return ["status" => "failed", "reason" => "auth_failed", "detail" => $this->envelope_error($response), "per_file" => $per_file];
+            }
+            $json = is_array($response["json"]) ? $response["json"] : [];
+            if ($response["http_code"] === 413) {
+                $reported = $json["max_request_bytes"] ?? null;
+                $decision = $this->sizer->record_too_large(is_numeric($reported) ? (int) $reported : null);
+                if ($decision["action"] === "give_up") {
+                    return ["status" => "failed", "reason" => "chunk_size_exhausted", "detail" => null, "per_file" => $per_file];
+                }
+                return ["status" => "failed", "reason" => "batch_too_large", "detail" => null, "per_file" => $per_file];
+            }
+            if (($json["status"] ?? null) === "busy") {
+                $this->backoff($attempt);
+                continue;
+            }
+
+            foreach (($json["results"] ?? []) as $result) {
+                if (!is_array($result) || !is_string($result["artifact_id"] ?? null)) {
+                    continue;
+                }
+                if (($result["status"] ?? null) === "verified") {
+                    $per_file[$result["artifact_id"]] = ["status" => "verified", "reason" => null];
+                } else {
+                    $reason = $result["reason"] ?? null;
+                    $per_file[$result["artifact_id"]] = [
+                        "status" => "failed",
+                        "reason" => is_string($reason) ? $reason : "unexpected_response",
+                    ];
+                }
+            }
+            foreach ($sendable as $artifact_id) {
+                if (!isset($per_file[$artifact_id])) {
+                    // The server stopped at an earlier frame; these retry.
+                    $per_file[$artifact_id] = ["status" => "not_attempted", "reason" => null];
+                }
+            }
+            if (($json["status"] ?? null) === "ok") {
+                $this->sizer->record_success();
+            }
+            return ["status" => "ok", "reason" => null, "detail" => null, "per_file" => $per_file];
+        }
+        return ["status" => "failed", "reason" => "busy_exhausted", "detail" => null, "per_file" => $per_file];
+    }
+
+    /**
      * Ask the target to validate (check_only) or apply a staged transfer.
      *
      * check_only is the sender's early gate: an environment that can never

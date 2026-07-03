@@ -111,9 +111,9 @@ class PushFilesCliTest extends TestCase
         ]);
 
         $this->assertSame(2, $code, 'a transient connection failure follows the resume convention');
-        // The very first request is the status resync, so a dead target
-        // surfaces as status_unavailable — classified retryable.
-        $this->assertStringContainsString('status_unavailable', $output);
+        // Small files travel batched, so the dead target surfaces on the
+        // batch POST as transport_failed — classified retryable.
+        $this->assertStringContainsString('transport_failed', $output);
         $this->assertFileExists(
             $this->state_dir . '/.push-state.json',
             'learned sizer state persists across the abort'

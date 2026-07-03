@@ -358,7 +358,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-push/staged-apply",
+            "version": "dev-push/upload-batches",
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-exporter",

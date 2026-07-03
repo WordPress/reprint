@@ -98,6 +98,13 @@ class StagedUploadClientTest extends TestCase
                 case 'staged_discard':
                     $result = $endpoints->discard($params, $server);
                     break;
+                case 'staged_upload_batch':
+                    $stream = fopen('php://temp', 'w+b');
+                    fwrite($stream, $body);
+                    rewind($stream);
+                    $result = $endpoints->upload_batch($params, $server, $stream);
+                    fclose($stream);
+                    break;
                 default:
                     return ['http_code' => 400, 'body' => '{"error":"unknown endpoint"}', 'error' => null];
             }
@@ -451,6 +458,92 @@ class StagedUploadClientTest extends TestCase
         $result = $client->upload_artifact('artifact.bin', $this->source_path . '-missing');
 
         $this->assertSame(['failed', 'source_unreadable'], [$result['status'], $result['reason']]);
+    }
+
+    // ---------------------------------------------------------------
+    // Batched uploads
+    // ---------------------------------------------------------------
+
+    /** Creates one temp file per artifact; returns upload_batch entries. */
+    private function batchFiles(array $map): array
+    {
+        $entries = [];
+        foreach ($map as $artifact_id => $body) {
+            $path = $this->source_path . '-' . md5($artifact_id);
+            file_put_contents($path, $body);
+            $entries[] = [
+                'artifact_id' => $artifact_id,
+                'source_path' => $path,
+                'total_bytes' => strlen($body),
+                'mtime' => (int) filemtime($path),
+            ];
+        }
+        return $entries;
+    }
+
+    public function testUploadBatchVerifiesManyFilesInOneRequest(): void
+    {
+        $client = $this->makeClient($this->transportFor($this->makeEndpoints()), [
+            'sizer' => new UploadChunkSizer(['floor_bytes' => 64, 'start_bytes' => 4096, 'max_bytes' => 4096]),
+        ]);
+        $files = $this->batchFiles([
+            'a.txt' => 'aaa',
+            'wp-content/b.bin' => str_repeat('b', 200),
+            'empty.txt' => '',
+        ]);
+
+        $result = $client->upload_batch($files);
+
+        $this->assertSame('ok', $result['status']);
+        foreach ($files as $file) {
+            $this->assertSame(
+                'verified',
+                $result['per_file'][$file['artifact_id']]['status'],
+                $file['artifact_id']
+            );
+            $this->assertSame(
+                (string) file_get_contents($file['source_path']),
+                (string) file_get_contents($this->staging_dir . '/files/' . $file['artifact_id'])
+            );
+        }
+        $this->assertCount(1, array_filter($this->requests, static function (array $request): bool {
+            return $request['endpoint'] === 'staged_upload_batch';
+        }), 'many files, one conversation');
+    }
+
+    public function testUploadBatchRepartitionsWhenTooLarge(): void
+    {
+        $sizer = new UploadChunkSizer(['floor_bytes' => 16, 'start_bytes' => 256, 'max_bytes' => 256]);
+        $client = $this->makeClient(
+            $this->transportFor($this->makeEndpoints(['max_request_bytes' => 64])),
+            ['sizer' => $sizer]
+        );
+        $files = $this->batchFiles(['big-ish.bin' => str_repeat('x', 200)]);
+
+        $result = $client->upload_batch($files);
+
+        $this->assertSame(['failed', 'batch_too_large'], [$result['status'], $result['reason']]);
+        $this->assertLessThanOrEqual(57, $sizer->chunk_bytes(), 'the sizer learned the cap');
+    }
+
+    public function testUploadBatchExcludesAVolatileFileLocally(): void
+    {
+        $client = $this->makeClient($this->transportFor($this->makeEndpoints()), [
+            'sizer' => new UploadChunkSizer(['floor_bytes' => 64, 'start_bytes' => 4096, 'max_bytes' => 4096]),
+        ]);
+        $files = $this->batchFiles(['steady.txt' => 'fine', 'volatile.txt' => 'about to change']);
+        // The plan's mtime no longer matches the file: stale plan.
+        $files[1]['mtime'] = $files[1]['mtime'] - 100;
+
+        $result = $client->upload_batch($files);
+
+        $this->assertSame('ok', $result['status']);
+        $this->assertSame('verified', $result['per_file']['steady.txt']['status']);
+        $this->assertSame(
+            ['failed', 'source_changed'],
+            [$result['per_file']['volatile.txt']['status'], $result['per_file']['volatile.txt']['reason']]
+        );
+        $this->assertFileDoesNotExist($this->staging_dir . '/files/volatile.txt', 'stale content never travels');
     }
 
     // ---------------------------------------------------------------

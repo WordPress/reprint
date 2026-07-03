@@ -535,6 +535,106 @@ final class StagedEndpointsTest extends TestCase {
     }
 
     // ---------------------------------------------------------------
+    // Batched uploads: many files, one request
+    // ---------------------------------------------------------------
+
+    /** Builds the length-prefixed frame body for complete files. */
+    private function batchBody(array $files): string
+    {
+        $body = '';
+        foreach ($files as $artifact_id => $payload) {
+            $body .= json_encode([
+                'artifact_id' => $artifact_id,
+                'offset' => 0,
+                'length' => strlen($payload),
+                'total_bytes' => strlen($payload),
+                'final' => true,
+            ]) . "\n" . $payload;
+        }
+        return $body;
+    }
+
+    private function uploadBatch(Site_Export_Staged_Endpoints $endpoints, string $body, array $header_overrides = []): array
+    {
+        $stream = $this->bodyStream($body);
+        try {
+            return $endpoints->upload_batch([], $this->signedHeaders($body, $header_overrides), $stream);
+        } finally {
+            fclose($stream);
+        }
+    }
+
+    public function testBatchStagesManyFilesInOneRequest(): void
+    {
+        $endpoints = $this->makeEndpoints(['append_buffer_bytes' => 8]);
+        $files = [
+            'index.php' => '<?php // root',
+            'wp-content/uploads/a.bin' => str_repeat('x', 100),
+            'empty.txt' => '',
+        ];
+
+        $result = $this->uploadBatch($endpoints, $this->batchBody($files));
+
+        $this->assertSame(200, $result['http_code'], json_encode($result['body']));
+        $this->assertSame('ok', $result['body']['status']);
+        $this->assertCount(3, $result['body']['results']);
+        foreach ($result['body']['results'] as $file_result) {
+            $this->assertSame('verified', $file_result['status'], json_encode($file_result));
+        }
+        foreach ($files as $artifact_id => $payload) {
+            $this->assertSame($payload, file_get_contents($this->staging_dir . '/files/' . $artifact_id));
+        }
+    }
+
+    public function testBatchRetryIsIdempotent(): void
+    {
+        $endpoints = $this->makeEndpoints();
+        $body = $this->batchBody(['a.txt' => 'aaa', 'b.txt' => 'bbbb']);
+        $this->uploadBatch($endpoints, $body);
+
+        // The response was lost; the sender retries the identical batch.
+        $retry = $this->uploadBatch($endpoints, $body);
+
+        $this->assertSame(200, $retry['http_code']);
+        foreach ($retry['body']['results'] as $file_result) {
+            $this->assertSame('verified', $file_result['status']);
+        }
+    }
+
+    public function testBatchStopsAtTheFirstBadFrameAndReportsProgress(): void
+    {
+        $endpoints = $this->makeEndpoints();
+        $body = $this->batchBody(['good.txt' => 'landed']) . "not json at all\n";
+
+        $result = $this->uploadBatch($endpoints, $body);
+
+        $this->assertSame(400, $result['http_code']);
+        $this->assertSame('invalid_batch_frame', $result['body']['reason']);
+        $this->assertCount(1, $result['body']['results'], 'work before the bad frame is reported');
+        $this->assertSame('verified', $result['body']['results'][0]['status']);
+        $this->assertSame('landed', file_get_contents($this->staging_dir . '/files/good.txt'));
+
+        $truncated = $this->uploadBatch(
+            $endpoints,
+            json_encode(['artifact_id' => 'short.txt', 'offset' => 0, 'length' => 100, 'total_bytes' => 100, 'final' => true]) . "\nonly-a-few"
+        );
+        $this->assertSame([400, 'truncated_batch'], [$truncated['http_code'], $truncated['body']['reason']]);
+    }
+
+    public function testBatchBodyMismatchNeverReachesTheStore(): void
+    {
+        $endpoints = $this->makeEndpoints();
+        $body = $this->batchBody(['secret.php' => 'attacker bytes']);
+
+        $result = $this->uploadBatch($endpoints, $body, [
+            'content_hash' => hash('sha256', 'what was actually signed'),
+        ]);
+
+        $this->assertSame(403, $result['http_code']);
+        $this->assertDirectoryDoesNotExist($this->staging_dir . '/files');
+    }
+
+    // ---------------------------------------------------------------
     // Dispatcher wiring
     // ---------------------------------------------------------------
 

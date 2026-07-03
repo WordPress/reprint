@@ -240,48 +240,20 @@ final class Site_Export_Staged_Endpoints {
             return $this->too_large($artifact_id);
         }
 
-        if (!is_resource($input)) {
-            return $this->rejected(500, 'io_error', 'open_request_body');
+        $spooled = $this->spool_verified_body($auth, $input, $artifact_id);
+        if (isset($spooled['response'])) {
+            return $spooled['response'];
         }
-
-        $spool = fopen('php://temp/maxmemory:' . self::SPOOL_MEMORY_BYTES, 'w+b');
-        if ($spool === false) {
-            return $this->rejected(500, 'io_error', 'open_spool');
-        }
+        $spool = $spooled['spool'];
+        $spooled_bytes = $spooled['bytes'];
 
         try {
-            $context = hash_init('sha256');
-            $spooled = 0;
-            while (( $buffer = fread($input, self::READ_BUFFER_BYTES) ) !== false && $buffer !== '') {
-                $spooled += strlen($buffer);
-                if ($spooled > $this->max_request_bytes) {
-                    return $this->too_large($artifact_id);
-                }
-                hash_update($context, $buffer);
-                if (fwrite($spool, $buffer) !== strlen($buffer)) {
-                    return $this->rejected(500, 'io_error', 'write_spool');
-                }
-            }
-            if ($buffer === false && !feof($input)) {
-                return $this->rejected(400, 'body_read_failed');
-            }
-
-            // The signature authenticated the hash claim; this comparison
-            // authenticates the bytes. Nothing reached the store yet.
-            if (!hash_equals( (string) $auth['content_hash'], hash_final($context))) {
-                return $this->rejected(403, 'content_hash_mismatch');
-            }
-
-            if ($spooled === 0) {
-                return $this->rejected(400, 'empty_body');
-            }
-
             $status = $this->store->status($artifact_id);
             if ($status['verified']) {
                 return $this->rejected(409, 'already_verified', null, $status['committed_bytes']);
             }
             $committed = $status['committed_bytes'];
-            if ($committed >= $offset + $spooled) {
+            if ($committed >= $offset + $spooled_bytes) {
                 // A retried chunk that fully landed before the sender's
                 // timeout. Nothing to write.
                 return [
@@ -326,6 +298,271 @@ final class Site_Export_Staged_Endpoints {
         } finally {
             fclose($spool);
         }
+    }
+
+    /**
+     * Stage many complete artifacts from one request body.
+     *
+     * The body is a sequence of length-prefixed frames — no boundary
+     * strings, so any filename frames verbatim:
+     *
+     *   {"artifact_id":"a/b.txt","offset":0,"length":9,"total_bytes":9,"final":true}\n
+     *   <9 raw payload bytes>
+     *   ... next frame ...
+     *
+     * This is push's answer to pull's multipart batching: one HTTP
+     * conversation carries a whole batch of small files instead of one
+     * request each. Authentication and the no-unverified-byte rule are
+     * identical to upload(): headers first, then the whole body spools and
+     * must match the signed digest before any frame touches the store.
+     *
+     * Frames process in order and stop at the first failure; the response
+     * lists a per-artifact result for everything that reached the store,
+     * so a retry resumes with only the unfinished tail (frames for
+     * already-verified artifacts at their recorded size come back
+     * "verified" without touching anything).
+     *
+     * @return array{http_code:int,body:array}
+     */
+    public function upload_batch(array $config, array $headers, $input): array {
+        $method_error = $this->require_post($headers);
+        if ($method_error !== null) {
+            return $method_error;
+        }
+        if ($this->secret === null) {
+            return $this->rejected(503, 'not_configured', 'shared_secret');
+        }
+
+        $hmac = new Site_Export_HMAC_Server($this->secret, $this->timestamp_tolerance);
+        $auth = $hmac->verify_signed_content_hash($headers);
+        if ($auth['error'] !== null) {
+            return $this->rejected(403, 'auth_failed', $auth['error']);
+        }
+
+        $declared_length = $headers['CONTENT_LENGTH'] ?? ( $headers['HTTP_CONTENT_LENGTH'] ?? null );
+        if (is_numeric($declared_length) && (int) $declared_length > $this->max_request_bytes) {
+            return $this->batch_response(413, 'request_too_large', null, []);
+        }
+
+        $spooled = $this->spool_verified_body($auth, $input, null);
+        if (isset($spooled['response'])) {
+            return $spooled['response'];
+        }
+        $spool = $spooled['spool'];
+
+        try {
+            rewind($spool);
+            $results = [];
+            while (( $line = fgets($spool) ) !== false) {
+                if (trim($line) === '') {
+                    continue;
+                }
+                $frame = json_decode($line, true);
+                if (
+                    !is_array($frame)
+                    || !is_string($frame['artifact_id'] ?? null)
+                    || !is_int($frame['offset'] ?? null) || $frame['offset'] < 0
+                    || !is_int($frame['length'] ?? null) || $frame['length'] < 0
+                    || !is_int($frame['total_bytes'] ?? null) || $frame['total_bytes'] < 0
+                ) {
+                    return $this->batch_response(400, 'invalid_batch_frame', substr($line, 0, 200), $results);
+                }
+                $payload = $frame['length'] > 0 ? $this->read_spool_exactly($spool, $frame['length']) : '';
+                if ($payload === null) {
+                    return $this->batch_response(400, 'truncated_batch', $frame['artifact_id'], $results);
+                }
+
+                $outcome = $this->stage_batch_frame($frame, $payload);
+                $results[] = $outcome;
+                if ($outcome['status'] === 'rejected' || $outcome['status'] === 'busy') {
+                    // Everything before this frame is committed and
+                    // reported; the sender retries from here.
+                    $code = $outcome['status'] === 'busy'
+                        ? 423
+                        : ( ($outcome['reason'] ?? null) === 'io_error' ? 500 : 409 );
+                    return $this->batch_response($code, $outcome['reason'], $outcome['artifact_id'], $results);
+                }
+            }
+
+            if ($results === []) {
+                return $this->batch_response(400, 'empty_batch', null, []);
+            }
+            return $this->batch_response(200, null, null, $results);
+        } finally {
+            fclose($spool);
+        }
+    }
+
+    /**
+     * Runs one batch frame through the store's frontier discipline.
+     *
+     * @return array{artifact_id:string,status:string,reason:?string,committed_bytes:int}
+     */
+    private function stage_batch_frame(array $frame, string $payload): array {
+        $artifact_id = $frame['artifact_id'];
+        $offset = $frame['offset'];
+        $final = !empty($frame['final']);
+        $total_bytes = $frame['total_bytes'];
+
+        $status = $this->store->status($artifact_id);
+        if ($status['verified']) {
+            // A retried batch re-sends artifacts an earlier attempt already
+            // landed; at the recorded size that is success, not conflict.
+            if ($status['committed_bytes'] === $total_bytes) {
+                return [
+                    'artifact_id' => $artifact_id,
+                    'status' => 'verified',
+                    'reason' => null,
+                    'committed_bytes' => $status['committed_bytes'],
+                ];
+            }
+            return [
+                'artifact_id' => $artifact_id,
+                'status' => 'rejected',
+                'reason' => 'already_verified',
+                'committed_bytes' => $status['committed_bytes'],
+            ];
+        }
+
+        $committed = $status['committed_bytes'];
+        $end = $offset + strlen($payload);
+        if ($committed < $offset) {
+            return [
+                'artifact_id' => $artifact_id,
+                'status' => 'rejected',
+                'reason' => 'offset_gap',
+                'committed_bytes' => $committed,
+            ];
+        }
+        if ($committed > $offset) {
+            // Skip the prefix the store already holds.
+            $payload = substr($payload, min(strlen($payload), $committed - $offset));
+            $offset = $committed;
+        }
+        while ($payload !== '') {
+            $piece = substr($payload, 0, $this->append_buffer_bytes);
+            $payload = (string) substr($payload, strlen($piece));
+            $result = $this->store->append($artifact_id, $offset, $piece);
+            if ($result['status'] !== 'accepted' && $result['status'] !== 'duplicate') {
+                return [
+                    'artifact_id' => $artifact_id,
+                    'status' => $result['status'],
+                    'reason' => $result['reason'],
+                    'committed_bytes' => $result['committed_bytes'],
+                ];
+            }
+            $offset = $result['committed_bytes'];
+        }
+        $offset = max($offset, $end);
+
+        if (!$final) {
+            return [
+                'artifact_id' => $artifact_id,
+                'status' => 'accepted',
+                'reason' => null,
+                'committed_bytes' => $offset,
+            ];
+        }
+
+        $finalized = $this->store->finalize($artifact_id, $total_bytes);
+        return [
+            'artifact_id' => $artifact_id,
+            'status' => $finalized['status'],
+            'reason' => $finalized['reason'],
+            'committed_bytes' => $finalized['committed_bytes'],
+        ];
+    }
+
+    /**
+     * @return array{http_code:int,body:array}
+     */
+    private function batch_response(int $http_code, ?string $reason, ?string $detail, array $results): array {
+        $body = [
+            'status' => $http_code === 200 ? 'ok' : ( $http_code === 423 ? 'busy' : 'rejected' ),
+            'reason' => $reason,
+            'detail' => $detail,
+            'results' => $results,
+        ];
+        if ($http_code === 413) {
+            $body['max_request_bytes'] = $this->max_request_bytes;
+        }
+        return [
+            'http_code' => $http_code,
+            'body' => $body,
+        ];
+    }
+
+    /**
+     * @return string|null Null when the spool ends before $bytes.
+     */
+    private function read_spool_exactly($spool, int $bytes): ?string {
+        $data = '';
+        while (strlen($data) < $bytes) {
+            $piece = fread($spool, $bytes - strlen($data));
+            if ($piece === false || $piece === '') {
+                return null;
+            }
+            $data .= $piece;
+        }
+        return $data;
+    }
+
+    /**
+     * Spools the request body while hashing it, then verifies the digest
+     * against the signed claim. Nothing may act on a body byte before the
+     * verification passes.
+     *
+     * @param resource|null $input
+     * @param ?string $too_large_artifact_id Names the artifact whose
+     *   committed offset a 413 should report; null for batch bodies.
+     * @return array{response?:array{http_code:int,body:array},spool?:resource,bytes?:int}
+     */
+    private function spool_verified_body(array $auth, $input, ?string $too_large_artifact_id): array {
+        if (!is_resource($input)) {
+            return ['response' => $this->rejected(500, 'io_error', 'open_request_body')];
+        }
+        $spool = fopen('php://temp/maxmemory:' . self::SPOOL_MEMORY_BYTES, 'w+b');
+        if ($spool === false) {
+            return ['response' => $this->rejected(500, 'io_error', 'open_spool')];
+        }
+
+        $context = hash_init('sha256');
+        $spooled = 0;
+        while (( $buffer = fread($input, self::READ_BUFFER_BYTES) ) !== false && $buffer !== '') {
+            $spooled += strlen($buffer);
+            if ($spooled > $this->max_request_bytes) {
+                fclose($spool);
+                return ['response' => $too_large_artifact_id !== null
+                    ? $this->too_large($too_large_artifact_id)
+                    : $this->batch_response(413, 'request_too_large', null, [])];
+            }
+            hash_update($context, $buffer);
+            if (fwrite($spool, $buffer) !== strlen($buffer)) {
+                fclose($spool);
+                return ['response' => $this->rejected(500, 'io_error', 'write_spool')];
+            }
+        }
+        if ($buffer === false && !feof($input)) {
+            fclose($spool);
+            return ['response' => $this->rejected(400, 'body_read_failed')];
+        }
+
+        // The signature authenticated the hash claim; this comparison
+        // authenticates the bytes. Nothing reached the store yet.
+        if (!hash_equals((string) $auth['content_hash'], hash_final($context))) {
+            fclose($spool);
+            return ['response' => $this->rejected(403, 'content_hash_mismatch')];
+        }
+        if ($spooled === 0) {
+            fclose($spool);
+            return ['response' => $this->rejected(400, 'empty_body')];
+        }
+
+        rewind($spool);
+        return [
+            'spool' => $spool,
+            'bytes' => $spooled,
+        ];
     }
 
     /**

@@ -52,6 +52,9 @@ class StagedPushRunner
         "source_changed",
     ];
 
+    /** Per-file allowance for a batch frame's JSON header line. */
+    private const BATCH_FRAME_OVERHEAD = 256;
+
     private string $state_path;
 
     private string $verified_path;
@@ -145,6 +148,8 @@ class StagedPushRunner
         $files_done = 0;
         $failed = [];
 
+        // Collect the work first; batching decisions need the whole list.
+        $queue = [];
         foreach ($artifacts as $entry) {
             $artifact_id = $entry["artifact_id"] ?? null;
             $source_path = $entry["source_path"] ?? null;
@@ -195,37 +200,111 @@ class StagedPushRunner
                 $this->client->discard($artifact_id);
             }
 
-            $result = $this->client->upload_artifact(
-                $artifact_id,
-                $source_path,
-                $total_bytes,
-                function (int $committed, int $total) use ($files_done, $files_total, $artifact_id): void {
-                    $this->report_progress($files_done, $files_total, $artifact_id, $committed, $total);
-                },
-                $mtime
-            );
+            $queue[] = [
+                "artifact_id" => $artifact_id,
+                "source_path" => $source_path,
+                "total_bytes" => $total_bytes,
+                "mtime" => $mtime,
+            ];
+        }
 
-            if ($result["status"] === "verified") {
-                $files_done++;
-                $this->append_verified($artifact_id, $total_bytes, $mtime);
+        // Process the queue: files that fit the sizer's request budget
+        // travel together — one HTTP conversation per batch, pull's
+        // multipart discipline in the push direction. Files bigger than
+        // the budget keep the resumable per-chunk path. A 413 shrinks the
+        // budget (monotonically, so this terminates) and the affected
+        // batch repartitions.
+        while ($queue !== []) {
+            $budget = max(1, $this->sizer->chunk_bytes());
+
+            if ($queue[0]["total_bytes"] + self::BATCH_FRAME_OVERHEAD > $budget) {
+                $entry = array_shift($queue);
+                $result = $this->client->upload_artifact(
+                    $entry["artifact_id"],
+                    $entry["source_path"],
+                    $entry["total_bytes"],
+                    function (int $committed, int $total) use ($files_done, $files_total, $entry): void {
+                        $this->report_progress($files_done, $files_total, $entry["artifact_id"], $committed, $total);
+                    },
+                    $entry["mtime"]
+                );
+
+                if ($result["status"] === "verified") {
+                    $files_done++;
+                    $this->append_verified($entry["artifact_id"], $entry["total_bytes"], $entry["mtime"]);
+                    $this->write_state($files_total, $files_done);
+                    $this->report_progress($files_done, $files_total, $entry["artifact_id"], $entry["total_bytes"], $entry["total_bytes"]);
+                    continue;
+                }
+                $reason = is_string($result["reason"]) ? $result["reason"] : "unexpected_response";
+                if (in_array($reason, self::ARTIFACT_SCOPED_REASONS, true)) {
+                    $failed[] = [
+                        "artifact_id" => $entry["artifact_id"],
+                        "reason" => $reason,
+                        "detail" => $result["detail"],
+                    ];
+                    $this->write_state($files_total, $files_done);
+                    continue;
+                }
                 $this->write_state($files_total, $files_done);
-                $this->report_progress($files_done, $files_total, $artifact_id, $total_bytes, $total_bytes);
-                continue;
+                return $this->aborted($files_total, $files_done, $failed, $reason, $result["detail"]);
             }
 
-            $reason = is_string($result["reason"]) ? $result["reason"] : "unexpected_response";
-            if (in_array($reason, self::ARTIFACT_SCOPED_REASONS, true)) {
-                $failed[] = [
-                    "artifact_id" => $artifact_id,
-                    "reason" => $reason,
-                    "detail" => $result["detail"],
-                ];
-                $this->write_state($files_total, $files_done);
-                continue;
+            $batch = [];
+            $batch_bytes = 0;
+            while (
+                $queue !== []
+                && $queue[0]["total_bytes"] + self::BATCH_FRAME_OVERHEAD <= $budget
+                && $batch_bytes + $queue[0]["total_bytes"] + self::BATCH_FRAME_OVERHEAD <= $budget
+            ) {
+                $entry = array_shift($queue);
+                $batch[$entry["artifact_id"]] = $entry;
+                $batch_bytes += $entry["total_bytes"] + self::BATCH_FRAME_OVERHEAD;
             }
 
+            $batch_result = $this->client->upload_batch(array_values($batch));
+
+            if ($batch_result["status"] === "failed") {
+                if ($batch_result["reason"] === "batch_too_large") {
+                    // The sizer already shrank; repartition these entries.
+                    foreach ($batch as $entry) {
+                        $queue[] = $entry;
+                    }
+                    continue;
+                }
+                $this->write_state($files_total, $files_done);
+                return $this->aborted($files_total, $files_done, $failed, $batch_result["reason"], $batch_result["detail"]);
+            }
+
+            foreach ($batch_result["per_file"] as $artifact_id => $outcome) {
+                $entry = $batch[$artifact_id] ?? null;
+                if ($entry === null) {
+                    continue;
+                }
+                if ($outcome["status"] === "verified") {
+                    $files_done++;
+                    $this->append_verified($artifact_id, $entry["total_bytes"], $entry["mtime"]);
+                    $this->report_progress($files_done, $files_total, $artifact_id, $entry["total_bytes"], $entry["total_bytes"]);
+                    continue;
+                }
+                if ($outcome["status"] === "not_attempted") {
+                    // The server stopped at an earlier frame; retry these.
+                    $queue[] = $entry;
+                    continue;
+                }
+                $reason = is_string($outcome["reason"]) ? $outcome["reason"] : "unexpected_response";
+                if (in_array($reason, self::ARTIFACT_SCOPED_REASONS, true)) {
+                    $failed[] = [
+                        "artifact_id" => $artifact_id,
+                        "reason" => $reason,
+                        "detail" => null,
+                    ];
+                    continue;
+                }
+                $this->write_state($files_total, $files_done);
+                return $this->aborted($files_total, $files_done, $failed, $reason, $artifact_id);
+            }
             $this->write_state($files_total, $files_done);
-            return $this->aborted($files_total, $files_done, $failed, $reason, $result["detail"]);
         }
 
         $this->write_state($files_total, $files_done);

@@ -95,6 +95,13 @@ class StagedPushRunnerTest extends TestCase
                 case 'staged_discard':
                     $result = $endpoints->discard($params, $server);
                     break;
+                case 'staged_upload_batch':
+                    $stream = fopen('php://temp', 'w+b');
+                    fwrite($stream, $body);
+                    rewind($stream);
+                    $result = $endpoints->upload_batch($params, $server, $stream);
+                    fclose($stream);
+                    break;
                 default:
                     return ['http_code' => 400, 'body' => '{"error":"unknown endpoint"}', 'error' => null];
             }
@@ -463,5 +470,67 @@ class StagedPushRunnerTest extends TestCase
         $state = StagedPushRunner::read_state($this->state_dir . '-never-created');
 
         $this->assertSame(['sizer' => [], 'files_total' => 0, 'files_done' => 0], $state);
+    }
+
+    // ---------------------------------------------------------------
+    // Batched uploads
+    // ---------------------------------------------------------------
+
+    public function testSmallFilesTravelInBatchesNotOneRequestEach(): void
+    {
+        $plan = [];
+        for ($i = 0; $i < 6; $i++) {
+            $plan[] = $this->planEntry("small-{$i}.txt", "file number {$i}");
+        }
+        $sizer = new UploadChunkSizer(['floor_bytes' => 512, 'start_bytes' => 4096, 'max_bytes' => 4096]);
+        [$runner] = $this->makeRunner($this->transportFor($this->makeEndpoints()), [], null, $sizer);
+
+        $result = $runner->push($plan);
+
+        $this->assertSame(['completed', 6], [$result['status'], $result['files_done']]);
+        $this->assertCount(1, $this->requestsFor('staged_upload_batch'), 'six files, one conversation');
+        $this->assertCount(0, $this->requestsFor('staged_upload'), 'no per-file requests for small files');
+        $this->assertSame('file number 3', file_get_contents($this->staging_dir . '/files/small-3.txt'));
+    }
+
+    public function testMixedPlanBatchesSmallAndChunksLarge(): void
+    {
+        $plan = [
+            $this->planEntry('small-a.txt', 'aa'),
+            $this->planEntry('large.bin', str_repeat('L', 2000)),
+            $this->planEntry('small-b.txt', 'bb'),
+        ];
+        $sizer = new UploadChunkSizer(['floor_bytes' => 64, 'start_bytes' => 512, 'max_bytes' => 512]);
+        [$runner] = $this->makeRunner($this->transportFor($this->makeEndpoints()), [], null, $sizer);
+
+        $result = $runner->push($plan);
+
+        $this->assertSame(['completed', 3, []], [$result['status'], $result['files_done'], $result['failed']]);
+        $this->assertGreaterThanOrEqual(1, count($this->requestsFor('staged_upload_batch')));
+        $this->assertGreaterThanOrEqual(
+            4,
+            count($this->requestsFor('staged_upload')),
+            'the 2000-byte file streams in 512-byte chunks'
+        );
+        $this->assertSame(str_repeat('L', 2000), file_get_contents($this->staging_dir . '/files/large.bin'));
+    }
+
+    public function testBatchShrinksAfterA413AndCompletes(): void
+    {
+        $plan = [];
+        for ($i = 0; $i < 6; $i++) {
+            $plan[] = $this->planEntry("cap-{$i}.txt", str_repeat((string) $i, 40));
+        }
+        $endpoints = $this->makeEndpoints(['max_request_bytes' => 700]);
+        $sizer = new UploadChunkSizer(['floor_bytes' => 64, 'start_bytes' => 4096, 'max_bytes' => 4096]);
+        [$runner] = $this->makeRunner($this->transportFor($endpoints), [], null, $sizer);
+
+        $result = $runner->push($plan);
+
+        $this->assertSame(['completed', 6, []], [$result['status'], $result['files_done'], $result['failed']]);
+        $this->assertNotEmpty(array_filter($this->requests, static function (array $request): bool {
+            return $request['http_code'] === 413;
+        }), 'the first oversized batch teaches the sizer');
+        $this->assertGreaterThanOrEqual(2, count($this->requestsFor('staged_upload_batch')), 'repartitioned batches');
     }
 }
