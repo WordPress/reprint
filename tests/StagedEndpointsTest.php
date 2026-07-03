@@ -267,6 +267,48 @@ final class StagedEndpointsTest extends TestCase {
         $this->assertSame(0, $endpoints->status(['artifact_id' => 'artifact-1'])['body']['committed_bytes']);
     }
 
+    public function testReplayedRequestIsAbsorbedAsADuplicate(): void
+    {
+        // There is no nonce cache; replay protection is the protocol's
+        // idempotence. A captured append replayed verbatim inside the
+        // timestamp window must land as a duplicate at the same offset —
+        // the frontier does not move and bytes are never doubled.
+        $endpoints = $this->makeEndpoints();
+        $body = 'replayable bytes';
+        $headers = $this->signedHeaders($body);
+
+        $stream = $this->bodyStream($body);
+        $first = $endpoints->upload(['artifact_id' => 'a.txt', 'offset' => 0], $headers, $stream);
+        fclose($stream);
+        $this->assertSame(200, $first['http_code']);
+        $this->assertSame(strlen($body), $first['body']['committed_bytes']);
+
+        // The exact same signed request again — same nonce, same
+        // timestamp, same signature, same body.
+        $stream = $this->bodyStream($body);
+        $replayed = $endpoints->upload(['artifact_id' => 'a.txt', 'offset' => 0], $headers, $stream);
+        fclose($stream);
+
+        $this->assertSame(200, $replayed['http_code']);
+        $this->assertSame('duplicate', $replayed['body']['status']);
+        $this->assertSame(strlen($body), $replayed['body']['committed_bytes'], 'the frontier must not move');
+        $this->assertSame(
+            strlen($body),
+            (int) filesize($this->staging_dir . '/files/a.txt'),
+            'bytes are never doubled'
+        );
+    }
+
+    public function testShortNonceIsRejected(): void
+    {
+        $endpoints = $this->makeEndpoints();
+
+        $result = $this->upload($endpoints, 'a.txt', 0, 'bytes', ['nonce' => 'short']);
+
+        $this->assertSame(403, $result['http_code']);
+        $this->assertFileDoesNotExist($this->staging_dir . '/files/a.txt');
+    }
+
     public function testUploadWithoutAConfiguredSecretIsUnavailable(): void
     {
         $endpoints = $this->makeEndpoints(['secret' => null]);
@@ -639,6 +681,51 @@ final class StagedEndpointsTest extends TestCase {
 
         $this->assertSame(403, $result['http_code']);
         $this->assertDirectoryDoesNotExist($this->staging_dir . '/files');
+    }
+
+    public function testDuplicateIdWithinOneBatchIsIdempotent(): void
+    {
+        // A sender bug or a repartition edge can put the same file into
+        // one request twice. The second frame must land on the verified
+        // short-circuit — never doubled bytes, never a poisoned batch.
+        $endpoints = $this->makeEndpoints();
+        $frame = json_encode([
+            'artifact_id' => 'twice.txt',
+            'offset' => 0,
+            'length' => 5,
+            'total_bytes' => 5,
+            'final' => true,
+        ]) . "\nhello";
+
+        $result = $this->uploadBatch($endpoints, $frame . $frame);
+
+        $this->assertSame(200, $result['http_code'], json_encode($result['body']));
+        $this->assertCount(2, $result['body']['results']);
+        $this->assertSame('verified', $result['body']['results'][0]['status']);
+        $this->assertSame('verified', $result['body']['results'][1]['status']);
+        $this->assertSame('hello', file_get_contents($this->staging_dir . '/files/twice.txt'));
+    }
+
+    public function testHostileFrameFieldsAreTypedRejections(): void
+    {
+        $endpoints = $this->makeEndpoints();
+
+        // A negative length must not be fed to a read loop.
+        $negative = $this->uploadBatch(
+            $endpoints,
+            json_encode(['artifact_id' => 'n.txt', 'offset' => 0, 'length' => -5, 'total_bytes' => 5, 'final' => true]) . "\nhello"
+        );
+        $this->assertSame(400, $negative['http_code']);
+
+        // A traversal id inside a frame goes through the same path rule
+        // as the single-upload route: the store's typed rejection, and
+        // nothing lands outside the staging dir.
+        $hostile = $this->uploadBatch(
+            $endpoints,
+            json_encode(['artifact_id' => '../escape.txt', 'offset' => 0, 'length' => 5, 'total_bytes' => 5, 'final' => true]) . "\nhello"
+        );
+        $this->assertSame(409, $hostile['http_code']);
+        $this->assertFileDoesNotExist(dirname($this->staging_dir) . '/escape.txt');
     }
 
     // ---------------------------------------------------------------
