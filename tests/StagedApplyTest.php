@@ -538,6 +538,38 @@ final class StagedApplyTest extends TestCase {
         }
     }
 
+    public function testDeletePassIoErrorIsTypedAndRerunResumes(): void
+    {
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $this->markTestSkipped('permission barriers do not bind as root');
+        }
+        mkdir($this->target_root . '/locked', 0700, true);
+        file_put_contents($this->target_root . '/locked/goner.txt', 'x');
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'locked/goner.txt', 'delete' => true],
+        ]);
+
+        // The environment turns hostile mid-transfer: the parent loses its
+        // write bit, so the unlink fails.
+        chmod($this->target_root . '/locked', 0555);
+        try {
+            $result = $this->makeApply()->apply($manifest);
+
+            $this->assertSame(['rejected', 'io_error'], [$result['status'], $result['reason']]);
+            $this->assertStringContainsString('delete: locked/goner.txt', (string) $result['detail']);
+        } finally {
+            chmod($this->target_root . '/locked', 0700);
+        }
+
+        // A rejection consumes nothing; once the operator fixes the
+        // permissions, rerunning the same manifest finishes the window.
+        $second = $this->makeApply()->apply($manifest);
+
+        $this->assertSame('applied', $second['status']);
+        $this->assertSame(1, $second['deleted']);
+        $this->assertFileDoesNotExist($this->target_root . '/locked/goner.txt');
+    }
+
     public function testMalformedDeleteEntriesRejectTheManifest(): void
     {
         // delete:false is not a delete, so the entry needs its size.

@@ -311,6 +311,19 @@ class PushFilesCliTest extends TestCase
                     "mangled in transit: {$name}"
                 );
             }
+
+            // Deletion ids ride the same manifest lines, so the weird
+            // names must survive that direction too.
+            unlink($this->fs_root . '/100%+done.txt');
+            unlink($this->fs_root . '/emoji-😀.php');
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+
+            $this->assertSame(0, $code, $output);
+            $summary = json_decode((string) substr($output, (int) strrpos($output, "{\n")), true);
+            $this->assertSame(2, $summary['deleted']);
+            $this->assertFileDoesNotExist($site_root . '/100%+done.txt');
+            $this->assertFileDoesNotExist($site_root . '/emoji-😀.php');
+            $this->assertFileExists($site_root . '/file with space.txt', 'the survivors stay');
         } finally {
             $this->stopApplyHarness();
         }
@@ -378,6 +391,33 @@ class PushFilesCliTest extends TestCase
             $this->assertSame(0, $code, $output);
             $summary = json_decode((string) substr($output, (int) strrpos($output, "{\n")), true);
             $this->assertSame(0, $summary['deleted']);
+
+            // A kill between the confirmed apply and the cache update
+            // resurrects the stale line. The next push re-derives the
+            // deletion, which no-ops (the path is already gone) and heals
+            // the cache.
+            $verified_path = $this->state_dir . '/.push-verified.jsonl';
+            file_put_contents(
+                $verified_path,
+                "\n" . json_encode(['artifact_id' => 'b.txt', 'size' => 15, 'mtime' => 1]) . "\n",
+                FILE_APPEND
+            );
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+            $this->assertSame(0, $code, $output);
+            $summary = json_decode((string) substr($output, (int) strrpos($output, "{\n")), true);
+            $this->assertSame(0, $summary['deleted']);
+            $this->assertStringNotContainsString(
+                'b.txt',
+                (string) file_get_contents($verified_path),
+                'the resurrected line is forgotten again'
+            );
+
+            // The deletion broke something? Restoring the file locally
+            // ships it back on the next push — the fix-forward loop.
+            file_put_contents($this->fs_root . '/b.txt', 'restored, new content');
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+            $this->assertSame(0, $code, $output);
+            $this->assertSame('restored, new content', file_get_contents($site_root . '/b.txt'));
         } finally {
             $this->stopApplyHarness();
         }

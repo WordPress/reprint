@@ -515,6 +515,33 @@ class StagedPushRunnerTest extends TestCase
         $this->assertSame(str_repeat('L', 2000), file_get_contents($this->staging_dir . '/files/large.bin'));
     }
 
+    public function testBatchMemberChangedSincePlanFailsScopedAndContinues(): void
+    {
+        // The volatility discipline must hold on the batch path too: a
+        // small file edited between the plan walk and the upload fails
+        // typed and local, and the rest of its batch still travels.
+        $volatile = $this->planEntry('volatile.txt', 'original');
+        $volatile['mtime'] = (int) filemtime($volatile['source_path']);
+        $stable = $this->planEntry('stable.txt', 'steady');
+        file_put_contents($volatile['source_path'], 'rewritten');
+        touch($volatile['source_path'], $volatile['mtime'] + 10);
+
+        [$runner] = $this->makeRunner($this->transportFor($this->makeEndpoints()));
+        $result = $runner->push([$volatile, $stable]);
+
+        $this->assertSame('completed', $result['status']);
+        $this->assertSame(1, $result['files_done']);
+        $this->assertSame(
+            ['volatile.txt', 'source_changed'],
+            [$result['failed'][0]['artifact_id'], $result['failed'][0]['reason']]
+        );
+        $this->assertSame('steady', file_get_contents($this->staging_dir . '/files/stable.txt'));
+        $this->assertFileDoesNotExist(
+            $this->staging_dir . '/files/volatile.txt',
+            'stale content never travels'
+        );
+    }
+
     // ---------------------------------------------------------------
     // Done-cache deletion bookkeeping
     // ---------------------------------------------------------------
