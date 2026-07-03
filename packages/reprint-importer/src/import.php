@@ -62,6 +62,9 @@ require_once __DIR__ . '/lib/upload/class-upload-chunk-sizer.php';
 // Chunked, resumable uploads into the target's staged artifact store
 require_once __DIR__ . '/lib/upload/class-staged-upload-client.php';
 
+// Batch orchestration over the upload client: plan in, verified artifacts out
+require_once __DIR__ . '/lib/upload/class-staged-push-runner.php';
+
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
