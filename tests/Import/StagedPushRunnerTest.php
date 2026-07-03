@@ -657,4 +657,42 @@ class StagedPushRunnerTest extends TestCase
         }), 'the first oversized batch teaches the sizer');
         $this->assertGreaterThanOrEqual(2, count($this->requestsFor('staged_upload_batch')), 'repartitioned batches');
     }
+
+    public function testUnwritableStateDirAbortsTypedBeforeAnyRequest(): void
+    {
+        // A file where the state dir belongs makes mkdir fail: the runner
+        // must abort typed instead of pushing without a done cache (every
+        // rerun would then re-upload the world).
+        $blocker = $this->state_dir . '-blocker';
+        file_put_contents($blocker, 'not a directory');
+        $transport = function (...$args): array {
+            $this->requests[] = ['endpoint' => 'unexpected', 'params' => [], 'http_code' => 0];
+            return ['http_code' => 200, 'body' => '{}', 'error' => null];
+        };
+        $client = new StagedUploadClient([
+            'base_url' => 'https://target.example/?reprint-api',
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'sizer' => new UploadChunkSizer(['floor_bytes' => 4, 'start_bytes' => 8, 'max_bytes' => 8]),
+            'transport' => $transport,
+            'sleeper' => static function (int $microseconds): void {
+            },
+        ]);
+        $runner = new StagedPushRunner([
+            'state_dir' => $blocker . '/nested',
+            'client' => $client,
+            'sizer' => new UploadChunkSizer(['floor_bytes' => 4, 'start_bytes' => 8, 'max_bytes' => 8]),
+        ]);
+
+        try {
+            $result = $runner->push([
+                ['artifact_id' => 'a.txt', 'source_path' => $this->source_dir . '/never-read'],
+            ]);
+
+            $this->assertSame('aborted', $result['status']);
+            $this->assertSame('state_dir_unwritable', $result['abort_reason']);
+            $this->assertSame([], $this->requests, 'no request may travel without a state dir');
+        } finally {
+            @unlink($blocker);
+        }
+    }
 }
