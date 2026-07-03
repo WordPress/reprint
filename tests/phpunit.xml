@@ -29,6 +29,7 @@
             <file>FileIndexDedupTest.php</file>
             <file>HmacServerTest.php</file>
             <file>SiteExportSecretTest.php</file>
+            <file>StagedApplyTest.php</file>
             <file>StagedArtifactsTest.php</file>
             <file>StagedEndpointsTest.php</file>
         </testsuite>

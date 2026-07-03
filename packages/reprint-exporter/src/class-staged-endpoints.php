@@ -92,6 +92,15 @@ final class Site_Export_Staged_Endpoints {
     /** @var int */
     private $timestamp_tolerance;
 
+    /** @var string|null */
+    private $apply_target_root;
+
+    /** @var callable|null */
+    private $apply_device_id;
+
+    /** @var string */
+    private $staging_dir;
+
     /**
      * @param array $options Server-owned configuration:
      *   - staging_dir (string, required): passed to the artifact store.
@@ -132,6 +141,63 @@ final class Site_Export_Staged_Endpoints {
         $this->timestamp_tolerance = is_numeric($tolerance) && (int) $tolerance > 0
             ? (int) $tolerance
             : 300;
+
+        $target_root = $options['apply_target_root'] ?? null;
+        $this->apply_target_root = is_string($target_root) && $target_root !== '' ? $target_root : null;
+        $this->apply_device_id = $options['apply_device_id'] ?? null;
+        $this->staging_dir = $staging_dir;
+    }
+
+    /**
+     * Validate a transfer (check_only) or move it into the target root.
+     *
+     * A sender probes with check_only=1 before uploading anything: an
+     * environment that can never apply — cross-device staging above all —
+     * rejects here, before a byte of transfer has been spent.
+     *
+     * @return array{http_code:int,body:array}
+     */
+    public function apply(array $config, array $headers): array {
+        $method_error = $this->require_post($headers);
+        if ($method_error !== null) {
+            return $method_error;
+        }
+
+        $manifest_id = $config['manifest_id'] ?? null;
+        if (!is_string($manifest_id) || $manifest_id === '') {
+            return $this->rejected(400, 'invalid_manifest_id');
+        }
+        if ($this->apply_target_root === null) {
+            return $this->rejected(503, 'not_configured', 'apply_target_root');
+        }
+
+        $apply_options = [
+            'staging_dir' => $this->staging_dir,
+            'target_root' => $this->apply_target_root,
+        ];
+        if ($this->apply_device_id !== null) {
+            $apply_options['device_id'] = $this->apply_device_id;
+        }
+        $engine = new Site_Export_Staged_Apply($apply_options);
+
+        $check_only = filter_var($config['check_only'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        $result = $engine->apply($manifest_id, $check_only);
+
+        switch ($result['status']) {
+            case 'applied':
+            case 'ready':
+                $code = 200;
+                break;
+            case 'busy':
+                $code = 423;
+                break;
+            default:
+                $code = $result['reason'] === 'io_error' ? 500 : 409;
+        }
+        return [
+            'http_code' => $code,
+            'body' => $result,
+        ];
     }
 
     /**

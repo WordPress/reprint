@@ -394,6 +394,83 @@ final class StagedEndpointsTest extends TestCase {
     }
 
     // ---------------------------------------------------------------
+    // Apply route
+    // ---------------------------------------------------------------
+
+    public function testApplyRouteProbesThenMovesAVerifiedTransfer(): void
+    {
+        $target_root = $this->staging_dir . '-target';
+        mkdir($target_root, 0700, true);
+        try {
+            $endpoints = $this->makeEndpoints(['apply_target_root' => $target_root]);
+            $this->upload($endpoints, 'wp-content/a.txt', 0, 'applied!');
+            $this->finalize($endpoints, 'wp-content/a.txt', 8);
+            $manifest = json_encode(['artifact_id' => 'wp-content/a.txt', 'size' => 8]) . "\n";
+            $this->upload($endpoints, 'm.jsonl', 0, $manifest);
+            $this->finalize($endpoints, 'm.jsonl', strlen($manifest));
+
+            $probe = $endpoints->apply(
+                ['manifest_id' => 'm.jsonl', 'check_only' => '1'],
+                ['REQUEST_METHOD' => 'POST']
+            );
+            $this->assertSame([200, 'ready'], [$probe['http_code'], $probe['body']['status']]);
+            $this->assertFileDoesNotExist($target_root . '/wp-content/a.txt');
+
+            $result = $endpoints->apply(['manifest_id' => 'm.jsonl'], ['REQUEST_METHOD' => 'POST']);
+            $this->assertSame(
+                [200, 'applied', 1],
+                [$result['http_code'], $result['body']['status'], $result['body']['applied']]
+            );
+            $this->assertSame('applied!', file_get_contents($target_root . '/wp-content/a.txt'));
+        } finally {
+            $this->removeDir($target_root);
+        }
+    }
+
+    public function testApplyRouteReportsCrossDeviceOnTheProbe(): void
+    {
+        $target_root = $this->staging_dir . '-target';
+        mkdir($target_root, 0700, true);
+        try {
+            $endpoints = $this->makeEndpoints([
+                'apply_target_root' => $target_root,
+                'apply_device_id' => function (string $path): ?int {
+                    return strpos($path, '-target') !== false ? 22 : 11;
+                },
+            ]);
+
+            // No transfer exists yet — the environment verdict alone must
+            // reject, so a sender learns before uploading anything.
+            $probe = $endpoints->apply(
+                ['manifest_id' => 'not-yet-staged', 'check_only' => '1'],
+                ['REQUEST_METHOD' => 'POST']
+            );
+
+            $this->assertSame(409, $probe['http_code']);
+            $this->assertSame('cross_device', $probe['body']['reason']);
+        } finally {
+            $this->removeDir($target_root);
+        }
+    }
+
+    public function testApplyRouteValidatesConfigurationAndMethod(): void
+    {
+        $unconfigured = $this->makeEndpoints();
+        $missing_root = $unconfigured->apply(['manifest_id' => 'm'], ['REQUEST_METHOD' => 'POST']);
+        $this->assertSame(
+            [503, 'not_configured', 'apply_target_root'],
+            [$missing_root['http_code'], $missing_root['body']['reason'], $missing_root['body']['detail']]
+        );
+
+        $configured = $this->makeEndpoints(['apply_target_root' => sys_get_temp_dir()]);
+        $get = $configured->apply(['manifest_id' => 'm'], ['REQUEST_METHOD' => 'GET']);
+        $this->assertSame(405, $get['http_code']);
+
+        $no_manifest = $configured->apply([], ['REQUEST_METHOD' => 'POST']);
+        $this->assertSame([400, 'invalid_manifest_id'], [$no_manifest['http_code'], $no_manifest['body']['reason']]);
+    }
+
+    // ---------------------------------------------------------------
     // Request validation and server-owned options
     // ---------------------------------------------------------------
 

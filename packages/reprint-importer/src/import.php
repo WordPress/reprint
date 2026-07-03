@@ -1235,6 +1235,9 @@ class ImportClient
      */
     public $exit_code = 0;
 
+    /** Artifact id the push manifest stages under; never applied itself. */
+    private const PUSH_MANIFEST_ID = '.reprint-push-manifest.jsonl';
+
     public function __construct(string $remote_url, string $state_dir, string $fs_root)
     {
         $this->remote_url = rtrim($remote_url, "?&");
@@ -3992,6 +3995,55 @@ class ImportClient
             "hmac_client" => $this->hmac_client,
             "sizer" => $sizer,
         ]);
+
+        // Probe the apply environment before any byte is uploaded. Apply is
+        // rename-only, so staging on a different device than the target
+        // root can never land — that must surface now, not after the
+        // transfer. Probe failures that only mean "this target cannot apply
+        // yet" stay fatal only when --apply asked for an apply.
+        $apply = !empty($options["apply"]);
+        $probe = $client->apply(self::PUSH_MANIFEST_ID, true);
+        if ($probe["status"] === "failed") {
+            $environment_verdicts = ["cross_device", "target_missing", "target_unwritable", "staging_unavailable"];
+            if (in_array($probe["reason"], $environment_verdicts, true)) {
+                $this->output_progress([
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => $probe["reason"],
+                    "abort_detail" => $probe["detail"],
+                ], true);
+                echo json_encode([
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => $probe["reason"],
+                    "abort_detail" => $probe["detail"],
+                ], JSON_PRETTY_PRINT) . "\n";
+                $this->exit_code = 1;
+                return;
+            }
+            if ($apply) {
+                $retryable = ["transport_failed", "busy_exhausted"];
+                $this->output_progress([
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => $probe["reason"],
+                    "abort_detail" => $probe["detail"],
+                ], true);
+                echo json_encode([
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => $probe["reason"],
+                    "abort_detail" => $probe["detail"],
+                ], JSON_PRETTY_PRINT) . "\n";
+                $this->exit_code = in_array($probe["reason"], $retryable, true) ? 2 : 1;
+                return;
+            }
+            $this->audit_log(
+                "PUSH APPLY PROBE | {$probe["reason"]} | staging only, apply deferred",
+                false,
+            );
+        }
+
         $runner = new StagedPushRunner([
             "state_dir" => $this->state_dir,
             "client" => $client,
@@ -4037,7 +4089,89 @@ class ImportClient
             $this->exit_code = in_array($result["abort_reason"], $retryable, true) ? 2 : 1;
             return;
         }
-        $this->exit_code = $result["failed"] === [] ? 0 : 1;
+        if ($result["failed"] !== []) {
+            $this->exit_code = 1;
+            return;
+        }
+        if (!$apply) {
+            $this->exit_code = 0;
+            return;
+        }
+        $this->exit_code = $this->run_push_apply($client, $build["plan"]);
+    }
+
+    /**
+     * Stage the manifest for a completed transfer and apply it.
+     *
+     * The manifest lists every planned artifact with its size; the target
+     * validates the whole transfer against it (device match included)
+     * before the first rename, so an incomplete or inconsistent transfer
+     * rejects instead of half-applying.
+     *
+     * @return int Process exit code.
+     */
+    private function run_push_apply(StagedUploadClient $client, array $plan): int
+    {
+        $lines = "";
+        foreach ($plan as $entry) {
+            $lines .= json_encode([
+                "artifact_id" => $entry["artifact_id"],
+                "size" => $entry["total_bytes"],
+            ]) . "\n";
+        }
+        $manifest_path = $this->state_dir . "/.push-manifest.jsonl";
+        if (@file_put_contents($manifest_path, $lines) !== strlen($lines)) {
+            echo json_encode([
+                "type" => "push_apply",
+                "status" => "error",
+                "abort_reason" => "manifest_write_failed",
+                "abort_detail" => $manifest_path,
+            ], JSON_PRETTY_PRINT) . "\n";
+            return 1;
+        }
+
+        // A manifest from an earlier, different plan may sit at this id;
+        // replace it wholesale. Failures surface on the upload right after.
+        $client->discard(self::PUSH_MANIFEST_ID);
+        $uploaded = $client->upload_artifact(self::PUSH_MANIFEST_ID, $manifest_path);
+        if ($uploaded["status"] !== "verified") {
+            return $this->finish_push_apply("error", [
+                "abort_reason" => $uploaded["reason"],
+                "abort_detail" => $uploaded["detail"],
+            ]);
+        }
+
+        $applied = $client->apply(self::PUSH_MANIFEST_ID);
+        if ($applied["status"] !== "applied") {
+            return $this->finish_push_apply("error", [
+                "abort_reason" => $applied["reason"],
+                "abort_detail" => $applied["detail"],
+            ]);
+        }
+
+        return $this->finish_push_apply("complete", [
+            "applied" => $applied["applied"],
+            "already_applied" => $applied["already_applied"],
+        ]);
+    }
+
+    /**
+     * @return int Process exit code.
+     */
+    private function finish_push_apply(string $status, array $fields): int
+    {
+        $summary = array_merge(["type" => "push_apply", "status" => $status], $fields);
+        $this->output_progress($summary, true);
+        echo json_encode($summary, JSON_PRETTY_PRINT) . "\n";
+        if ($status === "complete") {
+            return 0;
+        }
+        $this->audit_log(
+            "PUSH APPLY FAILED | " . ($fields["abort_reason"] ?? "unknown") . " | " . ($fields["abort_detail"] ?? ""),
+            false,
+        );
+        $retryable = ["transport_failed", "busy_exhausted", "status_unavailable", "server_io_error"];
+        return in_array($fields["abort_reason"] ?? null, $retryable, true) ? 2 : 1;
     }
 
     /**
@@ -12030,6 +12164,14 @@ if (
             'help' => 'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
                 'repeat for several. Default pulls everything. For push-files, SOURCE is an fs-root-relative prefix',
             'commands' => ['pull-files', 'files-pull', 'push-files'],
+        ],
+        [
+            'name' => 'apply',
+            'type' => 'flag',
+            'target' => 'apply',
+            'help' => 'After staging completes, apply the transfer into the remote tree ' .
+                '(rename-only; the environment is probed before any upload)',
+            'commands' => ['push-files'],
         ],
 
         // ── flat-docroot options ────────────────────────────────

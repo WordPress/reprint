@@ -34,5 +34,9 @@ if (!class_exists('Site_Export_Staged_Endpoints', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-endpoints.php';
 }
 
+if (!class_exists('Site_Export_Staged_Apply', false)) {
+    require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-apply.php';
+}
+
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';

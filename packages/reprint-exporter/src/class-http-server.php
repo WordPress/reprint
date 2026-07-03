@@ -330,6 +330,9 @@ final class Site_Export_HTTP_Server {
             'staged_discard' => static function (array $config) use ($endpoints): void {
                 self::emit_json_response($endpoints->discard($config, $_SERVER));
             },
+            'staged_apply' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->apply($config, $_SERVER));
+            },
         ];
 
         foreach ($routes as $endpoint => $handler) {

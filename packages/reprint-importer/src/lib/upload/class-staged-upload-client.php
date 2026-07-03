@@ -336,6 +336,64 @@ class StagedUploadClient
     }
 
     /**
+     * Ask the target to validate (check_only) or apply a staged transfer.
+     *
+     * check_only is the sender's early gate: an environment that can never
+     * apply — cross-device staging above all — answers "rejected" here,
+     * before any chunk has been uploaded.
+     *
+     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int}
+     *   status "applied"|"ready"|"failed".
+     */
+    public function apply(string $manifest_id, bool $check_only = false): array
+    {
+        for ($attempt = 1; $attempt <= self::MAX_BUSY_RETRIES; $attempt++) {
+            $params = ["manifest_id" => $manifest_id];
+            if ($check_only) {
+                $params["check_only"] = 1;
+            }
+            $response = $this->request_json("POST", "staged_apply", $params);
+            if ($response["error"] !== null) {
+                return $this->apply_failed("transport_failed", $response["error"]);
+            }
+            $json = is_array($response["json"]) ? $response["json"] : [];
+            $status = $json["status"] ?? null;
+            if ($status === "applied" || $status === "ready") {
+                return [
+                    "status" => $status,
+                    "reason" => null,
+                    "detail" => null,
+                    "applied" => (int) ($json["applied"] ?? 0),
+                    "already_applied" => (int) ($json["already_applied"] ?? 0),
+                ];
+            }
+            if ($status === "busy") {
+                $this->backoff($attempt);
+                continue;
+            }
+            return $this->apply_failed(
+                is_string($json["reason"] ?? null) ? $json["reason"] : "unexpected_response",
+                $json["detail"] ?? ("HTTP " . $response["http_code"])
+            );
+        }
+        return $this->apply_failed("busy_exhausted", null);
+    }
+
+    /**
+     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int}
+     */
+    private function apply_failed(string $reason, ?string $detail): array
+    {
+        return [
+            "status" => "failed",
+            "reason" => $reason,
+            "detail" => $detail,
+            "applied" => 0,
+            "already_applied" => 0,
+        ];
+    }
+
+    /**
      * Confirm the assembled artifact; retried only for "busy".
      *
      * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}

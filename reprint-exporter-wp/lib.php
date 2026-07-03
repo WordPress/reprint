@@ -198,6 +198,11 @@ function _site_export_staged_options(): array {
         'staging_dir' => $staging_dir,
         'secret' => _site_export_get_shared_secret(),
         'timestamp_tolerance' => SITE_EXPORT_TIMESTAMP_TOLERANCE,
+        // Where staged_apply moves verified artifacts. Apply is rename-only,
+        // so the staging dir must sit on this root's filesystem — apply
+        // rejects "cross_device" otherwise, and senders probe that with
+        // check_only before uploading anything.
+        'apply_target_root' => defined('SITE_EXPORT_APPLY_ROOT') ? SITE_EXPORT_APPLY_ROOT : ABSPATH,
     ];
 }
 
