@@ -826,6 +826,4 @@ final class Site_Export_Staged_Artifacts {
             @unlink($tmp_path);
         }
     }
-
-
 }
