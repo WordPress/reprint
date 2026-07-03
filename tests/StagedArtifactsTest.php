@@ -520,6 +520,25 @@ final class StagedArtifactsTest extends TestCase
         $this->assertSame('accepted', $store->append('artifact-1', 5, 'second')['status']);
     }
 
+    public function testDiscardOfAnUntracedArtifactRespectsTheWriterLock(): void
+    {
+        $store = $this->makeStore();
+        $store->append('other-artifact', 0, 'xx');
+
+        // The first append for artifact-1 is in flight: it holds the lock
+        // but has not yet created the file or moved the cursor. A discard
+        // that answered true here would be contradicted by that append's
+        // commit a moment later.
+        $holder = fopen($this->staging_dir . '/lock', 'r+b');
+        flock($holder, LOCK_EX);
+
+        $this->assertFalse($store->discard('artifact-1'));
+
+        flock($holder, LOCK_UN);
+        fclose($holder);
+        $this->assertTrue($store->discard('artifact-1'));
+    }
+
     public function testDiscardRemovesAllStagedData(): void
     {
         $store = $this->makeStore();
@@ -530,6 +549,15 @@ final class StagedArtifactsTest extends TestCase
         $status = $store->status('artifact-1');
         $this->assertSame(['exists' => false, 'committed_bytes' => 0, 'verified' => false], $status);
         $this->assertTrue($store->discard('never-existed'));
+    }
+
+    public function testDiscardBeforeAnyStagingExistsCreatesNothing(): void
+    {
+        $store = $this->makeStore();
+
+        $this->assertTrue($store->discard('artifact-1'));
+
+        $this->assertDirectoryDoesNotExist($this->staging_dir);
     }
 
     public function testDiscardedArtifactRestartsFromScratch(): void
@@ -559,6 +587,66 @@ final class StagedArtifactsTest extends TestCase
             ['exists' => false, 'committed_bytes' => 0, 'verified' => false],
             $store->status('artifact-1')
         );
+    }
+
+    public function testDiscardReportsFailureWhenTheArtifactFileCannotBeRemoved(): void
+    {
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $this->markTestSkipped('Permission checks do not bind as root.');
+        }
+
+        $store = $this->makeStore();
+        $store->append('artifact-1', 0, 'payload');
+
+        // Unlinking needs write permission on files/, not on the file.
+        chmod($this->staging_dir . '/files', 0500);
+        $this->assertFalse($store->discard('artifact-1'));
+        $this->assertFileExists($this->staging_dir . '/files/artifact-1');
+
+        // Retry until true: the next attempt finishes the cleanup.
+        chmod($this->staging_dir . '/files', 0700);
+        $this->assertTrue($store->discard('artifact-1'));
+        $this->assertSame(0, $store->status('artifact-1')['committed_bytes']);
+    }
+
+    public function testDiscardReportsFailureWhenTheCursorCannotBeCleared(): void
+    {
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $this->markTestSkipped('Permission checks do not bind as root.');
+        }
+
+        $store = $this->makeStore();
+        $store->append('artifact-1', 0, 'payload');
+
+        // Clearing the cursor writes state.json.tmp into the staging dir;
+        // the artifact unlink itself only needs write on files/.
+        chmod($this->staging_dir, 0500);
+        $this->assertFalse($store->discard('artifact-1'));
+        $this->assertSame(7, $store->status('artifact-1')['committed_bytes']);
+
+        chmod($this->staging_dir, 0700);
+        $this->assertTrue($store->discard('artifact-1'));
+        $this->assertSame(0, $store->status('artifact-1')['committed_bytes']);
+    }
+
+    public function testDiscardReportsFailureWhenTheVerifiedRecordCannotBeRemoved(): void
+    {
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $this->markTestSkipped('Permission checks do not bind as root.');
+        }
+
+        $store = $this->makeStore();
+        $store->append('artifact-1', 0, 'payload');
+        $store->finalize('artifact-1', 7);
+
+        // Rewriting verified.jsonl needs its temp file in the staging dir.
+        chmod($this->staging_dir, 0500);
+        $this->assertFalse($store->discard('artifact-1'));
+        $this->assertTrue($store->status('artifact-1')['verified']);
+
+        chmod($this->staging_dir, 0700);
+        $this->assertTrue($store->discard('artifact-1'));
+        $this->assertFalse($store->status('artifact-1')['verified']);
     }
 
     public function testStatusOfUnknownArtifact(): void

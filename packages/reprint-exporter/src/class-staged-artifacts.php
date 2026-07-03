@@ -510,13 +510,14 @@ final class Site_Export_Staged_Artifacts {
      * Remove all staged data and records for an artifact. Safe to call for
      * unknown ids.
      *
-     * Retry until true: a discard killed between its unlink and record
-     * updates leaves a partial state that only another discard fully
-     * cleans up. Every partial state is retriable.
+     * Retry until true: a discard killed between its steps — or stopped by
+     * a failing one — leaves a partial state that only another discard
+     * fully cleans up. Every partial state is retriable.
      *
-     * @return bool False when a concurrent writer holds the store — an
+     * @return bool False when a concurrent writer holds the store (an
      *              unguarded unlink would let that writer's commit resurrect
-     *              a discarded artifact.
+     *              a discarded artifact) or when a cleanup step failed and
+     *              staged data remains.
      */
     public function discard(string $artifact_id): bool {
         $file_path = $this->artifact_path($artifact_id);
@@ -524,14 +525,13 @@ final class Site_Export_Staged_Artifacts {
             return true;
         }
 
-        // Discarding an artifact nothing knows about is a no-op and must not
-        // create the staging scaffolding as a side effect.
-        $state = $this->read_state();
-        if (
-            !file_exists($file_path)
-            && $state['artifact_id'] !== $artifact_id
-            && !isset($this->read_verified()[$artifact_id])
-        ) {
+        // A missing staging directory proves nothing is staged and no writer
+        // is mid-step, so this one no-op may skip locking (open_lock() would
+        // create the scaffolding as a side effect). Every other check belongs
+        // under the lock: a first append can be in flight with no trace on
+        // disk yet, and its commit would resurrect an artifact this call just
+        // reported discarded.
+        if (!is_dir(dirname($this->lock_path))) {
             return true;
         }
 
@@ -544,13 +544,14 @@ final class Site_Export_Staged_Artifacts {
                 return false;
             }
 
-            @unlink($file_path);
-            $state = $this->read_state();
-            if ($state['artifact_id'] === $artifact_id) {
-                $this->write_state(null, 0);
+            if (file_exists($file_path) && !@unlink($file_path)) {
+                return false;
             }
-            $this->remove_verified($artifact_id);
-            return true;
+            $state = $this->read_state();
+            if ($state['artifact_id'] === $artifact_id && !$this->write_state(null, 0)) {
+                return false;
+            }
+            return $this->remove_verified($artifact_id);
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -691,10 +692,10 @@ final class Site_Export_Staged_Artifacts {
         return @file_put_contents($this->verified_path, $line, FILE_APPEND) === strlen($line);
     }
 
-    private function remove_verified(string $artifact_id): void {
+    private function remove_verified(string $artifact_id): bool {
         $records = $this->read_verified();
         if (!isset($records[$artifact_id])) {
-            return;
+            return true;
         }
         unset($records[$artifact_id]);
 
@@ -708,6 +709,8 @@ final class Site_Export_Staged_Artifacts {
         $tmp_path = $this->verified_path . '.tmp';
         if (@file_put_contents($tmp_path, $lines) !== strlen($lines) || !@rename($tmp_path, $this->verified_path)) {
             @unlink($tmp_path);
+            return false;
         }
+        return true;
     }
 }
