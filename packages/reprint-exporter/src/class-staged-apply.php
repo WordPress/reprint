@@ -49,6 +49,9 @@
  */
 final class Site_Export_Staged_Apply {
 
+    /** Protected paths reported by name; beyond this, only the count. */
+    private const SKIPPED_PATHS_LIMIT = 1000;
+
     /** @var string */
     private $staging_dir;
 
@@ -158,6 +161,7 @@ final class Site_Export_Staged_Apply {
             // over a path the policy was never going to touch.
             $already_applied = [];
             $protected = [];
+            $skipped_paths = [];
             foreach ($entries as $index => $entry) {
                 $verdict = $this->classify($entry);
                 if ($verdict === 'staged') {
@@ -169,13 +173,19 @@ final class Site_Export_Staged_Apply {
                 }
                 if ($verdict === 'protected') {
                     $protected[$index] = true;
+                    // Callers audit-log each protected path (the
+                    // PRESERVE-LOCAL contract); capped so a 50k-skip
+                    // transfer stays a bounded response.
+                    if (count($skipped_paths) < self::SKIPPED_PATHS_LIMIT) {
+                        $skipped_paths[] = $entry['artifact_id'];
+                    }
                     continue;
                 }
                 return $this->result('rejected', $verdict, $entry['artifact_id']);
             }
 
             if ($check_only) {
-                return $this->result('ready', null, null, 0, count($already_applied), count($protected));
+                return $this->result('ready', null, null, 0, count($already_applied), count($protected), $skipped_paths);
             }
 
             // Apply holds the store's lock, so cleanup below unlinks the
@@ -202,7 +212,7 @@ final class Site_Export_Staged_Apply {
                     // Everything validated, so this is environmental
                     // (permissions, disk). Rerunning apply resumes: moved
                     // entries classify as applied, the rest re-validate.
-                    return $this->result('rejected', 'io_error', $move_error, $applied, count($already_applied), count($protected));
+                    return $this->result('rejected', 'io_error', $move_error, $applied, count($already_applied), count($protected), $skipped_paths);
                 }
                 ++$applied;
             }
@@ -214,7 +224,7 @@ final class Site_Export_Staged_Apply {
             @unlink($this->staging_dir . '/verified/' . $manifest_id);
             $this->clear_cursor_for($entries, $manifest_id);
 
-            return $this->result('applied', null, null, $applied, count($already_applied), count($protected));
+            return $this->result('applied', null, null, $applied, count($already_applied), count($protected), $skipped_paths);
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -513,7 +523,7 @@ final class Site_Export_Staged_Apply {
         return false;
     }
 
-    private function result(string $status, ?string $reason, ?string $detail, int $applied = 0, int $already_applied = 0, int $skipped = 0): array {
+    private function result(string $status, ?string $reason, ?string $detail, int $applied = 0, int $already_applied = 0, int $skipped = 0, array $skipped_paths = []): array {
         return [
             'status' => $status,
             'reason' => $reason,
@@ -521,6 +531,7 @@ final class Site_Export_Staged_Apply {
             'applied' => $applied,
             'already_applied' => $already_applied,
             'skipped' => $skipped,
+            'skipped_paths' => $skipped_paths,
         ];
     }
 }
