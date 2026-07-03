@@ -294,6 +294,16 @@ class StagedPullCliTest extends TestCase
             $this->assertSame(0, $code, $output);
             $this->assertSame('local wins', file_get_contents($mapped . '/index.php'));
             $this->assertSame([], glob($shared . '/*'), 'nothing may appear behind the symlink');
+            // Protection fires at download time (trunk's write-time checks
+            // stay active in staged mode, so protected files are never even
+            // fetched); the apply engine enforces the same policies as a
+            // backstop. Either way, every skip is audit-logged.
+            $audit = (string) @file_get_contents($this->state_dir . '/.import-audit.log');
+            $this->assertStringContainsString(
+                'PRESERVE-LOCAL skip file',
+                $audit,
+                'every protected path is audit-logged'
+            );
             $this->assertSame(
                 str_repeat('reprint!', 40000),
                 file_get_contents($mapped . '/wp-content/uploads/big.bin'),

@@ -4397,6 +4397,21 @@ class ImportClient
         }
 
         @unlink($this->staged_pull_manifest_log());
+        // Same audit contract as write-time preserve-local: every skipped
+        // operation is logged with the PRESERVE-LOCAL prefix.
+        $skipped_paths = is_array($result["skipped_paths"] ?? null) ? $result["skipped_paths"] : [];
+        foreach ($skipped_paths as $protected_path) {
+            $this->audit_log("PRESERVE-LOCAL skip file (kept at apply) | {$protected_path}", false);
+        }
+        if ($result["skipped"] > count($skipped_paths)) {
+            $this->audit_log(
+                sprintf(
+                    "PRESERVE-LOCAL skipped %d more files (path list capped)",
+                    $result["skipped"] - count($skipped_paths),
+                ),
+                false,
+            );
+        }
         $this->audit_log(
             sprintf(
                 "STAGED APPLY COMPLETE | applied=%d already_applied=%d skipped=%d",
