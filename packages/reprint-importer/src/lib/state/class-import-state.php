@@ -346,6 +346,8 @@ class ImportState
     /** @var string|null Webhost detected during preflight. */
     public ?string $webhost = null;
     public bool $follow_symlinks = true;
+    /** @var bool Files download into staging and apply in one rename window. */
+    public bool $staged_apply = false;
     public string $fs_root_nonempty_behavior = 'error';
     public string $filter = 'none';
     /** @var string|null User-Agent that worked during preflight. */
@@ -398,6 +400,7 @@ class ImportState
         $state->version = isset($data['version']) ? (string) $data['version'] : null;
         $state->webhost = isset($data['webhost']) ? (string) $data['webhost'] : null;
         $state->follow_symlinks = (bool) ($data['follow_symlinks'] ?? true);
+        $state->staged_apply = (bool) ($data['staged_apply'] ?? false);
         $state->fs_root_nonempty_behavior = isset($data['fs_root_nonempty_behavior']) ? (string) $data['fs_root_nonempty_behavior'] : 'error';
         $state->filter = isset($data['filter']) ? (string) $data['filter'] : 'none';
         $state->user_agent = isset($data['user_agent']) ? (string) $data['user_agent'] : null;
@@ -436,6 +439,7 @@ class ImportState
             'version' => $this->version,
             'webhost' => $this->webhost,
             'follow_symlinks' => $this->follow_symlinks,
+            'staged_apply' => $this->staged_apply,
             'fs_root_nonempty_behavior' => $this->fs_root_nonempty_behavior,
             'filter' => $this->filter,
             'user_agent' => $this->user_agent,

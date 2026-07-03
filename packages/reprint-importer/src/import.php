@@ -1238,6 +1238,15 @@ class ImportClient
     /** Artifact id the push manifest stages under; never applied itself. */
     private const PUSH_MANIFEST_ID = '.reprint-push-manifest.jsonl';
 
+    /** Artifact id the staged pull manifest stages under. */
+    private const PULL_MANIFEST_ID = '.reprint-pull-manifest.jsonl';
+
+    /** @var bool Files download into staging and apply in one rename window. */
+    private $staged_apply_mode = false;
+
+    /** @var Site_Export_Staged_Artifacts|null Lazy staged pull store. */
+    private $staged_pull_store = null;
+
     public function __construct(string $remote_url, string $state_dir, string $fs_root)
     {
         $this->remote_url = rtrim($remote_url, "?&");
@@ -1665,6 +1674,16 @@ class ImportClient
             $this->save_state($this->state);
         } else {
             $this->fs_root_nonempty_behavior = $this->import_state()->fs_root_nonempty_behavior ?? 'error';
+        }
+
+        // Persist staged apply mode like the flags above: a resumed pull
+        // must keep staging where the interrupted run was staging.
+        if (isset($options["staged_apply"])) {
+            $this->staged_apply_mode = (bool) $options["staged_apply"];
+            $this->import_state()->staged_apply = $this->staged_apply_mode;
+            $this->save_state($this->state);
+        } else {
+            $this->staged_apply_mode = !empty($this->import_state()->staged_apply);
         }
 
         // Persist filter in state so it survives across resume cycles.
@@ -2809,6 +2828,13 @@ class ImportClient
             file_exists($this->index_file) &&
             filesize($this->index_file) > 0;
 
+        // Staged mode: refuse now if the apply window could never run —
+        // a state dir on another filesystem above all — not after the
+        // download has been paid for.
+        if ($this->staged_apply_mode) {
+            $this->assert_staged_pull_ready();
+        }
+
         // Resuming an in-progress sync
         if ($has_progress) {
             // Don't reset files_imported here — it counts files within
@@ -3063,6 +3089,7 @@ class ImportClient
                 // Essential files are done — mark the sync as complete.
                 // The skipped list stays on disk for a later
                 // --filter=skipped-earlier run.
+                $this->run_staged_pull_apply();
                 $this->import_state()->active_resumable_command->current_stage = null;
                 $this->save_state($this->state);
                 $this->audit_log(
@@ -3081,6 +3108,7 @@ class ImportClient
                 );
                 $this->write_status_file();
             } else {
+                $this->run_staged_pull_apply();
                 $this->import_state()->active_resumable_command->current_stage = null;
                 $this->save_state($this->state);
                 $stage = null;
@@ -3097,6 +3125,7 @@ class ImportClient
                 $this->save_state($this->state);
                 return;
             }
+            $this->run_staged_pull_apply();
             $this->import_state()->active_resumable_command->current_stage = null;
             $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
             $this->save_state($this->state);
@@ -4172,6 +4201,218 @@ class ImportClient
         );
         $retryable = ["transport_failed", "busy_exhausted", "status_unavailable", "server_io_error"];
         return in_array($fields["abort_reason"] ?? null, $retryable, true) ? 2 : 1;
+    }
+
+    private function staged_pull_staging_dir(): string
+    {
+        return $this->state_dir . "/.pull-staging";
+    }
+
+    /** The manifest log accumulates one line per staged file across resumes. */
+    private function staged_pull_manifest_log(): string
+    {
+        return $this->state_dir . "/.pull-staged-manifest.jsonl";
+    }
+
+    private function staged_pull_store(): Site_Export_Staged_Artifacts
+    {
+        if ($this->staged_pull_store === null) {
+            $this->staged_pull_store = new Site_Export_Staged_Artifacts($this->staged_pull_staging_dir());
+        }
+        return $this->staged_pull_store;
+    }
+
+    private function staged_pull_apply_engine(): Site_Export_Staged_Apply
+    {
+        $preserve_local = $this->fs_root_nonempty_behavior === "preserve-local";
+        return new Site_Export_Staged_Apply([
+            "staging_dir" => $this->staged_pull_staging_dir(),
+            "target_root" => $this->fs_root,
+            // Preserve-local keeps its write-time meaning at apply time:
+            // occupied paths win, and nothing is created through a
+            // symlinked directory.
+            "on_existing" => $preserve_local ? "skip" : "replace",
+            "refuse_symlinked_parents" => $preserve_local,
+        ]);
+    }
+
+    /** The fs-root-relative artifact id for a mapped local path. */
+    private function staged_pull_artifact_id(string $local_path): string
+    {
+        // The path mapper may hand back a resolved fs-root (macOS /var is
+        // a symlink to /private/var); accept either spelling.
+        $roots = [rtrim($this->fs_root, "/")];
+        $real_root = realpath($this->fs_root);
+        if (is_string($real_root) && $real_root !== "") {
+            $roots[] = rtrim($real_root, "/");
+        }
+        foreach (array_unique($roots) as $root) {
+            if (strpos($local_path, $root . "/") === 0) {
+                return substr($local_path, strlen($root) + 1);
+            }
+        }
+        throw new RuntimeException(
+            "Staged pull cannot stage a path outside --fs-root: {$local_path}",
+        );
+    }
+
+    /**
+     * Refuses a staged pull the apply step could never finish — above all
+     * a state dir on a different filesystem than --fs-root, where the
+     * rename-only apply would reject cross_device only after the download.
+     * The probe id never exists, so this checks the environment only.
+     */
+    private function assert_staged_pull_ready(): void
+    {
+        if (!is_dir($this->fs_root)) {
+            @mkdir($this->fs_root, 0755, true);
+        }
+        $probe = $this->staged_pull_apply_engine()->apply(".reprint-pull-probe", true);
+        if ($probe["status"] !== "ready") {
+            throw new RuntimeException(
+                "Staged apply cannot run here: " . ($probe["reason"] ?? $probe["status"]) .
+                    " (" . ($probe["detail"] ?? "") . "). Put --state-dir on the same " .
+                    "filesystem as --fs-root, or drop --staged-apply.",
+            );
+        }
+    }
+
+    /**
+     * Stages one body buffer for the file the stream is delivering.
+     *
+     * context->file_bytes_written tracks the STREAM position; the store
+     * enforces its own committed offset. Bytes the server re-sends after a
+     * resume land as duplicates and only the unseen tail is appended — the
+     * same frontier handling the push endpoint uses.
+     */
+    private function staged_pull_write_chunk(StreamingContext $context, string $data): void
+    {
+        $store = $this->staged_pull_store();
+        $artifact_id = $context->staged_artifact_id;
+        $offset = $context->file_bytes_written;
+        $committed = $store->status($artifact_id)["committed_bytes"];
+
+        if ($committed >= $offset + strlen($data)) {
+            $context->file_bytes_written = $offset + strlen($data);
+            return;
+        }
+        if ($committed > $offset) {
+            $data = substr($data, $committed - $offset);
+            $offset = $committed;
+        }
+
+        $result = $store->append($artifact_id, $offset, $data);
+        if ($result["status"] === "accepted" || $result["status"] === "duplicate") {
+            $context->file_bytes_written = $result["committed_bytes"];
+            return;
+        }
+        throw new RuntimeException(
+            "Staged write failed for {$artifact_id}: " .
+                ($result["reason"] ?? $result["status"]) .
+                " " . ($result["detail"] ?? ""),
+        );
+    }
+
+    /**
+     * Verifies a fully-streamed file and records it for the apply window.
+     *
+     * @return string|null Failure reason, or null when the file verified.
+     */
+    private function staged_pull_finalize_file(string $artifact_id, int $expected_size, int $ctime): ?string
+    {
+        $result = $this->staged_pull_store()->finalize($artifact_id, $expected_size);
+        if ($result["status"] !== "verified") {
+            return ($result["reason"] ?? $result["status"]) . " " . ($result["detail"] ?? "");
+        }
+        if ($ctime) {
+            // Rename preserves this mtime, which delta syncs compare
+            // against the remote ctime.
+            @touch($this->staged_pull_staging_dir() . "/files/" . $artifact_id, $ctime);
+        }
+        $line = json_encode(["artifact_id" => $artifact_id, "size" => $expected_size]) . "\n";
+        @file_put_contents($this->staged_pull_manifest_log(), $line, FILE_APPEND);
+        return null;
+    }
+
+    /**
+     * Applies everything staged so far in one rename window.
+     *
+     * Runs at each point the file phase completes. The manifest log
+     * accumulates across resumes and is deduplicated here; entries an
+     * earlier window already applied classify as applied and only consume
+     * their leftover markers.
+     */
+    private function run_staged_pull_apply(): void
+    {
+        if (!$this->staged_apply_mode) {
+            return;
+        }
+
+        $entries = [];
+        $raw = @file_get_contents($this->staged_pull_manifest_log());
+        if (is_string($raw) && $raw !== "") {
+            foreach (explode("\n", $raw) as $line) {
+                $record = json_decode($line, true);
+                if (
+                    is_array($record)
+                    && is_string($record["artifact_id"] ?? null)
+                    && is_int($record["size"] ?? null)
+                ) {
+                    $entries[$record["artifact_id"]] = $record["size"];
+                }
+            }
+        }
+        if ($entries === []) {
+            return;
+        }
+
+        $lines = "";
+        foreach ($entries as $artifact_id => $size) {
+            $lines .= json_encode(["artifact_id" => $artifact_id, "size" => $size]) . "\n";
+        }
+
+        $store = $this->staged_pull_store();
+        $store->discard(self::PULL_MANIFEST_ID);
+        $offset = 0;
+        foreach (str_split($lines, 262144) as $piece) {
+            $appended = $store->append(self::PULL_MANIFEST_ID, $offset, $piece);
+            if ($appended["status"] !== "accepted") {
+                throw new RuntimeException(
+                    "Staged apply could not stage its manifest: " . ($appended["reason"] ?? ""),
+                );
+            }
+            $offset = $appended["committed_bytes"];
+        }
+        if ($store->finalize(self::PULL_MANIFEST_ID, strlen($lines))["status"] !== "verified") {
+            throw new RuntimeException("Staged apply could not verify its manifest.");
+        }
+
+        $this->audit_log("STAGED APPLY | " . count($entries) . " files", true);
+        $result = $this->staged_pull_apply_engine()->apply(self::PULL_MANIFEST_ID);
+        if ($result["status"] !== "applied") {
+            throw new RuntimeException(
+                "Staged apply failed: " . ($result["reason"] ?? $result["status"]) .
+                    " (" . ($result["detail"] ?? "") . ")",
+            );
+        }
+
+        @unlink($this->staged_pull_manifest_log());
+        $this->audit_log(
+            sprintf(
+                "STAGED APPLY COMPLETE | applied=%d already_applied=%d skipped=%d",
+                $result["applied"],
+                $result["already_applied"],
+                $result["skipped"],
+            ),
+            true,
+        );
+        $this->output_progress([
+            "type" => "staged_apply",
+            "status" => "complete",
+            "applied" => $result["applied"],
+            "already_applied" => $result["already_applied"],
+            "skipped" => $result["skipped"],
+        ], true);
     }
 
     /**
@@ -6154,7 +6395,11 @@ class ImportClient
         // the new cursor, so we'll re-fetch the same data.
         $tracked_file = $this->import_state()->current_file ?? null;
         $tracked_bytes = $this->import_state()->current_file_bytes ?? null;
-        if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
+        // Staged mode must not run this: the tracked path is the FINAL
+        // location, which during a delta still holds the previous version
+        // of the file — truncating it would destroy live content the apply
+        // step has not replaced yet. The store trims its own tails.
+        if (!$this->staged_apply_mode && $tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
             $actual_size = filesize($tracked_file);
             if ($actual_size > $tracked_bytes) {
                 $this->audit_log(
@@ -6193,7 +6438,22 @@ class ImportClient
         // request, re-open it in append mode so continuation chunks (where
         // is_first=false) can still be written.  Without this, the context
         // starts with file_handle=null and non-first chunks are silently dropped.
-        if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
+        if ($this->staged_apply_mode && $tracked_file !== null && $tracked_bytes !== null) {
+            // Staged mode: nothing exists at the final path. Continuation
+            // chunks resume at the stream position saved with the cursor;
+            // the store's frontier absorbs any replayed prefix.
+            $context->staged_artifact_id = $this->staged_pull_artifact_id($tracked_file);
+            $context->file_path = $tracked_file;
+            $context->file_bytes_written = $tracked_bytes;
+            $this->audit_log(
+                sprintf(
+                    "RESUME STAGED FILE | %s at stream offset %d",
+                    $tracked_file,
+                    $tracked_bytes,
+                ),
+                true,
+            );
+        } elseif ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
             $context->file_handle = fopen($tracked_file, "ab");
             if ($context->file_handle) {
                 $context->file_path = $tracked_file;
@@ -6240,6 +6500,12 @@ class ImportClient
                     if ($context->file_handle && $context->file_path) {
                         // Flush to ensure bytes are on disk before saving state
                         fflush($context->file_handle);
+                        $this->import_state()->current_file = $context->file_path;
+                        $this->import_state()->current_file_bytes = $context->file_bytes_written;
+                    } elseif ($context->staged_artifact_id !== null && $context->file_path) {
+                        // Staged mode: every append already flushed. Save
+                        // the stream position alongside the cursor so a
+                        // resumed request re-enters at the same offset.
                         $this->import_state()->current_file = $context->file_path;
                         $this->import_state()->current_file_bytes = $context->file_bytes_written;
                     } else {
@@ -9164,6 +9430,7 @@ class ImportClient
             $context->skip_current_file = false;
 
             if (
+                !$this->staged_apply_mode &&
                 (file_exists($local_path) || is_link($local_path)) &&
                 (!is_file($local_path) || is_link($local_path))
             ) {
@@ -9224,7 +9491,15 @@ class ImportClient
         }
 
         // Open file handle on first chunk
-        if ($is_first) {
+        if ($is_first && $this->staged_apply_mode) {
+            // Bytes go to the staged store, not the live tree; the stream
+            // position starts at 0 and the store's frontier absorbs any
+            // committed prefix a resumed server re-sends.
+            $context->staged_artifact_id = $this->staged_pull_artifact_id($local_path);
+            $context->file_path = $local_path;
+            $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
+            $context->file_bytes_written = 0;
+        } elseif ($is_first) {
             // Close previous file if any
             if ($context->file_handle) {
                 fclose($context->file_handle);
@@ -9268,7 +9543,15 @@ class ImportClient
 
         // Write body data if present
         if (isset($chunk["body"]) && $chunk["body"] !== "") {
-            if ($context->file_handle) {
+            if ($this->staged_apply_mode) {
+                if ($context->staged_artifact_id === null) {
+                    // Mid-file continuation after a restart that never
+                    // checkpointed this file: the server re-sends it from
+                    // the start, so the stream position begins at 0.
+                    $context->staged_artifact_id = $this->staged_pull_artifact_id($local_path);
+                }
+                $this->staged_pull_write_chunk($context, $chunk["body"]);
+            } elseif ($context->file_handle) {
                 $data = $chunk["body"];
                 $bytes = fwrite($context->file_handle, $data);
                 if ($bytes === false || $bytes !== strlen($data)) {
@@ -9280,6 +9563,57 @@ class ImportClient
                 }
                 $context->file_bytes_written += $bytes;
             }
+        }
+
+        // Complete a staged file on last chunk
+        if ($is_last && $this->staged_apply_mode && $context->staged_artifact_id !== null) {
+            $file_size = (int) ($headers["x-file-size"] ?? 0);
+            $file_changed = ($headers["x-file-changed"] ?? "0") === "1";
+
+            if ($file_changed) {
+                // Same tolerance as the direct path: the exporter saw the
+                // file change mid-stream, so drop the staged copy and let
+                // the next delta refetch it.
+                $this->staged_pull_store()->discard($context->staged_artifact_id);
+                $this->audit_log(
+                    "  File changed during stream; staged copy discarded",
+                    true,
+                );
+            } else {
+                $finalize_error = $this->staged_pull_finalize_file(
+                    $context->staged_artifact_id,
+                    $file_size,
+                    $context->file_ctime ?? 0,
+                );
+                if ($finalize_error !== null) {
+                    $this->staged_pull_store()->discard($context->staged_artifact_id);
+                    $this->audit_log(
+                        "  Staged file did not verify ({$finalize_error}); discarded for refetch",
+                        true,
+                    );
+                } elseif ($context->file_ctime) {
+                    $this->upsert_index_entry(
+                        $path,
+                        $context->file_ctime,
+                        $file_size,
+                        "file",
+                    );
+                    $this->files_imported++;
+                    $this->clear_volatile_file($path);
+                    $this->audit_log(
+                        sprintf("  Staged (%d bytes)", $file_size),
+                        false,
+                    );
+                }
+            }
+
+            $context->staged_artifact_id = null;
+            $context->file_path = null;
+            $context->file_ctime = null;
+            $context->file_bytes_written = 0;
+            $this->import_state()->current_file = null;
+            $this->import_state()->current_file_bytes = null;
+            return;
         }
 
         // Close on last chunk
@@ -11075,6 +11409,7 @@ class ImportClient
             "version" => null,
             "webhost" => null,
             "follow_symlinks" => true,
+            "staged_apply" => false,
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
             "user_agent" => null,
@@ -11783,6 +12118,8 @@ class StreamingContext
     public $saw_completion = false;
     // When true, skip writing the current file (preserve-local mode)
     public $skip_current_file = false;
+    // Staged pull: fs-root-relative artifact id of the file being staged
+    public $staged_artifact_id = null;
 }
 
 /**
@@ -12172,6 +12509,15 @@ if (
             'help' => 'After staging completes, apply the transfer into the remote tree ' .
                 '(rename-only; the environment is probed before any upload)',
             'commands' => ['push-files'],
+        ],
+        [
+            'name' => 'staged-apply',
+            'type' => 'flag',
+            'target' => 'staged_apply',
+            'help' => 'Download into a staging area under --state-dir and move files into ' .
+                '--fs-root in one rename window at the end, so the tree never holds a ' .
+                'half-written file (requires --state-dir and --fs-root on one filesystem)',
+            'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
