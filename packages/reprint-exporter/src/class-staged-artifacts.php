@@ -46,8 +46,13 @@
  * Layout and state follow the pull importer's mechanics. Artifact bytes live
  * at their plain target-relative paths under files/ — no suffixes, so any
  * name a site can contain stages verbatim — and progress lives outside the
- * mirror: state.json holds the cursor for the single in-flight artifact and
- * verified.jsonl appends one line per artifact finalize() accepted.
+ * mirror: state.json holds the cursor for the single in-flight artifact,
+ * and each artifact finalize() accepted has a marker at the same relative
+ * path under verified/, holding the verified size. Markers, not a shared
+ * log, because the already-verified check runs on every append: one stat
+ * per call no matter how many artifacts a transfer has finished, where a
+ * log would be re-read and re-parsed in full each time and a 50k-file
+ * push would spend its appends parsing it.
  *
  * Transfers are sequential, like pull: progress is tracked for one artifact
  * at a time — the one currently being uploaded. That artifact can be
@@ -64,9 +69,9 @@
  * "busy" instead of interleaving writes. The lock needs its own
  * never-replaced file: state.json commits by rename, and renaming a locked
  * file strands the held flock on the orphaned inode while the next opener
- * locks the fresh one. Readers stay lock-free — state.json is rename-atomic,
- * verified.jsonl is append-only, and committed_bytes only grows — so
- * status() always reads a safe resume hint.
+ * locks the fresh one. Readers stay lock-free — state.json and verified
+ * markers appear whole or not at all (both commit by rename), and
+ * committed_bytes only grows — so status() always reads a safe resume hint.
  *
  * Contract:
  *
@@ -78,7 +83,7 @@
  *   record moved, in that order — a crash mid-step leaves an uncommitted
  *   tail that the next append discards.
  * - finalize() compares the assembled size against the plan-declared total
- *   before recording the artifact in verified.jsonl; append() refuses
+ *   before writing the artifact's verified marker; append() refuses
  *   verified artifacts.
  * - An artifact id is the files/-relative path the artifact will be applied
  *   from, mirroring the target tree — apply resolves artifacts by id, never
@@ -101,7 +106,10 @@ final class Site_Export_Staged_Artifacts {
     private $state_path;
 
     /** @var string */
-    private $verified_path;
+    private $verified_dir;
+
+    /** @var string */
+    private $verified_tmp_path;
 
     /** @var string */
     private $lock_path;
@@ -110,7 +118,12 @@ final class Site_Export_Staged_Artifacts {
         $base = rtrim($staging_dir, '/');
         $this->files_dir = $base . '/files';
         $this->state_path = $base . '/state.json';
-        $this->verified_path = $base . '/verified.jsonl';
+        $this->verified_dir = $base . '/verified';
+        // One reusable temp file, outside verified/: a marker's own ".tmp"
+        // sibling would collide with the marker of an artifact actually
+        // named that way. Marker writes happen under the lock, so a single
+        // temp path cannot race itself.
+        $this->verified_tmp_path = $base . '/verified.tmp';
         $this->lock_path = $base . '/lock';
     }
 
@@ -178,13 +191,13 @@ final class Site_Export_Staged_Artifacts {
                 ];
             }
 
-            $verified = $this->read_verified();
-            if (isset($verified[$artifact_id])) {
+            $verified_size = $this->read_verified_size($artifact_id);
+            if ($verified_size !== null) {
                 return [
                     'status' => 'rejected',
                     'reason' => 'already_verified',
                     'detail' => null,
-                    'committed_bytes' => $verified[$artifact_id],
+                    'committed_bytes' => $verified_size,
                 ];
             }
 
@@ -352,8 +365,8 @@ final class Site_Export_Staged_Artifacts {
                 ];
             }
 
-            $verified = $this->read_verified();
-            if (isset($verified[$artifact_id])) {
+            $verified_size = $this->read_verified_size($artifact_id);
+            if ($verified_size !== null) {
                 // The record can outlive the file — a discard killed between
                 // its steps, or external cleanup. There is nothing left to
                 // apply, so verified must not be re-affirmed.
@@ -362,16 +375,16 @@ final class Site_Export_Staged_Artifacts {
                         'status' => 'rejected',
                         'reason' => 'missing',
                         'detail' => 'verified_record',
-                        'committed_bytes' => $verified[$artifact_id],
+                        'committed_bytes' => $verified_size,
                         'path' => null,
                     ];
                 }
-                if ($verified[$artifact_id] === $expected_total_bytes) {
+                if ($verified_size === $expected_total_bytes) {
                     return [
                         'status' => 'verified',
                         'reason' => null,
                         'detail' => null,
-                        'committed_bytes' => $verified[$artifact_id],
+                        'committed_bytes' => $verified_size,
                         'path' => $file_path,
                     ];
                 }
@@ -379,7 +392,7 @@ final class Site_Export_Staged_Artifacts {
                     'status' => 'rejected',
                     'reason' => 'size_mismatch',
                     'detail' => 'verified_record',
-                    'committed_bytes' => $verified[$artifact_id],
+                    'committed_bytes' => $verified_size,
                     'path' => null,
                 ];
             }
@@ -443,7 +456,7 @@ final class Site_Export_Staged_Artifacts {
                 ];
             }
 
-            if (!$this->append_verified($artifact_id, $expected_total_bytes)) {
+            if (!$this->write_verified_marker($artifact_id, $expected_total_bytes)) {
                 return [
                     'status' => 'rejected',
                     'reason' => 'io_error',
@@ -489,11 +502,11 @@ final class Site_Export_Staged_Artifacts {
             ];
         }
 
-        $verified = $this->read_verified();
-        if (isset($verified[$artifact_id])) {
+        $verified_size = $this->read_verified_size($artifact_id);
+        if ($verified_size !== null) {
             return [
                 'exists' => file_exists($file_path),
-                'committed_bytes' => $verified[$artifact_id],
+                'committed_bytes' => $verified_size,
                 'verified' => true,
             ];
         }
@@ -551,7 +564,7 @@ final class Site_Export_Staged_Artifacts {
             if ($state['artifact_id'] === $artifact_id && !$this->write_state(null, 0)) {
                 return false;
             }
-            return $this->remove_verified($artifact_id);
+            return $this->remove_verified_marker($artifact_id);
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -651,66 +664,53 @@ final class Site_Export_Staged_Artifacts {
     }
 
     /**
-     * Reads the verified-artifact records: artifact id to verified size.
-     *
-     * Malformed lines — a tail torn by a crash mid-append — are skipped, so
-     * the worst case is re-finalizing an artifact, never trusting a torn
-     * record.
-     *
-     * @return array<string,int>
+     * The verified marker mirrors the artifact's relative path under
+     * verified/, so lookup is one stat regardless of transfer size.
      */
-    private function read_verified(): array {
-        $raw = @file_get_contents($this->verified_path);
-        if ($raw === false || $raw === '') {
-            return [];
-        }
-
-        $records = [];
-        foreach (explode("\n", $raw) as $line) {
-            $record = json_decode($line, true);
-            if (
-                !is_array($record)
-                || !is_string($record['artifact_id'] ?? null)
-                || !is_int($record['size'] ?? null)
-                || $record['size'] < 0
-            ) {
-                continue;
-            }
-            $records[$record['artifact_id']] = $record['size'];
-        }
-        return $records;
+    private function verified_marker_path(string $artifact_id): string {
+        return $this->verified_dir . '/' . $artifact_id;
     }
 
-    private function append_verified(string $artifact_id, int $size): bool {
-        // The leading newline seals any torn tail a killed writer left
-        // behind onto its own (skipped) line, so this record stays
-        // parseable. Blank lines between records are skipped on read.
-        $line = "\n" . json_encode([
-            'artifact_id' => $artifact_id,
-            'size' => $size,
-        ]) . "\n";
-        return @file_put_contents($this->verified_path, $line, FILE_APPEND) === strlen($line);
+    /**
+     * Reads an artifact's verified size, or null when it is not verified.
+     *
+     * A malformed marker — torn by a crash, since markers commit by rename
+     * this means external interference — reads as not verified, so the
+     * worst case is re-finalizing an artifact, never trusting a torn record.
+     */
+    private function read_verified_size(string $artifact_id): ?int {
+        $raw = @file_get_contents($this->verified_marker_path($artifact_id));
+        if ($raw === false) {
+            return null;
+        }
+        $record = json_decode($raw, true);
+        if (!is_array($record) || !is_int($record['size'] ?? null) || $record['size'] < 0) {
+            return null;
+        }
+        return $record['size'];
     }
 
-    private function remove_verified(string $artifact_id): bool {
-        $records = $this->read_verified();
-        if (!isset($records[$artifact_id])) {
-            return true;
+    private function write_verified_marker(string $artifact_id, int $size): bool {
+        $marker_path = $this->verified_marker_path($artifact_id);
+        if (!$this->ensure_parent_dir($marker_path)) {
+            return false;
         }
-        unset($records[$artifact_id]);
-
-        $lines = '';
-        foreach ($records as $id => $size) {
-            $lines .= json_encode([
-                'artifact_id' => $id,
-                'size' => $size,
-            ]) . "\n";
+        $json = json_encode(['size' => $size]);
+        // Same discipline as the cursor: a short write (disk full) must
+        // never become a marker, so write whole to the temp file and rename.
+        if (@file_put_contents($this->verified_tmp_path, $json) !== strlen($json)) {
+            @unlink($this->verified_tmp_path);
+            return false;
         }
-        $tmp_path = $this->verified_path . '.tmp';
-        if (@file_put_contents($tmp_path, $lines) !== strlen($lines) || !@rename($tmp_path, $this->verified_path)) {
-            @unlink($tmp_path);
+        if (!@rename($this->verified_tmp_path, $marker_path)) {
+            @unlink($this->verified_tmp_path);
             return false;
         }
         return true;
+    }
+
+    private function remove_verified_marker(string $artifact_id): bool {
+        $marker_path = $this->verified_marker_path($artifact_id);
+        return !file_exists($marker_path) || @unlink($marker_path);
     }
 }
