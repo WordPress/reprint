@@ -47,10 +47,13 @@
  * mirror: state.json holds the cursor for the single in-flight artifact and
  * verified.jsonl appends one line per artifact finalize() accepted.
  *
- * Transfers are sequential, like pull: one artifact is in flight at a time
- * and the cursor tracks only it. Writing chunk 0 of another artifact moves
- * the cursor there; an unfinished predecessor keeps its bytes on disk but
- * restarts from offset 0 when the sender returns to it.
+ * Transfers are sequential, like pull: progress is tracked for one artifact
+ * at a time — the one currently being uploaded. That artifact can be
+ * interrupted and resumed freely, because the cursor survives across
+ * requests. Starting a different artifact forgets the unfinished one's
+ * progress: its partial bytes stay under files/, but returning to it means
+ * re-uploading from offset 0. Senders must finish or discard one artifact
+ * before starting the next; interleaving two uploads is not supported.
  *
  * Locking: every mutator — write_chunks(), finalize(), discard() — holds one
  * exclusive non-blocking flock on the lock file for its whole call, so a
