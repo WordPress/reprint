@@ -250,6 +250,168 @@ final class StagedArtifactsTest extends TestCase
     }
 
     // ---------------------------------------------------------------
+    // Crash recovery: partial states a kill can leave behind
+    // ---------------------------------------------------------------
+
+    public function testEveryCallCanRunInItsOwnProcess(): void
+    {
+        // Each call constructs its own store instance — no shared in-memory
+        // state, as if every step ran in a separate PHP request.
+        $step = fn() => new Site_Export_Staged_Artifacts($this->staging_dir);
+
+        $this->assertSame('accepted', $step()->append('a.txt', 0, 'aaa')['status']);
+        $this->assertSame('accepted', $step()->append('a.txt', 3, 'AAA')['status']);
+        $this->assertSame('verified', $step()->finalize('a.txt', 6)['status']);
+        $this->assertSame('accepted', $step()->append('b.txt', 0, 'bb')['status']);
+        $this->assertSame('verified', $step()->finalize('b.txt', 2)['status']);
+        $this->assertSame('verified', $step()->finalize('empty.txt', 0)['status']);
+
+        $this->assertSame('aaaAAA', file_get_contents($this->staging_dir . '/files/a.txt'));
+        $this->assertSame('bb', file_get_contents($this->staging_dir . '/files/b.txt'));
+        $this->assertTrue($step()->status('a.txt')['verified']);
+    }
+
+    public function testKilledCursorWriteLeavesRecoverableState(): void
+    {
+        $store = $this->makeStore();
+        $store->append('artifact-1', 0, 'first');
+
+        // Simulate a kill inside write_state: the temp record was written,
+        // the rename never happened, and the appended bytes sit beyond the
+        // still-old cursor.
+        file_put_contents($this->staging_dir . '/state.json.tmp', '{"artifact_id":"artifact-1"');
+        file_put_contents($this->staging_dir . '/files/artifact-1', 'second', FILE_APPEND);
+
+        $this->assertSame(5, $store->status('artifact-1')['committed_bytes']);
+        $this->assertSame('accepted', $store->append('artifact-1', 5, 'second')['status']);
+        $verified = $store->finalize('artifact-1', 11);
+        $this->assertSame('verified', $verified['status']);
+        $this->assertSame('firstsecond', file_get_contents($verified['path']));
+    }
+
+    public function testTornVerifiedRecordIsIgnoredAndRefinalizeRecovers(): void
+    {
+        $store = $this->makeStore();
+        $store->append('artifact-a', 0, 'aaa');
+        $store->finalize('artifact-a', 3);
+        $store->append('artifact-b', 0, 'bbbb');
+
+        // Simulate a kill halfway through recording artifact-b as verified:
+        // the record file ends in a torn line.
+        file_put_contents(
+            $this->staging_dir . '/verified.jsonl',
+            '{"artifact_id":"artifact-b","si',
+            FILE_APPEND
+        );
+
+        $this->assertFalse($store->status('artifact-b')['verified']);
+        $this->assertTrue($store->status('artifact-a')['verified']);
+        $this->assertSame('verified', $store->finalize('artifact-b', 4)['status']);
+        $this->assertTrue($store->status('artifact-b')['verified']);
+    }
+
+    public function testFinalizeKilledBeforeClearingCursorStaysConsistent(): void
+    {
+        $store = $this->makeStore();
+        $store->append('artifact-1', 0, 'payload');
+
+        // Simulate a kill after the verified record landed but before the
+        // cursor was cleared.
+        file_put_contents(
+            $this->staging_dir . '/verified.jsonl',
+            "\n" . json_encode(['artifact_id' => 'artifact-1', 'size' => 7]) . "\n",
+            FILE_APPEND
+        );
+
+        $stale = $store->append('artifact-1', 7, 'more');
+        $this->assertSame(['rejected', 'already_verified'], [$stale['status'], $stale['reason']]);
+        $this->assertSame('verified', $store->finalize('artifact-1', 7)['status']);
+        $this->assertSame('accepted', $store->append('artifact-2', 0, 'next')['status']);
+    }
+
+    public function testVerifiedRecordWithoutTheArtifactFileReportsMissing(): void
+    {
+        $store = $this->makeStore();
+        $store->append('artifact-1', 0, 'payload');
+        $store->finalize('artifact-1', 7);
+        unlink($this->staging_dir . '/files/artifact-1');
+
+        $refinalized = $store->finalize('artifact-1', 7);
+
+        $this->assertSame(
+            ['rejected', 'missing', 'verified_record'],
+            [$refinalized['status'], $refinalized['reason'], $refinalized['detail']]
+        );
+
+        // Recovery: discard the orphaned record, then upload from scratch.
+        $this->assertTrue($store->discard('artifact-1'));
+        $this->assertSame('accepted', $store->append('artifact-1', 0, 'payload')['status']);
+        $this->assertSame('verified', $store->finalize('artifact-1', 7)['status']);
+    }
+
+    public function testDiscardKilledMidwayIsRetriable(): void
+    {
+        // Window 1: the artifact file was unlinked, the cursor survived.
+        $store = $this->makeStore();
+        $store->append('artifact-1', 0, 'first');
+        unlink($this->staging_dir . '/files/artifact-1');
+
+        $this->assertTrue($store->discard('artifact-1'));
+        $this->assertSame(0, $store->status('artifact-1')['committed_bytes']);
+        $this->assertSame('accepted', $store->append('artifact-1', 0, 'fresh')['status']);
+
+        // Window 2: the cursor was cleared, the verified record survived.
+        $store->finalize('artifact-1', 5);
+        unlink($this->staging_dir . '/files/artifact-1');
+
+        $this->assertTrue($store->discard('artifact-1'));
+        $this->assertFalse($store->status('artifact-1')['verified']);
+        $this->assertSame('accepted', $store->append('artifact-1', 0, 'again')['status']);
+    }
+
+    public function testArtifactPathBlockedByAnotherEntryIsATypedError(): void
+    {
+        $store = $this->makeStore();
+
+        // A directory sits where the artifact file should go.
+        $store->append('theme/style.css', 0, 'body{}');
+        $blocked_by_dir = $store->append('theme', 0, 'zip');
+        $this->assertSame(
+            ['rejected', 'io_error', 'open_artifact_file'],
+            [$blocked_by_dir['status'], $blocked_by_dir['reason'], $blocked_by_dir['detail']]
+        );
+
+        // A file sits where a parent directory should go.
+        $store->append('plugin.php', 0, '<?php');
+        $blocked_by_file = $store->append('plugin.php/readme.txt', 0, 'hi');
+        $this->assertSame(
+            ['rejected', 'io_error', 'create_staging_dir'],
+            [$blocked_by_file['status'], $blocked_by_file['reason'], $blocked_by_file['detail']]
+        );
+    }
+
+    public function testUnwritableStagingDirectoryIsATypedError(): void
+    {
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $this->markTestSkipped('Permission checks do not bind as root.');
+        }
+
+        mkdir($this->staging_dir, 0700, true);
+        chmod($this->staging_dir, 0500);
+        $store = $this->makeStore();
+
+        $result = $store->append('artifact-1', 0, 'bytes');
+        $this->assertSame(
+            ['rejected', 'io_error', 'open_lock_file'],
+            [$result['status'], $result['reason'], $result['detail']]
+        );
+
+        // The next run recovers once the environment does.
+        chmod($this->staging_dir, 0700);
+        $this->assertSame('accepted', $store->append('artifact-1', 0, 'bytes')['status']);
+    }
+
+    // ---------------------------------------------------------------
     // Input validation
     // ---------------------------------------------------------------
 

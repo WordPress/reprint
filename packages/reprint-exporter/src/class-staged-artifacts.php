@@ -354,6 +354,18 @@ final class Site_Export_Staged_Artifacts {
 
             $verified = $this->read_verified();
             if (isset($verified[$artifact_id])) {
+                // The record can outlive the file — a discard killed between
+                // its steps, or external cleanup. There is nothing left to
+                // apply, so verified must not be re-affirmed.
+                if (!file_exists($file_path)) {
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'missing',
+                        'detail' => 'verified_record',
+                        'committed_bytes' => $verified[$artifact_id],
+                        'path' => null,
+                    ];
+                }
                 if ($verified[$artifact_id] === $expected_total_bytes) {
                     return [
                         'status' => 'verified',
@@ -497,6 +509,10 @@ final class Site_Export_Staged_Artifacts {
     /**
      * Remove all staged data and records for an artifact. Safe to call for
      * unknown ids.
+     *
+     * Retry until true: a discard killed between its unlink and record
+     * updates leaves a partial state that only another discard fully
+     * cleans up. Every partial state is retriable.
      *
      * @return bool False when a concurrent writer holds the store — an
      *              unguarded unlink would let that writer's commit resurrect
@@ -665,7 +681,10 @@ final class Site_Export_Staged_Artifacts {
     }
 
     private function append_verified(string $artifact_id, int $size): bool {
-        $line = json_encode([
+        // The leading newline seals any torn tail a killed writer left
+        // behind onto its own (skipped) line, so this record stays
+        // parseable. Blank lines between records are skipped on read.
+        $line = "\n" . json_encode([
             'artifact_id' => $artifact_id,
             'size' => $size,
         ]) . "\n";
