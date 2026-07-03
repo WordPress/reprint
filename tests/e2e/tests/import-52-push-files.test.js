@@ -79,6 +79,10 @@ describe('Import: push-files stages and applies a local tree', () => {
         return runImporter(getSiteUrl(site), tempDir, 'push-files', {
             secret: getSiteSecret(site),
             extraArgs,
+            // push-files needs no preflight (its apply probe is the
+            // capability check), and this target serves lib.php WP-less,
+            // where the pull preflight legitimately reports not-ok.
+            skipPreflight: true,
             ...options,
         });
     }
@@ -217,6 +221,7 @@ describe('Import: push-files stages and applies a local tree', () => {
             secret: 'not-the-secret',
             extraArgs: ['--apply'],
             autoResume: false,
+            skipPreflight: true,
         });
 
         assert.equal(result.exitCode, 1);
@@ -255,6 +260,7 @@ describe('Import: push-files refuses cross-device staging up front', () => {
                 secret: getSiteSecret(site),
                 extraArgs: ['--apply'],
                 autoResume: false,
+                skipPreflight: true,
             });
 
             assert.equal(result.exitCode, 1, `${result.stdout}\n${result.stderr}`);

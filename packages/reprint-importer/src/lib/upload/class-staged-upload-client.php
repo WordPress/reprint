@@ -139,6 +139,9 @@ class StagedUploadClient
         if ($status["error"] !== null || !is_array($status["json"])) {
             return $this->failed("status_unavailable", $status["error"] ?? "invalid response");
         }
+        if ($this->is_auth_envelope($status)) {
+            return $this->failed("auth_failed", $this->envelope_error($status));
+        }
         if (!empty($status["json"]["verified"])) {
             // A finished earlier run. Finalize re-confirms the size and is
             // idempotent; a mismatch means this plan disagrees with what
@@ -315,6 +318,9 @@ class StagedUploadClient
             if ($response["error"] !== null) {
                 return $this->failed("transport_failed", $response["error"]);
             }
+            if ($this->is_auth_envelope($response)) {
+                return $this->failed("auth_failed", $this->envelope_error($response));
+            }
             $json = is_array($response["json"]) ? $response["json"] : [];
             if (!empty($json["discarded"])) {
                 return [
@@ -356,6 +362,9 @@ class StagedUploadClient
             if ($response["error"] !== null) {
                 return $this->apply_failed("transport_failed", $response["error"]);
             }
+            if ($this->is_auth_envelope($response)) {
+                return $this->apply_failed("auth_failed", $this->envelope_error($response));
+            }
             $json = is_array($response["json"]) ? $response["json"] : [];
             $status = $json["status"] ?? null;
             if ($status === "applied" || $status === "ready") {
@@ -377,6 +386,25 @@ class StagedUploadClient
             );
         }
         return $this->apply_failed("busy_exhausted", null);
+    }
+
+    /**
+     * The embedding layer (lib.php in the WordPress wiring) answers
+     * control-plane auth failures with its own {error, code} envelope
+     * before any endpoint runs. Surface those as auth_failed — retrying
+     * cannot fix a bad secret — instead of an unexpected response.
+     */
+    private function is_auth_envelope(array $response): bool
+    {
+        return in_array($response["http_code"], [401, 403], true)
+            && is_array($response["json"])
+            && !isset($response["json"]["status"]);
+    }
+
+    private function envelope_error(array $response): string
+    {
+        $error = $response["json"]["error"] ?? null;
+        return is_string($error) ? $error : ("HTTP " . $response["http_code"]);
     }
 
     /**
@@ -407,6 +435,9 @@ class StagedUploadClient
             ]);
             if ($response["error"] !== null) {
                 return $this->failed("transport_failed", $response["error"], $total_bytes);
+            }
+            if ($this->is_auth_envelope($response)) {
+                return $this->failed("auth_failed", $this->envelope_error($response));
             }
             $json = is_array($response["json"]) ? $response["json"] : [];
             if (($json["status"] ?? null) === "verified") {
