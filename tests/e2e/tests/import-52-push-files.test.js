@@ -250,7 +250,8 @@ describe('Import: push-files refuses cross-device staging up front', () => {
 
     afterAll(() => {
         cleanupTempDir(tempDir);
-        rmSync(xdevStaging, { recursive: true, force: true });
+        // PHP-FPM owns the staging scaffolding it created (0700 nginx).
+        execSync(`sudo rm -rf "${xdevStaging}"`);
     });
 
     it.skipIf(!existsSync('/dev/shm'))(
