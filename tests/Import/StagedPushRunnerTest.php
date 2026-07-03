@@ -576,6 +576,69 @@ class StagedPushRunnerTest extends TestCase
         $this->assertCount(0, $this->requests, 'surviving cache lines still skip');
     }
 
+    public function testSameSecondSameSizeEditIsTheDocumentedCacheBoundary(): void
+    {
+        // The done cache keys on (size, mtime). An edit that preserves
+        // both — same byte count, same filesystem second — is invisible
+        // to it, exactly like trunk's ctime+size delta comparison. This
+        // pins the boundary so a future cache change that widens or
+        // narrows it fails a test instead of drifting silently.
+        $entry = $this->planEntry('boundary.txt', 'aaaa');
+        $mtime = (int) filemtime($entry['source_path']);
+        $entry['mtime'] = $mtime;
+        $transport = $this->transportFor($this->makeEndpoints());
+        [$runner] = $this->makeRunner($transport);
+        $this->assertSame('completed', $runner->push([$entry])['status']);
+
+        // Rewrite with the same size and force the same mtime second.
+        file_put_contents($entry['source_path'], 'bbbb');
+        touch($entry['source_path'], $mtime);
+        clearstatcache();
+
+        $this->requests = [];
+        [$again] = $this->makeRunner($transport);
+        $result = $again->push([$entry]);
+
+        $this->assertSame('completed', $result['status']);
+        $this->assertCount(0, $this->requests, 'a same-size same-second edit skips: the documented boundary');
+        $this->assertSame(
+            'aaaa',
+            file_get_contents($this->staging_dir . '/files/boundary.txt'),
+            'the staged copy still holds the version the cache vouched for'
+        );
+
+        // Any mtime movement re-ships — the boundary is exactly one
+        // filesystem second wide.
+        touch($entry['source_path'], $mtime + 1);
+        clearstatcache();
+        $entry['mtime'] = $mtime + 1;
+        [$third] = $this->makeRunner($transport);
+        $this->assertSame('completed', $third->push([$entry])['status']);
+        $this->assertSame('bbbb', file_get_contents($this->staging_dir . '/files/boundary.txt'));
+    }
+
+    public function testForgetCachedToleratesAStaleTmpOrphan(): void
+    {
+        // A kill between the tmp write and the rename leaves an orphan;
+        // the next forget must overwrite it and still commit atomically.
+        $plan = [
+            $this->planEntry('stays.txt', 'stays'),
+            $this->planEntry('goes.txt', 'goes'),
+        ];
+        $transport = $this->transportFor($this->makeEndpoints());
+        [$runner] = $this->makeRunner($transport);
+        $this->assertSame('completed', $runner->push($plan)['status']);
+
+        file_put_contents($this->state_dir . '/.push-verified.jsonl.tmp', 'torn garbage from a kill');
+
+        $runner->forget_cached(['goes.txt']);
+
+        $this->assertSame([], $runner->cached_ids_not_in(['stays.txt']));
+        $this->assertFileDoesNotExist($this->state_dir . '/.push-verified.jsonl.tmp');
+        [$fresh] = $this->makeRunner($transport);
+        $this->assertSame(['stays.txt'], $fresh->cached_ids_not_in([]), 'the rewritten cache holds exactly the survivor');
+    }
+
     public function testBatchShrinksAfterA413AndCompletes(): void
     {
         $plan = [];
@@ -593,5 +656,43 @@ class StagedPushRunnerTest extends TestCase
             return $request['http_code'] === 413;
         }), 'the first oversized batch teaches the sizer');
         $this->assertGreaterThanOrEqual(2, count($this->requestsFor('staged_upload_batch')), 'repartitioned batches');
+    }
+
+    public function testUnwritableStateDirAbortsTypedBeforeAnyRequest(): void
+    {
+        // A file where the state dir belongs makes mkdir fail: the runner
+        // must abort typed instead of pushing without a done cache (every
+        // rerun would then re-upload the world).
+        $blocker = $this->state_dir . '-blocker';
+        file_put_contents($blocker, 'not a directory');
+        $transport = function (...$args): array {
+            $this->requests[] = ['endpoint' => 'unexpected', 'params' => [], 'http_code' => 0];
+            return ['http_code' => 200, 'body' => '{}', 'error' => null];
+        };
+        $client = new StagedUploadClient([
+            'base_url' => 'https://target.example/?reprint-api',
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'sizer' => new UploadChunkSizer(['floor_bytes' => 4, 'start_bytes' => 8, 'max_bytes' => 8]),
+            'transport' => $transport,
+            'sleeper' => static function (int $microseconds): void {
+            },
+        ]);
+        $runner = new StagedPushRunner([
+            'state_dir' => $blocker . '/nested',
+            'client' => $client,
+            'sizer' => new UploadChunkSizer(['floor_bytes' => 4, 'start_bytes' => 8, 'max_bytes' => 8]),
+        ]);
+
+        try {
+            $result = $runner->push([
+                ['artifact_id' => 'a.txt', 'source_path' => $this->source_dir . '/never-read'],
+            ]);
+
+            $this->assertSame('aborted', $result['status']);
+            $this->assertSame('state_dir_unwritable', $result['abort_reason']);
+            $this->assertSame([], $this->requests, 'no request may travel without a state dir');
+        } finally {
+            @unlink($blocker);
+        }
     }
 }
