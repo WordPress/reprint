@@ -267,6 +267,48 @@ final class StagedEndpointsTest extends TestCase {
         $this->assertSame(0, $endpoints->status(['artifact_id' => 'artifact-1'])['body']['committed_bytes']);
     }
 
+    public function testReplayedRequestIsAbsorbedAsADuplicate(): void
+    {
+        // There is no nonce cache; replay protection is the protocol's
+        // idempotence. A captured append replayed verbatim inside the
+        // timestamp window must land as a duplicate at the same offset —
+        // the frontier does not move and bytes are never doubled.
+        $endpoints = $this->makeEndpoints();
+        $body = 'replayable bytes';
+        $headers = $this->signedHeaders($body);
+
+        $stream = $this->bodyStream($body);
+        $first = $endpoints->upload(['artifact_id' => 'a.txt', 'offset' => 0], $headers, $stream);
+        fclose($stream);
+        $this->assertSame(200, $first['http_code']);
+        $this->assertSame(strlen($body), $first['body']['committed_bytes']);
+
+        // The exact same signed request again — same nonce, same
+        // timestamp, same signature, same body.
+        $stream = $this->bodyStream($body);
+        $replayed = $endpoints->upload(['artifact_id' => 'a.txt', 'offset' => 0], $headers, $stream);
+        fclose($stream);
+
+        $this->assertSame(200, $replayed['http_code']);
+        $this->assertSame('duplicate', $replayed['body']['status']);
+        $this->assertSame(strlen($body), $replayed['body']['committed_bytes'], 'the frontier must not move');
+        $this->assertSame(
+            strlen($body),
+            (int) filesize($this->staging_dir . '/files/a.txt'),
+            'bytes are never doubled'
+        );
+    }
+
+    public function testShortNonceIsRejected(): void
+    {
+        $endpoints = $this->makeEndpoints();
+
+        $result = $this->upload($endpoints, 'a.txt', 0, 'bytes', ['nonce' => 'short']);
+
+        $this->assertSame(403, $result['http_code']);
+        $this->assertFileDoesNotExist($this->staging_dir . '/files/a.txt');
+    }
+
     public function testUploadWithoutAConfiguredSecretIsUnavailable(): void
     {
         $endpoints = $this->makeEndpoints(['secret' => null]);
