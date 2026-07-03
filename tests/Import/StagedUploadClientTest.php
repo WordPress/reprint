@@ -472,4 +472,55 @@ class StagedUploadClientTest extends TestCase
         $this->assertSame('discarded', $client->discard('artifact.bin')['status']);
         $this->assertFalse($client->status('artifact.bin')['exists']);
     }
+
+    // ---------------------------------------------------------------
+    // Hostile and broken responses
+    // ---------------------------------------------------------------
+
+    public function testHtmlErrorPageInsteadOfJsonFailsTypedWithoutARetryStorm(): void
+    {
+        // Shared hosts interpose HTML error pages (mod_security, WAFs,
+        // maintenance screens). The client must fail typed on the
+        // non-JSON body, not loop and not crash.
+        $this->writeSource('bytes');
+        $html = ['http_code' => 200, 'body' => '<html><h1>Request blocked</h1></html>', 'error' => null];
+
+        // At the status probe: the resume state is unavailable —
+        // typed and classified retryable by the CLI.
+        $calls = 0;
+        $probe_blocked = $this->makeClient(static function (...$args) use (&$calls, $html): array {
+            $calls++;
+            return $html;
+        })->upload_artifact('artifact.bin', $this->source_path);
+        $this->assertSame(['failed', 'status_unavailable'], [$probe_blocked['status'], $probe_blocked['reason']]);
+        $this->assertLessThan(10, $calls, 'a non-JSON answer must not retry unbounded');
+
+        // Past the probe, at the upload itself: treated like a lost
+        // response — bounded retries with resyncs, then the retryable
+        // transport_failed instead of an opaque crash.
+        $base = $this->transportFor($this->makeEndpoints());
+        $upload_blocked = $this->makeClient(static function (...$args) use ($base, $html): array {
+            return strpos($args[1], 'staged_upload') !== false ? $html : $base(...$args);
+        })->upload_artifact('artifact.bin', $this->source_path);
+        $this->assertSame(['failed', 'transport_failed'], [$upload_blocked['status'], $upload_blocked['reason']]);
+    }
+
+    public function testServerIoErrorSurfacesTyped(): void
+    {
+        // The store answering io_error (disk full, permissions) maps to
+        // the retryable server_io_error, not a generic failure.
+        $this->writeSource('bytes');
+        $transport = static function (...$args): array {
+            return [
+                'http_code' => 500,
+                'body' => '{"status":"rejected","reason":"io_error","detail":"open_lock_file","committed_bytes":0}',
+                'error' => null,
+            ];
+        };
+
+        $result = $this->makeClient($transport)->upload_artifact('artifact.bin', $this->source_path);
+
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame('server_io_error', $result['reason']);
+    }
 }
