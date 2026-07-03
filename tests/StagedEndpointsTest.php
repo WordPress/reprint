@@ -416,6 +416,13 @@ final class StagedEndpointsTest extends TestCase {
             $this->assertSame([200, 'ready'], [$probe['http_code'], $probe['body']['status']]);
             $this->assertFileDoesNotExist($target_root . '/wp-content/a.txt');
 
+            // "ready" is the sender's preflight: the request cap seeds its
+            // chunk sizer and free space gates the transfer size.
+            $this->assertIsInt($probe['body']['max_request_bytes']);
+            $this->assertGreaterThan(0, $probe['body']['max_request_bytes']);
+            $this->assertIsInt($probe['body']['staging_free_bytes']);
+            $this->assertIsInt($probe['body']['target_free_bytes']);
+
             $result = $endpoints->apply(['manifest_id' => 'm.jsonl'], ['REQUEST_METHOD' => 'POST']);
             $this->assertSame(
                 [200, 'applied', 1],

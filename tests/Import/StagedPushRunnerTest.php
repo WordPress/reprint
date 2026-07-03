@@ -515,6 +515,40 @@ class StagedPushRunnerTest extends TestCase
         $this->assertSame(str_repeat('L', 2000), file_get_contents($this->staging_dir . '/files/large.bin'));
     }
 
+    // ---------------------------------------------------------------
+    // Done-cache deletion bookkeeping
+    // ---------------------------------------------------------------
+
+    public function testCacheRemembersDeletionsUntilForgotten(): void
+    {
+        $plan = [
+            $this->planEntry('keep.txt', 'kept'),
+            $this->planEntry('gone.txt', 'soon gone'),
+            $this->planEntry('wp-content/gone-too.php', 'also'),
+        ];
+        $transport = $this->transportFor($this->makeEndpoints());
+        [$runner] = $this->makeRunner($transport);
+        $this->assertSame('completed', $runner->push($plan)['status']);
+
+        // The next plan no longer lists two of the files: they are the
+        // transfer's deletions.
+        $this->assertSame([], $runner->cached_ids_not_in(['keep.txt', 'gone.txt', 'wp-content/gone-too.php']));
+        $stale = $runner->cached_ids_not_in(['keep.txt']);
+        sort($stale);
+        $this->assertSame(['gone.txt', 'wp-content/gone-too.php'], $stale);
+
+        // Forgetting them (after a confirmed apply) keeps the rest cached:
+        // the next push still skips keep.txt without a request.
+        $runner->forget_cached($stale);
+        $this->assertSame([], $runner->cached_ids_not_in(['keep.txt']));
+
+        $this->requests = [];
+        [$again] = $this->makeRunner($transport);
+        $result = $again->push([$plan[0]]);
+        $this->assertSame(1, $result['files_done']);
+        $this->assertCount(0, $this->requests, 'surviving cache lines still skip');
+    }
+
     public function testBatchShrinksAfterA413AndCompletes(): void
     {
         $plan = [];

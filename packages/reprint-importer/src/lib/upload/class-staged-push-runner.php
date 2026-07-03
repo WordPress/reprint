@@ -318,6 +318,48 @@ class StagedPushRunner
         ];
     }
 
+    /**
+     * Ids the done cache remembers that the current plan no longer lists —
+     * files previous pushes shipped and the local tree has since removed.
+     * These become the transfer's deletions, mirroring pull's delta drain.
+     */
+    public function cached_ids_not_in(array $artifact_ids): array
+    {
+        $planned = array_fill_keys($artifact_ids, true);
+        $stale = [];
+        foreach (array_keys($this->read_verified_cache()) as $cached_id) {
+            if (!isset($planned[$cached_id])) {
+                $stale[] = $cached_id;
+            }
+        }
+        return $stale;
+    }
+
+    /** Drops ids from the done cache once their deletion applied. */
+    public function forget_cached(array $artifact_ids): void
+    {
+        if ($artifact_ids === []) {
+            return;
+        }
+        $drop = array_fill_keys($artifact_ids, true);
+        $lines = "";
+        foreach ($this->read_verified_cache() as $artifact_id => $record) {
+            if (isset($drop[$artifact_id])) {
+                continue;
+            }
+            $lines .= json_encode([
+                "artifact_id" => $artifact_id,
+                "size" => $record["size"],
+                "mtime" => $record["mtime"],
+            ]) . "\n";
+        }
+        $tmp_path = $this->verified_path . ".tmp";
+        if (@file_put_contents($tmp_path, $lines) === strlen($lines)) {
+            @rename($tmp_path, $this->verified_path);
+        }
+        @unlink($tmp_path);
+    }
+
     private function report_progress(int $files_done, int $files_total, string $artifact_id, int $committed, int $total): void
     {
         if ($this->on_progress === null) {

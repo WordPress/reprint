@@ -522,8 +522,9 @@ class StagedUploadClient
      * apply — cross-device staging above all — answers "rejected" here,
      * before any chunk has been uploaded.
      *
-     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int}
-     *   status "applied"|"ready"|"failed".
+     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int,skipped:int,deleted:int,staging_free_bytes:?int,max_request_bytes:?int}
+     *   status "applied"|"ready"|"failed". "ready" carries the target's
+     *   preflight facts: free staging space and its request cap.
      */
     public function apply(string $manifest_id, bool $check_only = false): array
     {
@@ -548,6 +549,14 @@ class StagedUploadClient
                     "detail" => null,
                     "applied" => (int) ($json["applied"] ?? 0),
                     "already_applied" => (int) ($json["already_applied"] ?? 0),
+                    "skipped" => (int) ($json["skipped"] ?? 0),
+                    "deleted" => (int) ($json["deleted"] ?? 0),
+                    "staging_free_bytes" => is_numeric($json["staging_free_bytes"] ?? null)
+                        ? (int) $json["staging_free_bytes"]
+                        : null,
+                    "max_request_bytes" => is_numeric($json["max_request_bytes"] ?? null)
+                        ? (int) $json["max_request_bytes"]
+                        : null,
                 ];
             }
             if ($status === "busy") {
@@ -582,7 +591,7 @@ class StagedUploadClient
     }
 
     /**
-     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int}
+     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int,skipped:int,deleted:int,staging_free_bytes:?int,max_request_bytes:?int}
      */
     private function apply_failed(string $reason, ?string $detail): array
     {
@@ -592,6 +601,10 @@ class StagedUploadClient
             "detail" => $detail,
             "applied" => 0,
             "already_applied" => 0,
+            "skipped" => 0,
+            "deleted" => 0,
+            "staging_free_bytes" => null,
+            "max_request_bytes" => null,
         ];
     }
 

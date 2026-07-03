@@ -416,6 +416,158 @@ final class StagedApplyTest extends TestCase {
     }
 
     // ---------------------------------------------------------------
+    // Deletions
+    // ---------------------------------------------------------------
+
+    public function testDeleteEntriesRemoveFilesDirectoriesAndLinks(): void
+    {
+        file_put_contents($this->target_root . '/stale.php', 'old');
+        mkdir($this->target_root . '/stale-dir/nested', 0700, true);
+        file_put_contents($this->target_root . '/stale-dir/nested/deep.txt', 'old');
+        $shared = $this->target_root . '-shared-del';
+        mkdir($shared, 0700, true);
+        file_put_contents($shared . '/keep.txt', 'shared');
+        symlink($shared, $this->target_root . '/stale-link');
+        $this->stageVerified('fresh.txt', 'new');
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'fresh.txt', 'size' => 3],
+            ['artifact_id' => 'stale.php', 'delete' => true],
+            ['artifact_id' => 'stale-dir', 'delete' => true],
+            ['artifact_id' => 'stale-link', 'delete' => true],
+        ]);
+
+        try {
+            $result = $this->makeApply()->apply($manifest);
+
+            $this->assertSame('applied', $result['status']);
+            $this->assertSame(1, $result['applied']);
+            $this->assertSame(3, $result['deleted']);
+            $this->assertFileDoesNotExist($this->target_root . '/stale.php');
+            $this->assertDirectoryDoesNotExist($this->target_root . '/stale-dir');
+            $this->assertFalse(is_link($this->target_root . '/stale-link'));
+            $this->assertSame(
+                'shared',
+                file_get_contents($shared . '/keep.txt'),
+                'deleting the link must not follow it'
+            );
+            $this->assertSame('new', file_get_contents($this->target_root . '/fresh.txt'));
+        } finally {
+            $this->removeDir($shared);
+        }
+    }
+
+    public function testDeletionsRunBeforeMovesRegardlessOfManifestOrder(): void
+    {
+        // The old tree had a directory where the new tree lands a file, and
+        // the manifest lists the create before the delete. Move-first would
+        // rename the file in and then delete it.
+        mkdir($this->target_root . '/swap/nested', 0700, true);
+        file_put_contents($this->target_root . '/swap/nested/old.txt', 'old');
+        $this->stageVerified('swap', 'file now');
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'swap', 'size' => 8],
+            ['artifact_id' => 'swap', 'delete' => true],
+        ]);
+
+        $result = $this->makeApply()->apply($manifest);
+
+        $this->assertSame('applied', $result['status']);
+        $this->assertSame([1, 1], [$result['applied'], $result['deleted']]);
+        $this->assertSame('file now', file_get_contents($this->target_root . '/swap'));
+    }
+
+    public function testDeletionsAreIdempotentAcrossReruns(): void
+    {
+        file_put_contents($this->target_root . '/goner.txt', 'x');
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'goner.txt', 'delete' => true],
+        ]);
+
+        $first = $this->makeApply()->apply($manifest);
+        $this->assertSame(['applied', 1], [$first['status'], $first['deleted']]);
+        $this->assertFileDoesNotExist($this->target_root . '/goner.txt');
+
+        // A kill after apply but before the sender's cache update re-sends
+        // the same deletion; the path being gone already is the done state.
+        $again = $this->stageManifest([
+            ['artifact_id' => 'goner.txt', 'delete' => true],
+        ], '.manifest-2.jsonl');
+        $second = $this->makeApply()->apply($again);
+
+        $this->assertSame('applied', $second['status']);
+        $this->assertSame(0, $second['deleted']);
+        $this->assertSame(1, $second['already_applied']);
+    }
+
+    public function testPreserveLocalPoliciesProtectDeletions(): void
+    {
+        // Preserve-local means never overwrite AND never delete.
+        file_put_contents($this->target_root . '/precious.txt', 'local');
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'precious.txt', 'delete' => true],
+        ]);
+
+        $result = $this->makeApply(['on_existing' => 'skip'])->apply($manifest);
+
+        $this->assertSame('applied', $result['status']);
+        $this->assertSame(0, $result['deleted']);
+        $this->assertSame(1, $result['skipped']);
+        $this->assertSame(['precious.txt'], $result['skipped_paths']);
+        $this->assertSame('local', file_get_contents($this->target_root . '/precious.txt'));
+    }
+
+    public function testSymlinkedParentGuardProtectsDeletions(): void
+    {
+        mkdir($this->target_root . '/wp-content', 0700, true);
+        $shared = $this->target_root . '-shared-linked';
+        mkdir($shared, 0700, true);
+        file_put_contents($shared . '/keep.php', 'shared');
+        symlink($shared, $this->target_root . '/wp-content/plugins');
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'wp-content/plugins/keep.php', 'delete' => true],
+        ]);
+
+        try {
+            $result = $this->makeApply(['refuse_symlinked_parents' => true])->apply($manifest);
+
+            $this->assertSame(['applied', 1], [$result['status'], $result['skipped']]);
+            $this->assertSame(0, $result['deleted']);
+            $this->assertSame('shared', file_get_contents($shared . '/keep.php'));
+        } finally {
+            $this->removeDir($shared);
+        }
+    }
+
+    public function testMalformedDeleteEntriesRejectTheManifest(): void
+    {
+        // delete:false is not a delete, so the entry needs its size.
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'x.txt', 'delete' => false],
+        ]);
+        $result = $this->makeApply()->apply($manifest);
+        $this->assertSame(['rejected', 'manifest_invalid'], [$result['status'], $result['reason']]);
+
+        // Delete ids go through the same path rule as everything else.
+        $this->stageVerified('hostile-delete.jsonl', json_encode(['artifact_id' => '../escape', 'delete' => true]) . "\n");
+        $hostile = $this->makeApply()->apply('hostile-delete.jsonl');
+        $this->assertStringContainsString('invalid artifact id', (string) $hostile['detail']);
+    }
+
+    // ---------------------------------------------------------------
+    // Preflight facts on "ready"
+    // ---------------------------------------------------------------
+
+    public function testReadyReportsFreeSpaceForTheSendersPreflight(): void
+    {
+        $result = $this->makeApply()->apply('not-yet-staged', true);
+
+        $this->assertSame('ready', $result['status']);
+        $this->assertIsInt($result['staging_free_bytes']);
+        $this->assertIsInt($result['target_free_bytes']);
+        $this->assertGreaterThan(0, $result['target_free_bytes']);
+    }
+
+    // ---------------------------------------------------------------
     // Kill windows and contention
     // ---------------------------------------------------------------
 

@@ -161,6 +161,12 @@ class PushFilesCliTest extends TestCase
             "_site_export_handle_api_request();\n"
         );
 
+        return [$this->serveRouter($harness), $site_root, $harness . '/staging'];
+    }
+
+    /** Serves $harness/router.php over php -S and returns the API url. */
+    private function serveRouter(string $harness): string
+    {
         $probe = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
         $this->assertNotFalse($probe, "cannot allocate a port: {$errstr}");
         $name = (string) stream_socket_get_name($probe, false);
@@ -191,7 +197,7 @@ class PushFilesCliTest extends TestCase
         }
         $this->assertTrue($ready, 'php -S did not come up');
 
-        return ["http://127.0.0.1:{$port}/?reprint-api", $site_root, $harness . '/staging'];
+        return "http://127.0.0.1:{$port}/?reprint-api";
     }
 
     private function stopApplyHarness(): void
@@ -305,6 +311,106 @@ class PushFilesCliTest extends TestCase
                     "mangled in transit: {$name}"
                 );
             }
+        } finally {
+            $this->stopApplyHarness();
+        }
+    }
+
+    public function testInsufficientStagingSpaceRefusesBeforeUploading(): void
+    {
+        // A scripted target whose probe answers ready with 1 byte free: the
+        // gate must refuse the transfer without a single upload request.
+        $harness = sys_get_temp_dir() . '/push-cli-space-' . bin2hex(random_bytes(8));
+        mkdir($harness, 0700, true);
+        file_put_contents(
+            $harness . '/router.php',
+            "<?php\n" .
+            "file_put_contents('{$harness}/requests.log', (\$_GET['endpoint'] ?? '?') . \"\\n\", FILE_APPEND);\n" .
+            "header('Content-Type: application/json');\n" .
+            "echo json_encode(['status' => 'ready', 'staging_free_bytes' => 1, 'target_free_bytes' => 1, 'max_request_bytes' => 65536]);\n"
+        );
+        $url = $this->serveRouter($harness);
+        try {
+            file_put_contents($this->fs_root . '/too-big.bin', str_repeat('x', 4096));
+
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+
+            $this->assertSame(1, $code, $output);
+            $this->assertStringContainsString('insufficient_staging_space', $output);
+            $this->assertSame(
+                ['staged_apply'],
+                array_unique(array_filter(explode("\n", (string) file_get_contents($harness . '/requests.log')))),
+                'the probe must be the only request'
+            );
+        } finally {
+            $this->stopApplyHarness();
+        }
+    }
+
+    public function testLocalDeletionPropagatesOnTheNextPushApply(): void
+    {
+        [$url, $site_root] = $this->startApplyHarness();
+        try {
+            file_put_contents($this->fs_root . '/a.txt', 'stays');
+            file_put_contents($this->fs_root . '/b.txt', 'will be removed');
+            mkdir($this->fs_root . '/wp-content', 0700, true);
+            file_put_contents($this->fs_root . '/wp-content/c.php', '<?php // stays');
+
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+            $this->assertSame(0, $code, $output);
+            $this->assertFileExists($site_root . '/b.txt');
+
+            // The file disappears locally; the next push must remove it
+            // from the target in the same apply window.
+            unlink($this->fs_root . '/b.txt');
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+            $this->assertSame(0, $code, $output);
+            $summary = json_decode((string) substr($output, (int) strrpos($output, "{\n")), true);
+            $this->assertSame('complete', $summary['status']);
+            $this->assertSame(1, $summary['deleted']);
+            $this->assertFileDoesNotExist($site_root . '/b.txt');
+            $this->assertSame('stays', file_get_contents($site_root . '/a.txt'));
+            $this->assertSame('<?php // stays', file_get_contents($site_root . '/wp-content/c.php'));
+
+            // The deletion left the done cache with the apply: rerunning
+            // does not re-delete or fail.
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+            $this->assertSame(0, $code, $output);
+            $summary = json_decode((string) substr($output, (int) strrpos($output, "{\n")), true);
+            $this->assertSame(0, $summary['deleted']);
+        } finally {
+            $this->stopApplyHarness();
+        }
+    }
+
+    public function testOnlyScopedPushDerivesDeletionsOnlyInsideItsPrefixes(): void
+    {
+        [$url, $site_root] = $this->startApplyHarness();
+        try {
+            file_put_contents($this->fs_root . '/out.txt', 'outside the scope');
+            mkdir($this->fs_root . '/wp-content', 0700, true);
+            file_put_contents($this->fs_root . '/wp-content/in.txt', 'inside');
+            file_put_contents($this->fs_root . '/wp-content/keep.txt', 'kept');
+
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+            $this->assertSame(0, $code, $output);
+
+            // Both files vanish locally, but the scoped push may only act
+            // inside its prefixes: out.txt was excluded from the plan on
+            // purpose, not removed relative to it.
+            unlink($this->fs_root . '/out.txt');
+            unlink($this->fs_root . '/wp-content/in.txt');
+            [$output, $code] = $this->runCli(array_merge($this->pushArgs($url), ['--only=wp-content']));
+            $this->assertSame(0, $code, $output);
+            $this->assertFileDoesNotExist($site_root . '/wp-content/in.txt');
+            $this->assertFileExists($site_root . '/out.txt', 'out-of-scope paths must survive a scoped push');
+
+            // The next full push sees out.txt gone from the plan and
+            // finishes the deletion.
+            [$output, $code] = $this->runCli($this->pushArgs($url));
+            $this->assertSame(0, $code, $output);
+            $this->assertFileDoesNotExist($site_root . '/out.txt');
+            $this->assertSame('kept', file_get_contents($site_root . '/wp-content/keep.txt'));
         } finally {
             $this->stopApplyHarness();
         }

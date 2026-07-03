@@ -3999,7 +3999,9 @@ class ImportClient
             if (strpos($prefix, "./") === 0) {
                 $prefix = substr($prefix, 2);
             }
-            $only[] = $prefix;
+            // Same normalization the plan builder applies, so the deletion
+            // scope in run_push_apply matches the plan's selection exactly.
+            $only[] = trim($prefix, "/");
         }
 
         $build = PushPlanBuilder::build($this->fs_root, $only);
@@ -4073,6 +4075,36 @@ class ImportClient
             );
         }
 
+        if ($probe["status"] === "ready") {
+            if (($probe["max_request_bytes"] ?? null) !== null) {
+                // Seed the sizer from the target's declared cap instead of
+                // waiting for the first 413 to teach it.
+                $sizer->apply_reported_limits([$probe["max_request_bytes"]]);
+            }
+            $plan_bytes = 0;
+            foreach ($build["plan"] as $plan_entry) {
+                $plan_bytes += (int) ($plan_entry["total_bytes"] ?? 0);
+            }
+            $staging_free = $probe["staging_free_bytes"] ?? null;
+            if ($staging_free !== null && $plan_bytes > $staging_free) {
+                // The transfer could never fit; refuse before uploading.
+                $summary = [
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => "insufficient_staging_space",
+                    "abort_detail" => sprintf(
+                        "plan needs %d bytes, staging has %d free",
+                        $plan_bytes,
+                        $staging_free,
+                    ),
+                ];
+                $this->output_progress($summary, true);
+                echo json_encode($summary, JSON_PRETTY_PRINT) . "\n";
+                $this->exit_code = 1;
+                return;
+            }
+        }
+
         $runner = new StagedPushRunner([
             "state_dir" => $this->state_dir,
             "client" => $client,
@@ -4126,7 +4158,7 @@ class ImportClient
             $this->exit_code = 0;
             return;
         }
-        $this->exit_code = $this->run_push_apply($client, $build["plan"]);
+        $this->exit_code = $this->run_push_apply($client, $runner, $build["plan"], $only);
     }
 
     /**
@@ -4139,13 +4171,32 @@ class ImportClient
      *
      * @return int Process exit code.
      */
-    private function run_push_apply(StagedUploadClient $client, array $plan): int
+    private function run_push_apply(StagedUploadClient $client, StagedPushRunner $runner, array $plan, array $only): int
     {
+        // Files previous pushes shipped that the local tree no longer has
+        // become delete entries — the push counterpart of pull's delta
+        // deletions, derived from the same done cache that skips finished
+        // uploads. A scoped push (--only) derives deletions only inside its
+        // prefixes: everything else was excluded from the plan on purpose,
+        // not removed locally.
+        $stale_ids = [];
+        foreach ($runner->cached_ids_not_in(array_column($plan, "artifact_id")) as $stale_id) {
+            if ($only === [] || PushPlanBuilder::selected($stale_id, $only)) {
+                $stale_ids[] = $stale_id;
+            }
+        }
+
         $lines = "";
         foreach ($plan as $entry) {
             $lines .= json_encode([
                 "artifact_id" => $entry["artifact_id"],
                 "size" => $entry["total_bytes"],
+            ]) . "\n";
+        }
+        foreach ($stale_ids as $stale_id) {
+            $lines .= json_encode([
+                "artifact_id" => $stale_id,
+                "delete" => true,
             ]) . "\n";
         }
         $manifest_path = $this->state_dir . "/.push-manifest.jsonl";
@@ -4178,9 +4229,15 @@ class ImportClient
             ]);
         }
 
+        // Deleted paths leave the done cache only after the target confirmed
+        // the apply; a kill in between re-derives the same deletions, which
+        // rerun as idempotent no-ops.
+        $runner->forget_cached($stale_ids);
+
         return $this->finish_push_apply("complete", [
             "applied" => $applied["applied"],
             "already_applied" => $applied["already_applied"],
+            "deleted" => $applied["deleted"],
         ]);
     }
 

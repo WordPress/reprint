@@ -358,7 +358,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-push/upload-batches",
+            "version": "dev-push/deletions-and-preflight",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",

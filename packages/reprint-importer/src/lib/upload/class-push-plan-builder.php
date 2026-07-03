@@ -116,7 +116,7 @@ class PushPlanBuilder
     }
 
     /** A file is selected when it sits at or under one of the prefixes. */
-    private static function selected(string $rel, array $only): bool
+    public static function selected(string $rel, array $only): bool
     {
         foreach ($only as $prefix) {
             if ($rel === $prefix || strpos($rel, $prefix . "/") === 0) {

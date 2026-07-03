@@ -105,6 +105,9 @@ class StagedUploadClientTest extends TestCase
                     $result = $endpoints->upload_batch($params, $server, $stream);
                     fclose($stream);
                     break;
+                case 'staged_apply':
+                    $result = $endpoints->apply($params, $server);
+                    break;
                 default:
                     return ['http_code' => 400, 'body' => '{"error":"unknown endpoint"}', 'error' => null];
             }
@@ -564,5 +567,45 @@ class StagedUploadClientTest extends TestCase
 
         $this->assertSame('discarded', $client->discard('artifact.bin')['status']);
         $this->assertFalse($client->status('artifact.bin')['exists']);
+    }
+
+    // ---------------------------------------------------------------
+    // Apply passthrough
+    // ---------------------------------------------------------------
+
+    public function testApplyRoundTripCarriesPreflightFactsAndDeletions(): void
+    {
+        $target_root = $this->staging_dir . '-target';
+        mkdir($target_root, 0700, true);
+        file_put_contents($target_root . '/stale.txt', 'old');
+        $manifest_path = $this->source_path . '-manifest';
+        $endpoints = $this->makeEndpoints(['apply_target_root' => $target_root]);
+        $client = $this->makeClient($this->transportFor($endpoints));
+
+        try {
+            $this->writeSource('fresh');
+            $this->assertSame('verified', $client->upload_artifact('fresh.txt', $this->source_path)['status']);
+
+            $manifest = json_encode(['artifact_id' => 'fresh.txt', 'size' => 5]) . "\n"
+                . json_encode(['artifact_id' => 'stale.txt', 'delete' => true]) . "\n";
+            file_put_contents($manifest_path, $manifest);
+            $this->assertSame('verified', $client->upload_artifact('.m.jsonl', $manifest_path)['status']);
+
+            $probe = $client->apply('.m.jsonl', true);
+            $this->assertSame('ready', $probe['status']);
+            $this->assertIsInt($probe['staging_free_bytes']);
+            $this->assertIsInt($probe['max_request_bytes']);
+
+            $result = $client->apply('.m.jsonl');
+            $this->assertSame(
+                ['applied', 1, 1],
+                [$result['status'], $result['applied'], $result['deleted']]
+            );
+            $this->assertSame('fresh', file_get_contents($target_root . '/fresh.txt'));
+            $this->assertFileDoesNotExist($target_root . '/stale.txt');
+        } finally {
+            @unlink($manifest_path);
+            $this->removeDir($target_root);
+        }
     }
 }

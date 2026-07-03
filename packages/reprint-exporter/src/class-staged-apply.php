@@ -125,9 +125,11 @@ final class Site_Export_Staged_Apply {
      *   what a sender calls before uploading gigabytes: a staging
      *   directory that can never apply (cross_device) rejects here, at
      *   the start, not after the transfer.
-     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int,skipped:int,skipped_paths:array<int,string>}
+     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int,skipped:int,skipped_paths:array<int,string>,deleted:int,staging_free_bytes?:?int,target_free_bytes?:?int}
      *   status "applied"|"ready"|"busy"|"rejected"; skipped counts entries
-     *   the on_existing/symlink policies protected.
+     *   the on_existing/symlink policies protected; deleted counts manifest
+     *   delete entries carried out. "ready" also reports free space (null
+     *   when the filesystem won't say).
      */
     public function apply(string $manifest_id, bool $check_only = false): array {
         $precheck = $this->check_environment();
@@ -138,7 +140,7 @@ final class Site_Export_Staged_Apply {
         if ($check_only && !$this->store->status($manifest_id)['verified']) {
             // Probes run before the transfer exists. The environment is
             // the answer; the manifest is checked when apply runs for real.
-            return $this->result('ready', null, null);
+            return $this->with_environment_facts($this->result('ready', null, null));
         }
 
         $lock = @fopen($this->lock_path, 'c+b');
@@ -185,36 +187,55 @@ final class Site_Export_Staged_Apply {
             }
 
             if ($check_only) {
-                return $this->result('ready', null, null, 0, count($already_applied), count($protected), $skipped_paths);
+                return $this->with_environment_facts(
+                    $this->result('ready', null, null, 0, count($already_applied), count($protected), $skipped_paths)
+                );
             }
 
             // Apply holds the store's lock, so cleanup below unlinks the
             // store's files directly — its own discard() would contend on
             // the very lock this process holds.
+            //
+            // Deletions run before file moves: a transfer that removes a
+            // directory and lands a file where it stood must not depend on
+            // manifest order to get that right.
             $applied = 0;
-            foreach ($entries as $index => $entry) {
-                if (isset($protected[$index])) {
-                    // The local path wins; consume the staged bytes so they
-                    // cannot be applied by a later, differently-configured
-                    // run.
-                    @unlink($this->files_dir . '/' . $entry['artifact_id']);
-                    @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
-                    continue;
+            $deleted = 0;
+            foreach ([true, false] as $delete_pass) {
+                foreach ($entries as $index => $entry) {
+                    if (!empty($entry['delete']) !== $delete_pass) {
+                        continue;
+                    }
+                    if (isset($protected[$index])) {
+                        // The local path wins; consume the staged bytes so
+                        // they cannot be applied by a later,
+                        // differently-configured run.
+                        @unlink($this->files_dir . '/' . $entry['artifact_id']);
+                        @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
+                        continue;
+                    }
+                    if (isset($already_applied[$index])) {
+                        // A rerun after a kill: the work is done; only a
+                        // leftover marker may remain to consume.
+                        @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
+                        continue;
+                    }
+                    if ($delete_pass) {
+                        if (!$this->remove_path_without_following_symlinks($this->target_root . '/' . $entry['artifact_id'])) {
+                            return $this->result('rejected', 'io_error', 'delete: ' . $entry['artifact_id'], $applied, count($already_applied), count($protected), $skipped_paths, $deleted);
+                        }
+                        ++$deleted;
+                        continue;
+                    }
+                    $move_error = $this->move_into_place($entry['artifact_id']);
+                    if ($move_error !== null) {
+                        // Everything validated, so this is environmental
+                        // (permissions, disk). Rerunning apply resumes: moved
+                        // entries classify as applied, the rest re-validate.
+                        return $this->result('rejected', 'io_error', $move_error, $applied, count($already_applied), count($protected), $skipped_paths, $deleted);
+                    }
+                    ++$applied;
                 }
-                if (isset($already_applied[$index])) {
-                    // A rerun after a kill: the file is in place; only its
-                    // leftover marker remains to consume.
-                    @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
-                    continue;
-                }
-                $move_error = $this->move_into_place($entry['artifact_id']);
-                if ($move_error !== null) {
-                    // Everything validated, so this is environmental
-                    // (permissions, disk). Rerunning apply resumes: moved
-                    // entries classify as applied, the rest re-validate.
-                    return $this->result('rejected', 'io_error', $move_error, $applied, count($already_applied), count($protected), $skipped_paths);
-                }
-                ++$applied;
             }
 
             // The manifest is consumed with the transfer it described, and
@@ -224,7 +245,7 @@ final class Site_Export_Staged_Apply {
             @unlink($this->staging_dir . '/verified/' . $manifest_id);
             $this->clear_cursor_for($entries, $manifest_id);
 
-            return $this->result('applied', null, null, $applied, count($already_applied), count($protected), $skipped_paths);
+            return $this->result('applied', null, null, $applied, count($already_applied), count($protected), $skipped_paths, $deleted);
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -326,11 +347,11 @@ final class Site_Export_Staged_Apply {
                 continue;
             }
             $entry = json_decode($line, true);
+            $is_delete = is_array($entry) && !empty($entry['delete']);
             if (
                 !is_array($entry)
                 || !is_string($entry['artifact_id'] ?? null)
-                || !is_int($entry['size'] ?? null)
-                || $entry['size'] < 0
+                || ( !$is_delete && ( !is_int($entry['size'] ?? null) || $entry['size'] < 0 ) )
             ) {
                 return 'manifest line ' . ( $line_number + 1 ) . ' is malformed';
             }
@@ -345,10 +366,24 @@ final class Site_Export_Staged_Apply {
             }
             $entries[] = [
                 'artifact_id' => $entry['artifact_id'],
-                'size' => $entry['size'],
+                'size' => $is_delete ? null : $entry['size'],
+                'delete' => $is_delete,
             ];
         }
         return $entries;
+    }
+
+    /**
+     * "ready" doubles as the sender's preflight: staging and target free
+     * space let it refuse a transfer that could never fit, before a byte
+     * travels.
+     */
+    private function with_environment_facts(array $result): array {
+        $staging_free = @disk_free_space($this->staging_dir);
+        $target_free = @disk_free_space($this->target_root);
+        $result['staging_free_bytes'] = $staging_free === false ? null : (int) $staging_free;
+        $result['target_free_bytes'] = $target_free === false ? null : (int) $target_free;
+        return $result;
     }
 
     /** Mirrors the store's artifact id rule (see its contract docblock). */
@@ -375,7 +410,8 @@ final class Site_Export_Staged_Apply {
      */
     private function classify(array $entry): string {
         // Policy verdicts come first: a protected path is out of bounds no
-        // matter what is or is not staged for it.
+        // matter what is or is not staged for it. Preserve-local means
+        // never overwrite AND never delete.
         if ($this->refuse_symlinked_parents && $this->has_symlinked_parent($entry['artifact_id'])) {
             return 'protected';
         }
@@ -386,6 +422,13 @@ final class Site_Export_Staged_Apply {
             if (file_exists($occupied) || is_link($occupied)) {
                 return 'protected';
             }
+        }
+
+        if (!empty($entry['delete'])) {
+            // Deletions need nothing staged: the path either still exists
+            // (ready) or a previous window already removed it (idempotent).
+            $target = $this->target_root . '/' . $entry['artifact_id'];
+            return ( file_exists($target) || is_link($target) ) ? 'staged' : 'applied';
         }
 
         $status = $this->store->status($entry['artifact_id']);
@@ -501,9 +544,6 @@ final class Site_Export_Staged_Apply {
     }
 
     /**
-     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int}
-     */
-    /**
      * Whether any directory component of the artifact's target path is a
      * symlink. Only the relative components are checked — the target root
      * itself may legitimately be reached through links.
@@ -523,7 +563,7 @@ final class Site_Export_Staged_Apply {
         return false;
     }
 
-    private function result(string $status, ?string $reason, ?string $detail, int $applied = 0, int $already_applied = 0, int $skipped = 0, array $skipped_paths = []): array {
+    private function result(string $status, ?string $reason, ?string $detail, int $applied = 0, int $already_applied = 0, int $skipped = 0, array $skipped_paths = [], int $deleted = 0): array {
         return [
             'status' => $status,
             'reason' => $reason,
@@ -532,6 +572,7 @@ final class Site_Export_Staged_Apply {
             'already_applied' => $already_applied,
             'skipped' => $skipped,
             'skipped_paths' => $skipped_paths,
+            'deleted' => $deleted,
         ];
     }
 }

@@ -194,6 +194,11 @@ final class Site_Export_Staged_Endpoints {
             default:
                 $code = $result['reason'] === 'io_error' ? 500 : 409;
         }
+        if ($result['status'] === 'ready') {
+            // The probe doubles as push preflight: the request cap seeds
+            // the sender's chunk sizer without waiting for a 413.
+            $result['max_request_bytes'] = $this->max_request_bytes;
+        }
         return [
             'http_code' => $code,
             'body' => $result,
