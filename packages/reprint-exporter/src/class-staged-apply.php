@@ -38,6 +38,14 @@
  * upload retry racing the apply gets "busy" instead of writing into a
  * tree being consumed. The lock file is the same one the store's mutators
  * use; a killed apply releases it with the process.
+ *
+ * Policies cover the pull side of the same engine. on_existing "skip"
+ * (pull's preserve-local) makes an occupied target path win: the entry is
+ * not applied and its staged bytes are consumed. refuse_symlinked_parents
+ * refuses to create anything through a symlinked directory. Protected
+ * entries are classified before validation, so a rerun with nothing
+ * staged does not reject a transfer over paths the policy was never going
+ * to touch.
  */
 final class Site_Export_Staged_Apply {
 
@@ -59,12 +67,26 @@ final class Site_Export_Staged_Apply {
     /** @var callable */
     private $device_id;
 
+    /** @var string */
+    private $on_existing;
+
+    /** @var bool */
+    private $refuse_symlinked_parents;
+
     /**
      * @param array $options
      *   - staging_dir (string, required): same directory the store uses.
      *   - target_root (string, required): tree the artifacts apply into.
      *   - device_id (?callable): fn(string $path): ?int — stat device
      *     lookup, injectable for tests; null means the path is unreadable.
+     *   - on_existing ("replace"|"skip"): what an occupied target path
+     *     means. "replace" is push's own-tree semantics; "skip" is pull's
+     *     preserve-local — the local path wins and the staged bytes are
+     *     consumed unapplied.
+     *   - refuse_symlinked_parents (bool): never create anything through a
+     *     symlinked directory. Hosting layouts symlink plugins, themes,
+     *     and core from shared locations; apply must not write into those
+     *     through the link.
      */
     public function __construct(array $options) {
         $staging_dir = $options['staging_dir'] ?? null;
@@ -75,11 +97,17 @@ final class Site_Export_Staged_Apply {
         if (!is_string($target_root) || $target_root === '') {
             throw new InvalidArgumentException('Staged apply requires a target_root option.');
         }
+        $on_existing = $options['on_existing'] ?? 'replace';
+        if (!in_array($on_existing, ['replace', 'skip'], true)) {
+            throw new InvalidArgumentException('Staged apply on_existing must be "replace" or "skip".');
+        }
         $this->staging_dir = rtrim($staging_dir, '/');
         $this->files_dir = $this->staging_dir . '/files';
         $this->lock_path = $this->staging_dir . '/lock';
         $this->target_root = rtrim($target_root, '/');
         $this->store = new Site_Export_Staged_Artifacts($staging_dir);
+        $this->on_existing = $on_existing;
+        $this->refuse_symlinked_parents = !empty($options['refuse_symlinked_parents']);
         $this->device_id = $options['device_id'] ?? static function (string $path): ?int {
             $stat = @stat($path);
             return $stat === false ? null : (int) $stat['dev'];
@@ -94,8 +122,9 @@ final class Site_Export_Staged_Apply {
      *   what a sender calls before uploading gigabytes: a staging
      *   directory that can never apply (cross_device) rejects here, at
      *   the start, not after the transfer.
-     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int}
-     *   status "applied"|"ready"|"busy"|"rejected".
+     * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int,skipped:int}
+     *   status "applied"|"ready"|"busy"|"rejected"; skipped counts entries
+     *   the on_existing/symlink policies protected.
      */
     public function apply(string $manifest_id, bool $check_only = false): array {
         $precheck = $this->check_environment();
@@ -124,7 +153,11 @@ final class Site_Export_Staged_Apply {
             }
 
             // Nothing moves until the whole transfer proves consistent.
+            // Protected entries are decided here too, before validation:
+            // a rerun with nothing staged must not reject the transfer
+            // over a path the policy was never going to touch.
             $already_applied = [];
+            $protected = [];
             foreach ($entries as $index => $entry) {
                 $verdict = $this->classify($entry);
                 if ($verdict === 'staged') {
@@ -134,11 +167,15 @@ final class Site_Export_Staged_Apply {
                     $already_applied[$index] = true;
                     continue;
                 }
+                if ($verdict === 'protected') {
+                    $protected[$index] = true;
+                    continue;
+                }
                 return $this->result('rejected', $verdict, $entry['artifact_id']);
             }
 
             if ($check_only) {
-                return $this->result('ready', null, null, 0, count($already_applied));
+                return $this->result('ready', null, null, 0, count($already_applied), count($protected));
             }
 
             // Apply holds the store's lock, so cleanup below unlinks the
@@ -146,6 +183,14 @@ final class Site_Export_Staged_Apply {
             // the very lock this process holds.
             $applied = 0;
             foreach ($entries as $index => $entry) {
+                if (isset($protected[$index])) {
+                    // The local path wins; consume the staged bytes so they
+                    // cannot be applied by a later, differently-configured
+                    // run.
+                    @unlink($this->files_dir . '/' . $entry['artifact_id']);
+                    @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
+                    continue;
+                }
                 if (isset($already_applied[$index])) {
                     // A rerun after a kill: the file is in place; only its
                     // leftover marker remains to consume.
@@ -157,7 +202,7 @@ final class Site_Export_Staged_Apply {
                     // Everything validated, so this is environmental
                     // (permissions, disk). Rerunning apply resumes: moved
                     // entries classify as applied, the rest re-validate.
-                    return $this->result('rejected', 'io_error', $move_error, $applied, count($already_applied));
+                    return $this->result('rejected', 'io_error', $move_error, $applied, count($already_applied), count($protected));
                 }
                 ++$applied;
             }
@@ -169,7 +214,7 @@ final class Site_Export_Staged_Apply {
             @unlink($this->staging_dir . '/verified/' . $manifest_id);
             $this->clear_cursor_for($entries, $manifest_id);
 
-            return $this->result('applied', null, null, $applied, count($already_applied));
+            return $this->result('applied', null, null, $applied, count($already_applied), count($protected));
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -319,6 +364,20 @@ final class Site_Export_Staged_Apply {
      * already applied (a rerun after a kill), or a typed problem.
      */
     private function classify(array $entry): string {
+        // Policy verdicts come first: a protected path is out of bounds no
+        // matter what is or is not staged for it.
+        if ($this->refuse_symlinked_parents && $this->has_symlinked_parent($entry['artifact_id'])) {
+            return 'protected';
+        }
+        if ($this->on_existing === 'skip') {
+            $occupied = $this->target_root . '/' . $entry['artifact_id'];
+            // is_link covers dangling symlinks, which file_exists misses;
+            // preserve-local protects those too.
+            if (file_exists($occupied) || is_link($occupied)) {
+                return 'protected';
+            }
+        }
+
         $status = $this->store->status($entry['artifact_id']);
         if ($status['verified'] && $status['committed_bytes'] === $entry['size'] && $status['exists']) {
             return 'staged';
@@ -365,13 +424,34 @@ final class Site_Export_Staged_Apply {
     /**
      * @return array{status:string,reason:?string,detail:?string,applied:int,already_applied:int}
      */
-    private function result(string $status, ?string $reason, ?string $detail, int $applied = 0, int $already_applied = 0): array {
+    /**
+     * Whether any directory component of the artifact's target path is a
+     * symlink. Only the relative components are checked — the target root
+     * itself may legitimately be reached through links.
+     */
+    private function has_symlinked_parent(string $artifact_id): bool {
+        $parent = dirname($artifact_id);
+        if ($parent === '.') {
+            return false;
+        }
+        $path = $this->target_root;
+        foreach (explode('/', $parent) as $segment) {
+            $path .= '/' . $segment;
+            if (is_link($path)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function result(string $status, ?string $reason, ?string $detail, int $applied = 0, int $already_applied = 0, int $skipped = 0): array {
         return [
             'status' => $status,
             'reason' => $reason,
             'detail' => $detail,
             'applied' => $applied,
             'already_applied' => $already_applied,
+            'skipped' => $skipped,
         ];
     }
 }

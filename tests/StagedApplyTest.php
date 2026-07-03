@@ -235,6 +235,127 @@ final class StagedApplyTest extends TestCase {
     }
 
     // ---------------------------------------------------------------
+    // Preserve-local policies
+    // ---------------------------------------------------------------
+
+    public function testSkipPolicyLetsAnOccupiedTargetPathWin(): void
+    {
+        file_put_contents($this->target_root . '/index.php', 'local wins');
+        $this->stageVerified('index.php', 'remote bytes');
+        $this->stageVerified('fresh.txt', 'lands');
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'index.php', 'size' => 12],
+            ['artifact_id' => 'fresh.txt', 'size' => 5],
+        ]);
+        $apply = $this->makeApply(['on_existing' => 'skip']);
+
+        $result = $apply->apply($manifest);
+
+        $this->assertSame('applied', $result['status']);
+        $this->assertSame(1, $result['applied']);
+        $this->assertSame(1, $result['skipped']);
+        $this->assertSame('local wins', file_get_contents($this->target_root . '/index.php'));
+        $this->assertSame('lands', file_get_contents($this->target_root . '/fresh.txt'));
+        $this->assertFileDoesNotExist(
+            $this->staging_dir . '/files/index.php',
+            'protected entries consume their staged bytes'
+        );
+        $this->assertFileDoesNotExist($this->staging_dir . '/verified/index.php');
+    }
+
+    public function testSkipPolicyProtectsDanglingSymlinksAtTheTarget(): void
+    {
+        symlink($this->target_root . '/never-created', $this->target_root . '/link.php');
+        $this->stageVerified('link.php', 'remote');
+        $manifest = $this->stageManifest([['artifact_id' => 'link.php', 'size' => 6]]);
+
+        $result = $this->makeApply(['on_existing' => 'skip'])->apply($manifest);
+
+        $this->assertSame(['applied', 1], [$result['status'], $result['skipped']]);
+        $this->assertTrue(is_link($this->target_root . '/link.php'), 'the symlink survives');
+    }
+
+    public function testSymlinkedParentGuardNeverWritesThroughTheLink(): void
+    {
+        // A hosting layout: wp-content/plugins is a symlink to a shared dir.
+        mkdir($this->target_root . '/wp-content', 0700, true);
+        $shared = $this->target_root . '-shared-plugins';
+        mkdir($shared, 0700, true);
+        symlink($shared, $this->target_root . '/wp-content/plugins');
+
+        $this->stageVerified('wp-content/plugins/p/p.php', 'through the link');
+        $this->stageVerified('wp-content/regular.txt', 'fine');
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'wp-content/plugins/p/p.php', 'size' => 16],
+            ['artifact_id' => 'wp-content/regular.txt', 'size' => 4],
+        ]);
+
+        try {
+            $result = $this->makeApply(['refuse_symlinked_parents' => true])->apply($manifest);
+
+            $this->assertSame('applied', $result['status']);
+            $this->assertSame(1, $result['applied']);
+            $this->assertSame(1, $result['skipped']);
+            $this->assertSame([], glob($shared . '/*'), 'nothing may appear behind the link');
+            $this->assertSame('fine', file_get_contents($this->target_root . '/wp-content/regular.txt'));
+        } finally {
+            $this->removeDir($shared);
+        }
+    }
+
+    public function testSkipPolicyRerunWithNothingStagedStillApplies(): void
+    {
+        file_put_contents($this->target_root . '/protected.php', 'kept');
+        $this->stageVerified('protected.php', 'remote-1');
+        $this->stageVerified('normal.txt', 'moved');
+        $manifest = $this->stageManifest([
+            ['artifact_id' => 'protected.php', 'size' => 8],
+            ['artifact_id' => 'normal.txt', 'size' => 5],
+        ]);
+        $apply = $this->makeApply(['on_existing' => 'skip']);
+        $this->assertSame('applied', $apply->apply($manifest)['status']);
+
+        // The next transfer lists the protected path again. Nothing is
+        // staged for it and its local size differs from the manifest —
+        // without the policy-first classification this would reject the
+        // whole run as missing_artifact.
+        $this->stageVerified('normal.txt', 'move2');
+        $again = $this->stageManifest([
+            ['artifact_id' => 'protected.php', 'size' => 8],
+            ['artifact_id' => 'normal.txt', 'size' => 5],
+        ], '.manifest-2.jsonl');
+
+        $result = $apply->apply($again);
+
+        // Preserve-local means never overwrite — including files an earlier
+        // run applied. The rerun protects both and consumes the fresh bytes.
+        $this->assertSame('applied', $result['status']);
+        $this->assertSame(2, $result['skipped']);
+        $this->assertSame('kept', file_get_contents($this->target_root . '/protected.php'));
+        $this->assertSame('moved', file_get_contents($this->target_root . '/normal.txt'));
+        $this->assertFileDoesNotExist($this->staging_dir . '/files/normal.txt');
+    }
+
+    public function testCheckOnlyReportsProtectedEntriesWithoutConsuming(): void
+    {
+        file_put_contents($this->target_root . '/here.php', 'local');
+        $this->stageVerified('here.php', 'remote');
+        $manifest = $this->stageManifest([['artifact_id' => 'here.php', 'size' => 6]]);
+
+        $result = $this->makeApply(['on_existing' => 'skip'])->apply($manifest, true);
+
+        $this->assertSame(['ready', 1], [$result['status'], $result['skipped']]);
+        $this->assertFileExists($this->staging_dir . '/files/here.php', 'check_only must not consume');
+    }
+
+    public function testInvalidOnExistingPolicyIsRejectedAtConstruction(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->makeApply(['on_existing' => 'merge']);
+    }
+
+    // ---------------------------------------------------------------
     // Kill windows and contention
     // ---------------------------------------------------------------
 
