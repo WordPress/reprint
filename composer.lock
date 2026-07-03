@@ -358,7 +358,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-pull/apply-window-deletions",
+            "version": "dev-pull/dual-mode-windows",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",

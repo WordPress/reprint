@@ -630,6 +630,37 @@ final class StagedApplyTest extends TestCase {
         $this->assertStringContainsString('duplicates an artifact id', (string) $twice['detail']);
     }
 
+    public function testOnProtectedReportsEveryEntryBeyondTheResponseCap(): void
+    {
+        // skipped_paths is a bounded-HTTP-response diagnostic, capped at
+        // 1000. In-process callers reconcile per-entry state through
+        // on_protected, which must see every protected id — an index
+        // catch-up driven by the capped list would silently skip entries
+        // past the cap.
+        $manifest_entries = [];
+        for ($i = 0; $i < 1001; $i++) {
+            $name = sprintf('kept-%04d.txt', $i);
+            file_put_contents($this->target_root . '/' . $name, 'local');
+            $manifest_entries[] = ['artifact_id' => $name, 'size' => 5];
+        }
+        $manifest = $this->stageManifest($manifest_entries);
+
+        $reported = [];
+        $apply = $this->makeApply([
+            'on_existing' => 'skip',
+            'on_protected' => static function (string $artifact_id) use (&$reported): void {
+                $reported[] = $artifact_id;
+            },
+        ]);
+        $result = $apply->apply($manifest);
+
+        $this->assertSame('applied', $result['status']);
+        $this->assertSame(1001, $result['skipped']);
+        $this->assertCount(1000, $result['skipped_paths'], 'the response list stays capped');
+        $this->assertCount(1001, $reported, 'the callback sees every protected entry');
+        $this->assertSame('kept-1000.txt', end($reported));
+    }
+
     // ---------------------------------------------------------------
     // Preflight facts on "ready"
     // ---------------------------------------------------------------

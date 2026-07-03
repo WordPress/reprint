@@ -166,18 +166,14 @@ class StagedUploadClient
         // source is invisible to all of them. The exporter re-checks its
         // files after streaming (x-file-changed); the sender owes the same
         // honesty about its own disk, before and after the upload.
-        if (
-            $expected_mtime !== null
-            && is_array($opened_stat)
-            && (int) $opened_stat["mtime"] !== $expected_mtime
-        ) {
+        if ($this->planned_mtime_differs($opened_stat, $expected_mtime)) {
             fclose($source);
             // Committed bytes may belong to the older version; a mixed
             // artifact must never verify.
             $this->discard($artifact_id);
             return $this->failed(
                 "source_changed",
-                sprintf("planned mtime %d, found %d", $expected_mtime, (int) $opened_stat["mtime"])
+                sprintf("planned mtime %d, found %d", (int) $expected_mtime, (int) $opened_stat["mtime"])
             );
         }
 
@@ -309,15 +305,7 @@ class StagedUploadClient
         // Post-upload volatility check: a rewrite during the read window
         // can leave staged bytes that match no version of the file. Torn
         // content must fail typed, not verify.
-        clearstatcache(true, $source_path);
-        $now_stat = @stat($source_path);
-        if (
-            !is_array($opened_stat)
-            || $now_stat === false
-            || $now_stat["ino"] !== $opened_stat["ino"]
-            || $now_stat["mtime"] !== $opened_stat["mtime"]
-            || $now_stat["size"] !== $opened_stat["size"]
-        ) {
+        if ($this->source_changed_since($source_path, $opened_stat)) {
             $this->discard($artifact_id);
             return $this->failed("source_changed", "source changed while uploading");
         }
@@ -335,6 +323,11 @@ class StagedUploadClient
         $response = $this->request_json("GET", "staged_status", ["artifact_id" => $artifact_id]);
         if ($response["error"] !== null || !is_array($response["json"])) {
             return $this->failed("status_unavailable", $response["error"] ?? "invalid response");
+        }
+        if ($this->is_auth_envelope($response)) {
+            // Same reading as every other route: a control-plane auth
+            // envelope must not masquerade as "artifact absent".
+            return $this->failed("auth_failed", $this->envelope_error($response));
         }
         return [
             "status" => "ok",
@@ -414,11 +407,7 @@ class StagedUploadClient
             }
             $opened = fstat($source);
             $expected_mtime = isset($file["mtime"]) ? (int) $file["mtime"] : null;
-            if (
-                $expected_mtime !== null
-                && is_array($opened)
-                && (int) $opened["mtime"] !== $expected_mtime
-            ) {
+            if ($this->planned_mtime_differs($opened, $expected_mtime)) {
                 fclose($source);
                 $this->discard($artifact_id);
                 $per_file[$artifact_id] = ["status" => "failed", "reason" => "source_changed"];
@@ -426,19 +415,11 @@ class StagedUploadClient
             }
             $payload = $total_bytes > 0 ? $this->read_exactly($source, $total_bytes) : "";
             fclose($source);
-            clearstatcache(true, (string) $file["source_path"]);
-            $now_stat = @stat((string) $file["source_path"]);
             if ($payload === null) {
                 $per_file[$artifact_id] = ["status" => "failed", "reason" => "source_short"];
                 continue;
             }
-            if (
-                !is_array($opened)
-                || $now_stat === false
-                || $now_stat["ino"] !== $opened["ino"]
-                || $now_stat["mtime"] !== $opened["mtime"]
-                || $now_stat["size"] !== $opened["size"]
-            ) {
+            if ($this->source_changed_since((string) $file["source_path"], $opened)) {
                 $this->discard($artifact_id);
                 $per_file[$artifact_id] = ["status" => "failed", "reason" => "source_changed"];
                 continue;
@@ -577,6 +558,37 @@ class StagedUploadClient
      * before any endpoint runs. Surface those as auth_failed — retrying
      * cannot fix a bad secret — instead of an unexpected response.
      */
+    /**
+     * The plan promised an mtime and the opened file disagrees — the
+     * content is newer than the plan. One predicate for the chunked and
+     * batched paths, so both enforce the same torn-content rule.
+     *
+     * @param array|false $opened_stat fstat() of the opened source.
+     */
+    private function planned_mtime_differs($opened_stat, ?int $expected_mtime): bool
+    {
+        return $expected_mtime !== null
+            && is_array($opened_stat)
+            && (int) $opened_stat["mtime"] !== $expected_mtime;
+    }
+
+    /**
+     * Whether the source was rewritten since it was opened (inode, mtime,
+     * or size moved) — the post-read half of the same rule.
+     *
+     * @param array|false $opened_stat fstat() taken at open time.
+     */
+    private function source_changed_since(string $source_path, $opened_stat): bool
+    {
+        clearstatcache(true, $source_path);
+        $now_stat = @stat($source_path);
+        return !is_array($opened_stat)
+            || $now_stat === false
+            || $now_stat["ino"] !== $opened_stat["ino"]
+            || $now_stat["mtime"] !== $opened_stat["mtime"]
+            || $now_stat["size"] !== $opened_stat["size"];
+    }
+
     private function is_auth_envelope(array $response): bool
     {
         return in_array($response["http_code"], [401, 403], true)

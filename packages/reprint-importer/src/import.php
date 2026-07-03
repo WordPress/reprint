@@ -1238,6 +1238,13 @@ class ImportClient
     /** Artifact id the push manifest stages under; never applied itself. */
     private const PUSH_MANIFEST_ID = '.reprint-push-manifest.jsonl';
 
+    /**
+     * Push failures that follow the resumable convention (exit 2: run the
+     * same command again). One list for the transfer and the apply so a
+     * reason cannot be retryable in one phase and fatal in the other.
+     */
+    private const PUSH_RETRYABLE_REASONS = ["transport_failed", "busy_exhausted", "status_unavailable", "server_io_error"];
+
     /** Artifact id the staged pull manifest stages under. */
     private const PULL_MANIFEST_ID = '.reprint-pull-manifest.jsonl';
 
@@ -1249,6 +1256,9 @@ class ImportClient
 
     /** @var array<string,true> Owned remote paths in the batch being fetched. */
     private $staged_batch_owned = [];
+
+    /** @var string|null Cache key (list:offsets) for staged_batch_owned. */
+    private $staged_batch_owned_key = null;
 
     /**
      * True while the apply window replays deferred directory/symlink
@@ -4173,11 +4183,10 @@ class ImportClient
                 "PUSH ABORTED | {$result["abort_reason"]} | " . ($result["abort_detail"] ?? ""),
                 false,
             );
-            // Transient transfer failures follow the resumable convention
-            // (exit 2: run the same command again); a bad secret or a chunk
-            // size the host can never accept will not fix itself.
-            $retryable = ["transport_failed", "busy_exhausted", "status_unavailable", "server_io_error"];
-            $this->exit_code = in_array($result["abort_reason"], $retryable, true) ? 2 : 1;
+            // Transient transfer failures follow the resumable convention;
+            // a bad secret or a chunk size the host can never accept will
+            // not fix itself.
+            $this->exit_code = in_array($result["abort_reason"], self::PUSH_RETRYABLE_REASONS, true) ? 2 : 1;
             return;
         }
         if ($result["failed"] !== []) {
@@ -4286,8 +4295,7 @@ class ImportClient
             "PUSH APPLY FAILED | " . ($fields["abort_reason"] ?? "unknown") . " | " . ($fields["abort_detail"] ?? ""),
             false,
         );
-        $retryable = ["transport_failed", "busy_exhausted", "status_unavailable", "server_io_error"];
-        return in_array($fields["abort_reason"] ?? null, $retryable, true) ? 2 : 1;
+        return in_array($fields["abort_reason"] ?? null, self::PUSH_RETRYABLE_REASONS, true) ? 2 : 1;
     }
 
     private function staged_pull_staging_dir(): string
@@ -4309,7 +4317,7 @@ class ImportClient
         return $this->staged_pull_store;
     }
 
-    private function staged_pull_apply_engine(): Site_Export_Staged_Apply
+    private function staged_pull_apply_engine(?callable $on_protected = null): Site_Export_Staged_Apply
     {
         $preserve_local = $this->fs_root_nonempty_behavior === "preserve-local";
         return new Site_Export_Staged_Apply([
@@ -4320,6 +4328,10 @@ class ImportClient
             // symlinked directory.
             "on_existing" => $preserve_local ? "skip" : "replace",
             "refuse_symlinked_parents" => $preserve_local,
+            // The uncapped per-entry channel: index reconciliation after
+            // the window must see every protected id, not the capped
+            // diagnostic list in the result.
+            "on_protected" => $on_protected,
         ]);
     }
 
@@ -4522,9 +4534,13 @@ class ImportClient
         // and deleted remotely before the next accumulates both lines,
         // and the later one reflects the newer remote truth.
         $entries = [];
-        $raw = @file_get_contents($this->staged_pull_manifest_log());
-        if (is_string($raw) && $raw !== "") {
-            foreach (explode("\n", $raw) as $line) {
+        $log_handle = @fopen($this->staged_pull_manifest_log(), "r");
+        if ($log_handle !== false) {
+            while (true) {
+                $line = fgets($log_handle);
+                if ($line === false) {
+                    break;
+                }
                 $record = json_decode($line, true);
                 if (!is_array($record) || !is_string($record["artifact_id"] ?? null)) {
                     continue;
@@ -4563,6 +4579,7 @@ class ImportClient
                     ];
                 }
             }
+            fclose($log_handle);
         }
         if ($entries === []) {
             return;
@@ -4594,11 +4611,16 @@ class ImportClient
             "skipped_paths" => [],
             "deleted" => 0,
         ];
+        $protected_ids = [];
         if ($lines !== "") {
             $store = $this->staged_pull_store();
             $store->discard(self::PULL_MANIFEST_ID);
             $offset = 0;
-            foreach (str_split($lines, 262144) as $piece) {
+            // substr windows avoid str_split materializing a second full
+            // copy of a manifest that can reach tens of megabytes.
+            $lines_length = strlen($lines);
+            for ($piece_at = 0; $piece_at < $lines_length; $piece_at += 262144) {
+                $piece = substr($lines, $piece_at, 262144);
                 $appended = $store->append(self::PULL_MANIFEST_ID, $offset, $piece);
                 if ($appended["status"] !== "accepted") {
                     throw new RuntimeException(
@@ -4612,29 +4634,24 @@ class ImportClient
             }
 
             $this->audit_log("STAGED APPLY | " . count($entries) . " entries", true);
-            $result = $this->staged_pull_apply_engine()->apply(self::PULL_MANIFEST_ID);
+            // Every protected id flows through the callback, uncapped —
+            // the PRESERVE-LOCAL audit contract and the index catch-up
+            // below both need the full set, not the response's capped
+            // diagnostic list.
+            $engine = $this->staged_pull_apply_engine(function (string $artifact_id) use (&$protected_ids): void {
+                if (isset($protected_ids[$artifact_id])) {
+                    return;
+                }
+                $protected_ids[$artifact_id] = true;
+                $this->audit_log("PRESERVE-LOCAL skip file (kept at apply) | {$artifact_id}", false);
+            });
+            $result = $engine->apply(self::PULL_MANIFEST_ID);
             if ($result["status"] !== "applied") {
                 throw new RuntimeException(
                     "Staged apply failed: " . ($result["reason"] ?? $result["status"]) .
                         " (" . ($result["detail"] ?? "") . ")",
                 );
             }
-        }
-
-        // Same audit contract as write-time preserve-local: every skipped
-        // operation is logged with the PRESERVE-LOCAL prefix.
-        $skipped_paths = is_array($result["skipped_paths"] ?? null) ? $result["skipped_paths"] : [];
-        foreach ($skipped_paths as $protected_path) {
-            $this->audit_log("PRESERVE-LOCAL skip file (kept at apply) | {$protected_path}", false);
-        }
-        if ($result["skipped"] > count($skipped_paths)) {
-            $this->audit_log(
-                sprintf(
-                    "PRESERVE-LOCAL skipped %d more files (path list capped)",
-                    $result["skipped"] - count($skipped_paths),
-                ),
-                false,
-            );
         }
 
         // The index merge consumes its updates as a path-sorted stream
@@ -4655,13 +4672,10 @@ class ImportClient
         // checks, same validation, same audit lines, just at window time
         // (their index upserts included). Applied files enter the index,
         // confirmed deletions leave it — mirroring push's
-        // forget-after-confirm. Protected entries (and everything, past
-        // the skipped-paths cap, where protected and applied cannot be
-        // told apart) keep their old state and re-derive next delta —
-        // a re-download or a no-op, never an orphan. Every step is
-        // idempotent, so a kill here reruns cleanly from the log.
-        $protected = array_fill_keys($skipped_paths, true);
-        $cap_overflowed = $result["skipped"] > count($skipped_paths);
+        // forget-after-confirm. Protected entries keep their old state
+        // and re-derive next delta — a re-download or a no-op, never an
+        // orphan. Every step is idempotent, so a kill here reruns
+        // cleanly from the log.
         $this->staged_replay = true;
         try {
             foreach ($entries as $artifact_id => $entry) {
@@ -4683,7 +4697,7 @@ class ImportClient
                     ]]);
                     continue;
                 }
-                if ($cap_overflowed || isset($protected[$artifact_id])) {
+                if (isset($protected_ids[$artifact_id])) {
                     continue;
                 }
                 if ($entry["kind"] === "delete") {
@@ -7448,11 +7462,17 @@ class ImportClient
             // The batch's ownership flags live in the download list slice
             // the fetch state brackets; rebuilding from there covers
             // resumed batches, whose batch file predates this process.
-            $this->staged_batch_owned = $this->read_download_list_owned(
-                $list_file,
-                $batch_offset,
-                $next_offset,
-            );
+            // One batch spans many requests, so rebuild only when the
+            // slice changes.
+            $batch_key = $list_file . ":" . $batch_offset . ":" . $next_offset;
+            if ($this->staged_batch_owned_key !== $batch_key) {
+                $this->staged_batch_owned = $this->read_download_list_owned(
+                    $list_file,
+                    $batch_offset,
+                    $next_offset,
+                );
+                $this->staged_batch_owned_key = $batch_key;
+            }
         }
 
         $post_data = [
@@ -11785,111 +11805,10 @@ class ImportClient
 
     public function default_state(): array
     {
-        return [
-            // Resume checkpoint for the lower-level command currently being
-            // run directly or as a stage inside a pull pipeline.
-            "active_resumable_command" => [
-                "command_name" => null,
-                "completion_state" => null,
-                "current_stage" => null,
-                "remote_cursor" => null,
-            ],
-            "preflight" => null,
-            "remote_protocol_version" => null,
-            "remote_protocol_min_version" => null,
-            "version" => null,
-            "webhost" => null,
-            "follow_symlinks" => true,
-            "staged_apply" => false,
-            "fs_root_nonempty_behavior" => "error",
-            "filter" => "none",
-            "user_agent" => null,
-            "max_allowed_packet" => null,
-            "files_remap_fingerprint" => null,
-            "files_pull_only_fingerprint" => null,
-            "files_pull_summary" => [
-                "files_pulled" => 0,
-            ],
-            "db_index" => [
-                "file" => null,
-                "tables" => 0,
-                "rows_estimated" => 0,
-                "bytes" => 0,
-                "updated_at" => null,
-            ],
-            "diff" => [
-                "remote_offset" => 0,
-                "local_after" => null,
-            ],
-            "index" => [
-                "cursor" => null,
-            ],
-            "fetch" => [
-                "offset" => 0,
-                "next_offset" => 0,
-                "batch_file" => null,
-                "cursor" => null,
-                "batch_entries" => 0,
-            ],
-            "fetch_skipped" => [
-                "offset" => 0,
-                "next_offset" => 0,
-                "batch_file" => null,
-                "cursor" => null,
-                "batch_entries" => 0,
-            ],
-            // Crash recovery: track in-progress file downloads
-            // If we crash mid-write, we can truncate to the expected size on resume
-            "current_file" => null,        // Path to file being written
-            "current_file_bytes" => null,  // Expected bytes written so far
-            // Crash recovery: track SQL file size
-            "sql_bytes" => null,           // Expected SQL file size
-            // SQL streaming progress for user-facing statement counts.
-            "sql_statements_counted" => 0,
-            // db-apply state
-            "apply" => [
-                "statements_executed" => 0,
-                "bytes_read" => 0,
-                "rewrite_url" => null,
-                // Target database configuration — persisted by db-apply
-                // so that apply-runtime can generate DB_* constants.
-                "target_engine" => null,
-                "target_db" => null,
-                "target_host" => null,
-                "target_port" => null,
-                "target_user" => null,
-                "target_pass" => null,
-                "target_sqlite_path" => null,
-                "remote_paths_removed_from_local_site" => [],
-            ],
-            // SQL output mode (file, stdout, mysql) — persisted for resume
-            "sql_output" => null,
-            // MySQL connection parameters — persisted for resume (password excluded)
-            "mysql_host" => null,
-            "mysql_port" => null,
-            "mysql_user" => null,
-            "mysql_database" => null,
-            // Consecutive cURL timeout counter — tracks how many times in a
-            // row a timeout fired without the cursor advancing. After
-            // MAX_CONSECUTIVE_TIMEOUTS with no progress, the importer gives
-            // up instead of retrying forever.
-            "consecutive_timeouts" => 0,
-            // Adaptive tuning state/config
-            "tuning" => [
-                "config" => [],
-                "state" => [],
-            ],
-            // Resume checkpoint for the user-facing pull pipeline command
-            // being orchestrated.
-            "pull_pipeline" => [
-                "started_by_command" => null,
-                "stage_sequence" => [],
-                "last_completed_stage" => null,
-                "files_filter" => null,
-                "skipped_pending" => false,
-                "has_completed_once" => false,
-            ],
-        ];
+        // ImportState's typed properties are the single source of the
+        // persisted schema; a field added there appears here without a
+        // second hand-maintained copy to keep in lockstep.
+        return ImportState::from_array([])->to_array();
     }
 
 

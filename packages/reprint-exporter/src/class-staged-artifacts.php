@@ -611,6 +611,23 @@ final class Site_Export_Staged_Artifacts {
     }
 
     /**
+     * The artifact the cursor currently names, or null. Caller holds the
+     * store lock (the apply window's direct-consume contract): this reads
+     * without taking it.
+     */
+    public function cursor_artifact_locked(): ?string {
+        return $this->read_state()['artifact_id'];
+    }
+
+    /**
+     * Clears the cursor. Caller holds the store lock. The cursor schema
+     * and its write-then-rename commit stay owned by this class.
+     */
+    public function clear_cursor_locked(): bool {
+        return $this->write_state(null, 0);
+    }
+
+    /**
      * Reads the cursor as best-effort state.
      *
      * A missing or unreadable record is treated as no artifact in flight, so

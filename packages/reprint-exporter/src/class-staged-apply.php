@@ -81,6 +81,9 @@ final class Site_Export_Staged_Apply {
     /** @var bool */
     private $refuse_symlinked_parents;
 
+    /** @var callable|null */
+    private $on_protected;
+
     /**
      * @param array $options
      *   - staging_dir (string, required): same directory the store uses.
@@ -97,6 +100,12 @@ final class Site_Export_Staged_Apply {
      *     symlinked directory. Hosting layouts symlink plugins, themes,
      *     and core from shared locations; apply must not write into those
      *     through the link.
+     *   - on_protected (?callable): fn(string $artifact_id) — called once
+     *     per policy-protected entry during classification (check_only
+     *     included). This is the uncapped channel: in-process callers that
+     *     reconcile per-entry state (the pull window's index catch-up)
+     *     must use it. The result's skipped_paths list is capped for
+     *     bounded HTTP responses and is diagnostics only.
      */
     public function __construct(array $options) {
         $staging_dir = $options['staging_dir'] ?? null;
@@ -118,6 +127,7 @@ final class Site_Export_Staged_Apply {
         $this->store = new Site_Export_Staged_Artifacts($staging_dir);
         $this->on_existing = $on_existing;
         $this->refuse_symlinked_parents = !empty($options['refuse_symlinked_parents']);
+        $this->on_protected = $options['on_protected'] ?? null;
         $this->device_id = $options['device_id'] ?? static function (string $path): ?int {
             $stat = @stat($path);
             return $stat === false ? null : (int) $stat['dev'];
@@ -182,9 +192,11 @@ final class Site_Export_Staged_Apply {
                 }
                 if ($verdict === 'protected') {
                     $protected[$index] = true;
-                    // Callers audit-log each protected path (the
-                    // PRESERVE-LOCAL contract); capped so a 50k-skip
-                    // transfer stays a bounded response.
+                    if ($this->on_protected !== null) {
+                        call_user_func($this->on_protected, $entry['artifact_id']);
+                    }
+                    // The response list is capped so a 50k-skip transfer
+                    // stays bounded; per-entry consumers use on_protected.
                     if (count($skipped_paths) < self::SKIPPED_PATHS_LIMIT) {
                         $skipped_paths[] = $entry['artifact_id'];
                     }
@@ -213,29 +225,20 @@ final class Site_Export_Staged_Apply {
                     if (!empty($entry['delete']) !== $delete_pass) {
                         continue;
                     }
-                    if (isset($protected[$index])) {
-                        // The local path wins; consume the staged bytes so
-                        // they cannot be applied by a later,
-                        // differently-configured run.
-                        @unlink($this->files_dir . '/' . $entry['artifact_id']);
-                        @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
-                        continue;
-                    }
-                    if (isset($already_applied[$index])) {
-                        // A rerun after a kill: the work is done; leftover
-                        // staged remains only need consuming. (For a
-                        // deletion, bytes an earlier resume staged under
-                        // the id can still sit here.)
-                        @unlink($this->files_dir . '/' . $entry['artifact_id']);
-                        @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
+                    if (isset($protected[$index]) || isset($already_applied[$index])) {
+                        // Protected: the local path wins, and the staged
+                        // bytes must not be applied by a later,
+                        // differently-configured run. Already applied: a
+                        // rerun after a kill, where only leftover staged
+                        // remains linger. Both just consume.
+                        $this->consume_staged($entry['artifact_id']);
                         continue;
                     }
                     if ($delete_pass) {
                         // Staged bytes under a deleted id are garbage from
                         // before the remote dropped the file; consume them
                         // with the deletion.
-                        @unlink($this->files_dir . '/' . $entry['artifact_id']);
-                        @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
+                        $this->consume_staged($entry['artifact_id']);
                         if (!$this->remove_path_without_following_symlinks($this->target_root . '/' . $entry['artifact_id'])) {
                             return $this->result('rejected', 'io_error', 'delete: ' . $entry['artifact_id'], $applied, count($already_applied), count($protected), $skipped_paths, $deleted);
                         }
@@ -256,8 +259,7 @@ final class Site_Export_Staged_Apply {
             // The manifest is consumed with the transfer it described, and
             // a cursor still naming a consumed artifact must not survive to
             // answer a future upload with its stale offset.
-            @unlink($this->files_dir . '/' . $manifest_id);
-            @unlink($this->staging_dir . '/verified/' . $manifest_id);
+            $this->consume_staged($manifest_id);
             $this->clear_cursor_for($entries, $manifest_id);
 
             return $this->result('applied', null, null, $applied, count($already_applied), count($protected), $skipped_paths, $deleted);
@@ -268,16 +270,12 @@ final class Site_Export_Staged_Apply {
     }
 
     /**
-     * Clears the store cursor when it names an artifact this apply consumed.
-     * Same write-then-rename commit as the store's own cursor writes.
+     * Clears the store cursor when it names an artifact this apply
+     * consumed. The cursor's schema and commit discipline live in the
+     * store; apply only decides whether the cursor was consumed.
      */
     private function clear_cursor_for(array $entries, string $manifest_id): void {
-        $state_path = $this->staging_dir . '/state.json';
-        $raw = @file_get_contents($state_path);
-        $state = $raw === false ? null : json_decode($raw, true);
-        $cursor_artifact = is_array($state) && is_string($state['artifact_id'] ?? null)
-            ? $state['artifact_id']
-            : null;
+        $cursor_artifact = $this->store->cursor_artifact_locked();
         if ($cursor_artifact === null) {
             return;
         }
@@ -289,16 +287,19 @@ final class Site_Export_Staged_Apply {
                 break;
             }
         }
-        if (!$consumed) {
-            return;
+        if ($consumed) {
+            $this->store->clear_cursor_locked();
         }
+    }
 
-        $json = json_encode(['artifact_id' => null, 'committed_bytes' => 0]);
-        $tmp_path = $state_path . '.tmp';
-        if (@file_put_contents($tmp_path, $json) === strlen($json)) {
-            @rename($tmp_path, $state_path);
-        }
-        @unlink($tmp_path);
+    /**
+     * Consumes an entry's staged remains: its bytes and its verified
+     * marker. Callers hold the store lock; the store's own discard()
+     * would contend on it.
+     */
+    private function consume_staged(string $artifact_id): void {
+        @unlink($this->files_dir . '/' . $artifact_id);
+        @unlink($this->staging_dir . '/verified/' . $artifact_id);
     }
 
     /**
@@ -351,14 +352,23 @@ final class Site_Export_Staged_Apply {
         if (!$status['verified']) {
             return 'manifest artifact is not verified: ' . $manifest_id;
         }
-        $raw = @file_get_contents($this->files_dir . '/' . $manifest_id);
-        if ($raw === false) {
+        // Streamed line by line: a 200k-entry manifest is tens of
+        // megabytes, and this runs on the memory-constrained side.
+        $handle = @fopen($this->files_dir . '/' . $manifest_id, 'rb');
+        if ($handle === false) {
             return 'manifest artifact is not readable: ' . $manifest_id;
         }
 
         $entries = [];
         $seen_ids = [];
-        foreach (explode("\n", $raw) as $line_number => $line) {
+        $line_number = -1;
+        $error = null;
+        while (true) {
+            $line = fgets($handle);
+            if ($line === false) {
+                break;
+            }
+            ++$line_number;
             if (trim($line) === '') {
                 continue;
             }
@@ -369,10 +379,12 @@ final class Site_Export_Staged_Apply {
                 || !is_string($entry['artifact_id'] ?? null)
                 || ( !$is_delete && ( !is_int($entry['size'] ?? null) || $entry['size'] < 0 ) )
             ) {
-                return 'manifest line ' . ( $line_number + 1 ) . ' is malformed';
+                $error = 'manifest line ' . ( $line_number + 1 ) . ' is malformed';
+                break;
             }
             if ($entry['artifact_id'] === $manifest_id) {
-                return 'manifest lists itself';
+                $error = 'manifest lists itself';
+                break;
             }
             // One verdict per path. Neither sender can produce a duplicate
             // (both derive deletions as own-record-minus-current-set), and
@@ -380,14 +392,16 @@ final class Site_Export_Staged_Apply {
             // create has landed, the delete cannot tell the old occupant
             // from the new file.
             if (isset($seen_ids[$entry['artifact_id']])) {
-                return 'manifest line ' . ( $line_number + 1 ) . ' duplicates an artifact id';
+                $error = 'manifest line ' . ( $line_number + 1 ) . ' duplicates an artifact id';
+                break;
             }
             $seen_ids[$entry['artifact_id']] = true;
             // Manifest content is sender data; ids must satisfy the same
             // path rule the store enforces at upload time, or a crafted
             // manifest could probe or write outside the target root.
             if (!$this->valid_artifact_id($entry['artifact_id'])) {
-                return 'manifest line ' . ( $line_number + 1 ) . ' has an invalid artifact id';
+                $error = 'manifest line ' . ( $line_number + 1 ) . ' has an invalid artifact id';
+                break;
             }
             $entries[] = [
                 'artifact_id' => $entry['artifact_id'],
@@ -396,7 +410,8 @@ final class Site_Export_Staged_Apply {
                 'owned' => ( $is_delete || !empty($entry['owned']) ),
             ];
         }
-        return $entries;
+        fclose($handle);
+        return $error ?? $entries;
     }
 
     /**

@@ -67,6 +67,14 @@ class StagedPushRunner
     private $on_progress;
 
     /**
+     * @var array<string,array{size:int,mtime:?int}>|null Parsed done cache;
+     *   one push-files run reads it for the plan walk, the deletion
+     *   derivation, and the post-apply forget — one parse serves all
+     *   three. Writers keep it current.
+     */
+    private $verified_cache_memo = null;
+
+    /**
      * @param array $options
      *   - state_dir (string, required): holds .push-state.json and
      *     .push-verified.jsonl; created if missing.
@@ -213,12 +221,17 @@ class StagedPushRunner
         // multipart discipline in the push direction. Files bigger than
         // the budget keep the resumable per-chunk path. A 413 shrinks the
         // budget (monotonically, so this terminates) and the affected
-        // batch repartitions.
-        while ($queue !== []) {
+        // batch repartitions. The queue is consumed by index — shifting
+        // a 200k-entry array reindexes it every time — and retries
+        // append to the tail.
+        $next = 0;
+        $queue_size = count($queue);
+        while ($next < $queue_size) {
             $budget = max(1, $this->sizer->chunk_bytes());
 
-            if ($queue[0]["total_bytes"] + self::BATCH_FRAME_OVERHEAD > $budget) {
-                $entry = array_shift($queue);
+            if ($queue[$next]["total_bytes"] + self::BATCH_FRAME_OVERHEAD > $budget) {
+                $entry = $queue[$next];
+                ++$next;
                 $result = $this->client->upload_artifact(
                     $entry["artifact_id"],
                     $entry["source_path"],
@@ -250,14 +263,16 @@ class StagedPushRunner
                 return $this->aborted($files_total, $files_done, $failed, $reason, $result["detail"]);
             }
 
+            // One cumulative bound suffices: batch_bytes starts at 0, so
+            // the first entry's fit check and the running check coincide.
             $batch = [];
             $batch_bytes = 0;
             while (
-                $queue !== []
-                && $queue[0]["total_bytes"] + self::BATCH_FRAME_OVERHEAD <= $budget
-                && $batch_bytes + $queue[0]["total_bytes"] + self::BATCH_FRAME_OVERHEAD <= $budget
+                $next < $queue_size
+                && $batch_bytes + $queue[$next]["total_bytes"] + self::BATCH_FRAME_OVERHEAD <= $budget
             ) {
-                $entry = array_shift($queue);
+                $entry = $queue[$next];
+                ++$next;
                 $batch[$entry["artifact_id"]] = $entry;
                 $batch_bytes += $entry["total_bytes"] + self::BATCH_FRAME_OVERHEAD;
             }
@@ -269,6 +284,7 @@ class StagedPushRunner
                     // The sizer already shrank; repartition these entries.
                     foreach ($batch as $entry) {
                         $queue[] = $entry;
+                        ++$queue_size;
                     }
                     continue;
                 }
@@ -290,6 +306,7 @@ class StagedPushRunner
                 if ($outcome["status"] === "not_attempted") {
                     // The server stopped at an earlier frame; retry these.
                     $queue[] = $entry;
+                    ++$queue_size;
                     continue;
                 }
                 $reason = is_string($outcome["reason"]) ? $outcome["reason"] : "unexpected_response";
@@ -356,6 +373,9 @@ class StagedPushRunner
         $tmp_path = $this->verified_path . ".tmp";
         if (@file_put_contents($tmp_path, $lines) === strlen($lines)) {
             @rename($tmp_path, $this->verified_path);
+            foreach (array_keys($drop) as $artifact_id) {
+                unset($this->verified_cache_memo[$artifact_id]);
+            }
         }
         @unlink($tmp_path);
     }
@@ -379,8 +399,12 @@ class StagedPushRunner
      */
     private function read_verified_cache(): array
     {
+        if ($this->verified_cache_memo !== null) {
+            return $this->verified_cache_memo;
+        }
         $raw = @file_get_contents($this->verified_path);
         if ($raw === false || $raw === "") {
+            $this->verified_cache_memo = [];
             return [];
         }
         $cache = [];
@@ -401,6 +425,7 @@ class StagedPushRunner
                 "mtime" => is_int($record["mtime"] ?? null) ? $record["mtime"] : null,
             ];
         }
+        $this->verified_cache_memo = $cache;
         return $cache;
     }
 
@@ -414,6 +439,9 @@ class StagedPushRunner
             "mtime" => $mtime,
         ]) . "\n";
         @file_put_contents($this->verified_path, $line, FILE_APPEND);
+        if ($this->verified_cache_memo !== null) {
+            $this->verified_cache_memo[$artifact_id] = ["size" => $size, "mtime" => $mtime];
+        }
     }
 
     private function write_state(int $files_total, int $files_done): void

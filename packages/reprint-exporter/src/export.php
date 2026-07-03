@@ -128,7 +128,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
     /**
      * We're choosing a random boundary without checking for its presence in the content.
      * This may seem to contradict RFC 2046, where it says:
-     *
+     * 
      * > As stated previously, each body part is preceded by a boundary
      * > delimiter line that contains the boundary delimiter.  The boundary
      * > delimiter MUST NOT appear inside any of the encapsulated parts, on a
@@ -136,15 +136,15 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
      * > crucial that the composing agent be able to choose and specify a
      * > unique boundary parameter value that does not contain the boundary
      * > parameter value of an enclosing multipart as a prefix.
-     * >
+     * > 
      * > https://www.rfc-editor.org/rfc/rfc2046.html
      *
      * But in practice, we're okay. We use 128 bits of randomness. The chance of
      * it appearing in the data is about 1 in 2^128 — effectively zero. Curl does
-     * the same here:
+     * the same here: 
      *
      *    https://github.com/curl/curl/blob/462244447e8ba3a53b1ba9f0ba7baa52d8777daa/lib/mime.c#L1179-L1236
-     *
+     * 
      * Also, most chunks declare their Content-Length, so the client may skip the
      * boundary matching entirely and just consume that many bytes.
      */
@@ -2414,7 +2414,7 @@ function stream_file_producer(
     try {
         // @TODO: If an exception is thrown right after the previous chunk header,
         //        it read the fixed Content-Length value and will consume this next
-        //        chunk as data. We should try and backfill the output up to the
+        //        chunk as data. We should try and backfill the output up to the 
         //        previous content-length value if possible.
         if ($abort_payload !== null) {
             $json = json_encode_or_throw($abort_payload);
@@ -2499,11 +2499,11 @@ function encode_index_stack(array $stack): array
 
 /**
  * Resolve "." and ".." segments in a path without resolving symlinks.
- *
+ * 
  * Unlike realpath(), this only performs textual normalization — it collapses
  * "." and ".." but leaves symlink components intact.  This is useful when
  * you need a clean absolute path to inspect which components are symlinks.
- *
+ * 
  * @param string $path An absolute path that may contain "." or ".." segments.
  * @return string The normalized absolute path.
  */
@@ -2533,19 +2533,19 @@ function normalize_dot_segments(string $path): string
  * Given a path, such as `/srv/wordpress/wp-content/plugins/akismet/assets`, returns
  * a list of all the parent paths that are symlinks. It will check `/srv`,
  * `/srv/wordpress`, `/srv/wordpress/wp-content`, etc.
- *
+ * 
  * For example, given the following filesystem layout:
- *
+ * 
  *     /srv/wordpress/wp-content -> /htdocs/wp-content
  *     /srv/wordpress/wp-content/plugins/akismet -> /wordpress/plugins/akismet/latest
  *     /wordpress/plugins/akismet/latest -> /wordpress/plugins/akismet/5.0.5
- *
+ * 
  * Calling
- *
+ * 
  *     find_parents_symlinks("/srv/wordpress/wp-content/plugins/akismet/assets")
- *
+ * 
  * will return the following symlinks:
- *
+ * 
  * ['path' => '/srv/wordpress/wp-content', 'target' => '/htdocs/wp-content']
  * ['path' => '/htdocs/wp-content/plugins/akismet', 'target' => '/wordpress/plugins/akismet/latest']
  *
