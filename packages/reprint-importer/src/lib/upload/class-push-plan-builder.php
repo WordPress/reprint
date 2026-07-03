@@ -108,6 +108,9 @@ class PushPlanBuilder
                 "artifact_id" => $rel,
                 "source_path" => $path,
                 "total_bytes" => $size,
+                // Size alone cannot see a same-size edit; the runner keys
+                // its done-cache on mtime too.
+                "mtime" => (int) @filemtime($path),
             ];
         }
     }

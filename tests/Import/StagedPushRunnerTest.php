@@ -328,20 +328,48 @@ class StagedPushRunnerTest extends TestCase
         $this->assertCount(1, $this->requestsFor('staged_upload'), 'the abort stops the walk');
     }
 
-    public function testPlanSizeDisagreeingWithTheCacheFailsTyped(): void
+    public function testPlanSizeDisagreeingWithTheCacheDiscardsAndRetries(): void
     {
         $entry = $this->planEntry('artifact.bin', str_repeat('x', 10));
         $transport = $this->transportFor($this->makeEndpoints());
         [$runner] = $this->makeRunner($transport);
         $runner->push([$entry]);
 
-        // The next plan declares a different size for the verified artifact.
+        // The next plan declares a different size: the stale server copy is
+        // discarded, and the fresh upload honestly reports that the source
+        // does not match the plan either.
         $entry['total_bytes'] = 12;
         [$again] = $this->makeRunner($transport);
         $result = $again->push([$entry]);
 
         $this->assertSame('completed', $result['status']);
-        $this->assertSame('size_mismatch', $result['failed'][0]['reason']);
+        $this->assertSame('source_short', $result['failed'][0]['reason']);
+        $this->assertNotEmpty($this->requestsFor('staged_discard'), 'the stale artifact must be discarded');
+    }
+
+    public function testSameSizeEditReuploadsInsteadOfCacheSkipping(): void
+    {
+        $entry = $this->planEntry('plugin.php', '<?php // v1');
+        $entry['mtime'] = 1000;
+        $transport = $this->transportFor($this->makeEndpoints());
+        [$runner] = $this->makeRunner($transport);
+        $this->assertSame('completed', $runner->push([$entry])['status']);
+
+        // Same byte length, new content, newer mtime: every size check in
+        // the pipeline is blind to this — only the cache's mtime can see it.
+        file_put_contents($entry['source_path'], '<?php // v2');
+        $entry['mtime'] = 2000;
+        $this->requests = [];
+        [$again] = $this->makeRunner($transport);
+        $result = $again->push([$entry]);
+
+        $this->assertSame('completed', $result['status']);
+        $this->assertNotEmpty($this->requestsFor('staged_discard'));
+        $this->assertNotEmpty($this->requestsFor('staged_upload'), 'fresh bytes must upload');
+        $this->assertSame(
+            '<?php // v2',
+            file_get_contents($this->staging_dir . '/files/plugin.php')
+        );
     }
 
     public function testInvalidPlanEntriesAreRecordedNotFatal(): void

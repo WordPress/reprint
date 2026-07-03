@@ -55,8 +55,18 @@ class PushPlanBuilderTest extends TestCase
         $this->assertSame([], $result['skipped']);
         $this->assertSame(
             [
-                ['artifact_id' => 'index.php', 'source_path' => $this->root . '/index.php', 'total_bytes' => 5],
-                ['artifact_id' => 'wp-content/themes/t/style.css', 'source_path' => $this->root . '/wp-content/themes/t/style.css', 'total_bytes' => 6],
+                [
+                    'artifact_id' => 'index.php',
+                    'source_path' => $this->root . '/index.php',
+                    'total_bytes' => 5,
+                    'mtime' => (int) filemtime($this->root . '/index.php'),
+                ],
+                [
+                    'artifact_id' => 'wp-content/themes/t/style.css',
+                    'source_path' => $this->root . '/wp-content/themes/t/style.css',
+                    'total_bytes' => 6,
+                    'mtime' => (int) filemtime($this->root . '/wp-content/themes/t/style.css'),
+                ],
             ],
             $result['plan']
         );
