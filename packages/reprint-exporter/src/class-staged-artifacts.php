@@ -155,22 +155,42 @@ final class Site_Export_Staged_Artifacts {
     public function write_chunks(string $artifact_id, iterable $chunks): array {
         $file_path = $this->artifact_path($artifact_id);
         if ($file_path === null) {
-            return $this->write_result('rejected', 'invalid_artifact_id', 0);
+            return [
+                'status' => 'rejected',
+                'reason' => 'invalid_artifact_id',
+                'detail' => null,
+                'committed_bytes' => 0,
+            ];
         }
 
         $lock = $this->open_lock();
         if ($lock === false) {
-            return $this->write_result('rejected', 'io_error', 0, 'open_lock_file');
+            return [
+                'status' => 'rejected',
+                'reason' => 'io_error',
+                'detail' => 'open_lock_file',
+                'committed_bytes' => 0,
+            ];
         }
 
         try {
             if (!flock($lock, LOCK_EX | LOCK_NB)) {
-                return $this->write_result('busy', null, $this->status($artifact_id)['committed_bytes']);
+                return [
+                    'status' => 'busy',
+                    'reason' => null,
+                    'detail' => null,
+                    'committed_bytes' => $this->status($artifact_id)['committed_bytes'],
+                ];
             }
 
             $verified = $this->read_verified();
             if (isset($verified[$artifact_id])) {
-                return $this->write_result('rejected', 'already_verified', $verified[$artifact_id]);
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'already_verified',
+                    'detail' => null,
+                    'committed_bytes' => $verified[$artifact_id],
+                ];
             }
 
             // Sequential transfers: the cursor tracks one artifact. A write
@@ -179,14 +199,24 @@ final class Site_Export_Staged_Artifacts {
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
 
             if (!$this->ensure_parent_dir($file_path)) {
-                return $this->write_result('rejected', 'io_error', $committed, 'create_staging_dir');
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'io_error',
+                    'detail' => 'create_staging_dir',
+                    'committed_bytes' => $committed,
+                ];
             }
 
             // Open without truncating: a resumed transfer must keep committed
             // bytes until the cursor decides what tail to discard.
             $file = @fopen($file_path, 'c+b');
             if ($file === false) {
-                return $this->write_result('rejected', 'io_error', $committed, 'open_artifact_file');
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'io_error',
+                    'detail' => 'open_artifact_file',
+                    'committed_bytes' => $committed,
+                ];
             }
 
             try {
@@ -194,7 +224,12 @@ final class Site_Export_Staged_Artifacts {
                 // write, then append at the only offset the cursor says is
                 // committed.
                 if (!ftruncate($file, $committed) || fseek($file, $committed) !== 0) {
-                    return $this->write_result('rejected', 'io_error', $committed, 'truncate_uncommitted_tail');
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'io_error',
+                        'detail' => 'truncate_uncommitted_tail',
+                        'committed_bytes' => $committed,
+                    ];
                 }
 
                 $accepted = false;
@@ -211,27 +246,57 @@ final class Site_Export_Staged_Artifacts {
                     $source = $chunk['source'] ?? null;
 
                     if ($length < 1) {
-                        return $this->write_result('rejected', 'invalid_length', $committed);
+                        return [
+                            'status' => 'rejected',
+                            'reason' => 'invalid_length',
+                            'detail' => null,
+                            'committed_bytes' => $committed,
+                        ];
                     }
                     if ($offset < 0) {
-                        return $this->write_result('rejected', 'invalid_offset', $committed);
+                        return [
+                            'status' => 'rejected',
+                            'reason' => 'invalid_offset',
+                            'detail' => null,
+                            'committed_bytes' => $committed,
+                        ];
                     }
                     if (is_string($source) && strlen($source) !== $length) {
-                        return $this->write_result('rejected', 'length_mismatch', $committed);
+                        return [
+                            'status' => 'rejected',
+                            'reason' => 'length_mismatch',
+                            'detail' => null,
+                            'committed_bytes' => $committed,
+                        ];
                     }
                     if (!is_string($source) && !is_resource($source)) {
-                        return $this->write_result('rejected', 'invalid_source', $committed);
+                        return [
+                            'status' => 'rejected',
+                            'reason' => 'invalid_source',
+                            'detail' => null,
+                            'committed_bytes' => $committed,
+                        ];
                     }
                     if ($offset + $length <= $committed) {
                         $drain_reason = $this->drain_source($source, $length);
                         if ($drain_reason !== null) {
-                            return $this->write_result('rejected', $drain_reason, $committed, 'duplicate_drain');
+                            return [
+                                'status' => 'rejected',
+                                'reason' => $drain_reason,
+                                'detail' => 'duplicate_drain',
+                                'committed_bytes' => $committed,
+                            ];
                         }
                         $duplicate = true;
                         continue;
                     }
                     if ($offset !== $committed) {
-                        return $this->write_result('rejected', 'offset_gap', $committed);
+                        return [
+                            'status' => 'rejected',
+                            'reason' => 'offset_gap',
+                            'detail' => null,
+                            'committed_bytes' => $committed,
+                        ];
                     }
 
                     $copy_reason = $this->copy_source($source, $file, $length);
@@ -239,19 +304,34 @@ final class Site_Export_Staged_Artifacts {
                         // A failed copy can leave bytes past the committed
                         // offset; trim them before the caller retries this chunk.
                         ftruncate($file, $committed);
-                        return $this->write_result('rejected', $copy_reason, $committed, 'chunk_body');
+                        return [
+                            'status' => 'rejected',
+                            'reason' => $copy_reason,
+                            'detail' => 'chunk_body',
+                            'committed_bytes' => $committed,
+                        ];
                     }
 
                     // The data is flushed before the cursor record moves: a crash
                     // between the two leaves a tail that the next write truncates.
                     if (!fflush($file)) {
                         ftruncate($file, $committed);
-                        return $this->write_result('rejected', 'io_error', $committed, 'flush_chunk_body');
+                        return [
+                            'status' => 'rejected',
+                            'reason' => 'io_error',
+                            'detail' => 'flush_chunk_body',
+                            'committed_bytes' => $committed,
+                        ];
                     }
 
                     if (!$this->write_state($artifact_id, $committed + $length)) {
                         ftruncate($file, $committed);
-                        return $this->write_result('rejected', 'io_error', $committed, 'persist_cursor');
+                        return [
+                            'status' => 'rejected',
+                            'reason' => 'io_error',
+                            'detail' => 'persist_cursor',
+                            'committed_bytes' => $committed,
+                        ];
                     }
 
                     $committed += $length;
@@ -259,12 +339,27 @@ final class Site_Export_Staged_Artifacts {
                 }
 
                 if ($accepted) {
-                    return $this->write_result('accepted', null, $committed);
+                    return [
+                        'status' => 'accepted',
+                        'reason' => null,
+                        'detail' => null,
+                        'committed_bytes' => $committed,
+                    ];
                 }
                 if ($duplicate) {
-                    return $this->write_result('duplicate', null, $committed);
+                    return [
+                        'status' => 'duplicate',
+                        'reason' => null,
+                        'detail' => null,
+                        'committed_bytes' => $committed,
+                    ];
                 }
-                return $this->write_result('rejected', 'empty_batch', $committed);
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'empty_batch',
+                    'detail' => null,
+                    'committed_bytes' => $committed,
+                ];
             } finally {
                 fclose($file);
             }
@@ -293,27 +388,64 @@ final class Site_Export_Staged_Artifacts {
     public function finalize(string $artifact_id, int $expected_total_bytes): array {
         $file_path = $this->artifact_path($artifact_id);
         if ($file_path === null) {
-            return $this->finalize_result('rejected', 'invalid_artifact_id', 0);
+            return [
+                'status' => 'rejected',
+                'reason' => 'invalid_artifact_id',
+                'detail' => null,
+                'committed_bytes' => 0,
+                'path' => null,
+            ];
         }
         if ($expected_total_bytes < 0) {
-            return $this->finalize_result('rejected', 'invalid_total', 0);
+            return [
+                'status' => 'rejected',
+                'reason' => 'invalid_total',
+                'detail' => null,
+                'committed_bytes' => 0,
+                'path' => null,
+            ];
         }
 
         $lock = $this->open_lock();
         if ($lock === false) {
-            return $this->finalize_result('rejected', 'io_error', 0, 'open_lock_file');
+            return [
+                'status' => 'rejected',
+                'reason' => 'io_error',
+                'detail' => 'open_lock_file',
+                'committed_bytes' => 0,
+                'path' => null,
+            ];
         }
 
         try {
             if (!flock($lock, LOCK_EX | LOCK_NB)) {
-                return $this->finalize_result('busy', null, $this->status($artifact_id)['committed_bytes']);
+                return [
+                    'status' => 'busy',
+                    'reason' => null,
+                    'detail' => null,
+                    'committed_bytes' => $this->status($artifact_id)['committed_bytes'],
+                    'path' => null,
+                ];
             }
 
             $verified = $this->read_verified();
             if (isset($verified[$artifact_id])) {
-                return $verified[$artifact_id] === $expected_total_bytes
-                    ? $this->finalize_result('verified', null, $verified[$artifact_id], null, $file_path)
-                    : $this->finalize_result('rejected', 'size_mismatch', $verified[$artifact_id], 'verified_record');
+                if ($verified[$artifact_id] === $expected_total_bytes) {
+                    return [
+                        'status' => 'verified',
+                        'reason' => null,
+                        'detail' => null,
+                        'committed_bytes' => $verified[$artifact_id],
+                        'path' => $file_path,
+                    ];
+                }
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'size_mismatch',
+                    'detail' => 'verified_record',
+                    'committed_bytes' => $verified[$artifact_id],
+                    'path' => null,
+                ];
             }
 
             $state = $this->read_state();
@@ -323,30 +455,66 @@ final class Site_Export_Staged_Artifacts {
                 // A zero-byte artifact legitimately has no chunks; the fopen
                 // below creates its empty file.
                 if ($expected_total_bytes > 0) {
-                    return $this->finalize_result('rejected', 'missing', $committed);
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'missing',
+                        'detail' => null,
+                        'committed_bytes' => $committed,
+                        'path' => null,
+                    ];
                 }
                 if (!$this->ensure_parent_dir($file_path)) {
-                    return $this->finalize_result('rejected', 'io_error', 0, 'create_staging_dir');
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'io_error',
+                        'detail' => 'create_staging_dir',
+                        'committed_bytes' => 0,
+                        'path' => null,
+                    ];
                 }
             }
 
             if ($committed !== $expected_total_bytes) {
-                return $this->finalize_result('rejected', 'size_mismatch', $committed);
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'size_mismatch',
+                    'detail' => null,
+                    'committed_bytes' => $committed,
+                    'path' => null,
+                ];
             }
 
             $file = @fopen($file_path, 'c+b');
             if ($file === false) {
-                return $this->finalize_result('rejected', 'io_error', $committed, 'open_artifact_file');
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'io_error',
+                    'detail' => 'open_artifact_file',
+                    'committed_bytes' => $committed,
+                    'path' => null,
+                ];
             }
             // Drop any uncommitted tail so the artifact holds committed bytes only.
             $truncated = ftruncate($file, $committed);
             fclose($file);
             if (!$truncated) {
-                return $this->finalize_result('rejected', 'io_error', $committed, 'truncate_uncommitted_tail');
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'io_error',
+                    'detail' => 'truncate_uncommitted_tail',
+                    'committed_bytes' => $committed,
+                    'path' => null,
+                ];
             }
 
             if (!$this->append_verified($artifact_id, $expected_total_bytes)) {
-                return $this->finalize_result('rejected', 'io_error', $committed, 'persist_verified_record');
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'io_error',
+                    'detail' => 'persist_verified_record',
+                    'committed_bytes' => $committed,
+                    'path' => null,
+                ];
             }
             if ($state['artifact_id'] === $artifact_id) {
                 // Best effort: a stale cursor is harmless once the verified
@@ -354,7 +522,13 @@ final class Site_Export_Staged_Artifacts {
                 $this->write_state(null, 0);
             }
 
-            return $this->finalize_result('verified', null, $committed, null, $file_path);
+            return [
+                'status' => 'verified',
+                'reason' => null,
+                'detail' => null,
+                'committed_bytes' => $committed,
+                'path' => $file_path,
+            ];
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -653,28 +827,5 @@ final class Site_Export_Staged_Artifacts {
         }
     }
 
-    /**
-     * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
-     */
-    private function write_result(string $status, ?string $reason, int $committed_bytes, ?string $detail = null): array {
-        return [
-            'status' => $status,
-            'reason' => $reason,
-            'detail' => $detail,
-            'committed_bytes' => $committed_bytes,
-        ];
-    }
 
-    /**
-     * @return array{status:string,reason:?string,detail:?string,committed_bytes:int,path:?string}
-     */
-    private function finalize_result(string $status, ?string $reason, int $committed_bytes, ?string $detail = null, ?string $path = null): array {
-        return [
-            'status' => $status,
-            'reason' => $reason,
-            'detail' => $detail,
-            'committed_bytes' => $committed_bytes,
-            'path' => $path,
-        ];
-    }
 }
