@@ -207,6 +207,18 @@ function _site_export_staged_options(): array {
 }
 
 /**
+ * Data-plane endpoints authenticate inside their handlers.
+ *
+ * The default HMAC handler buffers php://input to hash it, which defeats the
+ * staged upload handlers' spool-then-verify discipline. Keep this list next
+ * to the public request handler so every large-body route makes an explicit
+ * auth decision.
+ */
+function _site_export_endpoint_authenticates_in_handler(string $endpoint): bool {
+    return in_array($endpoint, ['staged_upload', 'staged_upload_batch'], true);
+}
+
+/**
  * Handle an export API request.
  *
  * WordPress is already loaded at this point — DB credentials, $table_prefix,
@@ -277,18 +289,18 @@ function _site_export_handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    // staged_upload authenticates inside its handler: the default handler
-    // here buffers the whole request body to hash it, which a chunk upload
-    // cannot afford. The upload route verifies the signed headers first and
-    // hashes the body as it streams. A custom authenticate callable still
-    // runs for every endpoint — its embedder owns that tradeoff.
+    // Staged data-plane endpoints authenticate inside their handlers: the
+    // default handler here buffers the whole request body to hash it, which
+    // chunk and batch uploads cannot afford. Those routes verify the signed
+    // headers first and hash the body as it streams. A custom authenticate
+    // callable still runs for every endpoint — its embedder owns that tradeoff.
     // filter_input, not WP sanitizers: lib.php also runs without WordPress
     // bootstrapped (hosts that route the API from their own index.php).
     $endpoint = (string) filter_input(INPUT_GET, 'endpoint');
     $authenticate = $options['authenticate'] ?? null;
     if ($authenticate !== null) {
         $authenticate();
-    } elseif ($endpoint !== 'staged_upload') {
+    } elseif (!_site_export_endpoint_authenticates_in_handler($endpoint)) {
         _site_export_default_authenticate();
     }
 
