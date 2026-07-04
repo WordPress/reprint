@@ -650,6 +650,23 @@ final class StagedEndpointsTest extends TestCase {
         }
     }
 
+    public function testBatchRetryWithTruncatedVerifiedPayloadIsRejected(): void
+    {
+        $endpoints = $this->makeEndpoints();
+        $this->uploadBatch($endpoints, $this->batchBody(['a.txt' => 'abcde']));
+        $truncated = json_encode([
+            'artifact_id' => 'a.txt',
+            'offset' => 0,
+            'length' => 5,
+            'total_bytes' => 5,
+            'final' => true,
+        ]) . "\nab";
+
+        $result = $this->uploadBatch($endpoints, $truncated);
+
+        $this->assertSame([400, 'truncated_batch'], [$result['http_code'], $result['body']['reason']]);
+    }
+
     public function testBatchStopsAtTheFirstBadFrameAndReportsProgress(): void
     {
         $endpoints = $this->makeEndpoints();

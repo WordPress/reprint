@@ -372,19 +372,21 @@ final class Site_Export_Staged_Endpoints {
                 ) {
                     return $this->batch_response(400, 'invalid_batch_frame', substr($line, 0, 200), $results);
                 }
-                $payload = $frame['length'] > 0 ? $this->read_spool_exactly($spool, $frame['length']) : '';
-                if ($payload === null) {
-                    return $this->batch_response(400, 'truncated_batch', $frame['artifact_id'], $results);
-                }
-
-                $outcome = $this->stage_batch_frame($frame, $payload);
+                $outcome = $this->stage_batch_frame($frame, $spool);
                 $results[] = $outcome;
                 if ($outcome['status'] === 'rejected' || $outcome['status'] === 'busy') {
                     // Everything before this frame is committed and
                     // reported; the sender retries from here.
-                    $code = $outcome['status'] === 'busy'
-                        ? 423
-                        : ( ($outcome['reason'] ?? null) === 'io_error' ? 500 : 409 );
+                    $reason = $outcome['reason'] ?? null;
+                    if ($outcome['status'] === 'busy') {
+                        $code = 423;
+                    } elseif ($reason === 'io_error') {
+                        $code = 500;
+                    } elseif ($reason === 'truncated_batch') {
+                        $code = 400;
+                    } else {
+                        $code = 409;
+                    }
                     return $this->batch_response($code, $outcome['reason'], $outcome['artifact_id'], $results);
                 }
             }
@@ -403,14 +405,23 @@ final class Site_Export_Staged_Endpoints {
      *
      * @return array{artifact_id:string,status:string,reason:?string,committed_bytes:int}
      */
-    private function stage_batch_frame(array $frame, string $payload): array {
+    private function stage_batch_frame(array $frame, $spool): array {
         $artifact_id = $frame['artifact_id'];
         $offset = $frame['offset'];
         $final = !empty($frame['final']);
         $total_bytes = $frame['total_bytes'];
+        $remaining = $frame['length'];
 
         $status = $this->store->status($artifact_id);
         if ($status['verified']) {
+            if (!$this->skip_spool_bytes($spool, $remaining)) {
+                return [
+                    'artifact_id' => $artifact_id,
+                    'status' => 'rejected',
+                    'reason' => 'truncated_batch',
+                    'committed_bytes' => $status['committed_bytes'],
+                ];
+            }
             // A retried batch re-sends artifacts an earlier attempt already
             // landed; at the recorded size that is success, not conflict.
             if ($status['committed_bytes'] === $total_bytes) {
@@ -430,7 +441,7 @@ final class Site_Export_Staged_Endpoints {
         }
 
         $committed = $status['committed_bytes'];
-        $end = $offset + strlen($payload);
+        $end = $offset + $remaining;
         if ($committed < $offset) {
             return [
                 'artifact_id' => $artifact_id,
@@ -441,12 +452,28 @@ final class Site_Export_Staged_Endpoints {
         }
         if ($committed > $offset) {
             // Skip the prefix the store already holds.
-            $payload = substr($payload, min(strlen($payload), $committed - $offset));
+            $skipped = min($remaining, $committed - $offset);
+            if (!$this->skip_spool_bytes($spool, $skipped)) {
+                return [
+                    'artifact_id' => $artifact_id,
+                    'status' => 'rejected',
+                    'reason' => 'truncated_batch',
+                    'committed_bytes' => $committed,
+                ];
+            }
+            $remaining -= $skipped;
             $offset = $committed;
         }
-        while ($payload !== '') {
-            $piece = substr($payload, 0, $this->append_buffer_bytes);
-            $payload = (string) substr($payload, strlen($piece));
+        while ($remaining > 0) {
+            $piece = $this->read_spool_exactly($spool, min($this->append_buffer_bytes, $remaining));
+            if ($piece === null) {
+                return [
+                    'artifact_id' => $artifact_id,
+                    'status' => 'rejected',
+                    'reason' => 'truncated_batch',
+                    'committed_bytes' => $offset,
+                ];
+            }
             $result = $this->store->append($artifact_id, $offset, $piece);
             if ($result['status'] !== 'accepted' && $result['status'] !== 'duplicate') {
                 return [
@@ -457,6 +484,7 @@ final class Site_Export_Staged_Endpoints {
                 ];
             }
             $offset = $result['committed_bytes'];
+            $remaining -= strlen($piece);
         }
         $offset = max($offset, $end);
 
@@ -510,6 +538,30 @@ final class Site_Export_Staged_Endpoints {
             $data .= $piece;
         }
         return $data;
+    }
+
+    private function skip_spool_bytes($spool, int $bytes): bool {
+        if ($bytes <= 0) {
+            return true;
+        }
+        $position = ftell($spool);
+        $stat = fstat($spool);
+        if (is_int($position) && is_array($stat) && isset($stat['size'])) {
+            if ($position + $bytes > (int) $stat['size']) {
+                return false;
+            }
+            if (fseek($spool, $bytes, SEEK_CUR) === 0) {
+                return true;
+            }
+        }
+        while ($bytes > 0) {
+            $piece = fread($spool, min($this->append_buffer_bytes, $bytes));
+            if ($piece === false || $piece === '') {
+                return false;
+            }
+            $bytes -= strlen($piece);
+        }
+        return true;
     }
 
     /**

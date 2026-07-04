@@ -98,6 +98,8 @@ final class StagedApplyTest extends TestCase {
         $this->assertFileDoesNotExist($this->staging_dir . '/files/index.php');
         $this->assertFileDoesNotExist($this->staging_dir . '/verified/index.php');
         $this->assertFileDoesNotExist($this->staging_dir . '/files/.manifest.jsonl');
+        $this->assertDirectoryDoesNotExist($this->staging_dir . '/files/wp-content');
+        $this->assertDirectoryDoesNotExist($this->staging_dir . '/verified/wp-content');
         $this->assertFalse($this->store()->status('index.php')['verified']);
     }
 
