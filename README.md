@@ -276,6 +276,30 @@ php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
     --only=:wp-content: --only=:wp-plugins:
 ```
 
+#### Push local files to remote staging.
+
+`push-files` uploads a local filesystem tree into the remote exporter's staged
+artifact store. It is resumable and safe to retry: completed files are skipped,
+partially uploaded files resume from the remote committed offset, and the live
+remote tree is not changed by this command.
+
+```bash
+php reprint.phar push-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+```
+
+Use repeated `--only` values to push fs-root-relative prefixes instead of the
+whole tree:
+
+```bash
+php reprint.phar push-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+    --only=wp-content/uploads
+```
+
+The remote WordPress wiring stores staged artifacts outside the web-served tree.
+Define `SITE_EXPORT_STAGING_DIR` on the exporter host to choose that directory;
+it must have enough free space for the pushed artifacts and should be on storage
+that persists across retries.
+
 #### Pull only the database.
 
 `pull-db` runs the database side of the high-level pull pipeline:
@@ -682,6 +706,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
+* `push-files` — Upload local files into the remote staged artifact store without changing the live remote tree.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
