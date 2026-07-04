@@ -98,6 +98,28 @@ class PushFilesCliTest extends TestCase
         $this->assertFileExists($this->state_dir . '/.push-state.json');
     }
 
+    public function testAbortClearsPushStateWithoutSecretOrNetwork(): void
+    {
+        file_put_contents($this->state_dir . '/.push-state.json', '{}');
+        file_put_contents($this->state_dir . '/.push-verified.jsonl', "a.txt\n");
+        file_put_contents($this->state_dir . '/.push-manifest.jsonl', "{}\n");
+        file_put_contents($this->fs_root . '/a.txt', 'x');
+
+        [$output, $code] = $this->runCli([
+            'push-files',
+            'http://127.0.0.1:1/?reprint-api',
+            '--abort',
+            '--state-dir=' . $this->state_dir,
+            '--fs-root=' . $this->fs_root,
+        ]);
+
+        $this->assertSame(0, $code, $output);
+        $this->assertStringContainsString('State cleared for push-files', $output);
+        $this->assertFileDoesNotExist($this->state_dir . '/.push-state.json');
+        $this->assertFileDoesNotExist($this->state_dir . '/.push-verified.jsonl');
+        $this->assertFileDoesNotExist($this->state_dir . '/.push-manifest.jsonl');
+    }
+
     public function testUnreachableTargetAbortsWithTheRetryableExitCode(): void
     {
         file_put_contents($this->fs_root . '/wp-config-sample.php', '<?php');
