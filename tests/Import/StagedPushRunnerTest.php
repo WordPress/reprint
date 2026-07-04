@@ -251,6 +251,28 @@ class StagedPushRunnerTest extends TestCase
         $this->assertCount(0, $this->requests, 'cache hits must not cost requests');
     }
 
+    public function testPendingBytesIgnoreCachedArtifacts(): void
+    {
+        $plan = [
+            $this->planEntry('a.bin', str_repeat('a', 12)),
+            $this->planEntry('b.bin', str_repeat('b', 10)),
+        ];
+        touch($plan[0]['source_path'], 1000);
+        touch($plan[1]['source_path'], 1000);
+        $plan[0]['mtime'] = 1000;
+        $plan[1]['mtime'] = 1000;
+        $transport = $this->transportFor($this->makeEndpoints());
+        [$runner] = $this->makeRunner($transport);
+        $this->assertSame('completed', $runner->push($plan)['status']);
+        $this->assertSame(0, $runner->pending_bytes($plan));
+
+        file_put_contents($plan[1]['source_path'], str_repeat('B', 10));
+        touch($plan[1]['source_path'], 2000);
+        $plan[1]['mtime'] = 2000;
+
+        $this->assertSame(10, $runner->pending_bytes($plan));
+    }
+
     public function testTornCacheLineFallsBackToTheServerShortCircuit(): void
     {
         $plan = [$this->planEntry('artifact.bin', str_repeat('x', 12))];
