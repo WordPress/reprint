@@ -1898,6 +1898,10 @@ class ImportClient
             return;
         }
         if ($command === "push-files") {
+            if ($abort) {
+                $this->handle_abort($command);
+                return;
+            }
             $this->run_push_files($options);
             return;
         }
@@ -2066,6 +2070,20 @@ class ImportClient
                 $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
 
                 $this->save_state($this->state);
+                break;
+
+            case "push-files":
+                $this->audit_log(
+                    "RESTART | Clearing push-files state",
+                    true,
+                );
+                foreach ([".push-state.json", ".push-verified.jsonl", ".push-manifest.jsonl"] as $name) {
+                    $path = rtrim($this->state_dir, "/") . "/" . $name;
+                    if (file_exists($path)) {
+                        @unlink($path);
+                        $this->audit_log("FILE DELETE | {$path} | abort push-files");
+                    }
+                }
                 break;
 
             case "files-index":
@@ -4115,36 +4133,6 @@ class ImportClient
             );
         }
 
-        if ($probe["status"] === "ready") {
-            if (($probe["max_request_bytes"] ?? null) !== null) {
-                // Seed the sizer from the target's declared cap instead of
-                // waiting for the first 413 to teach it.
-                $sizer->apply_reported_limits([$probe["max_request_bytes"]]);
-            }
-            $plan_bytes = 0;
-            foreach ($build["plan"] as $plan_entry) {
-                $plan_bytes += (int) ($plan_entry["total_bytes"] ?? 0);
-            }
-            $staging_free = $probe["staging_free_bytes"] ?? null;
-            if ($staging_free !== null && $plan_bytes > $staging_free) {
-                // The transfer could never fit; refuse before uploading.
-                $summary = [
-                    "type" => "push",
-                    "status" => "error",
-                    "abort_reason" => "insufficient_staging_space",
-                    "abort_detail" => sprintf(
-                        "plan needs %d bytes, staging has %d free",
-                        $plan_bytes,
-                        $staging_free,
-                    ),
-                ];
-                $this->output_progress($summary, true);
-                echo json_encode($summary, JSON_PRETTY_PRINT) . "\n";
-                $this->exit_code = 1;
-                return;
-            }
-        }
-
         $runner = new StagedPushRunner([
             "state_dir" => $this->state_dir,
             "client" => $client,
@@ -4160,6 +4148,33 @@ class ImportClient
                 ]);
             },
         ]);
+
+        if ($probe["status"] === "ready") {
+            if (($probe["max_request_bytes"] ?? null) !== null) {
+                // Seed the sizer from the target's declared cap instead of
+                // waiting for the first 413 to teach it.
+                $sizer->apply_reported_limits([$probe["max_request_bytes"]]);
+            }
+            $pending_bytes = $runner->pending_bytes($build["plan"]);
+            $staging_free = $probe["staging_free_bytes"] ?? null;
+            if ($staging_free !== null && $pending_bytes > $staging_free) {
+                // The transfer could never fit; refuse before uploading.
+                $summary = [
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => "insufficient_staging_space",
+                    "abort_detail" => sprintf(
+                        "pending upload needs %d bytes, staging has %d free",
+                        $pending_bytes,
+                        $staging_free,
+                    ),
+                ];
+                $this->output_progress($summary, true);
+                echo json_encode($summary, JSON_PRETTY_PRINT) . "\n";
+                $this->exit_code = 1;
+                return;
+            }
+        }
 
         $result = $runner->push($build["plan"]);
 
@@ -4225,28 +4240,43 @@ class ImportClient
             }
         }
 
-        $lines = "";
-        foreach ($plan as $entry) {
-            $lines .= json_encode([
-                "artifact_id" => $entry["artifact_id"],
-                "size" => $entry["total_bytes"],
-            ]) . "\n";
-        }
-        foreach ($stale_ids as $stale_id) {
-            $lines .= json_encode([
-                "artifact_id" => $stale_id,
-                "delete" => true,
-            ]) . "\n";
-        }
         $manifest_path = $this->state_dir . "/.push-manifest.jsonl";
-        if (@file_put_contents($manifest_path, $lines) !== strlen($lines)) {
-            echo json_encode([
-                "type" => "push_apply",
-                "status" => "error",
+        $manifest = @fopen($manifest_path, "wb");
+        if ($manifest === false) {
+            return $this->finish_push_apply("error", [
                 "abort_reason" => "manifest_write_failed",
                 "abort_detail" => $manifest_path,
-            ], JSON_PRETTY_PRINT) . "\n";
-            return 1;
+            ]);
+        }
+        foreach ($plan as $entry) {
+            if (!$this->write_push_manifest_entry($manifest, [
+                "artifact_id" => $entry["artifact_id"],
+                "size" => $entry["total_bytes"],
+            ])) {
+                fclose($manifest);
+                return $this->finish_push_apply("error", [
+                    "abort_reason" => "manifest_write_failed",
+                    "abort_detail" => $manifest_path,
+                ]);
+            }
+        }
+        foreach ($stale_ids as $stale_id) {
+            if (!$this->write_push_manifest_entry($manifest, [
+                "artifact_id" => $stale_id,
+                "delete" => true,
+            ])) {
+                fclose($manifest);
+                return $this->finish_push_apply("error", [
+                    "abort_reason" => "manifest_write_failed",
+                    "abort_detail" => $manifest_path,
+                ]);
+            }
+        }
+        if (!@fclose($manifest)) {
+            return $this->finish_push_apply("error", [
+                "abort_reason" => "manifest_write_failed",
+                "abort_detail" => $manifest_path,
+            ]);
         }
 
         // A manifest from an earlier, different plan may sit at this id;
@@ -4278,6 +4308,23 @@ class ImportClient
             "already_applied" => $applied["already_applied"],
             "deleted" => $applied["deleted"],
         ]);
+    }
+
+    private function write_push_manifest_entry($manifest, array $entry): bool
+    {
+        $encoded = json_encode($entry);
+        if (!is_string($encoded)) {
+            return false;
+        }
+        $line = $encoded . "\n";
+        while ($line !== "") {
+            $written = @fwrite($manifest, $line);
+            if ($written === false || $written === 0) {
+                return false;
+            }
+            $line = substr($line, $written);
+        }
+        return true;
     }
 
     /**

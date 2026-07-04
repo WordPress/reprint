@@ -98,6 +98,28 @@ class PushFilesCliTest extends TestCase
         $this->assertFileExists($this->state_dir . '/.push-state.json');
     }
 
+    public function testAbortClearsPushStateWithoutSecretOrNetwork(): void
+    {
+        file_put_contents($this->state_dir . '/.push-state.json', '{}');
+        file_put_contents($this->state_dir . '/.push-verified.jsonl', "a.txt\n");
+        file_put_contents($this->state_dir . '/.push-manifest.jsonl', "{}\n");
+        file_put_contents($this->fs_root . '/a.txt', 'x');
+
+        [$output, $code] = $this->runCli([
+            'push-files',
+            'http://127.0.0.1:1/?reprint-api',
+            '--abort',
+            '--state-dir=' . $this->state_dir,
+            '--fs-root=' . $this->fs_root,
+        ]);
+
+        $this->assertSame(0, $code, $output);
+        $this->assertStringContainsString('State cleared for push-files', $output);
+        $this->assertFileDoesNotExist($this->state_dir . '/.push-state.json');
+        $this->assertFileDoesNotExist($this->state_dir . '/.push-verified.jsonl');
+        $this->assertFileDoesNotExist($this->state_dir . '/.push-manifest.jsonl');
+    }
+
     public function testUnreachableTargetAbortsWithTheRetryableExitCode(): void
     {
         file_put_contents($this->fs_root . '/wp-config-sample.php', '<?php');
@@ -354,6 +376,50 @@ class PushFilesCliTest extends TestCase
                 ['staged_apply'],
                 array_unique(array_filter(explode("\n", (string) file_get_contents($harness . '/requests.log')))),
                 'the probe must be the only request'
+            );
+        } finally {
+            $this->stopApplyHarness();
+        }
+    }
+
+    public function testInsufficientStagingSpaceIgnoresCachedArtifacts(): void
+    {
+        // A resumed push may have already staged more bytes than the target
+        // currently reports free. The preflight gate must compare only the
+        // bytes still pending, or it falsely rejects the resume.
+        $harness = sys_get_temp_dir() . '/push-cli-space-resume-' . bin2hex(random_bytes(8));
+        mkdir($harness, 0700, true);
+        $router = <<<'PHP'
+<?php
+file_put_contents('__REQUESTS_LOG__', ($_GET['endpoint'] ?? '?') . "\n", FILE_APPEND);
+header('Content-Type: application/json');
+echo json_encode(['status' => 'ready', 'staging_free_bytes' => 1, 'target_free_bytes' => 1, 'max_request_bytes' => 65536]);
+PHP;
+        file_put_contents($harness . '/router.php', str_replace('__REQUESTS_LOG__', $harness . '/requests.log', $router));
+        $url = $this->serveRouter($harness);
+        try {
+            file_put_contents($this->fs_root . '/already.bin', str_repeat('x', 4096));
+            $mtime = (int) filemtime($this->fs_root . '/already.bin');
+            file_put_contents(
+                $this->state_dir . '/.push-verified.jsonl',
+                "\n" . json_encode(['artifact_id' => 'already.bin', 'size' => 4096, 'mtime' => $mtime]) . "\n"
+            );
+
+            [$output, $code] = $this->runCli([
+                'push-files',
+                $url,
+                '--secret=push-cli-e2e-secret',
+                '--state-dir=' . $this->state_dir,
+                '--fs-root=' . $this->fs_root,
+            ]);
+
+            $this->assertSame(0, $code, $output);
+            $summary = json_decode((string) substr($output, (int) strrpos($output, "{\n")), true);
+            $this->assertSame('complete', $summary['status']);
+            $this->assertSame(
+                ['staged_apply'],
+                array_unique(array_filter(explode("\n", (string) file_get_contents($harness . '/requests.log')))),
+                'the cached artifact must not upload just to satisfy the space gate'
             );
         } finally {
             $this->stopApplyHarness();

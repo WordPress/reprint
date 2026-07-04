@@ -135,6 +135,41 @@ class StagedPushRunner
     }
 
     /**
+     * Bytes that a resumed run still needs to stage.
+     *
+     * Invalid or unreadable plan entries do not count here because push()
+     * records them as artifact-scoped failures before any upload attempt.
+     */
+    public function pending_bytes(array $artifacts): int
+    {
+        $verified_cache = $this->read_verified_cache();
+        $bytes = 0;
+        foreach ($artifacts as $entry) {
+            $artifact_id = $entry["artifact_id"] ?? null;
+            $source_path = $entry["source_path"] ?? null;
+            if (!is_string($artifact_id) || $artifact_id === "" || !is_string($source_path) || $source_path === "") {
+                continue;
+            }
+
+            $total_bytes = $entry["total_bytes"] ?? null;
+            if ($total_bytes === null) {
+                $size = @filesize($source_path);
+                if ($size === false) {
+                    continue;
+                }
+                $total_bytes = $size;
+            }
+            $total_bytes = (int) $total_bytes;
+            $mtime = isset($entry["mtime"]) ? (int) $entry["mtime"] : null;
+            if ($this->cache_hit($verified_cache, $artifact_id, $total_bytes, $mtime)) {
+                continue;
+            }
+            $bytes += $total_bytes;
+        }
+        return $bytes;
+    }
+
+    /**
      * Upload every artifact in the plan that is not already verified.
      *
      * @param array $artifacts Each entry: ['artifact_id' => string,
@@ -191,11 +226,7 @@ class StagedPushRunner
             // the store's verification, so the cache must not vouch for it.
             $mtime = isset($entry["mtime"]) ? (int) $entry["mtime"] : null;
             $cached = $verified_cache[$artifact_id] ?? null;
-            if (
-                $cached !== null
-                && $cached["size"] === $total_bytes
-                && ($mtime === null || $cached["mtime"] === null || $cached["mtime"] === $mtime)
-            ) {
+            if ($this->cache_hit($verified_cache, $artifact_id, $total_bytes, $mtime)) {
                 $files_done++;
                 $this->report_progress($files_done, $files_total, $artifact_id, $total_bytes, $total_bytes);
                 continue;
@@ -378,6 +409,19 @@ class StagedPushRunner
             }
         }
         @unlink($tmp_path);
+    }
+
+    /**
+     * The done cache keys on size and, when the plan supplies one, mtime.
+     * A same-size edit is invisible to the store's verification, so any
+     * mtime movement must invalidate the cache entry before upload/apply.
+     */
+    private function cache_hit(array $verified_cache, string $artifact_id, int $total_bytes, ?int $mtime): bool
+    {
+        $cached = $verified_cache[$artifact_id] ?? null;
+        return $cached !== null
+            && $cached["size"] === $total_bytes
+            && ($mtime === null || $cached["mtime"] === null || $cached["mtime"] === $mtime);
     }
 
     private function report_progress(int $files_done, int $files_total, string $artifact_id, int $committed, int $total): void

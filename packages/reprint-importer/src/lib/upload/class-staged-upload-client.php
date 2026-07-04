@@ -510,6 +510,20 @@ class StagedUploadClient
                     ];
                 }
             }
+            if (($json["status"] ?? null) === "rejected") {
+                $detail = $json["detail"] ?? null;
+                $reported = is_string($detail) ? ($per_file[$detail] ?? null) : null;
+                if (!is_array($reported) || ($reported["status"] ?? null) !== "failed") {
+                    $reason = $json["reason"] ?? null;
+                    fclose($body);
+                    return [
+                        "status" => "failed",
+                        "reason" => is_string($reason) ? $reason : "unexpected_response",
+                        "detail" => is_string($detail) ? $detail : null,
+                        "per_file" => $per_file,
+                    ];
+                }
+            }
             foreach ($sendable as $artifact_id) {
                 if (!isset($per_file[$artifact_id])) {
                     // The server stopped at an earlier frame; these retry.
