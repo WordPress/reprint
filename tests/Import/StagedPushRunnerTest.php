@@ -68,7 +68,7 @@ class StagedPushRunnerTest extends TestCase
 
     private function transportFor(Site_Export_Staged_Endpoints $endpoints): callable
     {
-        return function (string $method, string $url, array $headers, string $body, int $timeout) use ($endpoints): array {
+        return function (string $method, string $url, array $headers, $body, int $timeout) use ($endpoints): array {
             parse_str((string) parse_url($url, PHP_URL_QUERY), $params);
             $endpoint = (string) ($params['endpoint'] ?? '');
             unset($params['endpoint']);
@@ -81,7 +81,12 @@ class StagedPushRunnerTest extends TestCase
             switch ($endpoint) {
                 case 'staged_upload':
                     $stream = fopen('php://temp', 'w+b');
-                    fwrite($stream, $body);
+                    if (is_resource($body)) {
+                        rewind($body);
+                        stream_copy_to_stream($body, $stream);
+                    } else {
+                        fwrite($stream, (string) $body);
+                    }
                     rewind($stream);
                     $result = $endpoints->upload($params, $server, $stream);
                     fclose($stream);
@@ -97,7 +102,12 @@ class StagedPushRunnerTest extends TestCase
                     break;
                 case 'staged_upload_batch':
                     $stream = fopen('php://temp', 'w+b');
-                    fwrite($stream, $body);
+                    if (is_resource($body)) {
+                        rewind($body);
+                        stream_copy_to_stream($body, $stream);
+                    } else {
+                        fwrite($stream, (string) $body);
+                    }
                     rewind($stream);
                     $result = $endpoints->upload_batch($params, $server, $stream);
                     fclose($stream);
