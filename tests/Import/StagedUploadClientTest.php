@@ -574,6 +574,33 @@ class StagedUploadClientTest extends TestCase
         $this->assertLessThanOrEqual(57, $sizer->chunk_bytes(), 'the sizer learned the cap');
     }
 
+    public function testUploadBatchFailsTopLevelRejectedProtocolErrors(): void
+    {
+        $calls = 0;
+        $client = $this->makeClient(static function () use (&$calls): array {
+            $calls++;
+            return [
+                'http_code' => 400,
+                'body' => (string) json_encode([
+                    'status' => 'rejected',
+                    'reason' => 'invalid_batch_frame',
+                    'detail' => 'not json at all',
+                    'results' => [],
+                ]),
+                'error' => null,
+            ];
+        }, [
+            'sizer' => new UploadChunkSizer(['floor_bytes' => 64, 'start_bytes' => 4096, 'max_bytes' => 4096]),
+        ]);
+        $files = $this->batchFiles(['a.txt' => 'aaa']);
+
+        $result = $client->upload_batch($files);
+
+        $this->assertSame(['failed', 'invalid_batch_frame'], [$result['status'], $result['reason']]);
+        $this->assertSame('not json at all', $result['detail']);
+        $this->assertSame(1, $calls, 'malformed batch responses are not retried as sendable files');
+    }
+
     public function testUploadBatchExcludesAVolatileFileLocally(): void
     {
         $client = $this->makeClient($this->transportFor($this->makeEndpoints()), [

@@ -1878,6 +1878,10 @@ class ImportClient
             return;
         }
         if ($command === "push-files") {
+            if ($abort) {
+                $this->handle_abort($command);
+                return;
+            }
             $this->run_push_files($options);
             return;
         }
@@ -2030,6 +2034,20 @@ class ImportClient
                 $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
 
                 $this->save_state($this->state);
+                break;
+
+            case "push-files":
+                $this->audit_log(
+                    "RESTART | Clearing push-files state",
+                    true,
+                );
+                foreach ([".push-state.json", ".push-verified.jsonl", ".push-manifest.jsonl"] as $name) {
+                    $path = rtrim($this->state_dir, "/") . "/" . $name;
+                    if (file_exists($path)) {
+                        @unlink($path);
+                        $this->audit_log("FILE DELETE | {$path} | abort push-files");
+                    }
+                }
                 break;
 
             case "files-index":
