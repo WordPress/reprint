@@ -12,6 +12,7 @@
  *    empty file, and a multi-chunk file
  *  - idempotent re-push (cache-skips, apply reports already applied)
  *  - resume after the client loses ALL local state (server is the truth)
+ *  - resume when a prior apply already moved one staged artifact
  *  - a same-size edit re-pushes (size checks alone cannot see it)
  *  - --only pushes a subset and applies only that subset
  *  - wrong secret fails fast without staging a byte
@@ -172,6 +173,32 @@ describe('Import: push-files stages and applies a local tree', () => {
         const resumed = runPush(['--apply']);
 
         assert.equal(resumed.exitCode, 0, `resume failed:\n${resumed.stderr}\n${resumed.stdout}`);
+        assert.equal(
+            readFileSync(join(appliedRoot, 'wp-content', 'plugins', 'my-plugin', 'my-plugin.php'), 'utf-8'),
+            '<?php // v1'
+        );
+    }, 120000);
+
+    it('finishes an apply window with one file already moved', () => {
+        freshWorkspace();
+        resetTarget();
+
+        const staged = runPush();
+        assert.equal(staged.exitCode, 0, `staging failed:\n${staged.stderr}\n${staged.stdout}`);
+
+        // Simulate a kill after the first rename but before apply could consume
+        // its verified marker. The rerun must treat that artifact as already
+        // applied and continue with the still-staged files.
+        execSync(
+            `sudo mv "${join(siteDir, '.push-staging', 'files', 'index.php')}" "${join(appliedRoot, 'index.php')}"`
+        );
+
+        const result = runPush(['--apply']);
+
+        assert.equal(result.exitCode, 0, `apply rerun failed:\n${result.stderr}\n${result.stdout}`);
+        const summary = JSON.parse(result.stdout.slice(result.stdout.lastIndexOf('{\n')));
+        assert.equal(summary.status, 'complete');
+        assert.equal(summary.already_applied, 1);
         assert.equal(
             readFileSync(join(appliedRoot, 'wp-content', 'plugins', 'my-plugin', 'my-plugin.php'), 'utf-8'),
             '<?php // v1'
