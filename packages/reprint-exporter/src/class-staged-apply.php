@@ -204,7 +204,7 @@ final class Site_Export_Staged_Apply {
                 if (isset($already_applied[$index])) {
                     // A rerun after a kill: the file is in place; only its
                     // leftover marker remains to consume.
-                    @unlink($this->staging_dir . '/verified/' . $entry['artifact_id']);
+                    $this->consume_verified_marker($entry['artifact_id']);
                     continue;
                 }
                 $move_error = $this->move_into_place($entry['artifact_id']);
@@ -220,8 +220,11 @@ final class Site_Export_Staged_Apply {
             // The manifest is consumed with the transfer it described, and
             // a cursor still naming a consumed artifact must not survive to
             // answer a future upload with its stale offset.
-            @unlink($this->files_dir . '/' . $manifest_id);
-            @unlink($this->staging_dir . '/verified/' . $manifest_id);
+            $manifest_path = $this->files_dir . '/' . $manifest_id;
+            @unlink($manifest_path);
+            clearstatcache(true, $manifest_path);
+            $this->prune_empty_staging_parents('files', $manifest_id);
+            $this->consume_verified_marker($manifest_id);
             $this->clear_cursor_for($entries, $manifest_id);
 
             return $this->result('applied', null, null, $applied, count($already_applied), count($protected), $skipped_paths);
@@ -443,11 +446,32 @@ final class Site_Export_Staged_Apply {
         if (!@rename($staged_path, $target_path)) {
             return 'rename: ' . $artifact_id;
         }
+        clearstatcache(true, $staged_path);
         // The marker is consumed with the file. A kill between the two
         // reruns as "applied" (target at size, nothing staged) and only
         // costs this unlink again.
-        @unlink($this->staging_dir . '/verified/' . $artifact_id);
+        $this->prune_empty_staging_parents('files', $artifact_id);
+        $this->consume_verified_marker($artifact_id);
         return null;
+    }
+
+    private function consume_verified_marker(string $artifact_id): void {
+        $marker_path = $this->staging_dir . '/verified/' . $artifact_id;
+        @unlink($marker_path);
+        clearstatcache(true, $marker_path);
+        $this->prune_empty_staging_parents('verified', $artifact_id);
+    }
+
+    private function prune_empty_staging_parents(string $root_name, string $artifact_id): void {
+        $root = $this->staging_dir . '/' . $root_name;
+        $dir = dirname($root . '/' . $artifact_id);
+        while ($dir !== $root && strpos($dir, $root . '/') === 0) {
+            if (!@rmdir($dir)) {
+                return;
+            }
+            clearstatcache(true, $dir);
+            $dir = dirname($dir);
+        }
     }
 
     /**
