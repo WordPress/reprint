@@ -47,6 +47,9 @@ class StagedPushRunner
         "invalid_offset",
         "invalid_total",
         "invalid_artifact_entry",
+        // A source rewritten mid-push fails its artifact; the next run
+        // re-plans with the current mtime and pushes the fresh content.
+        "source_changed",
     ];
 
     private string $state_path;
@@ -169,13 +172,27 @@ class StagedPushRunner
             }
             $total_bytes = (int) $total_bytes;
 
-            // A cache hit at the planned size is done — no request. Any
-            // disagreement falls through to the client, whose verified
-            // short-circuit settles it against the store.
-            if (($verified_cache[$artifact_id] ?? null) === $total_bytes) {
+            // A cache hit at the planned size and mtime is done — no
+            // request. The mtime matters because every other check in this
+            // pipeline is a byte count: a same-size edit is invisible to
+            // the store's verification, so the cache must not vouch for it.
+            $mtime = isset($entry["mtime"]) ? (int) $entry["mtime"] : null;
+            $cached = $verified_cache[$artifact_id] ?? null;
+            if (
+                $cached !== null
+                && $cached["size"] === $total_bytes
+                && ($mtime === null || $cached["mtime"] === null || $cached["mtime"] === $mtime)
+            ) {
                 $files_done++;
                 $this->report_progress($files_done, $files_total, $artifact_id, $total_bytes, $total_bytes);
                 continue;
+            }
+            if ($cached !== null) {
+                // The source changed since this artifact verified. The
+                // store's size checks cannot see a same-size edit, so the
+                // stale server copy must go before the fresh bytes come —
+                // its verified short-circuit would otherwise vouch for it.
+                $this->client->discard($artifact_id);
             }
 
             $result = $this->client->upload_artifact(
@@ -184,12 +201,13 @@ class StagedPushRunner
                 $total_bytes,
                 function (int $committed, int $total) use ($files_done, $files_total, $artifact_id): void {
                     $this->report_progress($files_done, $files_total, $artifact_id, $committed, $total);
-                }
+                },
+                $mtime
             );
 
             if ($result["status"] === "verified") {
                 $files_done++;
-                $this->append_verified($artifact_id, $total_bytes);
+                $this->append_verified($artifact_id, $total_bytes, $mtime);
                 $this->write_state($files_total, $files_done);
                 $this->report_progress($files_done, $files_total, $artifact_id, $total_bytes, $total_bytes);
                 continue;
@@ -236,7 +254,7 @@ class StagedPushRunner
     }
 
     /**
-     * @return array<string,int> artifact id to verified size.
+     * @return array<string,array{size:int,mtime:?int}> keyed by artifact id.
      */
     private function read_verified_cache(): array
     {
@@ -257,18 +275,22 @@ class StagedPushRunner
                 // takes the client's short-circuit path instead.
                 continue;
             }
-            $cache[$record["artifact_id"]] = $record["size"];
+            $cache[$record["artifact_id"]] = [
+                "size" => $record["size"],
+                "mtime" => is_int($record["mtime"] ?? null) ? $record["mtime"] : null,
+            ];
         }
         return $cache;
     }
 
-    private function append_verified(string $artifact_id, int $size): void
+    private function append_verified(string $artifact_id, int $size, ?int $mtime): void
     {
         // The leading newline seals any torn tail from a killed writer onto
         // its own (skipped) line, as the staged store does for its records.
         $line = "\n" . json_encode([
             "artifact_id" => $artifact_id,
             "size" => $size,
+            "mtime" => $mtime,
         ]) . "\n";
         @file_put_contents($this->verified_path, $line, FILE_APPEND);
     }

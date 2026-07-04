@@ -116,6 +116,10 @@ class StagedUploadClient
      * @param ?int $total_bytes Plan-declared size; defaults to the file size.
      * @param ?callable $on_progress fn(int $committed_bytes, int $total_bytes)
      *   after every advance.
+     * @param ?int $expected_mtime Plan-declared source mtime. A mismatch
+     *   before uploading means the plan is stale — the artifact fails
+     *   "source_changed" so a re-plan pushes the current content instead
+     *   of a mix.
      * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
      *   status "verified" on success, "failed" with a typed reason otherwise.
      */
@@ -123,7 +127,8 @@ class StagedUploadClient
         string $artifact_id,
         string $source_path,
         ?int $total_bytes = null,
-        ?callable $on_progress = null
+        ?callable $on_progress = null,
+        ?int $expected_mtime = null
     ): array {
         if ($total_bytes === null) {
             $size = @filesize($source_path);
@@ -151,6 +156,26 @@ class StagedUploadClient
         $source = @fopen($source_path, "rb");
         if ($source === false) {
             return $this->failed("source_unreadable", $source_path);
+        }
+        $opened_stat = fstat($source);
+
+        // Every check downstream is a byte count, so a rewrite of the
+        // source is invisible to all of them. The exporter re-checks its
+        // files after streaming (x-file-changed); the sender owes the same
+        // honesty about its own disk, before and after the upload.
+        if (
+            $expected_mtime !== null
+            && is_array($opened_stat)
+            && (int) $opened_stat["mtime"] !== $expected_mtime
+        ) {
+            fclose($source);
+            // Committed bytes may belong to the older version; a mixed
+            // artifact must never verify.
+            $this->discard($artifact_id);
+            return $this->failed(
+                "source_changed",
+                sprintf("planned mtime %d, found %d", $expected_mtime, (int) $opened_stat["mtime"])
+            );
         }
 
         try {
@@ -276,6 +301,22 @@ class StagedUploadClient
             }
         } finally {
             fclose($source);
+        }
+
+        // Post-upload volatility check: a rewrite during the read window
+        // can leave staged bytes that match no version of the file. Torn
+        // content must fail typed, not verify.
+        clearstatcache(true, $source_path);
+        $now_stat = @stat($source_path);
+        if (
+            !is_array($opened_stat)
+            || $now_stat === false
+            || $now_stat["ino"] !== $opened_stat["ino"]
+            || $now_stat["mtime"] !== $opened_stat["mtime"]
+            || $now_stat["size"] !== $opened_stat["size"]
+        ) {
+            $this->discard($artifact_id);
+            return $this->failed("source_changed", "source changed while uploading");
         }
 
         return $this->finalize($artifact_id, $total_bytes, $on_progress);
