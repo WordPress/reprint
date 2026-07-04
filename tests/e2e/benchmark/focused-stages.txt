@@ -5,6 +5,8 @@
 #
 # This stack changes file transfer/apply behavior. Keep the focused benchmark
 # on file movement rather than unrelated database-only Playground SQLite
-# stages. Push-specific stages cannot be compared here until push-files exists
+# stages. `files-pull` requires preflight state, so benchmark both stages
+# together. Push-specific stages cannot be compared here until push-files exists
 # on the trunk baseline.
+preflight
 files-pull
