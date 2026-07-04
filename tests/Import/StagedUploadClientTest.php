@@ -340,6 +340,9 @@ class StagedUploadClientTest extends TestCase
         $client = $this->makeClient($envelope);
         $this->writeSource('bytes');
 
+        $probe = $client->apply('.manifest.jsonl', true);
+        $this->assertSame(['failed', 'auth_failed'], [$probe['status'], $probe['reason']]);
+
         $upload = $client->upload_artifact('artifact.bin', $this->source_path);
         $this->assertSame(['failed', 'auth_failed'], [$upload['status'], $upload['reason']]);
 

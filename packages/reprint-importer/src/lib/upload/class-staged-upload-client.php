@@ -406,6 +406,9 @@ class StagedUploadClient
             if ($response["error"] !== null) {
                 return $this->apply_failed("transport_failed", $response["error"]);
             }
+            if ($this->is_auth_envelope($response)) {
+                return $this->apply_failed("auth_failed", $this->envelope_error($response));
+            }
             $json = is_array($response["json"]) ? $response["json"] : [];
             $status = $json["status"] ?? null;
             if ($status === "applied" || $status === "ready") {
