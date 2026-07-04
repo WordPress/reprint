@@ -338,6 +338,54 @@ class StagedUploadClientTest extends TestCase
         $this->assertCount(1, $this->uploadCalls(), 'auth failures must not be retried');
     }
 
+    public function testSourceRewrittenMidUploadFailsTyped(): void
+    {
+        $body = str_repeat('abcd', 8); // 32 bytes: several 8-byte chunks
+        $this->writeSource($body);
+        $base = $this->transportFor($this->makeEndpoints());
+        $rewritten = false;
+        $transport = function (...$args) use ($base, &$rewritten): array {
+            $response = $base(...$args);
+            if (!$rewritten && strpos($args[1], 'staged_upload') !== false) {
+                $rewritten = true;
+                // Same length, new content, future mtime — invisible to
+                // every byte-count check in the pipeline.
+                file_put_contents($this->source_path, str_repeat('zzzz', 8));
+                touch($this->source_path, time() + 10);
+            }
+            return $response;
+        };
+        $client = $this->makeClient($transport);
+
+        $result = $client->upload_artifact('artifact.bin', $this->source_path);
+
+        $this->assertSame(['failed', 'source_changed'], [$result['status'], $result['reason']]);
+        $this->assertFalse(
+            $client->status('artifact.bin')['exists'],
+            'torn staged bytes must be discarded, never verified'
+        );
+    }
+
+    public function testStalePlanMtimeFailsBeforeAnyUpload(): void
+    {
+        $this->writeSource('current content');
+        // Remnants of the older version sit staged on the target.
+        (new Site_Export_Staged_Artifacts($this->staging_dir))->append('artifact.bin', 0, 'old-');
+        $client = $this->makeClient($this->transportFor($this->makeEndpoints()));
+
+        $result = $client->upload_artifact(
+            'artifact.bin',
+            $this->source_path,
+            null,
+            null,
+            ((int) filemtime($this->source_path)) - 100
+        );
+
+        $this->assertSame(['failed', 'source_changed'], [$result['status'], $result['reason']]);
+        $this->assertCount(0, $this->uploadCalls(), 'a stale plan must not upload');
+        $this->assertFalse($client->status('artifact.bin')['exists'], 'stale remnants are discarded');
+    }
+
     public function testTransportHardFailureStopsBounded(): void
     {
         $this->writeSource(str_repeat('x', 32));
