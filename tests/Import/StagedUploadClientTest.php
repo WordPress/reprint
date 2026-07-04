@@ -70,7 +70,7 @@ class StagedUploadClientTest extends TestCase
      */
     private function transportFor(Site_Export_Staged_Endpoints $endpoints): callable
     {
-        return function (string $method, string $url, array $headers, string $body, int $timeout) use ($endpoints): array {
+        return function (string $method, string $url, array $headers, $body, int $timeout) use ($endpoints): array {
             parse_str((string) parse_url($url, PHP_URL_QUERY), $params);
             $endpoint = (string) ($params['endpoint'] ?? '');
             unset($params['endpoint']);
@@ -84,7 +84,12 @@ class StagedUploadClientTest extends TestCase
             switch ($endpoint) {
                 case 'staged_upload':
                     $stream = fopen('php://temp', 'w+b');
-                    fwrite($stream, $body);
+                    if (is_resource($body)) {
+                        rewind($body);
+                        stream_copy_to_stream($body, $stream);
+                    } else {
+                        fwrite($stream, (string) $body);
+                    }
                     rewind($stream);
                     $result = $endpoints->upload($params, $server, $stream);
                     fclose($stream);
@@ -100,7 +105,12 @@ class StagedUploadClientTest extends TestCase
                     break;
                 case 'staged_upload_batch':
                     $stream = fopen('php://temp', 'w+b');
-                    fwrite($stream, $body);
+                    if (is_resource($body)) {
+                        rewind($body);
+                        stream_copy_to_stream($body, $stream);
+                    } else {
+                        fwrite($stream, (string) $body);
+                    }
                     rewind($stream);
                     $result = $endpoints->upload_batch($params, $server, $stream);
                     fclose($stream);
@@ -518,6 +528,35 @@ class StagedUploadClientTest extends TestCase
         $this->assertCount(1, array_filter($this->requests, static function (array $request): bool {
             return $request['endpoint'] === 'staged_upload_batch';
         }), 'many files, one conversation');
+    }
+
+    public function testUploadBatchSendsAStreamedRequestBody(): void
+    {
+        $base = $this->transportFor($this->makeEndpoints());
+        $saw_batch_stream = false;
+        $transport = function (string $method, string $url, array $headers, $body, int $timeout) use ($base, &$saw_batch_stream): array {
+            parse_str((string) parse_url($url, PHP_URL_QUERY), $params);
+            if (($params['endpoint'] ?? '') === 'staged_upload_batch') {
+                $saw_batch_stream = true;
+                $this->assertTrue(is_resource($body), 'batch body should not be materialized as one PHP string');
+                $stat = fstat($body);
+                $this->assertIsArray($stat);
+                $this->assertSame((string) $stat['size'], $headers['Content-Length'] ?? null);
+            }
+            return $base($method, $url, $headers, $body, $timeout);
+        };
+        $client = $this->makeClient($transport, [
+            'sizer' => new UploadChunkSizer(['floor_bytes' => 64, 'start_bytes' => 4096, 'max_bytes' => 4096]),
+        ]);
+        $files = $this->batchFiles([
+            'a.txt' => str_repeat('a', 128),
+            'b.txt' => str_repeat('b', 128),
+        ]);
+
+        $result = $client->upload_batch($files);
+
+        $this->assertSame('ok', $result['status']);
+        $this->assertTrue($saw_batch_stream, 'the test must exercise the batch endpoint');
     }
 
     public function testUploadBatchRepartitionsWhenTooLarge(): void

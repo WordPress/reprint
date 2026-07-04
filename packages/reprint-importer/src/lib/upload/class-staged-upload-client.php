@@ -61,13 +61,19 @@ class StagedUploadClient
     /** Longest single backoff, in microseconds. */
     private const MAX_BACKOFF_USEC = 5000000;
 
+    /** Bytes copied at a time when composing streamed batch bodies. */
+    private const BATCH_STREAM_BUFFER_BYTES = 262144;
+
+    /** Batch spools stay in memory up to this size, then php://temp spills. */
+    private const BATCH_SPOOL_MEMORY_BYTES = 2097152;
+
     private string $base_url;
 
     private ?Site_Export_HMAC_Client $hmac_client;
 
     private UploadChunkSizer $sizer;
 
-    /** @var callable(string,string,array,string,int):array */
+    /** @var callable(string,string,array,mixed,int):array */
     private $transport;
 
     /** @var callable(int):void */
@@ -389,10 +395,11 @@ class StagedUploadClient
      * Upload a batch of complete small files in one request.
      *
      * One HTTP conversation carries many files — push's answer to pull's
-     * multipart batching. Files are read whole (the caller only batches
-     * files that fit the sizer's budget), each with the same volatility
-     * checks as upload_artifact(); a file that changed underfoot fails
-     * "source_changed" locally and is excluded from the wire.
+     * multipart batching. The request body is composed into a temp stream,
+     * not one PHP string: each source is copied through a bounded per-file
+     * spool, checked for volatility, then appended to the outgoing stream.
+     * Files that changed underfoot fail "source_changed" locally and are
+     * excluded from the wire.
      *
      * @param array $files Entries: ['artifact_id','source_path','total_bytes','mtime'?].
      * @return array{status:string,reason:?string,detail:?string,per_file:array<string,array{status:string,reason:?string}>}
@@ -405,7 +412,11 @@ class StagedUploadClient
     public function upload_batch(array $files): array
     {
         $per_file = [];
-        $body = "";
+        $body = $this->open_batch_spool();
+        if ($body === false) {
+            return ["status" => "failed", "reason" => "source_unreadable", "detail" => "open_batch_spool", "per_file" => $per_file];
+        }
+        $hash = hash_init("sha256");
         $sendable = [];
         foreach ($files as $file) {
             $artifact_id = (string) $file["artifact_id"];
@@ -427,7 +438,7 @@ class StagedUploadClient
                 $per_file[$artifact_id] = ["status" => "failed", "reason" => "source_changed"];
                 continue;
             }
-            $payload = $total_bytes > 0 ? $this->read_exactly($source, $total_bytes) : "";
+            $payload = $this->copy_source_to_spool($source, $total_bytes);
             fclose($source);
             clearstatcache(true, (string) $file["source_path"]);
             $now_stat = @stat((string) $file["source_path"]);
@@ -442,38 +453,53 @@ class StagedUploadClient
                 || $now_stat["mtime"] !== $opened["mtime"]
                 || $now_stat["size"] !== $opened["size"]
             ) {
+                fclose($payload);
                 $this->discard($artifact_id);
                 $per_file[$artifact_id] = ["status" => "failed", "reason" => "source_changed"];
                 continue;
             }
 
-            $body .= json_encode([
+            $header = json_encode([
                 "artifact_id" => $artifact_id,
                 "offset" => 0,
-                "length" => strlen($payload),
+                "length" => $total_bytes,
                 "total_bytes" => $total_bytes,
                 "final" => true,
-            ]) . "\n" . $payload;
+            ]) . "\n";
+            if (
+                !$this->write_batch_bytes($body, $hash, $header)
+                || !$this->write_batch_stream($body, $hash, $payload)
+            ) {
+                fclose($payload);
+                fclose($body);
+                return ["status" => "failed", "reason" => "source_unreadable", "detail" => "write_batch_spool", "per_file" => $per_file];
+            }
+            fclose($payload);
             $sendable[] = $artifact_id;
         }
 
         if ($sendable === []) {
+            fclose($body);
             return ["status" => "ok", "reason" => null, "detail" => null, "per_file" => $per_file];
         }
 
+        rewind($body);
+        $content_hash = hash_final($hash);
         $transport_failures = 0;
         for ($attempt = 1; $attempt <= self::MAX_BUSY_RETRIES + self::MAX_TRANSPORT_RETRIES; $attempt++) {
-            $response = $this->request_json("POST", "staged_upload_batch", [], $body);
+            $response = $this->request_json("POST", "staged_upload_batch", [], $body, $content_hash);
             if ($response["error"] !== null) {
                 $decision = $this->sizer->record_transport_failure();
                 $transport_failures++;
                 if ($decision["action"] === "give_up" || $transport_failures > self::MAX_TRANSPORT_RETRIES) {
+                    fclose($body);
                     return ["status" => "failed", "reason" => "transport_failed", "detail" => $response["error"], "per_file" => $per_file];
                 }
                 $this->backoff($transport_failures);
                 continue;
             }
             if ($this->is_auth_envelope($response)) {
+                fclose($body);
                 return ["status" => "failed", "reason" => "auth_failed", "detail" => $this->envelope_error($response), "per_file" => $per_file];
             }
             $json = is_array($response["json"]) ? $response["json"] : [];
@@ -481,8 +507,10 @@ class StagedUploadClient
                 $reported = $json["max_request_bytes"] ?? null;
                 $decision = $this->sizer->record_too_large(is_numeric($reported) ? (int) $reported : null);
                 if ($decision["action"] === "give_up") {
+                    fclose($body);
                     return ["status" => "failed", "reason" => "chunk_size_exhausted", "detail" => null, "per_file" => $per_file];
                 }
+                fclose($body);
                 return ["status" => "failed", "reason" => "batch_too_large", "detail" => null, "per_file" => $per_file];
             }
             if (($json["status"] ?? null) === "busy") {
@@ -513,8 +541,10 @@ class StagedUploadClient
             if (($json["status"] ?? null) === "ok") {
                 $this->sizer->record_success();
             }
+            fclose($body);
             return ["status" => "ok", "reason" => null, "detail" => null, "per_file" => $per_file];
         }
+        fclose($body);
         return ["status" => "failed", "reason" => "busy_exhausted", "detail" => null, "per_file" => $per_file];
     }
 
@@ -659,16 +689,27 @@ class StagedUploadClient
      *
      * @return array{http_code:int,json:mixed,error:?string}
      */
-    private function request_json(string $method, string $endpoint, array $params, string $body = ""): array
+    private function request_json(string $method, string $endpoint, array $params, $body = "", ?string $content_hash = null): array
     {
         $url = $this->base_url
             . (strpos($this->base_url, "?") === false ? "?" : "&")
             . http_build_query(array_merge(["endpoint" => $endpoint], $params));
 
-        $headers = $this->hmac_client !== null
-            ? $this->hmac_client->get_auth_headers($body)
-            : [];
+        if (is_resource($body)) {
+            rewind($body);
+        }
+        $headers = [];
+        if ($this->hmac_client !== null) {
+            if ($content_hash === null) {
+                $content_hash = is_resource($body) ? $this->hash_stream($body) : hash("sha256", (string) $body);
+            }
+            $headers = $this->auth_headers_for_hash($content_hash);
+        }
         $headers["Content-Type"] = "application/octet-stream";
+        if (is_resource($body)) {
+            $headers["Content-Length"] = (string) $this->stream_size($body);
+            rewind($body);
+        }
 
         $response = call_user_func($this->transport, $method, $url, $headers, $body, $this->request_timeout);
 
@@ -694,6 +735,98 @@ class StagedUploadClient
             "json" => $decoded,
             "error" => null,
         ];
+    }
+
+    /** @return resource|false */
+    private function open_batch_spool()
+    {
+        return fopen("php://temp/maxmemory:" . self::BATCH_SPOOL_MEMORY_BYTES, "w+b");
+    }
+
+    /** @return resource|null */
+    private function copy_source_to_spool($source, int $bytes)
+    {
+        $spool = $this->open_batch_spool();
+        if ($spool === false) {
+            return null;
+        }
+        $remaining = $bytes;
+        while ($remaining > 0) {
+            $chunk = fread($source, min(self::BATCH_STREAM_BUFFER_BYTES, $remaining));
+            if ($chunk === false || $chunk === "") {
+                fclose($spool);
+                return null;
+            }
+            $written = fwrite($spool, $chunk);
+            if ($written !== strlen($chunk)) {
+                fclose($spool);
+                return null;
+            }
+            $remaining -= strlen($chunk);
+        }
+        rewind($spool);
+        return $spool;
+    }
+
+    private function write_batch_bytes($body, $hash, string $bytes): bool
+    {
+        hash_update($hash, $bytes);
+        return fwrite($body, $bytes) === strlen($bytes);
+    }
+
+    private function write_batch_stream($body, $hash, $source): bool
+    {
+        rewind($source);
+        while (!feof($source)) {
+            $chunk = fread($source, self::BATCH_STREAM_BUFFER_BYTES);
+            if ($chunk === false) {
+                return false;
+            }
+            if ($chunk === "") {
+                break;
+            }
+            if (!$this->write_batch_bytes($body, $hash, $chunk)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private function auth_headers_for_hash(string $content_hash): array
+    {
+        $client = $this->hmac_client;
+        if ($client === null) {
+            return [];
+        }
+        $nonce = $client->generate_nonce();
+        $timestamp = $client->get_timestamp();
+        return [
+            "X-Auth-Signature" => $client->compute_signature($nonce, $timestamp, $content_hash),
+            "X-Auth-Nonce" => $nonce,
+            "X-Auth-Timestamp" => $timestamp,
+            "X-Auth-Content-Hash" => $content_hash,
+        ];
+    }
+
+    private function hash_stream($stream): string
+    {
+        rewind($stream);
+        $context = hash_init("sha256");
+        while (!feof($stream)) {
+            $chunk = fread($stream, self::BATCH_STREAM_BUFFER_BYTES);
+            if ($chunk === false || $chunk === "") {
+                break;
+            }
+            hash_update($context, $chunk);
+        }
+        rewind($stream);
+        return hash_final($context);
+    }
+
+    private function stream_size($stream): int
+    {
+        $stat = fstat($stream);
+        return is_array($stat) && isset($stat["size"]) ? (int) $stat["size"] : 0;
     }
 
     /**
@@ -737,7 +870,7 @@ class StagedUploadClient
      *
      * @return array{http_code:int,body:string,error:?string}
      */
-    private function curl_transport(string $method, string $url, array $headers, string $body, int $timeout): array
+    private function curl_transport(string $method, string $url, array $headers, $body, int $timeout): array
     {
         $ch = curl_init($url);
         if (function_exists("reprint_apply_curl_proxy_from_env")) {
@@ -752,14 +885,28 @@ class StagedUploadClient
             $header_lines[] = "{$name}: {$value}";
         }
 
-        curl_setopt_array($ch, [
+        $options = [
             CURLOPT_CUSTOMREQUEST => $method,
-            CURLOPT_POSTFIELDS => $method === "POST" ? $body : null,
             CURLOPT_HTTPHEADER => $header_lines,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_TIMEOUT => $timeout,
-        ]);
+        ];
+        if ($method === "POST") {
+            if (is_resource($body)) {
+                rewind($body);
+                $options[CURLOPT_UPLOAD] = true;
+                $options[CURLOPT_INFILESIZE] = $this->stream_size($body);
+                $options[CURLOPT_READFUNCTION] = static function ($ch, $fd, int $length) use ($body): string {
+                    $chunk = fread($body, $length);
+                    return $chunk === false ? "" : $chunk;
+                };
+            } else {
+                $options[CURLOPT_POSTFIELDS] = (string) $body;
+            }
+        }
+
+        curl_setopt_array($ch, $options);
 
         $response_body = curl_exec($ch);
         if ($response_body === false) {
