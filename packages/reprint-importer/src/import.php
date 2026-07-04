@@ -4635,22 +4635,6 @@ class ImportClient
         // Only files and deletions go through the store-backed engine;
         // directories and symlinks replay through their own handlers after
         // the renames land.
-        $lines = "";
-        foreach ($entries as $artifact_id => $entry) {
-            if ($entry["kind"] === "delete") {
-                $lines .= json_encode(["artifact_id" => $artifact_id, "delete" => true]) . "\n";
-                continue;
-            }
-            if ($entry["kind"] !== "file") {
-                continue;
-            }
-            $manifest_entry = ["artifact_id" => $artifact_id, "size" => $entry["size"]];
-            if ($entry["owned"]) {
-                $manifest_entry["owned"] = true;
-            }
-            $lines .= json_encode($manifest_entry) . "\n";
-        }
-
         $result = [
             "applied" => 0,
             "already_applied" => 0,
@@ -4659,24 +4643,41 @@ class ImportClient
             "deleted" => 0,
         ];
         $protected_ids = [];
-        if ($lines !== "") {
-            $store = $this->staged_pull_store();
-            $store->discard(self::PULL_MANIFEST_ID);
-            $offset = 0;
-            // substr windows avoid str_split materializing a second full
-            // copy of a manifest that can reach tens of megabytes.
-            $lines_length = strlen($lines);
-            for ($piece_at = 0; $piece_at < $lines_length; $piece_at += 262144) {
-                $piece = substr($lines, $piece_at, 262144);
-                $appended = $store->append(self::PULL_MANIFEST_ID, $offset, $piece);
-                if ($appended["status"] !== "accepted") {
-                    throw new RuntimeException(
-                        "Staged apply could not stage its manifest: " . ($appended["reason"] ?? ""),
-                    );
+        $store = $this->staged_pull_store();
+        $store->discard(self::PULL_MANIFEST_ID);
+        $manifest_entries = 0;
+        $manifest_bytes = 0;
+        // Flush manifest lines to the store in bounded windows instead of
+        // materializing one string that can reach tens of megabytes.
+        $manifest_chunk = "";
+        foreach ($entries as $artifact_id => $entry) {
+            if ($entry["kind"] === "delete") {
+                $manifest_entry = ["artifact_id" => $artifact_id, "delete" => true];
+            } elseif ($entry["kind"] === "file") {
+                $manifest_entry = ["artifact_id" => $artifact_id, "size" => $entry["size"]];
+                if ($entry["owned"]) {
+                    $manifest_entry["owned"] = true;
                 }
-                $offset = $appended["committed_bytes"];
+            } else {
+                continue;
             }
-            if ($store->finalize(self::PULL_MANIFEST_ID, strlen($lines))["status"] !== "verified") {
+            $encoded = json_encode($manifest_entry);
+            if (!is_string($encoded)) {
+                throw new RuntimeException("Staged apply could not encode its manifest.");
+            }
+            $manifest_chunk .= $encoded . "\n";
+            $manifest_entries++;
+            if (strlen($manifest_chunk) >= 262144) {
+                $manifest_bytes = $this->append_staged_pull_manifest_chunk($store, $manifest_bytes, $manifest_chunk);
+                $manifest_chunk = "";
+            }
+        }
+
+        if ($manifest_entries > 0) {
+            if ($manifest_chunk !== "") {
+                $manifest_bytes = $this->append_staged_pull_manifest_chunk($store, $manifest_bytes, $manifest_chunk);
+            }
+            if ($store->finalize(self::PULL_MANIFEST_ID, $manifest_bytes)["status"] !== "verified") {
                 throw new RuntimeException("Staged apply could not verify its manifest.");
             }
 
@@ -4780,6 +4781,17 @@ class ImportClient
             "skipped" => $result["skipped"],
             "deleted" => $result["deleted"],
         ], true);
+    }
+
+    private function append_staged_pull_manifest_chunk(Site_Export_Staged_Artifacts $store, int $offset, string $chunk): int
+    {
+        $appended = $store->append(self::PULL_MANIFEST_ID, $offset, $chunk);
+        if ($appended["status"] !== "accepted") {
+            throw new RuntimeException(
+                "Staged apply could not stage its manifest: " . ($appended["reason"] ?? ""),
+            );
+        }
+        return $appended["committed_bytes"];
     }
 
     /**
