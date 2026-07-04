@@ -325,6 +325,31 @@ class StagedUploadClientTest extends TestCase
         $this->assertNotEmpty($this->sleeps);
     }
 
+    public function testControlPlaneAuthEnvelopeSurfacesAsAuthFailed(): void
+    {
+        // lib.php rejects control-plane requests with its own {error, code}
+        // envelope before any endpoint runs; the client must read that as
+        // an auth failure, not an unexpected response.
+        $envelope = static function (): array {
+            return [
+                'http_code' => 403,
+                'body' => '{"error":"HMAC signature verification failed","code":403}',
+                'error' => null,
+            ];
+        };
+        $client = $this->makeClient($envelope);
+        $this->writeSource('bytes');
+
+        $upload = $client->upload_artifact('artifact.bin', $this->source_path);
+        $this->assertSame(['failed', 'auth_failed'], [$upload['status'], $upload['reason']]);
+
+        $status = $client->status('artifact.bin');
+        $this->assertSame(['failed', 'auth_failed'], [$status['status'], $status['reason']]);
+
+        $discard = $client->discard('artifact.bin');
+        $this->assertSame(['failed', 'auth_failed'], [$discard['status'], $discard['reason']]);
+    }
+
     public function testWrongSecretFailsFastWithoutRetries(): void
     {
         $this->writeSource('some bytes');
