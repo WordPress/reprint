@@ -215,6 +215,21 @@ The command returns one of three exit codes:
 
 Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
 
+Add `--staged-apply` when pulled files should download into a staging area
+under `--state-dir` and then move into `--fs-root` in one rename window at the
+end:
+
+```bash
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" --staged-apply
+```
+
+`--staged-apply` keeps partially downloaded file bytes out of the live local
+tree. The final apply is rename-only, so `--state-dir` and `--fs-root` must be
+on the same filesystem. If they are not, Reprint rejects the run before moving
+anything; it does not copy staged files into place because that could expose
+half-written files. A killed apply can be rerun: files already renamed into
+place are recognized by size and the remaining staged files are moved.
+
 **Non-empty local fs-root**
 
 By default, `files-pull` refuses to start if `--fs-root` is non-empty. If you need to use a non-empty local fs-root,
@@ -725,7 +740,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
 * `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
-* `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
+* `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed; add `--staged-apply` to land files by rename after download.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `push-files` — Upload local files into the remote staged artifact store; add `--apply` to rename the verified transfer into the remote tree.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
