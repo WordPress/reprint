@@ -352,6 +352,12 @@ class StagedUploadClientTest extends TestCase
 
         $upload = $client->upload_artifact('artifact.bin', $this->source_path);
         $this->assertSame(['failed', 'auth_failed'], [$upload['status'], $upload['reason']]);
+
+        $status = $client->status('artifact.bin');
+        $this->assertSame(['failed', 'auth_failed'], [$status['status'], $status['reason']]);
+
+        $discard = $client->discard('artifact.bin');
+        $this->assertSame(['failed', 'auth_failed'], [$discard['status'], $discard['reason']]);
     }
 
     public function testWrongSecretFailsFastWithoutRetries(): void
