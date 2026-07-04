@@ -336,6 +336,9 @@ class StagedUploadClient
         if ($response["error"] !== null || !is_array($response["json"])) {
             return $this->failed("status_unavailable", $response["error"] ?? "invalid response");
         }
+        if ($this->is_auth_envelope($response)) {
+            return $this->failed("auth_failed", $this->envelope_error($response));
+        }
         return [
             "status" => "ok",
             "reason" => null,
@@ -567,6 +570,25 @@ class StagedUploadClient
     {
         $delay = min(self::MAX_BACKOFF_USEC, self::RETRY_BACKOFF_USEC * (2 ** max(0, $attempt - 1)));
         call_user_func($this->sleeper, (int) $delay);
+    }
+
+    /**
+     * The embedding layer (lib.php in the WordPress wiring) answers
+     * control-plane auth failures with its own {error, code} envelope
+     * before any endpoint runs. Surface those as auth_failed — retrying
+     * cannot fix a bad secret — instead of an unexpected response.
+     */
+    private function is_auth_envelope(array $response): bool
+    {
+        return in_array($response["http_code"], [401, 403], true)
+            && is_array($response["json"])
+            && !isset($response["json"]["status"]);
+    }
+
+    private function envelope_error(array $response): string
+    {
+        $error = $response["json"]["error"] ?? null;
+        return is_string($error) ? $error : ("HTTP " . $response["http_code"]);
     }
 
     /**
