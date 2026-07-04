@@ -513,7 +513,7 @@ class StagedUploadClient
             if (($json["status"] ?? null) === "rejected") {
                 $detail = $json["detail"] ?? null;
                 $reported = is_string($detail) ? ($per_file[$detail] ?? null) : null;
-                if (!is_array($reported) || ($reported["status"] ?? null) !== "failed") {
+                if (!is_array($reported) || $reported["status"] !== "failed") {
                     $reason = $json["reason"] ?? null;
                     fclose($body);
                     return [
