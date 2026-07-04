@@ -26,7 +26,7 @@ class PushPlanBuilder
      * @param array $only_prefixes fs-root-relative path prefixes; empty
      *   means everything.
      * @return array{plan:array,skipped:array} plan entries are
-     *   ['artifact_id','source_path','total_bytes']; skipped entries are
+     *   ['artifact_id','source_path','total_bytes','mtime']; skipped entries are
      *   ['path','reason'] with reason symlink|special|unreadable|unreadable_dir.
      */
     public static function build(string $fs_root, array $only_prefixes = []): array
@@ -100,7 +100,8 @@ class PushPlanBuilder
                 continue;
             }
             $size = @filesize($path);
-            if ($size === false) {
+            $mtime = @filemtime($path);
+            if ($size === false || $mtime === false) {
                 $skipped[] = ["path" => $rel, "reason" => "unreadable"];
                 continue;
             }
@@ -110,7 +111,7 @@ class PushPlanBuilder
                 "total_bytes" => $size,
                 // Size alone cannot see a same-size edit; the runner keys
                 // its done-cache on mtime too.
-                "mtime" => (int) @filemtime($path),
+                "mtime" => (int) $mtime,
             ];
         }
     }
