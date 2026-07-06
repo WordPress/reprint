@@ -8,32 +8,27 @@ reachable inbound and without a new transfer subsystem.** It is deliberately
 scoped to the existing commands; the staged-transfer/push machinery is out of
 scope here.
 
-The relay mechanism exists as small classes, and the importer's transport is
-now pluggable so the real pull rides them:
+Three small classes, plus a pluggable transport seam in `ImportClient`:
 
-- `packages/reprint-importer/src/lib/relay/class-relay-transport.php` — `RelayTransport`
-- `packages/reprint-importer/src/lib/relay/class-transport-yield.php` — `TransportYield`
-- `packages/reprint-importer/src/lib/relay/class-relay-exchange.php` — `RelayExchange`
-- `packages/reprint-importer/src/lib/relay/class-relay-source-worker.php` — `RelaySourceWorker`
-- `packages/reprint-importer/src/lib/relay/class-relay-export-source.php` — `RelayExportSource` (runs the source's real `export.php` and gunzips the response)
-- `packages/reprint-importer/src/lib/relay/class-relay-import-driver.php` — `RelayImportDriver` (re-enters the real importer per exchange)
-- `packages/reprint-importer/src/lib/relay/class-relay-exchange-endpoint.php` — `RelayExchangeEndpoint` (the JSON wire contract: base64s the binary result body so the exchange survives an HTTP hop)
+- `class-relay-transport.php` — `RelayTransport`: holds the one delivered result
+  and hands it to the importer's next request, or throws `TransportYield`
+  (`class-transport-yield.php`) to unwind. This is the only stateful piece; see
+  "Why RelayTransport" below.
+- `class-relay-exchange.php` — `RelayExchange`: the remote endpoint. `handle_json`
+  runs the real importer inline until it yields (returns the command) or
+  completes (returns done), base64-decoding the delivered result body.
+- `class-relay-source.php` — `RelaySource`: the outbound-only local side. Loops
+  making exchanges and runs each command against the source's own `export.php`,
+  gunzipping the response. Standalone — it needs neither the importer nor the
+  exchange.
 - `ImportClient` gains a transport seam: `set_relay_transport()` plus a relay
   branch at the two curl choke points (`fetch_json`, `fetch_streaming`), inert
   in direct mode.
 
-Tests:
-
-- `tests/Relay/ReverseTransportDemoTest.php` — moves real file bytes source →
-  destination over the reversed channel with a stand-in source/driver (byte
-  identity + crash-resume).
-- `tests/Relay/ReverseTransportPullTest.php` — runs the **real** `files-pull`
-  (real `ImportClient`) against the **real** `export.php` entirely over the
-  reverse channel and mirrors a source tree to the fs-root byte-for-byte, in two
-  exchanges (`file_index` then `file_fetch`).
-- `tests/Relay/ReverseTransportWireTest.php` — the same real `files-pull`, but the
-  worker↔endpoint boundary crosses **JSON strings** via `RelayExchangeEndpoint`,
-  proving the wire contract (including base64 of the binary body).
+Test: `tests/Relay/ReverseTransportTest.php` runs the **real** `files-pull`
+(real `ImportClient`) against the **real** `export.php` entirely over the reverse
+channel, with the worker↔endpoint boundary crossing **JSON strings**, and mirrors
+a source tree to the fs-root byte-for-byte.
 
 ## The idea in one paragraph
 
@@ -71,7 +66,7 @@ Reverse transport (source can't be dialed; it dials out instead):
                                                     v  returns "command N" as the HTTP response
     [relay-source worker on LOCAL] --runs export.php in-process on command N--
                                                     |
-                                                    v  next outbound POST: { last_command_id: N, result }
+                                                    v  next outbound POST: { result of N }
     [importer on REMOTE, inside the NEXT relay_exchange] -- resumes from cursor,
         RelayTransport.request(cmd N) returns the delivered result -- feeds the normal parser
 ```
@@ -113,28 +108,41 @@ shared command/result store polled by two processes.** The whole exchange is one
 bounded HTTP request handled by one endpoint:
 
 - **`relay_exchange`** (local → remote, HMAC-authenticated):
-  request body = `{ session, last_command_id, result? }`, where `result` is the
-  previous export response (`{httpCode, headers incl. X-Cursor, body}`).
+  request body = `{ result? }`, where `result` is the previous export response
+  (`{ http_code, body_b64 }` — the body is raw gunzipped multipart bytes, so it
+  rides base64).
 
-The handler (`RelayExchange::handle`) runs the importer **inline**:
+The handler (`RelayExchange::handle_json`) runs the importer **inline**:
 
 1. It builds a `RelayTransport` primed with the one delivered `result`.
-2. It calls the importer (the injected *driver*). The driver **resumes from its
-   own persisted cursor**, and its next `transport->request(...)` — the command
-   the delivered result answers — returns that result, so the importer advances
-   one step (writes/stages the bytes, moves the cursor, persists it).
-3. The importer then issues its *next* export request. There is no result for it
-   yet, so `RelayTransport` throws **`TransportYield`**, which unwinds cleanly
-   back to the handler. The handler catches it and returns
-   `{ status: "command", command_id, command }` — the next thing for the worker
-   to fetch. When the driver returns instead of requesting, the handler returns
-   `{ status: "done" }`.
+2. It calls the importer. It **resumes from its persisted cursor**, and its next
+   `transport->request(...)` returns that result, so the importer advances one
+   step (writes/stages the bytes, moves the cursor, persists it).
+3. The importer then issues its *next* export request. There is no result left,
+   so `RelayTransport` throws **`TransportYield`**, which unwinds cleanly back to
+   the handler. The handler catches it and returns `{ status: "command", command }`
+   — the next thing for the worker to run. When the importer returns instead of
+   requesting, the handler returns `{ status: "done" }`.
 
-`RelayTransport` is deliberately tiny: it holds exactly one delivered result and
-hands it back to the single matching request (matched by a fingerprint of the
-request envelope, so a re-issued request after re-entry lines up with its
-result); every other request yields. That one rule is what makes each exchange
-advance the importer by **exactly one** export request.
+There is **no request/response matching**. The exchange is strictly sequential —
+one outstanding request at a time — and the importer resumes *deterministically*,
+so the request it re-issues on re-entry is always the one the delivered result
+belongs to. A single `consumed` flag ("first request gets the result, the rest
+yield") is all the bookkeeping needed; no command ids, no fingerprints, no
+cache-buster special-casing. That one rule makes each exchange advance the
+importer by **exactly one** export request.
+
+### Why RelayTransport (the one abstraction that earns its keep)
+
+One exchange delivers one result, but reaching the next request can take more
+than one importer pass — e.g. consuming an index chunk advances the cursor and
+stops with exit code 2 *without* issuing a request, so the handler re-enters. To
+mimic a real resume, each pass builds a **fresh** `ImportClient`. The delivered
+result and its `consumed` flag therefore cannot live on the client (they would
+reset every pass and the second pass would re-consume the result and apply it to
+the *next*, cursor-advanced request — silent corruption). `RelayTransport` is
+that shared-across-passes holder. It is small, but it is not indirection: it is
+the per-exchange state the fresh-client re-entry loop needs.
 
 ## Why there's no liveness problem (the old open question, now solved)
 
@@ -171,8 +179,8 @@ without re-asking for the file the remote already holds.
    synthetic `{get, post, body, server}` request array and returns without
    exiting, so the worker drives it with the command's params and **captures**
    the multipart body + `X-Cursor` response.
-4. The worker POSTs `{ last_command_id, result }` on its next exchange. **The
-   bytes travel local → remote here.** Back to step 1 for the next chunk.
+4. The worker POSTs `{ result }` on its next exchange. **The bytes travel local
+   → remote here.** Back to step 1 for the next chunk.
 
 The remote sets the chunk-size params, so each command's response is bounded to
 one comfortable exchange body — no unbounded buffering on either side.
@@ -185,11 +193,10 @@ one comfortable exchange body — no unbounded buffering on either side.
   piece in the local-drives model).
 - **The local worker is stateless.** It executes idempotent, read-only export
   commands. Kill it and rerun — it re-exchanges and re-executes; the export side
-  is cursor-driven, so re-execution is safe. (The demo's second test does exactly
-  this: crash mid-transfer, resume clean.)
+  is cursor-driven, so re-execution is safe.
 - **It reuses the entire tested pull pipeline** (resume, delta, `--staged-apply`
-  atomic apply). The only new code is the transport seam + the four small relay
-  classes + the `relay-source` loop.
+  atomic apply). The only new code is the transport seam plus three small relay
+  classes.
 
 ## Security to design carefully (flagged, not solved here)
 
@@ -197,34 +204,28 @@ one comfortable exchange body — no unbounded buffering on either side.
   export engine with the source's own root/directory constraints** — a
   compromised or hostile remote can then only ask for paths the source already
   exposes over `export.php`, no more. The remote is handed the read-only export
-  API in reverse, never a shell. (The demo enforces a containment check in its
-  stand-in source to make this concrete.)
+  API in reverse, never a shell.
 - **HMAC** authenticates the worker↔remote channel (the worker holds the secret,
   as today). **TLS** for confidentiality: the file bytes traverse the wire inside
   the exchange bodies.
-- **Idempotency/replay:** `command_id` makes the exchange idempotent — a lost
-  exchange re-fetches the same command; a lost result is re-posted; a replayed
-  command re-runs a read-only export safely.
+- **Idempotency/replay:** the exchange is sequential and read-only — a lost
+  exchange re-posts the same result, and a replayed command re-runs a read-only
+  export safely, so no request/response ids are needed for correctness.
 
 ## First iteration — "play with it in context of regular commands"
 
 Done:
-- The relay mechanism (`RelayTransport`, `TransportYield`, `RelayExchange`,
-  `RelaySourceWorker`) and a demo that moves real files over the reversed
-  single-endpoint channel, including crash-resume.
 - The importer transport seam: `fetch_json`/`fetch_streaming` route through
-  `RelayTransport` when it is set (a request's URL, cache-buster-free so it
-  fingerprints stably, is the command identity); direct mode is untouched and
-  every existing pull test stays green (504/74 PHPCS on `import.php`, unchanged).
-- `RelayExportSource` (the source's real `export.php`, gunzipped) and
-  `RelayImportDriver` (re-enter the real importer per exchange until it yields or
-  completes).
-- A real reversed `files-pull` — real importer, real exporter — mirroring a
-  source tree byte-for-byte in `tests/Relay/ReverseTransportPullTest.php`.
-- The JSON wire contract (`RelayExchangeEndpoint`): the same real `files-pull`
-  runs with the worker↔endpoint boundary crossing JSON strings. This surfaced
-  the one thing the in-process path hid — the delivered result body is raw
-  (gunzipped) binary and must ride the wire base64-encoded.
+  `RelayTransport` when it is set; direct mode is untouched and every existing
+  pull test stays green (504/74 PHPCS on `import.php`, unchanged).
+- `RelayExchange` (the remote endpoint, `handle_json`, re-entering the real
+  importer per exchange until it yields or completes) and `RelaySource` (the
+  outbound-only local side, running the source's real `export.php` and gunzipping
+  the response).
+- A real reversed `files-pull` — real importer, real exporter — over a JSON wire
+  boundary, mirroring a source tree byte-for-byte in
+  `tests/Relay/ReverseTransportTest.php`. The delivered result body is raw
+  (gunzipped) binary, so it rides the wire base64-encoded (`result.body_b64`).
 
 Notes from wiring the real path:
 - `TransportYield` extends `Error`, not `Exception`, so it slips past the
@@ -234,16 +235,17 @@ Notes from wiring the real path:
   importer already reads its resumable position from persisted state at the
   start of each request and only issues one export request per invocation, so a
   yield lands exactly on the existing exit-2 checkpoint.
+- No request/response ids: the sequential protocol + deterministic resume make
+  fingerprinting (and the URL cache-buster special-case) unnecessary.
 
 Next, in scope:
 1. The HTTP hop itself: an HMAC-authenticated `relay_exchange` route on the
-   remote that calls `RelayExchangeEndpoint::handle_json()`, and a `relay-source`
-   CLI whose exchange callable POSTs `RelayExchangeEndpoint::encode_request()`
-   to it. The wire contract is done and tested; only the curl glue and the
-   route/CLI entry points remain.
-2. The source worker making a real loopback request to its own `export.php` in
-   place of the test's subprocess (`RelayExportSource` already abstracts "how to
-   run the export" behind an injected runner).
+   remote that calls `RelayExchange::handle_json()`, and a `relay-source` CLI
+   that POSTs to it. The wire contract is done and tested; only the curl glue and
+   the route/CLI entry points remain.
+2. The source making a real loopback request to its own `export.php` in place of
+   the test's subprocess (`RelaySource` already abstracts "how to run the export"
+   behind an injected runner).
 3. `db-pull` (same seam; it uses `sql_chunk`/`db_index` through the same choke
    points). Not yet done — it needs the db-path `catch (\Throwable)` audited so
    the yield propagates, and a live MySQL to verify end to end.

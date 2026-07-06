@@ -1,57 +1,65 @@
 <?php
 
 /**
- * The remote's single reverse-transport endpoint.
+ * The remote's single reverse-transport endpoint: JSON in, JSON out.
  *
- * There is no separate importer process and no long-held socket. Each call is
- * one bounded request from the local worker that both delivers the previous
- * command's result and takes the next. The handler:
- *   1. builds a RelayTransport primed with the delivered result;
- *   2. runs the importer *inline* — the driver resumes from its own persisted
- *      cursor, consumes the delivered result (writes/stages, advances state),
- *      and issues its next request;
- *   3. that next request throws TransportYield, which is caught here and
- *      returned as the next command; or the driver returns, meaning done.
+ * There is no separate importer process and no held socket. Each call runs the
+ * real importer inline. The importer resumes from its persisted cursor, consumes
+ * the delivered result, advances, and issues its next request — which throws
+ * TransportYield and unwinds back here, so the carried command is returned to
+ * the worker; or it completes, and "done" is returned. The local worker's
+ * outbound request is the only trigger, so nothing runs on the remote between
+ * exchanges.
  *
- * The driver is injected, so the demo passes a small mirror driver while the
- * real files-pull/db-pull would be adapted to the same seam. All transfer
- * state (cursors, index, apply, final writes) lives with the driver on the
- * remote; the worker holds nothing.
+ * One exchange carries one result, so the importer is re-entered (a fresh client
+ * each pass, like an exit-2 resume) until it yields or completes. The SAME
+ * RelayTransport is shared across those passes so the result is consumed exactly
+ * once even though the client is recreated.
+ *
+ * Wire request:  { "result": { "http_code": int, "body_b64": string } | null }
+ * Wire response: { "status": "done" } | { "status": "command", "command": {...} }
+ * The result body is raw (gunzipped) multipart bytes, so it rides base64.
  */
 final class RelayExchange
 {
-    /** @var callable fn(RelayTransport $transport): void — one importer step. */
-    private $driver;
+    /** @var callable fn(): object A fresh, relay-capable importer client. */
+    private $client_factory;
 
-    /**
-     * @param callable $driver Runs the importer far enough to consume the
-     *   delivered result and issue exactly one next request (which yields),
-     *   or return when the transfer is complete.
-     */
-    public function __construct( callable $driver )
+    /** @var array run() options selecting the command, e.g. ['command'=>'files-pull']. */
+    private $run_options;
+
+    public function __construct( callable $client_factory, array $run_options )
     {
-        $this->driver = $driver;
+        $this->client_factory = $client_factory;
+        $this->run_options    = $run_options;
     }
 
-    /**
-     * @param array $request { last_command_id?: string, result?: array }
-     * @return array { status: "done" } | { status: "command", command_id, command }
-     */
-    public function handle( array $request ): array
+    public function handle_json( string $request_json ): string
     {
-        $transport = new RelayTransport(
-            isset( $request["last_command_id"] ) ? (string) $request["last_command_id"] : null,
-            isset( $request["result"] ) && is_array( $request["result"] ) ? $request["result"] : null
-        );
+        $request = json_decode( $request_json, true );
+        $result  = null;
+        if ( is_array( $request ) && isset( $request["result"] ) && is_array( $request["result"] ) ) {
+            $result = array(
+                "http_code" => (int) ( $request["result"]["http_code"] ?? 0 ),
+                "body"      => (string) base64_decode( (string) ( $request["result"]["body_b64"] ?? "" ) ),
+            );
+        }
 
+        $transport = new RelayTransport( $result );
         try {
-            call_user_func( $this->driver, $transport );
-            return array( "status" => "done" );
+            do {
+                $client = call_user_func( $this->client_factory );
+                $client->set_relay_transport( $transport );
+                $client->run( $this->run_options );
+            } while ( $client->exit_code === 2 );
+
+            return (string) json_encode( array( "status" => "done" ) );
         } catch ( TransportYield $yield ) {
-            return array(
-                "status"     => "command",
-                "command_id" => $yield->command_id,
-                "command"    => $yield->command,
+            return (string) json_encode(
+                array(
+                    "status"  => "command",
+                    "command" => $yield->command,
+                )
             );
         }
     }

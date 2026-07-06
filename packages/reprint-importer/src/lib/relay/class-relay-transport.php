@@ -1,59 +1,44 @@
 <?php
 
 /**
- * The importer-side transport for a reverse (remote-driven) pull.
+ * One outstanding export request's answer, for a reverse (remote-driven) pull.
  *
- * A normal transport dials the source and returns the response. This one does
- * not dial anything: it is constructed for a single relay_exchange call,
- * primed with the result the local worker just delivered for the previous
- * command. When the importer issues that same request again (on re-entry from
- * its cursor), the result is handed back and the importer runs forward. When
- * the importer issues its *next* request — one there is no result for yet — the
- * transport throws TransportYield, unwinding to the exchange handler,
- * which returns that command to the worker. So each exchange advances the
- * importer by exactly one request, paced by the worker's outbound cadence.
+ * The reverse transport is strictly sequential: the importer issues one export
+ * request, the local worker runs it and brings the answer back on its next
+ * outbound call. This object carries that one answer. request() hands it to the
+ * importer's next request and then throws TransportYield for the request after
+ * it — which unwinds the importer back to the exchange handler so the worker can
+ * be handed the next command.
  *
- * The command is the same export request envelope the direct transport would
- * build (endpoint, params, cursor); only who carries it changes.
+ * There is no request/response matching: because the importer resumes
+ * deterministically from its persisted cursor, the request it re-issues on
+ * re-entry IS the one this answer belongs to. The single consumed flag is the
+ * only bookkeeping — and it is why this is a shared object rather than importer
+ * state: the exchange re-creates the importer client per re-entry, but the same
+ * transport is kept across those passes so a result is consumed exactly once.
  */
 final class RelayTransport
 {
-    /** @var ?string Fingerprint of the command the delivered result answers. */
-    private ?string $delivered_id;
+    /** @var array|null The delivered answer, or null on the first exchange. */
+    private $result;
 
-    /** @var ?array The delivered result, or null on the first exchange. */
-    private ?array $delivered_result;
+    /** @var bool One answer per exchange; every request after it must yield. */
+    private $consumed = false;
 
-    /** @var bool One result per exchange; the next request must yield. */
-    private bool $consumed = false;
-
-    public function __construct( ?string $delivered_id, ?array $delivered_result )
+    public function __construct( ?array $result )
     {
-        $this->delivered_id     = $delivered_id;
-        $this->delivered_result = $delivered_result;
+        $this->result = $result;
     }
 
     /**
-     * A stable id for a command: two identical requests fingerprint alike, so
-     * a re-issued request after re-entry matches the result delivered for it.
-     */
-    public static function command_id( array $command ): string
-    {
-        return md5( (string) json_encode( $command ) );
-    }
-
-    /**
-     * Return the delivered result for this command, or yield it to the worker.
-     *
-     * @throws TransportYield when the result is not in hand.
+     * @throws TransportYield when there is no answer left to give.
      */
     public function request( array $command ): array
     {
-        $id = self::command_id( $command );
-        if ( ! $this->consumed && $this->delivered_id !== null && $id === $this->delivered_id ) {
+        if ( $this->result !== null && ! $this->consumed ) {
             $this->consumed = true;
-            return $this->delivered_result;
+            return $this->result;
         }
-        throw new TransportYield( $id, $command );
+        throw new TransportYield( $command );
     }
 }

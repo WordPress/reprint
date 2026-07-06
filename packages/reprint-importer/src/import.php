@@ -9683,13 +9683,7 @@ class ImportClient
             // Also include cursor in query params as a fallback when headers are stripped.
             $params["cursor"] = $cursor;
         }
-        // The cache-buster defeats intermediary caches on the wire, but it also
-        // makes the URL non-deterministic. Over the relay there is no cache and
-        // the URL is the request's identity — a re-issued request after a yield
-        // must fingerprint identically to match its delivered result — so skip it.
-        if ($this->relay_transport === null) {
-            $params["_cache_bust"] = time() . "-" . rand(0, 999999);
-        }
+        $params["_cache_bust"] = time() . "-" . rand(0, 999999);
 
         return $url . $separator . http_build_query($params);
     }
