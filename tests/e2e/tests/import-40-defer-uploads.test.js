@@ -138,6 +138,29 @@ describe('Import: --filter', () => {
                 'Expected skipped download list to be cleaned up');
         });
 
+        it('state shows complete after skipped-earlier (not left in_progress)', () => {
+            // Regression: the skipped-earlier fetch must mark the sync
+            // complete. If it leaves status="in_progress", the filter-change
+            // guard blocks the next delta re-pull below.
+            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            assert.equal(state.active_resumable_command.completion_state, 'complete',
+                `Expected completion_state=complete after skipped-earlier, got ${state.active_resumable_command?.completion_state}`);
+        });
+
+        it('a subsequent essential-files delta re-pull succeeds', () => {
+            // Regression: switching the filter back to essential-files after a
+            // completed skipped-earlier fetch must be allowed (the guard only
+            // blocks filter changes mid-sync). Previously this threw
+            // "Cannot change --filter from 'skipped-earlier' to
+            // 'essential-files' while a sync is in progress."
+            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+                secret: getSiteSecret(site),
+                extraArgs: ['--filter=essential-files'],
+            });
+            assert.equal(result.exitCode, 0,
+                `Expected exit 0 on delta re-pull\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        });
+
         it('all files match source', () => {
             const importedRoot = join(fsRootDir(tempDir), siteDir);
             assertTreesMatch(siteDir, importedRoot);

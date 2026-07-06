@@ -1662,7 +1662,9 @@ class ImportClient
         //
         // Changing the filter mid-flight is not allowed.  The user must either
         // start fresh (--abort) or finish the current sync before switching.
-        // The one valid transition is: essential-files (complete) → skipped-earlier.
+        // Exceptions: essential-files may advance to skipped-earlier once
+        // complete, and skipped-earlier (a terminal tail-fetch) may always give
+        // way to a fresh full sync.
         if (isset($options["filter"])) {
             $next = $options["filter"];
             if (
@@ -1676,7 +1678,14 @@ class ImportClient
             }
             $prev = $this->import_state()->filter ?? null;
             $status = $this->import_state()->active_resumable_command->completion_state ?? null;
-            $is_mid_flight = $prev !== null && $prev !== $next && $status !== null && $status !== "complete";
+            // Leaving a skipped-earlier tail-fetch for another sync is a fresh
+            // cycle, not a mid-flight filter change.
+            $is_mid_flight =
+                $prev !== null &&
+                $prev !== $next &&
+                $prev !== "skipped-earlier" &&
+                $status !== null &&
+                $status !== "complete";
             if ($is_mid_flight) {
                 throw new RuntimeException(
                     "Cannot change --filter from '{$prev}' to '{$next}' while a sync is in progress. " .
@@ -2683,6 +2692,26 @@ class ImportClient
     public function run_files_sync(): void
     {
         $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
+
+        // A full `pull` leaves active_resumable_command on its last stage
+        // (db-apply), not files-pull, so a standalone skipped-earlier run can't
+        // tell that files-pull finished with a deferred tail. Recover that from
+        // the pipeline's skipped_pending flag and restore the files-pull
+        // checkpoint. Once the fetch starts it persists command_name=files-pull,
+        // so on the resume passes this recovery is skipped and won't clobber the
+        // checkpoint.
+        if (
+            $this->filter === "skipped-earlier" &&
+            $state_command !== "files-pull" &&
+            $this->import_state()->pull_pipeline->skipped_pending
+        ) {
+            $this->import_state()->active_resumable_command->command_name = "files-pull";
+            $this->import_state()->active_resumable_command->completion_state = "complete";
+            $this->import_state()->active_resumable_command->current_stage = null;
+            $this->save_state($this->state);
+            $state_command = "files-pull";
+        }
+
         $current_status =
             $state_command === "files-pull"
                 ? $this->import_state()->active_resumable_command->completion_state ?? null
@@ -2769,9 +2798,15 @@ class ImportClient
         }
 
         // --filter=skipped-earlier is only valid after a completed
-        // --filter=essential-files run.  It doesn't make sense as a fresh
-        // start or resume of an in-progress sync.
-        if ($this->filter === "skipped-earlier") {
+        // --filter=essential-files run. Reject it as a fresh start, but allow
+        // resuming a skipped-files fetch that is already under way: a
+        // multi-batch fetch returns status="partial" and is re-run, at which
+        // point stage is "fetch-skipped" and the resume flows through the
+        // $has_progress path below (and completes via the shared tail).
+        if (
+            $this->filter === "skipped-earlier" &&
+            ($this->import_state()->active_resumable_command->current_stage ?? null) !== "fetch-skipped"
+        ) {
             throw new RuntimeException(
                 "--filter=skipped-earlier was requested but there is no completed sync with skipped files. " .
                     "Run files-pull with --filter=essential-files first.",
@@ -3082,6 +3117,9 @@ class ImportClient
             }
             $this->import_state()->active_resumable_command->current_stage = null;
             $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
+            // Tail fully fetched; clear the flag so a later skipped-earlier run
+            // doesn't treat the now-empty tail as pending.
+            $this->import_state()->pull_pipeline->skipped_pending = false;
             $this->save_state($this->state);
 
             if (file_exists($this->skipped_download_list_file)) {

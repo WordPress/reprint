@@ -901,4 +901,44 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
         $this->assertSame('essential-files', $state["filter"]);
     }
+
+    public function testRepullAfterInterruptedSkippedEarlierTailIsNotBlocked(): void
+    {
+        // An interrupted skipped-earlier tail leaves completion_state="partial"
+        // with filter=skipped-earlier. A new essential-files pull must still be
+        // allowed: the filter-change guard must not treat the terminal tail as
+        // a mid-flight sync.
+        file_put_contents(
+            $this->stateDir . '/.import-state.json',
+            json_encode([
+                "active_resumable_command" => [
+                    "command_name" => "files-pull",
+                    "completion_state" => "partial",
+                    "current_stage" => "fetch-skipped",
+                ],
+                "filter" => "skipped-earlier",
+                "pull_pipeline" => [
+                    "started_by_command" => "pull",
+                    "stage_sequence" => ["preflight", "files-pull", "db-pull", "db-apply"],
+                    "last_completed_stage" => "db-apply",
+                    "files_filter" => "essential-files",
+                    "skipped_pending" => true,
+                ],
+                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            ]),
+        );
+
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "filter" => "essential-files",
+            "runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame('essential-files', $state["filter"]);
+    }
 }
