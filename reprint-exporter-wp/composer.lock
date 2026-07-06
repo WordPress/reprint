@@ -358,18 +358,20 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-a87e2773f3b6375f2d6c44ec6f9eb16a3a4561f4",
+            "version": "dev-pull/dual-mode-windows",
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-exporter",
-                "reference": "9e8e2886a687a785a91676f20c505a413926b7b3"
+                "reference": "02cfcadbdd4fa49cdfccb0a2580897781f841db5"
             },
             "require": {
-                "ext-pdo": "*",
-                "ext-pdo_mysql": "*",
                 "php": ">=7.4",
                 "wp-php-toolkit/data-liberation": "^0.8.0",
                 "wp-php-toolkit/html": "^0.8.0"
+            },
+            "suggest": {
+                "ext-pdo": "Needed for the SQLite export path; recommended for MySQL exports (the wpdb fallback handles MySQL when absent).",
+                "ext-pdo_mysql": "Recommended for MySQL exports; falls back to wpdb when absent."
             },
             "type": "library",
             "autoload": {
@@ -382,10 +384,15 @@
                     "src/class-hmac-client.php",
                     "src/class-hmac-server.php",
                     "src/class-http-server.php",
-                    "src/class-sqlite-driver-pdo.php"
+                    "src/class-staged-apply.php",
+                    "src/class-staged-artifacts.php",
+                    "src/class-staged-endpoints.php",
+                    "src/class-sqlite-driver-pdo.php",
+                    "src/class-wpdb-driver-pdo.php"
                 ],
                 "files": [
-                    "src/utils.php"
+                    "src/utils.php",
+                    "src/class-pdo-polyfill.php"
                 ]
             },
             "license": [

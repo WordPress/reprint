@@ -89,6 +89,8 @@ class UploadChunkSizer
         $config["growth_holdoff_successes"] = max(0, (int) $config["growth_holdoff_successes"]);
         $this->config = $config;
 
+        // Persisted state may come from an older config or version; clamp it
+        // through the current floor, ceiling, and hard cap before resuming.
         $ceiling = $state["ceiling_bytes"] ?? null;
         $this->ceiling_bytes = is_numeric($ceiling) && (int) $ceiling > 0 ? (int) $ceiling : null;
         $this->chunk_bytes = $this->clamp_chunk(
@@ -133,6 +135,8 @@ class UploadChunkSizer
             return $this->decision("steady");
         }
 
+        // Limits only lower the ceiling; a later, higher preflight value
+        // cannot erase a smaller limit learned earlier in the session.
         return $this->lower_ceiling((int) ($smallest * $this->config["limit_safety_ratio"]));
     }
 
@@ -225,6 +229,9 @@ class UploadChunkSizer
     }
 
     /**
+     * Lowers the learned per-session ceiling and shrinks the current chunk
+     * when it no longer fits.
+     *
      * @return array{action:string,chunk_bytes:int}
      */
     private function lower_ceiling(int $ceiling): array
@@ -246,11 +253,18 @@ class UploadChunkSizer
         return $this->decision("shrink");
     }
 
+    /**
+     * Returns the active ceiling after applying the unconditional hard cap.
+     */
     private function effective_ceiling(): int
     {
         return min($this->ceiling_bytes ?? PHP_INT_MAX, $this->config["max_bytes"]);
     }
 
+    /**
+     * Normalizes restored state without converting an already-impossible
+     * ceiling into an invalid chunk size.
+     */
     private function clamp_chunk(int $chunk_bytes): int
     {
         return max(

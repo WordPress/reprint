@@ -1,10 +1,12 @@
-# Stages this PR's perf comment will benchmark.
+# Stages this PR stack's perf comment will benchmark.
 # One stage name per line; comments and blank lines ignored.
 # Both the PR build and the trunk baseline run the same set, so the
-# table shows two like-for-like wall-time numbers per row.
+# table shows like-for-like wall-time numbers per row.
 #
-# This PR loads the Rust wp_mysql_parser PHP.wasm extension for the PR side
-# and leaves it disabled for the trunk baseline. Both sides use the same
-# direct PHP.wasm runner so the wall-time delta isolates the extension.
-playground-sqlite-db-pull
-playground-sqlite-db-apply
+# This stack changes file transfer/apply behavior. Keep the focused benchmark
+# on file movement rather than unrelated database-only Playground SQLite
+# stages. `files-pull` requires preflight state, so benchmark both stages
+# together. Push-specific stages cannot be compared here until push-files exists
+# on the trunk baseline.
+preflight
+files-pull

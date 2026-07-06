@@ -180,6 +180,8 @@ During the file fetch phase, progress and heartbeat records include `files_done`
   - src/lib/target-runtime/: Runtime appliers (NginxFpmApplier, PhpBuiltinApplier, PlaygroundCliApplier)
   - src/lib/url-rewrite/: URL rewriting for db-apply
   - src/lib/mysql-query-stream/: MySQL query stream parser for direct streaming
+  - src/lib/state/: Typed persisted state (ImportState — the single source of the .import-state.json schema)
+  - src/lib/upload/: Push-side staged transfer (StagedUploadClient, StagedPushRunner, PushPlanBuilder, UploadChunkSizer)
 - reprint-exporter-wp/: Self-contained WordPress plugin distribution directory
   - index.php: WordPress plugin entry point — intercepts `?reprint-api` requests (and the legacy `?site-export-api` alias) during plugin load, requires lib.php
   - lib.php: Standalone library — constants, auth functions, and request handler. Can be required without index.php by projects that want to embed the export engine with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `_site_export_handle_api_request()`)
@@ -241,6 +243,12 @@ Progress is computed client-side by reading state files (all in `--state-dir`):
 - `.import-remote-index.jsonl`: Remote file index (for delta comparison)
 - `.import-download-list.jsonl`: Files pending download
 - `db.sql`: SQL dump file size
+
+Staged transfers add (also under `--state-dir`):
+- `.push-state.json`: push chunk-sizer state and progress counters
+- `.push-shipped-index.jsonl`: the shipped index — what the target holds, in the shared `{path,ctime,size,type}` format, updated after each confirmed apply. Push's analog of pull's local index; the delta base the fs-root walk diffs against (via the same sorted-merge classifier pull uses) to derive the upload list and deletions. Transient per-run work files: `.push-source-index.jsonl` (the fs-root walk), `.push-upload-list.jsonl`, `.push-deletions.jsonl`
+- `.pull-staging/`: staged pull artifact store (files/, verified/, state.json, lock)
+- `.pull-staged-manifest.jsonl`: the pending apply-window log for staged pulls (files, dirs, symlinks, deletions)
 
 And from `--fs-root`:
 - Actual downloaded files (recursive size/count)

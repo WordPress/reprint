@@ -55,6 +55,52 @@ class ImportStateTest extends TestCase
         $this->assertSame(99, $array['sql_statements_counted']);
     }
 
+    /**
+     * The staged-pull resume path checkpoints the in-flight file's ownership
+     * so a file that straddles a request boundary keeps its preserve-local
+     * override at apply time. That only works if the flag survives the
+     * state round-trip.
+     */
+    public function testCurrentFileOwnedRoundTrips(): void
+    {
+        foreach ([true, false, null] as $owned) {
+            $state = \ImportState::from_array([]);
+            $state->current_file = 'wp-content/plugins/a/a.php';
+            $state->current_file_bytes = 4096;
+            $state->current_file_owned = $owned;
+
+            $restored = \ImportState::from_array($state->to_array());
+
+            $this->assertSame($owned, $restored->current_file_owned, var_export($owned, true));
+            $this->assertSame('wp-content/plugins/a/a.php', $restored->current_file);
+            $this->assertSame(4096, $restored->current_file_bytes);
+        }
+    }
+
+    /** State written before this field existed reads as null (owned=false). */
+    public function testMissingCurrentFileOwnedDefaultsToNull(): void
+    {
+        $restored = \ImportState::from_array(['current_file' => 'x', 'current_file_bytes' => 1]);
+
+        $this->assertNull($restored->current_file_owned);
+    }
+
+    /**
+     * The path style persists like the sync flags so a resumed transfer keeps
+     * the representation it started with (absolute vs relative).
+     */
+    public function testIndexPathStyleRoundTrips(): void
+    {
+        foreach (['absolute', 'relative', null] as $style) {
+            $state = \ImportState::from_array([]);
+            $state->index_path_style = $style;
+
+            $restored = \ImportState::from_array($state->to_array());
+
+            $this->assertSame($style, $restored->index_path_style, var_export($style, true));
+        }
+    }
+
     public function testStateRoundTripMatchesDefaultStateSchema(): void
     {
         $client = new \ImportClient(

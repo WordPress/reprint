@@ -59,6 +59,15 @@ require_once __DIR__ . '/lib/state/class-import-state.php';
 // Adaptive sizing for bounded local-to-remote upload chunks (push transfers)
 require_once __DIR__ . '/lib/upload/class-upload-chunk-sizer.php';
 
+// Chunked, resumable uploads into the target's staged artifact store
+require_once __DIR__ . '/lib/upload/class-staged-upload-client.php';
+
+// Batch orchestration over the upload client: plan in, verified artifacts out
+require_once __DIR__ . '/lib/upload/class-staged-push-runner.php';
+
+// Local-tree walk that produces the plan the push runner consumes
+require_once __DIR__ . '/lib/upload/class-push-plan-builder.php';
+
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
@@ -1045,6 +1054,18 @@ class ImportClient
     /** @var string Path to .import-download-list-skipped.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
     private $skipped_download_list_file;
 
+    /** @var string Push source index (fs-root walk) in the shared index format; transient per run. */
+    private $push_source_index_file;
+
+    /** @var string Push shipped index — what the target holds, updated after each confirmed apply. Push's analog of the local index. */
+    private $push_shipped_index_file;
+
+    /** @var string Push upload list — files the diff says to upload (download-list format plus size). */
+    private $push_upload_list_file;
+
+    /** @var string Push deletions list — target paths the diff says to remove. */
+    private $push_deletions_file;
+
     /** @var string Path to .import-audit.log — append-only log of every operation for debugging. */
     private $audit_log;
 
@@ -1226,6 +1247,49 @@ class ImportClient
      */
     public $exit_code = 0;
 
+    /** Artifact id the push manifest stages under; never applied itself. */
+    private const PUSH_MANIFEST_ID = '.reprint-push-manifest.jsonl';
+
+    /**
+     * Push failures that follow the resumable convention (exit 2: run the
+     * same command again). One list for the transfer and the apply so a
+     * reason cannot be retryable in one phase and fatal in the other.
+     */
+    private const PUSH_RETRYABLE_REASONS = ["transport_failed", "busy_exhausted", "status_unavailable", "server_io_error"];
+
+    /** Artifact id the staged pull manifest stages under. */
+    private const PULL_MANIFEST_ID = '.reprint-pull-manifest.jsonl';
+
+    /** @var bool Files download into staging and apply in one rename window. */
+    private $staged_apply_mode = false;
+
+    /**
+     * @var string Index/transfer path style. "absolute" mirrors the whole
+     * filesystem layout (pull's default; lets a transfer carry paths from
+     * outside the document root). "relative" mirrors just the --fs-root
+     * subtree (push's default) — that subtree is what appears in staging.
+     * Resolved in run(): explicit option, else persisted state, else the
+     * per-command default. Governs how index paths validate and how they
+     * map to store artifact ids.
+     */
+    private $index_path_style = "absolute";
+
+    /** @var Site_Export_Staged_Artifacts|null Lazy staged pull store. */
+    private $staged_pull_store = null;
+
+    /** @var array<string,true> Owned remote paths in the batch being fetched. */
+    private $staged_batch_owned = [];
+
+    /** @var string|null Cache key (list:offsets) for staged_batch_owned. */
+    private $staged_batch_owned_key = null;
+
+    /**
+     * True while the apply window replays deferred directory/symlink
+     * records through their regular handlers — the same code that runs at
+     * fetch time in unstaged mode, just at window time.
+     */
+    private $staged_replay = false;
+
     public function __construct(string $remote_url, string $state_dir, string $fs_root)
     {
         $this->remote_url = rtrim($remote_url, "?&");
@@ -1241,6 +1305,10 @@ class ImportClient
             $this->state_dir . "/.import-download-list.jsonl";
         $this->skipped_download_list_file =
             $this->state_dir . "/.import-download-list-skipped.jsonl";
+        $this->push_source_index_file = $this->state_dir . "/.push-source-index.jsonl";
+        $this->push_shipped_index_file = $this->state_dir . "/.push-shipped-index.jsonl";
+        $this->push_upload_list_file = $this->state_dir . "/.push-upload-list.jsonl";
+        $this->push_deletions_file = $this->state_dir . "/.push-deletions.jsonl";
         $this->audit_log = $this->state_dir . "/.import-audit.log";
         $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
         $this->status_file = $this->state_dir . "/.import-status.json";
@@ -1598,6 +1666,7 @@ class ImportClient
             "files-pull",
             "files-index",
             "files-stats",
+            "push-files",
             "db-pull",
             "db-index",
             "db-domains",
@@ -1652,6 +1721,31 @@ class ImportClient
             $this->save_state($this->state);
         } else {
             $this->fs_root_nonempty_behavior = $this->import_state()->fs_root_nonempty_behavior ?? 'error';
+        }
+
+        // Persist staged apply mode like the flags above: a resumed pull
+        // must keep staging where the interrupted run was staging.
+        if (isset($options["staged_apply"])) {
+            $this->staged_apply_mode = (bool) $options["staged_apply"];
+            $this->import_state()->staged_apply = $this->staged_apply_mode;
+            $this->save_state($this->state);
+        } else {
+            $this->staged_apply_mode = !empty($this->import_state()->staged_apply);
+        }
+
+        // Path style persists like the flags above. Explicit option wins;
+        // otherwise a resumed run keeps what it started with; otherwise the
+        // per-command default — push mirrors just its --fs-root subtree
+        // (relative), pull mirrors the exporter's absolute layout.
+        if (isset($options["index_path_style"])) {
+            $this->index_path_style = $options["index_path_style"];
+            $this->import_state()->index_path_style = $this->index_path_style;
+            $this->save_state($this->state);
+        } elseif (!empty($this->import_state()->index_path_style)) {
+            $this->index_path_style = $this->import_state()->index_path_style;
+        } else {
+            $command = $options["command"] ?? "";
+            $this->index_path_style = $command === "push-files" ? "relative" : "absolute";
         }
 
         // Persist filter in state so it survives across resume cycles.
@@ -1845,6 +1939,14 @@ class ImportClient
             $this->run_files_stats();
             return;
         }
+        if ($command === "push-files") {
+            if ($abort) {
+                $this->handle_abort($command);
+                return;
+            }
+            $this->run_push_files($options);
+            return;
+        }
         if ($command === "flat-docroot") {
             $this->run_flat_document_root($options);
             return;
@@ -1989,11 +2091,53 @@ class ImportClient
                     @unlink($this->volatile_files_file);
                     $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
                 }
+
+                // Staged leftovers are sync progress too: unapplied bytes
+                // and the pending window log go with the cursor. Nothing
+                // in them reached the live tree or the index, so the next
+                // diff re-derives whatever still applies.
+                $staging_dir = $this->staged_pull_staging_dir();
+                if (is_dir($staging_dir)) {
+                    $this->remove_local_path_without_following_symlinks($staging_dir);
+                    $this->audit_log("FILE DELETE | {$staging_dir} | staged leftovers cleared");
+                    $this->staged_pull_store = null;
+                }
+                if (file_exists($this->staged_pull_manifest_log())) {
+                    @unlink($this->staged_pull_manifest_log());
+                    $this->audit_log("FILE DELETE | {$this->staged_pull_manifest_log()}");
+                }
+
                 $this->import_state()->index = new RemoteFileIndexCursorState();
                 $this->import_state()->fetch = new DownloadListFetchProgressState();
                 $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
 
                 $this->save_state($this->state);
+                break;
+
+            case "push-files":
+                $this->audit_log(
+                    "RESTART | Clearing push-files state",
+                    true,
+                );
+                // Transient per-run work files clear; the shipped index is
+                // preserved, exactly as pull's --abort keeps its local index —
+                // it is the delta base the next push diffs against.
+                // (.push-verified.jsonl is a legacy done cache, removed if a
+                // pre-collapse run left one behind.)
+                foreach ([
+                    ".push-state.json",
+                    ".push-verified.jsonl",
+                    ".push-manifest.jsonl",
+                    ".push-source-index.jsonl",
+                    ".push-upload-list.jsonl",
+                    ".push-deletions.jsonl",
+                ] as $name) {
+                    $path = rtrim($this->state_dir, "/") . "/" . $name;
+                    if (file_exists($path)) {
+                        @unlink($path);
+                        $this->audit_log("FILE DELETE | {$path} | abort push-files");
+                    }
+                }
                 break;
 
             case "files-index":
@@ -2792,6 +2936,13 @@ class ImportClient
             file_exists($this->index_file) &&
             filesize($this->index_file) > 0;
 
+        // Staged mode: refuse now if the apply window could never run —
+        // a state dir on another filesystem above all — not after the
+        // download has been paid for.
+        if ($this->staged_apply_mode) {
+            $this->assert_staged_pull_ready();
+        }
+
         // Resuming an in-progress sync
         if ($has_progress) {
             // Don't reset files_imported here — it counts files within
@@ -2983,6 +3134,10 @@ class ImportClient
             } elseif ($has_skipped) {
                 $stage = "fetch-skipped";
             } else {
+                // Nothing to download, but a deletions-only delta still
+                // has a window to run: the manifest log holds whatever
+                // the diff just staged for removal.
+                $this->run_staged_pull_apply();
                 $stage = null;
             }
             $this->import_state()->active_resumable_command->current_stage = $stage;
@@ -3046,6 +3201,7 @@ class ImportClient
                 // Essential files are done — mark the sync as complete.
                 // The skipped list stays on disk for a later
                 // --filter=skipped-earlier run.
+                $this->run_staged_pull_apply();
                 $this->import_state()->active_resumable_command->current_stage = null;
                 $this->save_state($this->state);
                 $this->audit_log(
@@ -3064,6 +3220,7 @@ class ImportClient
                 );
                 $this->write_status_file();
             } else {
+                $this->run_staged_pull_apply();
                 $this->import_state()->active_resumable_command->current_stage = null;
                 $this->save_state($this->state);
                 $stage = null;
@@ -3080,6 +3237,7 @@ class ImportClient
                 $this->save_state($this->state);
                 return;
             }
+            $this->run_staged_pull_apply();
             $this->import_state()->active_resumable_command->current_stage = null;
             $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
             $this->save_state($this->state);
@@ -3924,6 +4082,1093 @@ class ImportClient
         }
 
         echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
+    }
+
+    /**
+     * Upload local files into the target's staged artifact store.
+     *
+     * The plan comes from walking --fs-root: each regular file becomes one
+     * artifact at its fs-root-relative path. Nothing on the target site
+     * changes — this command only fills staging; a later apply step moves
+     * verified artifacts into place. Rerunning resumes: finished artifacts
+     * are skipped from the local done cache, a half-uploaded artifact
+     * continues from the store's committed offset, and the chunk sizer
+     * restarts at its learned limits.
+     */
+    private function run_push_files(array $options): void
+    {
+        if ($this->hmac_client === null) {
+            throw new InvalidArgumentException(
+                "push-files requires --secret: the staged upload endpoints reject unsigned requests.",
+            );
+        }
+
+        // Push selection is fs-root-relative. The :token: forms --only
+        // accepts for pull describe remote paths and do not apply here.
+        $only_raw = [];
+        foreach (($options["only"] ?? []) as $raw) {
+            $prefix = (string) $raw;
+            if (strpos($prefix, "./") === 0) {
+                $prefix = substr($prefix, 2);
+            }
+            $only_raw[] = $prefix;
+        }
+        // Validates hostile prefixes before anything runs.
+        $only = PushPlanBuilder::normalize_only($only_raw);
+
+        // Enumerate the local tree into a source index, then diff it against
+        // the shipped index (what the target already holds) to build the
+        // upload list and deletions — pull's index/diff path, inverted. Push
+        // carries no separate plan array or done cache.
+        $skipped = $this->build_push_source_index($only);
+        foreach ($skipped as $skip) {
+            $this->audit_log("PUSH-SKIP | {$skip["reason"]} | {$skip["path"]}", false);
+        }
+        $diff = $this->diff_push_indexes($only, array_column($skipped, "path"));
+
+        $this->output_progress(
+            [
+                "type" => "push",
+                "status" => "starting",
+                "files_total" => $diff["upload_count"],
+                "skipped" => count($skipped),
+            ],
+            true,
+        );
+
+        $persisted = StagedPushRunner::read_state($this->state_dir);
+        $sizer = new UploadChunkSizer([], $persisted["sizer"]);
+        $client = new StagedUploadClient([
+            "base_url" => $this->remote_url,
+            "hmac_client" => $this->hmac_client,
+            "sizer" => $sizer,
+        ]);
+
+        // Probe the apply environment before any byte is uploaded. Apply is
+        // rename-only, so staging on a different device than the target
+        // root can never land — that must surface now, not after the
+        // transfer. Probe failures that only mean "this target cannot apply
+        // yet" stay fatal only when --apply asked for an apply.
+        $apply = !empty($options["apply"]);
+        $probe = $client->apply(self::PUSH_MANIFEST_ID, true);
+        if ($probe["status"] === "failed") {
+            $environment_verdicts = ["cross_device", "target_missing", "target_unwritable", "staging_unavailable"];
+            if (in_array($probe["reason"], $environment_verdicts, true)) {
+                $this->output_progress([
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => $probe["reason"],
+                    "abort_detail" => $probe["detail"],
+                ], true);
+                echo json_encode([
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => $probe["reason"],
+                    "abort_detail" => $probe["detail"],
+                ], JSON_PRETTY_PRINT) . "\n";
+                $this->exit_code = 1;
+                return;
+            }
+            if ($apply) {
+                $retryable = ["transport_failed", "busy_exhausted"];
+                $this->output_progress([
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => $probe["reason"],
+                    "abort_detail" => $probe["detail"],
+                ], true);
+                echo json_encode([
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => $probe["reason"],
+                    "abort_detail" => $probe["detail"],
+                ], JSON_PRETTY_PRINT) . "\n";
+                $this->exit_code = in_array($probe["reason"], $retryable, true) ? 2 : 1;
+                return;
+            }
+            $this->audit_log(
+                "PUSH APPLY PROBE | {$probe["reason"]} | staging only, apply deferred",
+                false,
+            );
+        }
+
+        $runner = new StagedPushRunner([
+            "state_dir" => $this->state_dir,
+            "client" => $client,
+            "sizer" => $sizer,
+            // Absolute-mode ids are already rooted, so source_root is empty;
+            // relative-mode ids resolve under --fs-root.
+            "source_root" => $this->index_path_style === "absolute" ? "" : $this->fs_root,
+            "on_progress" => function (array $progress): void {
+                $this->output_progress([
+                    "type" => "push_progress",
+                    "files_done" => $progress["files_done"],
+                    "files_total" => $progress["files_total"],
+                    "path" => $progress["artifact_id"],
+                    "committed_bytes" => $progress["committed_bytes"],
+                    "total_bytes" => $progress["total_bytes"],
+                ]);
+            },
+        ]);
+
+        if ($probe["status"] === "ready") {
+            if (($probe["max_request_bytes"] ?? null) !== null) {
+                // Seed the sizer from the target's declared cap instead of
+                // waiting for the first 413 to teach it.
+                $sizer->apply_reported_limits([$probe["max_request_bytes"]]);
+            }
+            $staging_free = $probe["staging_free_bytes"] ?? null;
+            if ($staging_free !== null && $diff["pending_bytes"] > $staging_free) {
+                // The transfer could never fit; refuse before uploading.
+                $summary = [
+                    "type" => "push",
+                    "status" => "error",
+                    "abort_reason" => "insufficient_staging_space",
+                    "abort_detail" => sprintf(
+                        "pending upload needs %d bytes, staging has %d free",
+                        $diff["pending_bytes"],
+                        $staging_free,
+                    ),
+                ];
+                $this->output_progress($summary, true);
+                echo json_encode($summary, JSON_PRETTY_PRINT) . "\n";
+                $this->exit_code = 1;
+                return;
+            }
+        }
+
+        $result = $runner->push($this->push_upload_list_file);
+
+        $summary = [
+            "type" => "push",
+            "status" => $result["status"] === "completed" && $result["failed"] === []
+                ? "complete"
+                : "error",
+            "files_total" => $result["files_total"],
+            "files_done" => $result["files_done"],
+            "failed" => $result["failed"],
+            "skipped" => count($skipped),
+            "abort_reason" => $result["abort_reason"],
+            "abort_detail" => $result["abort_detail"],
+        ];
+        $this->output_progress($summary, true);
+        echo json_encode($summary, JSON_PRETTY_PRINT) . "\n";
+
+        if ($result["status"] === "aborted") {
+            $this->audit_log(
+                "PUSH ABORTED | {$result["abort_reason"]} | " . ($result["abort_detail"] ?? ""),
+                false,
+            );
+            // Transient transfer failures follow the resumable convention;
+            // a bad secret or a chunk size the host can never accept will
+            // not fix itself.
+            $this->exit_code = in_array($result["abort_reason"], self::PUSH_RETRYABLE_REASONS, true) ? 2 : 1;
+            return;
+        }
+        if ($result["failed"] !== []) {
+            $this->exit_code = 1;
+            return;
+        }
+        if (!$apply) {
+            $this->exit_code = 0;
+            return;
+        }
+        $this->exit_code = $this->run_push_apply($client);
+    }
+
+    /**
+     * Stage the manifest for a completed transfer and apply it.
+     *
+     * The manifest lists every planned artifact with its size; the target
+     * validates the whole transfer against it (device match included)
+     * before the first rename, so an incomplete or inconsistent transfer
+     * rejects instead of half-applying.
+     *
+     * @return int Process exit code.
+     */
+    private function run_push_apply(StagedUploadClient $client): int
+    {
+        // The manifest lists every uploaded file (rename into place) and every
+        // deletion the diff derived (remove) — nothing else. Unchanged files
+        // are "same" in the diff, never staged and never listed. Both work
+        // lists are written in path order, so streaming them keeps the
+        // manifest bounded regardless of transfer size.
+        $manifest_path = $this->state_dir . "/.push-manifest.jsonl";
+        $manifest = @fopen($manifest_path, "wb");
+        if ($manifest === false) {
+            return $this->finish_push_apply("error", [
+                "abort_reason" => "manifest_write_failed",
+                "abort_detail" => $manifest_path,
+            ]);
+        }
+
+        $upload_handle = @fopen($this->push_upload_list_file, "r");
+        if ($upload_handle !== false) {
+            while (true) {
+                $entry = $this->read_push_upload_entry($upload_handle);
+                if ($entry === null) {
+                    break;
+                }
+                // Store artifact ids drop the leading slash absolute-mode
+                // index paths carry (a no-op in relative mode).
+                if (!$this->write_push_manifest_entry($manifest, [
+                    "artifact_id" => ltrim($entry["path"], "/"),
+                    "size" => $entry["size"],
+                ])) {
+                    fclose($upload_handle);
+                    fclose($manifest);
+                    return $this->finish_push_apply("error", [
+                        "abort_reason" => "manifest_write_failed",
+                        "abort_detail" => $manifest_path,
+                    ]);
+                }
+            }
+            fclose($upload_handle);
+        }
+
+        $delete_handle = @fopen($this->push_deletions_file, "r");
+        if ($delete_handle !== false) {
+            while (true) {
+                $path = $this->read_push_deletion($delete_handle);
+                if ($path === null) {
+                    break;
+                }
+                if (!$this->write_push_manifest_entry($manifest, [
+                    "artifact_id" => ltrim($path, "/"),
+                    "delete" => true,
+                ])) {
+                    fclose($delete_handle);
+                    fclose($manifest);
+                    return $this->finish_push_apply("error", [
+                        "abort_reason" => "manifest_write_failed",
+                        "abort_detail" => $manifest_path,
+                    ]);
+                }
+            }
+            fclose($delete_handle);
+        }
+
+        if (!@fclose($manifest)) {
+            return $this->finish_push_apply("error", [
+                "abort_reason" => "manifest_write_failed",
+                "abort_detail" => $manifest_path,
+            ]);
+        }
+
+        // A manifest from an earlier, different diff may sit at this id;
+        // replace it wholesale. Failures surface on the upload right after.
+        $client->discard(self::PUSH_MANIFEST_ID);
+        $uploaded = $client->upload_artifact(self::PUSH_MANIFEST_ID, $manifest_path);
+        if ($uploaded["status"] !== "verified") {
+            return $this->finish_push_apply("error", [
+                "abort_reason" => $uploaded["reason"],
+                "abort_detail" => $uploaded["detail"],
+            ]);
+        }
+
+        $applied = $client->apply(self::PUSH_MANIFEST_ID);
+        if ($applied["status"] !== "applied") {
+            return $this->finish_push_apply("error", [
+                "abort_reason" => $applied["reason"],
+                "abort_detail" => $applied["detail"],
+            ]);
+        }
+
+        // The target confirmed the window: fold the uploaded files and
+        // deletions into the shipped index (push's local index) through the
+        // same streaming merge pull uses. A kill before this re-derives the
+        // identical diff next run, which reruns as idempotent no-ops.
+        $this->update_shipped_index_after_apply();
+
+        return $this->finish_push_apply("complete", [
+            "applied" => $applied["applied"],
+            "already_applied" => $applied["already_applied"],
+            "deleted" => $applied["deleted"],
+        ]);
+    }
+
+    /**
+     * Walk --fs-root into a sorted source index in the shared index format,
+     * reusing the same sort the exporter-built remote index goes through.
+     *
+     * @return array<int,array{path:string,reason:string}> skipped entries.
+     */
+    private function build_push_source_index(array $only): array
+    {
+        $handle = @fopen($this->push_source_index_file, "wb");
+        if ($handle === false) {
+            throw new RuntimeException("Failed to open push source index for writing");
+        }
+        try {
+            $build = PushPlanBuilder::build_index($this->fs_root, $only, $handle, $this->push_path_prefix());
+        } finally {
+            fclose($handle);
+        }
+        $this->sort_index_file($this->push_source_index_file);
+        return $build["skipped"];
+    }
+
+    /**
+     * The prefix push index paths carry for the active style: empty in
+     * relative (document-root) mode, the absolute fs-root in filesystem mode.
+     * Index paths and the skip list share this space; store artifact ids drop
+     * the leading slash (see the runner and manifest).
+     */
+    private function push_path_prefix(): string
+    {
+        if ($this->index_path_style !== "absolute") {
+            return "";
+        }
+        $real = realpath($this->fs_root);
+        return rtrim($real !== false ? $real : $this->fs_root, "/");
+    }
+
+    /**
+     * Diff the source index (the local tree) against the shipped index (what
+     * the target holds) with the same sorted-merge classifier pull's fetch
+     * diff uses, writing the upload list and the deletions list.
+     *
+     * @return array{upload_count:int,delete_count:int,pending_bytes:int}
+     */
+    private function diff_push_indexes(array $only, array $skipped_paths): array
+    {
+        $source_handle = file_exists($this->push_source_index_file)
+            ? fopen($this->push_source_index_file, "r")
+            : null;
+        $shipped_handle = file_exists($this->push_shipped_index_file)
+            ? fopen($this->push_shipped_index_file, "r")
+            : null;
+        $upload_handle = fopen($this->push_upload_list_file, "w");
+        $delete_handle = fopen($this->push_deletions_file, "w");
+        if (!$upload_handle || !$delete_handle) {
+            throw new RuntimeException("Failed to open push work lists");
+        }
+
+        // Index paths carry the style's prefix; --only prefixes are always
+        // fs-root-relative, so lift them into the same space to scope
+        // deletions correctly in either mode.
+        $prefix = $this->push_path_prefix();
+        $only_matched = $prefix === "" ? $only : array_map(
+            static fn(string $p): string => $prefix . "/" . $p,
+            $only
+        );
+
+        $source = $this->read_index_line($source_handle);
+        $shipped = $this->read_index_line($shipped_handle);
+        $upload_count = 0;
+        $delete_count = 0;
+        $pending_bytes = 0;
+
+        while (true) {
+            $verdict = self::classify_index_pair($source, $shipped);
+            if ($verdict === "done") {
+                break;
+            }
+            if ($verdict === "new") {
+                $this->write_push_upload_entry($upload_handle, $source);
+                $upload_count++;
+                $pending_bytes += $source["size"];
+                $source = $this->read_index_line($source_handle);
+            } elseif ($verdict === "removed") {
+                // A shipped path missing from the source is a deletion —
+                // unless it is outside the --only scope (excluded on purpose,
+                // not removed) or at/under a skipped local path (not read this
+                // run, so not proven removed; mirrors pull's --only guard).
+                $in_scope = $only === [] || PushPlanBuilder::selected($shipped["path"], $only_matched);
+                if ($in_scope && !$this->push_id_under_skipped($shipped["path"], $skipped_paths)) {
+                    $this->write_push_deletion($delete_handle, $shipped["path"]);
+                    $delete_count++;
+                }
+                $shipped = $this->read_index_line($shipped_handle);
+            } else {
+                // "changed" re-uploads; "same" skips. Push always replaces its
+                // own tree, so ownership needs no separate tracking here.
+                if ($verdict === "changed") {
+                    $this->write_push_upload_entry($upload_handle, $source);
+                    $upload_count++;
+                    $pending_bytes += $source["size"];
+                }
+                $source = $this->read_index_line($source_handle);
+                $shipped = $this->read_index_line($shipped_handle);
+            }
+        }
+
+        if ($source_handle) {
+            fclose($source_handle);
+        }
+        if ($shipped_handle) {
+            fclose($shipped_handle);
+        }
+        fclose($upload_handle);
+        fclose($delete_handle);
+
+        return [
+            "upload_count" => $upload_count,
+            "delete_count" => $delete_count,
+            "pending_bytes" => $pending_bytes,
+        ];
+    }
+
+    /**
+     * Fold the confirmed transfer into the shipped index: uploaded files enter
+     * at their source ctime/size, deletions leave. Both work lists are path
+     * sorted with disjoint paths, so a two-way merge feeds the index-update
+     * buffer in sorted order for finalize_index_updates.
+     */
+    private function update_shipped_index_after_apply(): void
+    {
+        $upload_handle = @fopen($this->push_upload_list_file, "r");
+        $delete_handle = @fopen($this->push_deletions_file, "r");
+        $up = $upload_handle !== false ? $this->read_push_upload_entry($upload_handle) : null;
+        $del = $delete_handle !== false ? $this->read_push_deletion($delete_handle) : null;
+
+        $this->begin_index_updates();
+        while ($up !== null || $del !== null) {
+            $take_upload = $del === null || ( $up !== null && strcmp($up["path"], $del) <= 0 );
+            if ($take_upload) {
+                $this->record_index_update_file($up["path"], $up["ctime"], $up["size"], "file");
+                $up = $this->read_push_upload_entry($upload_handle);
+            } else {
+                $this->record_index_update_deletion($del);
+                $del = $this->read_push_deletion($delete_handle);
+            }
+        }
+        $this->finalize_index_updates($this->push_shipped_index_file);
+
+        if ($upload_handle !== false) {
+            fclose($upload_handle);
+        }
+        if ($delete_handle !== false) {
+            fclose($delete_handle);
+        }
+    }
+
+    /** Upload-list line: base64 path plus the size/ctime apply and the shipped index need. */
+    private function write_push_upload_entry($handle, array $entry): void
+    {
+        $line = json_encode([
+            "path" => base64_encode($entry["path"]),
+            "size" => (int) $entry["size"],
+            "ctime" => (int) $entry["ctime"],
+        ], JSON_UNESCAPED_SLASHES);
+        if ($line === false || fwrite($handle, $line . "\n") === false) {
+            throw new RuntimeException("Failed to write the push upload list (disk full?)");
+        }
+    }
+
+    /**
+     * @return array{path:string,size:int,ctime:int}|null
+     */
+    private function read_push_upload_entry($handle): ?array
+    {
+        while (true) {
+            $line = fgets($handle);
+            if ($line === false) {
+                return null;
+            }
+            $line = trim($line);
+            if ($line === "") {
+                continue;
+            }
+            $data = json_decode($line, true);
+            if (!is_array($data)) {
+                continue;
+            }
+            $encoded = isset($data["path"]) ? (string) $data["path"] : "";
+            $path = base64_decode($encoded, true);
+            if ($path === false || $path === "") {
+                continue;
+            }
+            $size = isset($data["size"]) ? (int) $data["size"] : 0;
+            $ctime = isset($data["ctime"]) ? (int) $data["ctime"] : 0;
+            return [
+                "path" => $path,
+                "size" => $size,
+                "ctime" => $ctime,
+            ];
+        }
+    }
+
+    private function write_push_deletion($handle, string $path): void
+    {
+        $line = json_encode(["path" => base64_encode($path)], JSON_UNESCAPED_SLASHES);
+        if ($line === false || fwrite($handle, $line . "\n") === false) {
+            throw new RuntimeException("Failed to write the push deletions list (disk full?)");
+        }
+    }
+
+    private function read_push_deletion($handle): ?string
+    {
+        while (true) {
+            $line = fgets($handle);
+            if ($line === false) {
+                return null;
+            }
+            $line = trim($line);
+            if ($line === "") {
+                continue;
+            }
+            $data = json_decode($line, true);
+            if (!is_array($data)) {
+                continue;
+            }
+            $encoded = isset($data["path"]) ? (string) $data["path"] : "";
+            $path = base64_decode($encoded, true);
+            if ($path !== false && $path !== "") {
+                return $path;
+            }
+        }
+    }
+
+    private function write_push_manifest_entry($manifest, array $entry): bool
+    {
+        $encoded = json_encode($entry);
+        if (!is_string($encoded)) {
+            return false;
+        }
+        $line = $encoded . "\n";
+        while ($line !== "") {
+            $written = @fwrite($manifest, $line);
+            if ($written === false || $written === 0) {
+                return false;
+            }
+            $line = substr($line, $written);
+        }
+        return true;
+    }
+
+    /**
+     * Whether an id sits at or under a path the plan builder skipped.
+     *
+     * Skips (symlinks, special files, unreadable entries, and the subtree
+     * under an unreadable directory) mean the local tree was not fully read,
+     * never that a file was removed — so previously-pushed ids beneath them
+     * must not be derived as deletions. An empty skipped path is the root
+     * (its own scandir failed), which covers every id.
+     */
+    private function push_id_under_skipped(string $id, array $skipped_paths): bool
+    {
+        foreach ($skipped_paths as $skipped) {
+            if (!is_string($skipped)) {
+                continue;
+            }
+            if ($skipped === "" || $id === $skipped || strpos($id, $skipped . "/") === 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @return int Process exit code.
+     */
+    private function finish_push_apply(string $status, array $fields): int
+    {
+        $summary = array_merge(["type" => "push_apply", "status" => $status], $fields);
+        $this->output_progress($summary, true);
+        echo json_encode($summary, JSON_PRETTY_PRINT) . "\n";
+        if ($status === "complete") {
+            return 0;
+        }
+        $this->audit_log(
+            "PUSH APPLY FAILED | " . ($fields["abort_reason"] ?? "unknown") . " | " . ($fields["abort_detail"] ?? ""),
+            false,
+        );
+        return in_array($fields["abort_reason"] ?? null, self::PUSH_RETRYABLE_REASONS, true) ? 2 : 1;
+    }
+
+    private function staged_pull_staging_dir(): string
+    {
+        return $this->state_dir . "/.pull-staging";
+    }
+
+    /** The manifest log accumulates one line per staged file across resumes. */
+    private function staged_pull_manifest_log(): string
+    {
+        return $this->state_dir . "/.pull-staged-manifest.jsonl";
+    }
+
+    private function staged_pull_store(): Site_Export_Staged_Artifacts
+    {
+        if ($this->staged_pull_store === null) {
+            $this->staged_pull_store = new Site_Export_Staged_Artifacts($this->staged_pull_staging_dir());
+        }
+        return $this->staged_pull_store;
+    }
+
+    private function staged_pull_apply_engine(?callable $on_protected = null): Site_Export_Staged_Apply
+    {
+        $preserve_local = $this->fs_root_nonempty_behavior === "preserve-local";
+        return new Site_Export_Staged_Apply([
+            "staging_dir" => $this->staged_pull_staging_dir(),
+            "target_root" => $this->fs_root,
+            // Preserve-local keeps its write-time meaning at apply time:
+            // occupied paths win, and nothing is created through a
+            // symlinked directory.
+            "on_existing" => $preserve_local ? "skip" : "replace",
+            "refuse_symlinked_parents" => $preserve_local,
+            // The uncapped per-entry channel: index reconciliation after
+            // the window must see every protected id, not the capped
+            // diagnostic list in the result.
+            "on_protected" => $on_protected,
+        ]);
+    }
+
+    /** The fs-root-relative artifact id for a mapped local path. */
+    private function staged_pull_artifact_id(string $local_path): string
+    {
+        // The path mapper may hand back a resolved fs-root (macOS /var is
+        // a symlink to /private/var); accept either spelling.
+        $roots = [rtrim($this->fs_root, "/")];
+        $real_root = realpath($this->fs_root);
+        if (is_string($real_root) && $real_root !== "") {
+            $roots[] = rtrim($real_root, "/");
+        }
+        foreach (array_unique($roots) as $root) {
+            if (strpos($local_path, $root . "/") === 0) {
+                return substr($local_path, strlen($root) + 1);
+            }
+        }
+        throw new RuntimeException(
+            "Staged pull cannot stage a path outside --fs-root: {$local_path}",
+        );
+    }
+
+    /**
+     * Refuses a staged pull the apply step could never finish — above all
+     * a state dir on a different filesystem than --fs-root, where the
+     * rename-only apply would reject cross_device only after the download.
+     * The probe id never exists, so this checks the environment only.
+     */
+    private function assert_staged_pull_ready(): void
+    {
+        if (!is_dir($this->fs_root)) {
+            @mkdir($this->fs_root, 0755, true);
+        }
+        $probe = $this->staged_pull_apply_engine()->apply(".reprint-pull-probe", true);
+        if ($probe["status"] !== "ready") {
+            throw new RuntimeException(
+                "Staged apply cannot run here: " . ($probe["reason"] ?? $probe["status"]) .
+                    " (" . ($probe["detail"] ?? "") . "). Put --state-dir on the same " .
+                    "filesystem as --fs-root, or drop --staged-apply.",
+            );
+        }
+    }
+
+    /**
+     * Stages one body buffer for the file the stream is delivering.
+     *
+     * context->file_bytes_written tracks the STREAM position; the store
+     * enforces its own committed offset. Bytes the server re-sends after a
+     * resume land as duplicates and only the unseen tail is appended — the
+     * same frontier handling the push endpoint uses.
+     */
+    private function staged_pull_write_chunk(StreamingContext $context, string $data): void
+    {
+        $store = $this->staged_pull_store();
+        $artifact_id = $context->staged_artifact_id;
+        $offset = $context->file_bytes_written;
+        $committed = $store->status($artifact_id)["committed_bytes"];
+
+        if ($committed >= $offset + strlen($data)) {
+            $context->file_bytes_written = $offset + strlen($data);
+            return;
+        }
+        if ($committed > $offset) {
+            $data = substr($data, $committed - $offset);
+            $offset = $committed;
+        }
+
+        $result = $store->append($artifact_id, $offset, $data);
+        if ($result["status"] === "accepted" || $result["status"] === "duplicate") {
+            $context->file_bytes_written = $result["committed_bytes"];
+            return;
+        }
+        if ($result["status"] === "rejected" && $result["reason"] === "already_verified") {
+            // A lost checkpoint made the server re-send a file the store
+            // already verified, and it now sends bytes past the verified
+            // size — the remote grew since we staged it, so the staged copy
+            // is stale. We lack the resent prefix to re-stage it in place, so
+            // drop it and let the next delta refetch it whole (the same
+            // tolerance x-file-changed uses). This turns what used to be a
+            // rethrown wedge on every resume into a clean skip.
+            $store->discard($artifact_id);
+            $context->skip_current_file = true;
+            return;
+        }
+        throw new RuntimeException(
+            "Staged write failed for {$artifact_id}: " .
+                ($result["reason"] ?? $result["status"]) .
+                " " . ($result["detail"] ?? ""),
+        );
+    }
+
+    /**
+     * Verifies a fully-streamed file and records it for the apply window.
+     *
+     * @return string|null Failure reason, or null when the file verified.
+     */
+    private function staged_pull_finalize_file(string $artifact_id, int $expected_size, int $ctime, bool $owned, string $remote_path): ?string
+    {
+        $result = $this->staged_pull_store()->finalize($artifact_id, $expected_size);
+        if ($result["status"] !== "verified") {
+            return ($result["reason"] ?? $result["status"]) . " " . ($result["detail"] ?? "");
+        }
+        if ($ctime) {
+            // Rename preserves this mtime, which delta syncs compare
+            // against the remote ctime.
+            @touch($this->staged_pull_staging_dir() . "/files/" . $artifact_id, $ctime);
+        }
+        // The remote path and ctime ride along so the window can update
+        // the local index after the file actually lands — the index must
+        // describe the live tree, never the staging area, or an abort
+        // between fetch and apply leaves a delta that skips files the
+        // tree never received.
+        $record = [
+            "artifact_id" => $artifact_id,
+            "size" => $expected_size,
+            "path" => $remote_path,
+            "ctime" => $ctime,
+        ];
+        if ($owned) {
+            $record["owned"] = true;
+        }
+        $this->staged_pull_append_log(json_encode($record) . "\n");
+        return null;
+    }
+
+    /**
+     * Appends a deferred record to the manifest log, keyed by the path's
+     * fs-root-relative artifact id. Directory and symlink parts defer here
+     * in staged mode; the apply window replays them through their regular
+     * handlers.
+     */
+    private function staged_pull_defer_record(array $record): void
+    {
+        try {
+            $local_path = $this->remote_path_to_local_path_within_import_root($record["path"]);
+            $record["artifact_id"] = $this->staged_pull_artifact_id($local_path);
+        } catch (RuntimeException $e) {
+            $this->audit_log(
+                "Security: refusing to stage a {$record["type"]} record for invalid path '{$record["path"]}': " . $e->getMessage(),
+                true,
+            );
+            return;
+        }
+        $this->staged_pull_append_log(json_encode($record) . "\n");
+    }
+
+    /**
+     * All manifest-log appends go through here: a lost record is a file,
+     * directory, symlink, or deletion the window would silently never
+     * carry out, so short writes are fatal (disk full?) like the index
+     * updates writer's.
+     */
+    private function staged_pull_append_log(string $line): void
+    {
+        if (@file_put_contents($this->staged_pull_manifest_log(), $line, FILE_APPEND) !== strlen($line)) {
+            throw new RuntimeException("Failed to append to the staged manifest log (disk full?)");
+        }
+    }
+
+    /**
+     * Whether a delivered file landed in the live tree at the size we staged
+     * it — a plain file, not a symlink or directory. Used to tell our own
+     * kill-interrupted apply from a genuinely preserve-local-protected path
+     * when deciding whether a protected entry still belongs in the index.
+     */
+    private function staged_pull_delivered_size_matches(string $remote_path, int $size): bool
+    {
+        try {
+            $local_path = $this->remote_path_to_local_path_within_import_root($remote_path);
+        } catch (RuntimeException $e) {
+            return false;
+        }
+        return !is_link($local_path) && is_file($local_path) && @filesize($local_path) === $size;
+    }
+
+    /**
+     * Records a diff-derived deletion for the apply window instead of
+     * removing the file at diff time — staged mode's whole point is that
+     * the tree flips in one window, deletions included. The index entry
+     * stays until the window confirms: a crash or --abort in between just
+     * re-derives the same deletion from the next diff, never orphaning a
+     * file the index has already forgotten.
+     */
+    private function record_staged_pull_deletion(string $remote_path): void
+    {
+        try {
+            $local_path = $this->remote_path_to_local_path_within_import_root($remote_path);
+            $artifact_id = $this->staged_pull_artifact_id($local_path);
+        } catch (RuntimeException $e) {
+            $this->audit_log(
+                "Security: refusing to stage a deletion for invalid path '{$remote_path}': " . $e->getMessage(),
+                true,
+            );
+            return;
+        }
+        // Any bytes staged under this id from an earlier resume are
+        // garbage now; the apply window's delete pass consumes them.
+        $this->staged_pull_append_log(json_encode([
+            "artifact_id" => $artifact_id,
+            "delete" => true,
+            "path" => $remote_path,
+        ]) . "\n");
+        $this->audit_log("Deletion staged for the apply window: {$remote_path}", false);
+    }
+
+    /**
+     * Applies everything staged so far in one rename window.
+     *
+     * Runs at each point the file phase completes. The manifest log
+     * accumulates across resumes and is deduplicated here; entries an
+     * earlier window already applied classify as applied and only consume
+     * their leftover markers.
+     *
+     * The window is: engine apply (file renames and deletions under the
+     * store lock), then a replay of deferred directory/symlink records
+     * through their regular handlers, then the index catch-up. Everything
+     * before the final log unlink is idempotent, so a kill anywhere in
+     * the window reruns cleanly.
+     */
+    private function run_staged_pull_apply(): void
+    {
+        if (!$this->staged_apply_mode) {
+            return;
+        }
+
+        // Last record wins per artifact id: a file staged by one resume
+        // and deleted remotely before the next accumulates both lines,
+        // and the later one reflects the newer remote truth.
+        $entries = [];
+        $log_handle = @fopen($this->staged_pull_manifest_log(), "r");
+        if ($log_handle !== false) {
+            while (true) {
+                $line = fgets($log_handle);
+                if ($line === false) {
+                    break;
+                }
+                $record = json_decode($line, true);
+                if (!is_array($record) || !is_string($record["artifact_id"] ?? null)) {
+                    continue;
+                }
+                $path = is_string($record["path"] ?? null) ? $record["path"] : null;
+                if (!empty($record["delete"])) {
+                    $entries[$record["artifact_id"]] = ["kind" => "delete", "path" => $path];
+                    continue;
+                }
+                $type = $record["type"] ?? null;
+                $ctime = is_int($record["ctime"] ?? null) ? $record["ctime"] : 0;
+                if ($type === "dir" && $path !== null) {
+                    $entries[$record["artifact_id"]] = [
+                        "kind" => "dir",
+                        "path" => $path,
+                        "ctime" => $ctime,
+                    ];
+                    continue;
+                }
+                if ($type === "symlink" && $path !== null && is_string($record["target"] ?? null)) {
+                    $entries[$record["artifact_id"]] = [
+                        "kind" => "symlink",
+                        "path" => $path,
+                        "target" => $record["target"],
+                        "ctime" => $ctime,
+                    ];
+                    continue;
+                }
+                if ($type === null && is_int($record["size"] ?? null)) {
+                    $entries[$record["artifact_id"]] = [
+                        "kind" => "file",
+                        "size" => $record["size"],
+                        "owned" => !empty($record["owned"]),
+                        "path" => $path,
+                        "ctime" => $ctime,
+                    ];
+                }
+            }
+            fclose($log_handle);
+        }
+        if ($entries === []) {
+            return;
+        }
+
+        // Only files and deletions go through the store-backed engine;
+        // directories and symlinks replay through their own handlers after
+        // the renames land.
+        $result = [
+            "applied" => 0,
+            "already_applied" => 0,
+            "skipped" => 0,
+            "skipped_paths" => [],
+            "deleted" => 0,
+        ];
+        $protected_ids = [];
+        $store = $this->staged_pull_store();
+        $store->discard(self::PULL_MANIFEST_ID);
+        $manifest_entries = 0;
+        $manifest_bytes = 0;
+        // Flush manifest lines to the store in bounded windows instead of
+        // materializing one string that can reach tens of megabytes.
+        $manifest_chunk = "";
+        foreach ($entries as $artifact_id => $entry) {
+            if ($entry["kind"] === "delete") {
+                $manifest_entry = ["artifact_id" => $artifact_id, "delete" => true];
+            } elseif ($entry["kind"] === "file") {
+                $manifest_entry = ["artifact_id" => $artifact_id, "size" => $entry["size"]];
+                if ($entry["owned"]) {
+                    $manifest_entry["owned"] = true;
+                }
+            } else {
+                continue;
+            }
+            $encoded = json_encode($manifest_entry);
+            if (!is_string($encoded)) {
+                throw new RuntimeException("Staged apply could not encode its manifest.");
+            }
+            $manifest_chunk .= $encoded . "\n";
+            $manifest_entries++;
+            if (strlen($manifest_chunk) >= 262144) {
+                $manifest_bytes = $this->append_staged_pull_manifest_chunk($store, $manifest_bytes, $manifest_chunk);
+                $manifest_chunk = "";
+            }
+        }
+
+        if ($manifest_entries > 0) {
+            if ($manifest_chunk !== "") {
+                $manifest_bytes = $this->append_staged_pull_manifest_chunk($store, $manifest_bytes, $manifest_chunk);
+            }
+            if ($store->finalize(self::PULL_MANIFEST_ID, $manifest_bytes)["status"] !== "verified") {
+                throw new RuntimeException("Staged apply could not verify its manifest.");
+            }
+
+            $this->audit_log("STAGED APPLY | " . count($entries) . " entries", true);
+            // Every protected id flows through the callback, uncapped —
+            // the PRESERVE-LOCAL audit contract and the index catch-up
+            // below both need the full set, not the response's capped
+            // diagnostic list.
+            $engine = $this->staged_pull_apply_engine(function (string $artifact_id) use (&$protected_ids): void {
+                if (isset($protected_ids[$artifact_id])) {
+                    return;
+                }
+                $protected_ids[$artifact_id] = true;
+                $this->audit_log("PRESERVE-LOCAL skip file (kept at apply) | {$artifact_id}", false);
+            });
+            $result = $engine->apply(self::PULL_MANIFEST_ID);
+            if ($result["status"] !== "applied") {
+                throw new RuntimeException(
+                    "Staged apply failed: " . ($result["reason"] ?? $result["status"]) .
+                        " (" . ($result["detail"] ?? "") . ")",
+                );
+            }
+        }
+
+        // The index merge consumes its updates as a path-sorted stream
+        // (trunk keeps it sorted by upserting in fetch order). Flush any
+        // fetch-phase leftovers as their own sorted run first, then walk
+        // the window's entries in path order so replays and index writes
+        // emit one sorted run of their own.
+        $this->finalize_index_updates();
+        uasort($entries, static function (array $a, array $b): int {
+            $a_path = (string) $a["path"];
+            $b_path = (string) $b["path"];
+            return strcmp($a_path, $b_path);
+        });
+
+        // The window's remaining effects, one path-ordered walk:
+        // directory and symlink records replay through the handlers that
+        // would have run at fetch time in unstaged mode — same policy
+        // checks, same validation, same audit lines, just at window time
+        // (their index upserts included). Applied files enter the index,
+        // confirmed deletions leave it — mirroring push's
+        // forget-after-confirm. Protected entries keep their old state
+        // and re-derive next delta — a re-download or a no-op, never an
+        // orphan. Every step is idempotent, so a kill here reruns
+        // cleanly from the log.
+        $this->staged_replay = true;
+        try {
+            foreach ($entries as $artifact_id => $entry) {
+                if ($entry["path"] === null) {
+                    continue;
+                }
+                if ($entry["kind"] === "dir") {
+                    $this->handle_directory_chunk(["headers" => [
+                        "x-directory-path" => base64_encode($entry["path"]),
+                        "x-directory-ctime" => (string) $entry["ctime"],
+                    ]]);
+                    continue;
+                }
+                if ($entry["kind"] === "symlink") {
+                    $this->handle_symlink_chunk(["headers" => [
+                        "x-symlink-path" => base64_encode($entry["path"]),
+                        "x-symlink-target" => base64_encode($entry["target"]),
+                        "x-symlink-ctime" => (string) $entry["ctime"],
+                    ]]);
+                    continue;
+                }
+                if (isset($protected_ids[$artifact_id])) {
+                    // A file entry the engine reported protected may be our
+                    // own delivery from a prior window that a kill interrupted
+                    // before this index catch-up. Everything in the manifest
+                    // log was fetched by us, and preserve-local only fetches
+                    // paths that were empty at fetch time, so an occupant
+                    // matching our delivered size is our copy — not a
+                    // pre-existing local file. Record it, or the next delta
+                    // finds an occupied-but-unindexed path, re-fetches, and
+                    // re-skips it forever. A genuine protection (size
+                    // mismatch, a foreign occupant) is left untouched.
+                    if (
+                        $entry["kind"] === "file"
+                        && $entry["ctime"] > 0
+                        && $this->staged_pull_delivered_size_matches($entry["path"], $entry["size"])
+                    ) {
+                        $this->upsert_index_entry($entry["path"], $entry["ctime"], $entry["size"], "file");
+                    }
+                    continue;
+                }
+                if ($entry["kind"] === "delete") {
+                    $this->delete_index_entry($entry["path"]);
+                } elseif ($entry["kind"] === "file" && $entry["ctime"] > 0) {
+                    $this->upsert_index_entry($entry["path"], $entry["ctime"], $entry["size"], "file");
+                }
+            }
+        } finally {
+            $this->staged_replay = false;
+        }
+        $this->finalize_index_updates();
+
+        // Unlinked last: everything above idempotently reruns from the
+        // log if the process dies mid-window.
+        @unlink($this->staged_pull_manifest_log());
+
+        $this->audit_log(
+            sprintf(
+                "STAGED APPLY COMPLETE | applied=%d already_applied=%d skipped=%d deleted=%d",
+                $result["applied"],
+                $result["already_applied"],
+                $result["skipped"],
+                $result["deleted"],
+            ),
+            true,
+        );
+        $this->output_progress([
+            "type" => "staged_apply",
+            "status" => "complete",
+            "applied" => $result["applied"],
+            "already_applied" => $result["already_applied"],
+            "skipped" => $result["skipped"],
+            "deleted" => $result["deleted"],
+        ], true);
+    }
+
+    private function append_staged_pull_manifest_chunk(Site_Export_Staged_Artifacts $store, int $offset, string $chunk): int
+    {
+        $appended = $store->append(self::PULL_MANIFEST_ID, $offset, $chunk);
+        if ($appended["status"] !== "accepted") {
+            throw new RuntimeException(
+                "Staged apply could not stage its manifest: " . ($appended["reason"] ?? ""),
+            );
+        }
+        return $appended["committed_bytes"];
     }
 
     /**
@@ -5906,7 +7151,11 @@ class ImportClient
         // the new cursor, so we'll re-fetch the same data.
         $tracked_file = $this->import_state()->current_file ?? null;
         $tracked_bytes = $this->import_state()->current_file_bytes ?? null;
-        if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
+        // Staged mode must not run this: the tracked path is the FINAL
+        // location, which during a delta still holds the previous version
+        // of the file — truncating it would destroy live content the apply
+        // step has not replaced yet. The store trims its own tails.
+        if (!$this->staged_apply_mode && $tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
             $actual_size = filesize($tracked_file);
             if ($actual_size > $tracked_bytes) {
                 $this->audit_log(
@@ -5945,7 +7194,28 @@ class ImportClient
         // request, re-open it in append mode so continuation chunks (where
         // is_first=false) can still be written.  Without this, the context
         // starts with file_handle=null and non-first chunks are silently dropped.
-        if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
+        if ($this->staged_apply_mode && $tracked_file !== null && $tracked_bytes !== null) {
+            // Staged mode: nothing exists at the final path. Continuation
+            // chunks resume at the stream position saved with the cursor;
+            // the store's frontier absorbs any replayed prefix.
+            $context->staged_artifact_id = $this->staged_pull_artifact_id($tracked_file);
+            $context->file_path = $tracked_file;
+            $context->file_bytes_written = $tracked_bytes;
+            // Restore the ownership flag with the stream position. Without it
+            // a file that straddles a request boundary finalizes owned=false,
+            // and preserve-local then protects the pull's own old copy at
+            // apply time — the update never lands and every later delta
+            // re-downloads and re-skips it.
+            $context->staged_owned = $this->import_state()->current_file_owned === true;
+            $this->audit_log(
+                sprintf(
+                    "RESUME STAGED FILE | %s at stream offset %d",
+                    $tracked_file,
+                    $tracked_bytes,
+                ),
+                true,
+            );
+        } elseif ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
             $context->file_handle = fopen($tracked_file, "ab");
             if ($context->file_handle) {
                 $context->file_path = $tracked_file;
@@ -5994,9 +7264,18 @@ class ImportClient
                         fflush($context->file_handle);
                         $this->import_state()->current_file = $context->file_path;
                         $this->import_state()->current_file_bytes = $context->file_bytes_written;
+                    } elseif ($context->staged_artifact_id !== null && $context->file_path) {
+                        // Staged mode: every append already flushed. Save
+                        // the stream position and ownership flag alongside
+                        // the cursor so a resumed request re-enters at the
+                        // same offset with the same preserve-local ownership.
+                        $this->import_state()->current_file = $context->file_path;
+                        $this->import_state()->current_file_bytes = $context->file_bytes_written;
+                        $this->import_state()->current_file_owned = $context->staged_owned;
                     } else {
                         $this->import_state()->current_file = null;
                         $this->import_state()->current_file_bytes = null;
+                        $this->import_state()->current_file_owned = null;
                     }
                     $this->save_state($this->state);
                     $chunks_since_save = 0;
@@ -6445,8 +7724,14 @@ class ImportClient
                 // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-pull --only runs.
                 if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                    $this->delete_local_file_path($local["path"]);
-                    $this->delete_index_entry($local["path"]);
+                    if ($this->staged_apply_mode) {
+                        // Staged mode defers the deletion into the apply
+                        // window, so removals and arrivals flip together.
+                        $this->record_staged_pull_deletion($local["path"]);
+                    } else {
+                        $this->delete_local_file_path($local["path"]);
+                        $this->delete_index_entry($local["path"]);
+                    }
                 }
                 $local_after = $local["path"];
                 $local = $this->read_index_line($local_handle);
@@ -6468,6 +7753,7 @@ class ImportClient
                     $this->append_download_list(
                         $remote["path"],
                         $target_handle,
+                        true,
                     );
                 }
                 $local_after = $local["path"];
@@ -6499,8 +7785,12 @@ class ImportClient
 
         while ($local !== null) {
             if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                $this->delete_local_file_path($local["path"]);
-                $this->delete_index_entry($local["path"]);
+                if ($this->staged_apply_mode) {
+                    $this->record_staged_pull_deletion($local["path"]);
+                } else {
+                    $this->delete_local_file_path($local["path"]);
+                    $this->delete_index_entry($local["path"]);
+                }
             }
             $local_after = $local["path"];
             $local = $this->read_index_line($local_handle);
@@ -6611,6 +7901,23 @@ class ImportClient
                 "cursor" => null,
             ]));
             $this->save_state($this->state);
+        }
+
+        if ($this->staged_apply_mode) {
+            // The batch's ownership flags live in the download list slice
+            // the fetch state brackets; rebuilding from there covers
+            // resumed batches, whose batch file predates this process.
+            // One batch spans many requests, so rebuild only when the
+            // slice changes.
+            $batch_key = $list_file . ":" . $batch_offset . ":" . $next_offset;
+            if ($this->staged_batch_owned_key !== $batch_key) {
+                $this->staged_batch_owned = $this->read_download_list_owned(
+                    $list_file,
+                    $batch_offset,
+                    $next_offset,
+                );
+                $this->staged_batch_owned_key = $batch_key;
+            }
         }
 
         $post_data = [
@@ -6871,12 +8178,51 @@ class ImportClient
     /**
      * Append a path to the download list file.
      */
-    private function append_download_list(string $path, $handle): void
+    /**
+     * Owned paths within one batch's slice of the download list.
+     *
+     * @param int $from Byte offset of the batch's first list line.
+     * @param int $to   Byte offset just past its last line.
+     * @return array<string,true> keyed by remote path.
+     */
+    private function read_download_list_owned(string $list_file, int $from, int $to): array
     {
-        $line = json_encode(
-            ["path" => base64_encode($path)],
-            JSON_UNESCAPED_SLASHES,
-        );
+        $owned = [];
+        $handle = @fopen($list_file, "r");
+        if (!$handle) {
+            return $owned;
+        }
+        if ($from > 0) {
+            fseek($handle, $from);
+        }
+        while (ftell($handle) < $to) {
+            $line = fgets($handle);
+            if ($line === false) {
+                break;
+            }
+            $record = json_decode(trim($line), true);
+            if (!is_array($record) || empty($record["owned"]) || !isset($record["path"])) {
+                continue;
+            }
+            $path = base64_decode($record["path"]);
+            if (is_string($path) && $path !== "") {
+                $owned[$path] = true;
+            }
+        }
+        fclose($handle);
+        return $owned;
+    }
+
+    private function append_download_list(string $path, $handle, bool $owned = false): void
+    {
+        $record = ["path" => base64_encode($path)];
+        if ($owned) {
+            // The diff found this path in the local index: the pull owns
+            // it. Staged apply needs the distinction — preserve-local
+            // protects what the sync never owned, not its own copies.
+            $record["owned"] = true;
+        }
+        $line = json_encode($record, JSON_UNESCAPED_SLASHES);
         if ($line !== false) {
             fwrite($handle, $line . "\n");
         }
@@ -6955,6 +8301,76 @@ class ImportClient
     /**
      * Parse one JSON index line into an array.
      */
+    /**
+     * Classify one step of a sorted-index merge join between a "source" index
+     * (what we want the target to hold) and a "base" index (what it holds
+     * now). Both entries are ?array with a 'path' (null at end-of-stream),
+     * read in ascending path order. Returns:
+     *   'new'     — path only in source: add it     (caller advances source)
+     *   'changed' — same path, ctime/size/type differ (caller advances both)
+     *   'same'    — same path, identical              (caller advances both)
+     *   'removed' — path only in base: gone from source (caller advances base)
+     *   'done'    — both streams exhausted
+     * Pull's fetch diff and push's upload diff both drive from this one rule.
+     */
+    private static function classify_index_pair(?array $source, ?array $base): string
+    {
+        if ($source === null && $base === null) {
+            return "done";
+        }
+        if ($base === null) {
+            return "new";
+        }
+        if ($source === null) {
+            return "removed";
+        }
+        $cmp = strcmp($source["path"], $base["path"]);
+        if ($cmp < 0) {
+            return "new";
+        }
+        if ($cmp > 0) {
+            return "removed";
+        }
+        if (
+            $source["ctime"] !== $base["ctime"] ||
+            $source["size"] !== $base["size"] ||
+            $source["type"] !== $base["type"]
+        ) {
+            return "changed";
+        }
+        return "same";
+    }
+
+    /**
+     * Validate an index/transfer path for the active path style. Absolute
+     * mode requires a leading slash (the shared assert_valid_path rule);
+     * relative mode requires a clean fs-root-relative path with no leading
+     * slash and no dot-segments — the same shape the staged store accepts as
+     * an artifact id.
+     */
+    private function assert_valid_index_path(string $path): void
+    {
+        if ($this->index_path_style !== "relative") {
+            assert_valid_path($path, "index path");
+            return;
+        }
+        $trimmed = trim($path);
+        if ($trimmed === "") {
+            throw new InvalidArgumentException("index path must be a non-empty string");
+        }
+        if ($trimmed[0] === "/") {
+            throw new InvalidArgumentException("index path must be relative in relative path style");
+        }
+        if (strpos($trimmed, "\0") !== false) {
+            throw new InvalidArgumentException("index path must not contain NUL bytes");
+        }
+        foreach (explode("/", $trimmed) as $segment) {
+            if ($segment === "" || $segment === "." || $segment === "..") {
+                throw new InvalidArgumentException("index path must not contain empty or dot-segments");
+            }
+        }
+    }
+
     private function parse_index_line(string $line): ?array
     {
         $line = trim($line);
@@ -6973,7 +8389,7 @@ class ImportClient
         if ($path === "" || $path === false) {
             throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
-        assert_valid_path($path, "index path");
+        $this->assert_valid_index_path($path);
         return [
             "path" => $path,
             "ctime" => (int) ($data["ctime"] ?? 0),
@@ -7109,8 +8525,11 @@ class ImportClient
     /**
      * Merge the collected updates with the existing sorted index without loading it into memory.
      */
-    private function finalize_index_updates(): void
+    private function finalize_index_updates(?string $index_file = null): void
     {
+        // Push reuses this exact streaming merge for its shipped index by
+        // passing that file; pull passes nothing and merges its local index.
+        $index_file = $index_file ?? $this->index_file;
         if ($this->index_updates_handle) {
             fclose($this->index_updates_handle);
             $this->index_updates_handle = null;
@@ -7142,14 +8561,14 @@ class ImportClient
         }
 
         $updates_path = $this->index_updates_file;
-        $new_index = $this->index_file . ".new";
+        $new_index = $index_file . ".new";
 
         $this->audit_log(
-            "INDEX MERGE START | merging updates into {$this->index_file}",
+            "INDEX MERGE START | merging updates into {$index_file}",
         );
 
-        $old_handle = file_exists($this->index_file)
-            ? fopen($this->index_file, "r")
+        $old_handle = file_exists($index_file)
+            ? fopen($index_file, "r")
             : null;
         $upd_handle = fopen($updates_path, "r");
         $new_handle = fopen($new_index, "w");
@@ -7226,10 +8645,10 @@ class ImportClient
         fclose($upd_handle);
         fclose($new_handle);
 
-        if (!rename($new_index, $this->index_file)) {
+        if (!rename($new_index, $index_file)) {
             throw new RuntimeException("Failed to replace index file");
         }
-        $this->audit_log("INDEX MERGE COMPLETE | {$this->index_file} updated");
+        $this->audit_log("INDEX MERGE COMPLETE | {$index_file} updated");
 
         @unlink($updates_path);
         $this->audit_log("FILE DELETE | {$updates_path} | updates merged");
@@ -8916,6 +10335,7 @@ class ImportClient
             $context->skip_current_file = false;
 
             if (
+                !$this->staged_apply_mode &&
                 (file_exists($local_path) || is_link($local_path)) &&
                 (!is_file($local_path) || is_link($local_path))
             ) {
@@ -8976,7 +10396,24 @@ class ImportClient
         }
 
         // Open file handle on first chunk
-        if ($is_first) {
+        if ($is_first && $this->staged_apply_mode) {
+            // Bytes go to the staged store, not the live tree; the stream
+            // position starts at 0 and the store's frontier absorbs any
+            // committed prefix a resumed server re-sends.
+            $context->staged_artifact_id = $this->staged_pull_artifact_id($local_path);
+            $context->staged_owned = isset($this->staged_batch_owned[$path]);
+            $context->file_path = $local_path;
+            $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
+            $context->file_bytes_written = 0;
+            // A lost checkpoint can make the server re-send a file the store
+            // already verified. Its staged bytes may be stale — the remote
+            // could have changed at the same size (invisible to byte counts)
+            // or grown since — so discard them and let this fresh stream
+            // re-verify the current content instead of trusting the old copy.
+            if ($this->staged_pull_store()->status($context->staged_artifact_id)["verified"]) {
+                $this->staged_pull_store()->discard($context->staged_artifact_id);
+            }
+        } elseif ($is_first) {
             // Close previous file if any
             if ($context->file_handle) {
                 fclose($context->file_handle);
@@ -9020,7 +10457,16 @@ class ImportClient
 
         // Write body data if present
         if (isset($chunk["body"]) && $chunk["body"] !== "") {
-            if ($context->file_handle) {
+            if ($this->staged_apply_mode) {
+                if ($context->staged_artifact_id === null) {
+                    // Mid-file continuation after a restart that never
+                    // checkpointed this file: the server re-sends it from
+                    // the start, so the stream position begins at 0.
+                    $context->staged_artifact_id = $this->staged_pull_artifact_id($local_path);
+                    $context->staged_owned = isset($this->staged_batch_owned[$path]);
+                }
+                $this->staged_pull_write_chunk($context, $chunk["body"]);
+            } elseif ($context->file_handle) {
                 $data = $chunk["body"];
                 $bytes = fwrite($context->file_handle, $data);
                 if ($bytes === false || $bytes !== strlen($data)) {
@@ -9032,6 +10478,56 @@ class ImportClient
                 }
                 $context->file_bytes_written += $bytes;
             }
+        }
+
+        // Complete a staged file on last chunk
+        if ($is_last && $this->staged_apply_mode && $context->staged_artifact_id !== null) {
+            $file_size = (int) ($headers["x-file-size"] ?? 0);
+            $file_changed = ($headers["x-file-changed"] ?? "0") === "1";
+
+            if ($file_changed) {
+                // Same tolerance as the direct path: the exporter saw the
+                // file change mid-stream, so drop the staged copy and let
+                // the next delta refetch it.
+                $this->staged_pull_store()->discard($context->staged_artifact_id);
+                $this->audit_log(
+                    "  File changed during stream; staged copy discarded",
+                    true,
+                );
+            } else {
+                $finalize_error = $this->staged_pull_finalize_file(
+                    $context->staged_artifact_id,
+                    $file_size,
+                    $context->file_ctime ?? 0,
+                    $context->staged_owned === true,
+                    $path,
+                );
+                if ($finalize_error !== null) {
+                    $this->staged_pull_store()->discard($context->staged_artifact_id);
+                    $this->audit_log(
+                        "  Staged file did not verify ({$finalize_error}); discarded for refetch",
+                        true,
+                    );
+                } else {
+                    // The index entry waits for the apply window; only
+                    // progress bookkeeping happens at stage time.
+                    $this->files_imported++;
+                    $this->clear_volatile_file($path);
+                    $this->audit_log(
+                        sprintf("  Staged (%d bytes)", $file_size),
+                        false,
+                    );
+                }
+            }
+
+            $context->staged_artifact_id = null;
+            $context->file_path = null;
+            $context->file_ctime = null;
+            $context->file_bytes_written = 0;
+            $this->import_state()->current_file = null;
+            $this->import_state()->current_file_bytes = null;
+            $this->import_state()->current_file_owned = null;
+            return;
         }
 
         // Close on last chunk
@@ -9314,6 +10810,17 @@ class ImportClient
             return;
         }
 
+        if ($this->staged_apply_mode && !$this->staged_replay) {
+            // Staged mode: the live tree stays untouched until the apply
+            // window, which replays this record through this same handler.
+            $this->staged_pull_defer_record([
+                "type" => "dir",
+                "path" => $path,
+                "ctime" => $ctime,
+            ]);
+            return;
+        }
+
         $local_path = $this->remote_path_to_local_path_within_import_root($path);
 
         // In preserve-local mode, if the directory already exists (as a real
@@ -9397,6 +10904,19 @@ class ImportClient
                     true,
                 );
             }
+            return;
+        }
+
+        if ($this->staged_apply_mode && !$this->staged_replay) {
+            // Staged mode: defer, window replays. The raw remote target is
+            // recorded; mapping and validation run at replay, in the same
+            // code they always run in.
+            $this->staged_pull_defer_record([
+                "type" => "symlink",
+                "path" => $path,
+                "target" => $target,
+                "ctime" => $ctime,
+            ]);
             return;
         }
 
@@ -10812,110 +12332,10 @@ class ImportClient
 
     public function default_state(): array
     {
-        return [
-            // Resume checkpoint for the lower-level command currently being
-            // run directly or as a stage inside a pull pipeline.
-            "active_resumable_command" => [
-                "command_name" => null,
-                "completion_state" => null,
-                "current_stage" => null,
-                "remote_cursor" => null,
-            ],
-            "preflight" => null,
-            "remote_protocol_version" => null,
-            "remote_protocol_min_version" => null,
-            "version" => null,
-            "webhost" => null,
-            "follow_symlinks" => true,
-            "fs_root_nonempty_behavior" => "error",
-            "filter" => "none",
-            "user_agent" => null,
-            "max_allowed_packet" => null,
-            "files_remap_fingerprint" => null,
-            "files_pull_only_fingerprint" => null,
-            "files_pull_summary" => [
-                "files_pulled" => 0,
-            ],
-            "db_index" => [
-                "file" => null,
-                "tables" => 0,
-                "rows_estimated" => 0,
-                "bytes" => 0,
-                "updated_at" => null,
-            ],
-            "diff" => [
-                "remote_offset" => 0,
-                "local_after" => null,
-            ],
-            "index" => [
-                "cursor" => null,
-            ],
-            "fetch" => [
-                "offset" => 0,
-                "next_offset" => 0,
-                "batch_file" => null,
-                "cursor" => null,
-                "batch_entries" => 0,
-            ],
-            "fetch_skipped" => [
-                "offset" => 0,
-                "next_offset" => 0,
-                "batch_file" => null,
-                "cursor" => null,
-                "batch_entries" => 0,
-            ],
-            // Crash recovery: track in-progress file downloads
-            // If we crash mid-write, we can truncate to the expected size on resume
-            "current_file" => null,        // Path to file being written
-            "current_file_bytes" => null,  // Expected bytes written so far
-            // Crash recovery: track SQL file size
-            "sql_bytes" => null,           // Expected SQL file size
-            // SQL streaming progress for user-facing statement counts.
-            "sql_statements_counted" => 0,
-            // db-apply state
-            "apply" => [
-                "statements_executed" => 0,
-                "bytes_read" => 0,
-                "rewrite_url" => null,
-                // Target database configuration — persisted by db-apply
-                // so that apply-runtime can generate DB_* constants.
-                "target_engine" => null,
-                "target_db" => null,
-                "target_host" => null,
-                "target_port" => null,
-                "target_user" => null,
-                "target_pass" => null,
-                "target_sqlite_path" => null,
-                "remote_paths_removed_from_local_site" => [],
-            ],
-            // SQL output mode (file, stdout, mysql) — persisted for resume
-            "sql_output" => null,
-            // MySQL connection parameters — persisted for resume (password excluded)
-            "mysql_host" => null,
-            "mysql_port" => null,
-            "mysql_user" => null,
-            "mysql_database" => null,
-            // Consecutive cURL timeout counter — tracks how many times in a
-            // row a timeout fired without the cursor advancing. After
-            // MAX_CONSECUTIVE_TIMEOUTS with no progress, the importer gives
-            // up instead of retrying forever.
-            "consecutive_timeouts" => 0,
-            // Adaptive tuning state/config
-            "tuning" => [
-                "config" => [],
-                "state" => [],
-            ],
-            // Resume checkpoint for the user-facing pull pipeline command
-            // being orchestrated.
-            "pull_pipeline" => [
-                "started_by_command" => null,
-                "stage_sequence" => [],
-                "last_completed_stage" => null,
-                "files_filter" => null,
-                "skipped_pending" => false,
-                "has_completed_once" => false,
-            ],
-        ];
+        // ImportState's typed properties are the single source of the
+        // persisted schema; a field added there appears here without a
+        // second hand-maintained copy to keep in lockstep.
+        return ImportState::from_array([])->to_array();
     }
 
 
@@ -11535,6 +12955,10 @@ class StreamingContext
     public $saw_completion = false;
     // When true, skip writing the current file (preserve-local mode)
     public $skip_current_file = false;
+    // Staged pull: fs-root-relative artifact id of the file being staged
+    public $staged_artifact_id = null;
+    // Staged pull: whether the download list marked this file owned
+    public $staged_owned = false;
 }
 
 /**
@@ -11653,7 +13077,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert', 'push-files'],
         ],
         [
             'name' => 'abort',
@@ -11670,7 +13094,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime', 'push-files'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11914,8 +13338,43 @@ if (
             'placeholder' => 'SOURCE',
             'repeatable' => true,
             'help' => 'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
-                'repeat for several. Default pulls everything',
-            'commands' => ['pull-files', 'files-pull'],
+                'repeat for several. Default pulls everything. For push-files, SOURCE is an fs-root-relative prefix',
+            'commands' => ['pull-files', 'files-pull', 'push-files'],
+        ],
+        [
+            'name' => 'apply',
+            'type' => 'flag',
+            'target' => 'apply',
+            'help' => 'After staging completes, apply the transfer into the remote tree ' .
+                '(rename-only; the environment is probed before any upload). Files earlier ' .
+                'pushes shipped that no longer exist locally are deleted from the remote ' .
+                'tree in the same window',
+            'commands' => ['push-files'],
+        ],
+        [
+            'name' => 'staged-apply',
+            'type' => 'flag',
+            'target' => 'staged_apply',
+            'help' => 'Download into a staging area under --state-dir and move files into ' .
+                '--fs-root in one rename window at the end, so the tree never holds a ' .
+                'half-written file (requires --state-dir and --fs-root on one filesystem). ' .
+                'The mode persists in state: resumes and later deltas stay staged. ' .
+                'To switch modes, run --abort first (pending staged data is discarded ' .
+                'and re-derived by the next sync)',
+            'commands' => ['pull', 'pull-files', 'files-pull'],
+        ],
+        [
+            'name' => 'index-path-style',
+            'type' => 'value',
+            'target' => 'index_path_style',
+            'placeholder' => 'STYLE',
+            'valid_values' => ['absolute', 'relative'],
+            'help' => 'How transfer paths are represented: "absolute" mirrors the whole ' .
+                'filesystem layout (can carry paths from outside the document root); ' .
+                '"relative" mirrors just the --fs-root subtree, which is what appears in ' .
+                'staging. Defaults: pull=absolute, push=relative. Persists in state; ' .
+                '--abort before switching',
+            'commands' => ['pull', 'pull-files', 'files-pull', 'push-files'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
@@ -12584,6 +14043,40 @@ if (
                 "\n" .
                 "Does not download any file contents.\n",
             "extra" => null,
+        ],
+        "push-files" => [
+            "level" => "high",
+            "short" => "Upload local files into the remote staged store (push)",
+            "usage" => "reprint push-files <remote-url> --secret=TOKEN --state-dir=DIR --fs-root=DIR [options]",
+            "description" =>
+                "Walks --fs-root and uploads every regular file into the remote\n" .
+                "site's staged artifact store, in bounded resumable chunks. The\n" .
+                "remote site keeps running untouched: nothing changes there until\n" .
+                "a later apply step moves the verified artifacts into place.\n" .
+                "\n" .
+                "Rerunning the command resumes: finished files are skipped from\n" .
+                "the local done cache, a half-uploaded file continues from the\n" .
+                "byte offset the store confirmed, and chunk sizes start at the\n" .
+                "limits learned from the server last time.\n" .
+                "\n" .
+                "Symlinks are never followed; they are skipped and recorded in\n" .
+                "the audit log. Use --only with fs-root-relative prefixes to\n" .
+                "push a subset.\n" .
+                "\n" .
+                "With --apply, the verified transfer moves into the remote tree\n" .
+                "in one atomic window, and files that earlier pushes shipped but\n" .
+                "the local tree no longer has are deleted with it. A scoped push\n" .
+                "(--only) only deletes inside its prefixes.\n",
+            "extra" =>
+                "Examples:\n" .
+                "  # Stage a full local tree on the remote:\n" .
+                "  reprint push-files https://example.com/?reprint-api \\\n" .
+                "    --secret=TOKEN --state-dir=./push-state --fs-root=./site\n" .
+                "\n" .
+                "  # Push only wp-content/uploads:\n" .
+                "  reprint push-files https://example.com/?reprint-api \\\n" .
+                "    --secret=TOKEN --state-dir=./push-state --fs-root=./site \\\n" .
+                "    --only=wp-content/uploads\n",
         ],
         "files-stats" => [
             "level" => "low",

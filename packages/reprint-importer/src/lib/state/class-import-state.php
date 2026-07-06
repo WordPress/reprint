@@ -346,7 +346,11 @@ class ImportState
     /** @var string|null Webhost detected during preflight. */
     public ?string $webhost = null;
     public bool $follow_symlinks = true;
+    /** @var bool Files download into staging and apply in one rename window. */
+    public bool $staged_apply = false;
     public string $fs_root_nonempty_behavior = 'error';
+    /** @var ?string Index path style: "absolute" (whole-filesystem layout) or "relative" (document-root subtree). */
+    public ?string $index_path_style = null;
     public string $filter = 'none';
     /** @var string|null User-Agent that worked during preflight. */
     public ?string $user_agent = null;
@@ -361,6 +365,8 @@ class ImportState
     public DownloadListFetchProgressState $fetch_skipped;
     public ?string $current_file = null;
     public ?int $current_file_bytes = null;
+    /** Whether the in-flight staged file is owned (preserve-local override). */
+    public ?bool $current_file_owned = null;
     public ?int $sql_bytes = null;
     /** @var int SQL statements counted while streaming db.sql. */
     public int $sql_statements_counted = 0;
@@ -398,6 +404,8 @@ class ImportState
         $state->version = isset($data['version']) ? (string) $data['version'] : null;
         $state->webhost = isset($data['webhost']) ? (string) $data['webhost'] : null;
         $state->follow_symlinks = (bool) ($data['follow_symlinks'] ?? true);
+        $state->staged_apply = (bool) ($data['staged_apply'] ?? false);
+        $state->index_path_style = isset($data['index_path_style']) ? (string) $data['index_path_style'] : null;
         $state->fs_root_nonempty_behavior = isset($data['fs_root_nonempty_behavior']) ? (string) $data['fs_root_nonempty_behavior'] : 'error';
         $state->filter = isset($data['filter']) ? (string) $data['filter'] : 'none';
         $state->user_agent = isset($data['user_agent']) ? (string) $data['user_agent'] : null;
@@ -412,6 +420,7 @@ class ImportState
         $state->fetch_skipped = self::download_list_fetch_progress_from($data['fetch_skipped'] ?? []);
         $state->current_file = isset($data['current_file']) ? (string) $data['current_file'] : null;
         $state->current_file_bytes = isset($data['current_file_bytes']) ? (int) $data['current_file_bytes'] : null;
+        $state->current_file_owned = isset($data['current_file_owned']) ? (bool) $data['current_file_owned'] : null;
         $state->sql_bytes = isset($data['sql_bytes']) ? (int) $data['sql_bytes'] : null;
         $state->sql_statements_counted = (int) ($data['sql_statements_counted'] ?? 0);
         $state->apply = self::database_apply_command_from($data['apply'] ?? []);
@@ -436,6 +445,8 @@ class ImportState
             'version' => $this->version,
             'webhost' => $this->webhost,
             'follow_symlinks' => $this->follow_symlinks,
+            'staged_apply' => $this->staged_apply,
+            'index_path_style' => $this->index_path_style,
             'fs_root_nonempty_behavior' => $this->fs_root_nonempty_behavior,
             'filter' => $this->filter,
             'user_agent' => $this->user_agent,
@@ -450,6 +461,7 @@ class ImportState
             'fetch_skipped' => $this->fetch_skipped->to_array(),
             'current_file' => $this->current_file,
             'current_file_bytes' => $this->current_file_bytes,
+            'current_file_owned' => $this->current_file_owned,
             'sql_bytes' => $this->sql_bytes,
             'sql_statements_counted' => $this->sql_statements_counted,
             'apply' => $this->apply->to_array(),

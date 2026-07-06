@@ -215,6 +215,21 @@ The command returns one of three exit codes:
 
 Which is to say, you'll need to wrap it in a loop that runs until failure or full completion.
 
+Add `--staged-apply` when pulled files should download into a staging area
+under `--state-dir` and then move into `--fs-root` in one rename window at the
+end:
+
+```bash
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" --staged-apply
+```
+
+`--staged-apply` keeps partially downloaded file bytes out of the live local
+tree. The final apply is rename-only, so `--state-dir` and `--fs-root` must be
+on the same filesystem. If they are not, Reprint rejects the run before moving
+anything; it does not copy staged files into place because that could expose
+half-written files. A killed apply can be rerun: files already renamed into
+place are recognized by size and the remaining staged files are moved.
+
 **Non-empty local fs-root**
 
 By default, `files-pull` refuses to start if `--fs-root` is non-empty. If you need to use a non-empty local fs-root,
@@ -275,6 +290,51 @@ It accepts the `pull` file filters (`--filter=none` and
 php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --only=:wp-content: --only=:wp-plugins:
 ```
+
+#### Push local files to remote staging.
+
+`push-files` uploads a local filesystem tree into the remote exporter's staged
+artifact store. It is resumable and safe to retry: completed files are skipped,
+partially uploaded files resume from the remote committed offset, and the live
+remote tree is not changed by this command.
+
+```bash
+php reprint.phar push-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+```
+
+Use repeated `--only` values to push fs-root-relative prefixes instead of the
+whole tree:
+
+```bash
+php reprint.phar push-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+    --only=wp-content/uploads
+```
+
+The remote WordPress wiring stores staged artifacts outside the web-served tree.
+Define `SITE_EXPORT_STAGING_DIR` on the exporter host to choose that directory;
+it must have enough free space for the pushed artifacts and should be on storage
+that persists across retries.
+
+Add `--apply` when the verified transfer should move into the remote tree after
+uploading:
+
+```bash
+php reprint.phar push-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" --apply
+```
+
+The exporter applies into `ABSPATH` by default. Define `SITE_EXPORT_APPLY_ROOT`
+on the exporter host to choose a different target root. Apply is rename-only:
+it probes before upload and refuses `cross_device` if `SITE_EXPORT_STAGING_DIR`
+and `SITE_EXPORT_APPLY_ROOT` are on different filesystems. Put staging on the
+same filesystem as the target when you plan to use `--apply`; Reprint will not
+fall back to copy-and-remove because that could expose half-written live files.
+
+An interrupted apply can be retried with the same command. Files already renamed
+into place are recognized by size, and files still in staging are moved on the
+next run. The apply window is intentionally short but serial; the remote site
+may briefly contain a mix of old and new files if the process is killed between
+renames, so keep the site in maintenance mode for deployments that need a
+whole-tree cutover.
 
 #### Pull only the database.
 
@@ -680,8 +740,9 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
 * `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
-* `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
+* `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed; add `--staged-apply` to land files by rename after download.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
+* `push-files` — Upload local files into the remote staged artifact store; add `--apply` to rename the verified transfer into the remote tree.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.

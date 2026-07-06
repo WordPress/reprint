@@ -22,6 +22,9 @@ final class Site_Export_HTTP_Server {
     /** @var string|null */
     private $default_directory;
 
+    /** @var string[] Endpoints dispatched without a resource budget. */
+    private $no_budget_endpoints = ['preflight'];
+
     public function __construct(array $options = []) {
         $this->handlers = $options['handlers'] ?? $this->default_handlers();
         $this->budget_factory = $options['budget_factory'] ?? [$this, 'default_budget_factory'];
@@ -31,11 +34,22 @@ final class Site_Export_HTTP_Server {
         };
         $this->cursor_header_name = $options['cursor_header_name'] ?? 'HTTP_X_EXPORT_CURSOR';
         $this->default_directory = $options['default_directory'] ?? null;
+
+        if (isset($options['staged']) && is_array($options['staged'])) {
+            $this->register_staged_handlers(new Site_Export_Staged_Endpoints($options['staged']));
+        }
     }
 
     public function handle_request(array $request = []): void {
         $server = $request['server'] ?? $_SERVER;
-        $body = array_key_exists('body', $request) ? (string) $request['body'] : call_user_func($this->body_reader);
+        if (array_key_exists('body', $request)) {
+            $body = (string) $request['body'];
+        } else {
+            // Config parsing only consumes JSON bodies. Reading anything
+            // else here would buffer a raw upload body (staged_upload) in
+            // memory before its handler can stream it.
+            $body = $this->is_json_content_type($server) ? call_user_func($this->body_reader) : '';
+        }
         $config = $request['config'] ?? $this->parse_http_config(
             $request['get'] ?? $_GET,
             $request['post'] ?? $_POST,
@@ -262,7 +276,7 @@ final class Site_Export_HTTP_Server {
         }
 
         $handler = $this->handlers[$endpoint];
-        if ($endpoint === 'preflight') {
+        if (in_array($endpoint, $this->no_budget_endpoints, true)) {
             call_user_func($handler, $config);
             return;
         }
@@ -285,6 +299,74 @@ final class Site_Export_HTTP_Server {
             'db_index' => 'endpoint_db_index',
             'preflight' => 'endpoint_preflight',
         ];
+    }
+
+    /**
+     * Wire the staged artifact routes to the shared dispatcher.
+     *
+     * Explicitly-passed handlers win over these, matching how the
+     * handlers option replaces the default map.
+     */
+    private function register_staged_handlers(Site_Export_Staged_Endpoints $endpoints): void {
+        $routes = [
+            'staged_upload' => static function (array $config) use ($endpoints): void {
+                $input = @fopen('php://input', 'rb');
+                try {
+                    self::emit_json_response(
+                        $endpoints->upload($config, $_SERVER, $input === false ? null : $input)
+                    );
+                } finally {
+                    if (is_resource($input)) {
+                        fclose($input);
+                    }
+                }
+            },
+            'staged_finalize' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->finalize($config, $_SERVER));
+            },
+            'staged_status' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->status($config));
+            },
+            'staged_discard' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->discard($config, $_SERVER));
+            },
+            'staged_apply' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->apply($config, $_SERVER));
+            },
+            'staged_upload_batch' => static function (array $config) use ($endpoints): void {
+                $input = @fopen('php://input', 'rb');
+                try {
+                    self::emit_json_response(
+                        $endpoints->upload_batch($config, $_SERVER, $input === false ? null : $input)
+                    );
+                } finally {
+                    if (is_resource($input)) {
+                        fclose($input);
+                    }
+                }
+            },
+        ];
+
+        foreach ($routes as $endpoint => $handler) {
+            if (!isset($this->handlers[$endpoint])) {
+                $this->handlers[$endpoint] = $handler;
+            }
+            $this->no_budget_endpoints[] = $endpoint;
+        }
+    }
+
+    /**
+     * @param array{http_code:int,body:array} $response
+     */
+    private static function emit_json_response(array $response): void {
+        http_response_code($response['http_code']);
+        header('Content-Type: application/json');
+        echo json_encode($response['body']);
+    }
+
+    private function is_json_content_type(array $server): bool {
+        $content_type = (string) ( $server['CONTENT_TYPE'] ?? '' );
+        return strtolower(trim( (string) strtok($content_type, ';'))) === 'application/json';
     }
 
     /**

@@ -9,8 +9,6 @@
  */
 final class Site_Export_HMAC_Server {
 
-    private const DEFAULT_MAX_CONTROL_BODY_BYTES = 1048576;
-
     /** @var string */
     private $secret;
 
@@ -23,33 +21,13 @@ final class Site_Export_HMAC_Server {
     }
 
     /**
-     * Verify a bounded control-plane request.
-     *
-     * HMAC is the guard for small protocol commands such as preflight, session
-     * start, plan confirmation, and abort/resume. Large data uploads should use
-     * authenticated sessions plus per-chunk hashes instead of signing one
-     * multi-megabyte request body.
-     */
-    public function verify_control_request(array $headers = [], string $body = '', ?float $now = null, ?int $max_body_bytes = null): ?string {
-        $body_limit = $max_body_bytes ?? self::DEFAULT_MAX_CONTROL_BODY_BYTES;
-        if (strlen($body) > $body_limit) {
-            return sprintf(
-                'HMAC control request body exceeds %d bytes',
-                $body_limit
-            );
-        }
-
-        return $this->verify($headers, $body, [], $now);
-    }
-
-    /**
      * Verify a request using explicit inputs.
      *
      * Returns null on success, or an error string on failure. This convenience
      * method receives the full body as a string and is only appropriate for
-     * compatibility with existing small request flows. New protocol code should
-     * use verify_control_request() for HMAC-protected commands and avoid
-     * HMAC-signing large data uploads.
+     * small request flows; large data uploads verify per chunk through
+     * verify_signed_content_hash() instead of HMAC-signing one
+     * multi-megabyte request body.
      *
      * When $files is non-empty, the content hash is computed from uploaded file
      * contents rather than $body so multipart uploads verify consistently.
@@ -59,24 +37,6 @@ final class Site_Export_HMAC_Server {
             $headers,
             function () use ($body, $files): string {
                 return $this->compute_received_content_hash($body, $files);
-            },
-            $now
-        );
-    }
-
-    /**
-     * Verify a request when the caller already computed the received digest.
-     *
-     * This exists for bounded protocol code that has already computed the body
-     * digest. It does not read a request body. Push chunk uploads should use
-     * session/request capabilities plus per-chunk hashes instead of routing
-     * large bodies through HMAC verification.
-     */
-    public function verify_content_hash(array $headers, string $received_content_hash, ?float $now = null): ?string {
-        return $this->verify_content_hash_callback(
-            $headers,
-            function () use ($received_content_hash): string {
-                return $received_content_hash;
             },
             $now
         );
@@ -139,9 +99,8 @@ final class Site_Export_HMAC_Server {
      *
      * Returns null on success, or an error string on failure. This legacy
      * convenience path buffers php://input and should only be used for small
-     * request bodies. New control-plane routes should bound the body and call
-     * verify_control_request(). Large data routes should not use whole-body
-     * HMAC verification.
+     * request bodies. Large data routes should not use whole-body HMAC
+     * verification.
      */
     public function verify_globals(?float $now = null): ?string {
         $body = file_get_contents('php://input');

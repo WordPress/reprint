@@ -180,6 +180,68 @@ function _site_export_default_authenticate(): void {
 }
 
 /**
+ * Server-side options for the staged artifact endpoints.
+ *
+ * The staging directory must live outside the web-served tree, and WordPress
+ * has no guaranteed writable directory there, so the default sits under the
+ * system temp dir, keyed by ABSPATH so co-hosted sites do not share staging
+ * state. A host that cleans its temp dir only costs a transfer its progress —
+ * artifacts re-upload from offset 0. Define SITE_EXPORT_STAGING_DIR to pick a
+ * durable location instead.
+ */
+function _site_export_staged_options(): array {
+    $staging_dir = defined('SITE_EXPORT_STAGING_DIR')
+        ? SITE_EXPORT_STAGING_DIR
+        : rtrim(sys_get_temp_dir(), '/') . '/reprint-staging-' . md5(ABSPATH);
+
+    return [
+        'staging_dir' => $staging_dir,
+        'secret' => _site_export_get_shared_secret(),
+        'timestamp_tolerance' => SITE_EXPORT_TIMESTAMP_TOLERANCE,
+        // Where staged_apply moves verified artifacts. Apply is rename-only,
+        // so the staging dir must sit on this root's filesystem — apply
+        // rejects "cross_device" otherwise, and senders probe that with
+        // check_only before uploading anything.
+        'apply_target_root' => defined('SITE_EXPORT_APPLY_ROOT') ? SITE_EXPORT_APPLY_ROOT : ABSPATH,
+    ];
+}
+
+/**
+ * Data-plane endpoints authenticate inside their handlers.
+ *
+ * The default HMAC handler buffers php://input to hash it, which defeats the
+ * staged upload handlers' spool-then-verify discipline. Keep this list next
+ * to the public request handler so every large-body route makes an explicit
+ * auth decision.
+ */
+function _site_export_endpoint_authenticates_in_handler(string $endpoint): bool {
+    return in_array($endpoint, ['staged_upload', 'staged_upload_batch'], true);
+}
+
+/**
+ * Resolves the endpoint the dispatcher will actually run, so the auth gate
+ * authorizes that endpoint and not a different one named in the query string.
+ *
+ * Site_Export_HTTP_Server::parse_http_config() merges GET and POST with POST
+ * winning. If the gate read only the query string, a request could name a
+ * self-authenticating data-plane route (staged_upload) there — skipping the
+ * default HMAC check — while a form body carried endpoint=file_index, which
+ * POST-over-GET then dispatches unauthenticated. Resolving with the same
+ * precedence closes that seam. Takes the already-read filter_input() values;
+ * a non-string endpoint (e.g. endpoint[]=..., which arrives as false)
+ * resolves to '' so the default auth still runs and the dispatcher rejects.
+ *
+ * @param mixed $get_endpoint  filter_input(INPUT_GET, 'endpoint')
+ * @param mixed $post_endpoint filter_input(INPUT_POST, 'endpoint')
+ */
+function _site_export_resolve_endpoint($get_endpoint, $post_endpoint): string {
+    if (is_string($post_endpoint) && $post_endpoint !== '') {
+        return $post_endpoint;
+    }
+    return is_string($get_endpoint) ? $get_endpoint : '';
+}
+
+/**
  * Handle an export API request.
  *
  * WordPress is already loaded at this point — DB credentials, $table_prefix,
@@ -250,8 +312,25 @@ function _site_export_handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    $authenticate = $options['authenticate'] ?? '_site_export_default_authenticate';
-    $authenticate();
+    // Staged data-plane endpoints authenticate inside their handlers: the
+    // default handler here buffers the whole request body to hash it, which
+    // chunk and batch uploads cannot afford. Those routes verify the signed
+    // headers first and hash the body as it streams. A custom authenticate
+    // callable still runs for every endpoint — its embedder owns that tradeoff.
+    // Resolve the endpoint the same way the dispatcher does (POST over GET),
+    // so a form body cannot route to an unauthenticated endpoint while the
+    // query string names a self-authenticating one. filter_input, not the raw
+    // superglobals: lib.php also runs without WordPress bootstrapped.
+    $endpoint = _site_export_resolve_endpoint(
+        filter_input(INPUT_GET, 'endpoint'),
+        filter_input(INPUT_POST, 'endpoint')
+    );
+    $authenticate = $options['authenticate'] ?? null;
+    if ($authenticate !== null) {
+        $authenticate();
+    } elseif (!_site_export_endpoint_authenticates_in_handler($endpoint)) {
+        _site_export_default_authenticate();
+    }
 
     // Ensure the Composer autoloader is loaded so Site_Export_HTTP_Server
     // is resolvable. The class itself will require export.php on demand
@@ -267,6 +346,7 @@ function _site_export_handle_api_request(array $options = []): void {
     try {
         Site_Export_HTTP_Server::serve([
             'default_directory' => ABSPATH,
+            'staged' => _site_export_staged_options(),
         ]);
     } catch (Exception $e) {
         if (!headers_sent()) {
