@@ -4314,6 +4314,85 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "2024e1d08064ac27d28eef754ad107adeb0ed965",
+      "shortSha": "2024e1d",
+      "date": "2026-07-06T11:23:18+02:00",
+      "message": "Better prior-op understanding for `files-sync --filter=skipped-earlier` calls (#292)",
+      "author": "Fredrik Rombach Ekelund",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.8",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "preflightImporter": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 130.7879469999989,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 12343.299398,
+          "attempts": 2,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 103462.623493,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 32356.653926,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 94.88806600001408,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-pull",
+          "elapsedMs": 275620.148146,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-apply",
+          "elapsedMs": 60193.59333099995,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 178.14464600000065,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-binary-compression",
+          "elapsedMs": 128.473685999983,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull-large-part-peak-memory",
+          "elapsedMs": 4327.765300999978,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
