@@ -15,3 +15,4 @@ require_once __DIR__ . '/class-relay-exchange.php';
 require_once __DIR__ . '/class-relay-source-worker.php';
 require_once __DIR__ . '/class-relay-export-source.php';
 require_once __DIR__ . '/class-relay-import-driver.php';
+require_once __DIR__ . '/class-relay-exchange-endpoint.php';

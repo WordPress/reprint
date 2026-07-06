@@ -17,6 +17,7 @@ now pluggable so the real pull rides them:
 - `packages/reprint-importer/src/lib/relay/class-relay-source-worker.php` — `RelaySourceWorker`
 - `packages/reprint-importer/src/lib/relay/class-relay-export-source.php` — `RelayExportSource` (runs the source's real `export.php` and gunzips the response)
 - `packages/reprint-importer/src/lib/relay/class-relay-import-driver.php` — `RelayImportDriver` (re-enters the real importer per exchange)
+- `packages/reprint-importer/src/lib/relay/class-relay-exchange-endpoint.php` — `RelayExchangeEndpoint` (the JSON wire contract: base64s the binary result body so the exchange survives an HTTP hop)
 - `ImportClient` gains a transport seam: `set_relay_transport()` plus a relay
   branch at the two curl choke points (`fetch_json`, `fetch_streaming`), inert
   in direct mode.
@@ -30,6 +31,9 @@ Tests:
   (real `ImportClient`) against the **real** `export.php` entirely over the
   reverse channel and mirrors a source tree to the fs-root byte-for-byte, in two
   exchanges (`file_index` then `file_fetch`).
+- `tests/Relay/ReverseTransportWireTest.php` — the same real `files-pull`, but the
+  worker↔endpoint boundary crosses **JSON strings** via `RelayExchangeEndpoint`,
+  proving the wire contract (including base64 of the binary body).
 
 ## The idea in one paragraph
 
@@ -217,6 +221,10 @@ Done:
   completes).
 - A real reversed `files-pull` — real importer, real exporter — mirroring a
   source tree byte-for-byte in `tests/Relay/ReverseTransportPullTest.php`.
+- The JSON wire contract (`RelayExchangeEndpoint`): the same real `files-pull`
+  runs with the worker↔endpoint boundary crossing JSON strings. This surfaced
+  the one thing the in-process path hid — the delivered result body is raw
+  (gunzipped) binary and must ride the wire base64-encoded.
 
 Notes from wiring the real path:
 - `TransportYield` extends `Error`, not `Exception`, so it slips past the
@@ -228,12 +236,17 @@ Notes from wiring the real path:
   yield lands exactly on the existing exit-2 checkpoint.
 
 Next, in scope:
-1. `db-pull` (same seam; it uses `sql_chunk`/`db_index` through the same choke
-   points).
-2. Ship the `relay_exchange` endpoint (HMAC-authenticated) and the
-   `relay-source` CLI as thin wrappers over `RelayImportDriver` /
-   `RelaySourceWorker`, with the source worker making a real loopback request to
-   its own `export.php` in place of the test's subprocess.
+1. The HTTP hop itself: an HMAC-authenticated `relay_exchange` route on the
+   remote that calls `RelayExchangeEndpoint::handle_json()`, and a `relay-source`
+   CLI whose exchange callable POSTs `RelayExchangeEndpoint::encode_request()`
+   to it. The wire contract is done and tested; only the curl glue and the
+   route/CLI entry points remain.
+2. The source worker making a real loopback request to its own `export.php` in
+   place of the test's subprocess (`RelayExportSource` already abstracts "how to
+   run the export" behind an injected runner).
+3. `db-pull` (same seam; it uses `sql_chunk`/`db_index` through the same choke
+   points). Not yet done — it needs the db-path `catch (\Throwable)` audited so
+   the yield propagates, and a live MySQL to verify end to end.
 
 Out of scope for now: multi-session concurrency and any of the push-side staging
 store (unused in this model).
