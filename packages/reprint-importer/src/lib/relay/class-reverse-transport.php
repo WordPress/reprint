@@ -19,7 +19,7 @@
  * state: the exchange re-creates the importer client per re-entry, but the same
  * transport is kept across those passes so a result is consumed exactly once.
  */
-final class RelayTransport
+final class ReverseTransport
 {
     /** @var array|null The delivered answer { http_code, body }, or null on the first exchange. */
     private $result;

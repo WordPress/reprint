@@ -13,7 +13,7 @@
  *
  * One exchange carries one result, so the importer is re-entered (a fresh client
  * each pass, like an exit-2 resume) until it yields or completes. The SAME
- * RelayTransport is shared across those passes so the result is consumed exactly
+ * ReverseTransport is shared across those passes so the result is consumed exactly
  * once even though the client is recreated.
  *
  * Wire request:  { "result": { "http_code": int, "body_b64": string } | null }
@@ -45,11 +45,11 @@ final class RelayExchange
             );
         }
 
-        $transport = new RelayTransport( $result );
+        $transport = new ReverseTransport( $result );
         try {
             do {
                 $client = call_user_func( $this->client_factory );
-                $client->set_relay_transport( $transport );
+                $client->set_reverse_transport( $transport );
                 $client->run( $this->run_options );
             } while ( $client->exit_code === 2 );
 

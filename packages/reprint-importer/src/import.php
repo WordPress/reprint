@@ -1231,18 +1231,18 @@ class ImportClient
     public $exit_code = 0;
 
     /**
-     * @var RelayTransport|null When set, outbound export requests are served by
+     * @var ReverseTransport|null When set, outbound export requests are served by
      * the reverse relay (a remote-driven pull) instead of curl.
      */
-    private $relay_transport = null;
+    private $reverse_transport = null;
 
     /**
      * Route this client's outbound export requests through the reverse relay
      * instead of dialing the source. Pass null to restore direct HTTP.
      */
-    public function set_relay_transport(?RelayTransport $transport): void
+    public function set_reverse_transport(?ReverseTransport $transport): void
     {
-        $this->relay_transport = $transport;
+        $this->reverse_transport = $transport;
     }
 
     public function __construct(string $remote_url, string $state_dir, string $fs_root)
@@ -10389,8 +10389,8 @@ class ImportClient
      */
     private function fetch_json(string $url): array
     {
-        if ($this->relay_transport !== null) {
-            return $this->relay_transport->fetch_json($url);
+        if ($this->reverse_transport !== null) {
+            return $this->reverse_transport->fetch_json($url);
         }
 
         $this->reset_curl_state();
@@ -10497,7 +10497,7 @@ class ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
-        if ($this->relay_transport !== null) {
+        if ($this->reverse_transport !== null) {
             // The relay has no timing signal; zero stats keep the tuner fed
             // with the same shape the curl path produces below.
             if (!isset($context->response_stats) || !is_array($context->response_stats)) {
@@ -10507,7 +10507,7 @@ class ImportClient
             $context->response_stats["total_time"] = 0.0;
 
             $current_chunk = null;
-            $this->relay_transport->fetch_streaming(
+            $this->reverse_transport->fetch_streaming(
                 $url,
                 $post_data,
                 $this->make_chunk_handler($context, $current_chunk)
