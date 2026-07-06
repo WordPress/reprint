@@ -1,11 +1,22 @@
 # Reverse transport: push as a remote-driven pull
 
-**Status: design sketch. No code yet.** This describes how to run the *ordinary*
-pull commands (`files-index`, `files-pull`, `db-pull`, `db-apply`) in the push
-direction — local site → remote target — **without the local site being
-reachable inbound and without a new transfer subsystem.** It is deliberately
-scoped to the existing commands; the staged-transfer/push machinery is out of
-scope here.
+**Status: working prototype + demo of the transport mechanism; not yet wired to
+the real commands.** This describes how to run the *ordinary* pull commands
+(`files-index`, `files-pull`, `db-pull`, `db-apply`) in the push direction —
+local site → remote target — **without the local site being reachable inbound
+and without a new transfer subsystem.** It is deliberately scoped to the
+existing commands; the staged-transfer/push machinery is out of scope here.
+
+The relay mechanism now exists as small, tested classes:
+
+- `packages/reprint-importer/src/lib/relay/class-relay-transport.php` — `RelayTransport`
+- `packages/reprint-importer/src/lib/relay/class-transport-yield.php` — `TransportYield`
+- `packages/reprint-importer/src/lib/relay/class-relay-exchange.php` — `RelayExchange`
+- `packages/reprint-importer/src/lib/relay/class-relay-source-worker.php` — `RelaySourceWorker`
+- `tests/Relay/ReverseTransportDemoTest.php` — moves real file bytes source →
+  destination over the reversed single-endpoint channel and asserts byte
+  identity, plus a crash-resume case. Its stand-in file source and mirror
+  driver play the parts `export.php` and `files-pull` will play in production.
 
 ## The idea in one paragraph
 
@@ -16,15 +27,15 @@ runs a small `relay-source` worker whose every request does two things at once:
 it **delivers the result of the previous export command** and **asks for the
 next one**. The importer's HTTP transport is swapped for a *relay transport*
 that, instead of dialing the source over the network, hands each export request
-to a per-session rendezvous on the remote and waits for the worker to bring the
-answer back. Above that one seam nothing changes — the importer can't tell a
-relayed pull from a direct one, so every regular command rides it for free.
+back to the local worker to execute. Above that one seam nothing changes — the
+importer can't tell a relayed pull from a direct one, so every regular command
+rides it for free.
 
 ## Actors
 
 | | Role | Network | Runs |
 |---|---|---|---|
-| **Remote** (destination) | the importer *brain* + the rendezvous | reachable (it's the live site) | `files-pull` (etc.) with `--transport=relay`, plus the rendezvous endpoints in its plugin |
+| **Remote** (destination) | the importer *brain* | reachable (it's the live site) | the `relay_exchange` endpoint, which *is* `files-pull` (etc.) driven one step per call |
 | **Local** (source) | a stateless source worker | outbound-only | `relay-source`: exchange with the remote, execute each export command in-process against the local export engine |
 
 The direction of *control* is remote→protocol; the direction of *connection* is
@@ -38,14 +49,14 @@ Normal pull (importer wants files, dials the source):
     [importer] <------- multipart bytes, X-Cursor: C' -------
 
 Reverse transport (source can't be dialed; it dials out instead):
-    [importer on REMOTE] --RelayTransport--> [rendezvous on remote]   (enqueues "command N")
-                                                    ^
-                                                    | (2) POST result of N-1, take command N   (outbound)
-                                                    |
+    [importer on REMOTE, inside relay_exchange] --RelayTransport.request(cmd N)-->
+                                                    | (no result in hand → TransportYield)
+                                                    v  returns "command N" as the HTTP response
     [relay-source worker on LOCAL] --runs export.php in-process on command N--
                                                     |
-                                                    v  (3) POST result of N on its next exchange
-    [importer on REMOTE] <-- RelayTransport returns result N --  (feeds the normal parser)
+                                                    v  next outbound POST: { last_command_id: N, result }
+    [importer on REMOTE, inside the NEXT relay_exchange] -- resumes from cursor,
+        RelayTransport.request(cmd N) returns the delivered result -- feeds the normal parser
 ```
 
 The export **request envelope** the importer builds is identical in both worlds
@@ -78,66 +89,73 @@ Because the seam sits *below* cursor handling, multipart parsing, the diff, and
 staged apply, **every regular command works over the relay unchanged** — that is
 the payoff and the reason this is small.
 
-## The rendezvous (endpoints on the remote plugin)
+## The single endpoint: the endpoint *is* the importer
 
-The remote hosts a tiny per-session store holding **one in-flight command and
-its result**, committed by atomic rename — the same discipline the staged store
-uses. One endpoint carries the whole exchange (the worker's single outbound
-request):
+There is **no separate importer process on the remote, no held socket, and no
+shared command/result store polled by two processes.** The whole exchange is one
+bounded HTTP request handled by one endpoint:
 
 - **`relay_exchange`** (local → remote, HMAC-authenticated):
-  request body = `{ session, last_command_id, result? }` where `result` is the
+  request body = `{ session, last_command_id, result? }`, where `result` is the
   previous export response (`{httpCode, headers incl. X-Cursor, body}`).
-  The handler:
-  1. records `result` for `last_command_id`, unblocking the importer's
-     RelayTransport that is waiting on it;
-  2. returns the next pending command
-     `{ command_id, method, endpoint, params, X-Cursor, requestBody? }`, or
-     `{ status: "waiting" }` (retry after a short backoff — the importer hasn't
-     produced the next request yet), or `{ status: "done" }`.
 
-Optional, or folded into the first exchange:
+The handler (`RelayExchange::handle`) runs the importer **inline**:
 
-- **`relay_open` / `relay_close`** — create/tear down a session (id + secret
-  binding), or let the first `relay_exchange` create it lazily and `db-apply`
-  completion close it.
+1. It builds a `RelayTransport` primed with the one delivered `result`.
+2. It calls the importer (the injected *driver*). The driver **resumes from its
+   own persisted cursor**, and its next `transport->request(...)` — the command
+   the delivered result answers — returns that result, so the importer advances
+   one step (writes/stages the bytes, moves the cursor, persists it).
+3. The importer then issues its *next* export request. There is no result for it
+   yet, so `RelayTransport` throws **`TransportYield`**, which unwinds cleanly
+   back to the handler. The handler catches it and returns
+   `{ status: "command", command_id, command }` — the next thing for the worker
+   to fetch. When the driver returns instead of requesting, the handler returns
+   `{ status: "done" }`.
 
-Only one endpoint is load-bearing. There is **no long-poll held open** in the
-minimal form: `relay_exchange` returns promptly with either the next command or
-`waiting`, and the worker retries. (A held long-poll is a later optimization, not
-required.)
+`RelayTransport` is deliberately tiny: it holds exactly one delivered result and
+hands it back to the single matching request (matched by a fingerprint of the
+request envelope, so a re-issued request after re-entry lines up with its
+result); every other request yields. That one rule is what makes each exchange
+advance the importer by **exactly one** export request.
 
-## Who blocks on whom (and why there's no held socket)
+## Why there's no liveness problem (the old open question, now solved)
 
-Two processes on the **remote** share the rendezvous store, exactly the way the
-uploader and applier share the staged store:
+Earlier sketches kept a long-lived importer process on the remote and asked how
+to trigger/keep it alive. The single-endpoint model deletes that question: **the
+local worker's outbound request is itself the trigger.** Each POST runs one
+bounded importer step and returns; between exchanges nothing runs on the remote.
+This is the same reentrant, resume-from-cursor discipline the codebase already
+uses for exit-code-2 resumption — here applied at *per-exchange* granularity.
 
-- the **importer process** runs `files-pull`; its RelayTransport writes the
-  export request as "pending command N" and then **polls the store** for
-  "result N" (bounded sleeps, not a held connection);
-- the **`relay_exchange` web handler** is hit by the local worker; it writes
-  "result N-1" into the store and reads back "pending command N" to return.
-
-So the importer advances **exactly one export request per local exchange**,
-paced by the worker's outbound cadence. Every hop is a bounded request; nothing
-holds a socket across the internet. This is the same reentrant, shared-store
-decoupling the codebase already relies on, which is why it suits shared hosting.
+The one real requirement this places on a command: it must **persist its cursor
+at the yield boundary**, exactly as it already checkpoints on an exit-2 stop, so
+the next exchange resumes precisely after the last consumed result. Re-entry
+replays only the importer's cheap in-memory reconstruction from that cursor — not
+any prior transfer. The prototype's mirror driver shows the shape concretely: it
+saves its state to disk immediately before issuing the request that yields, and
+the crash-resume test kills the worker mid-transfer and finishes on a fresh one
+without re-asking for the file the remote already holds.
 
 ## One `file_fetch`, end to end
 
-1. Remote `files-pull` needs the next file chunk → RelayTransport enqueues
-   `{endpoint: file_fetch, X-Cursor: C, chunk params}` as command N, waits.
-2. The local worker's next `relay_exchange` returns command N. The worker runs
-   the export engine **in-process** — `Site_Export_HTTP_Server::handle_request()`
-   already accepts a synthetic `{get, post, body, server}` request array, so the
-   worker drives it with N's params and **captures** the output instead of
-   echoing it — producing the multipart body + `X-Cursor` response.
-3. The worker POSTs `{ last_command_id: N, result: {...} }` on its next
-   exchange. **The bytes travel local → remote here.**
-4. The remote records result N; RelayTransport returns it to `files-pull`, which
-   feeds it to `MultipartStreamParser` + (optionally) the staged apply window
-   exactly as for a direct pull. Cursor advances to `C'`; command N+1 is
-   enqueued.
+1. A `relay_exchange` arrives carrying the result of the previous chunk (or none,
+   on the first exchange). The handler runs `files-pull` inline; it resumes from
+   cursor `C`, and `RelayTransport.request({endpoint: file_fetch, X-Cursor: C})`
+   returns the delivered chunk. The importer feeds it to `MultipartStreamParser`
+   + (optionally) the staged apply window exactly as for a direct pull, advances
+   the cursor to `C'`, and **persists it**.
+2. `files-pull` needs the next chunk → `RelayTransport.request({... X-Cursor: C'})`
+   has no delivered result → **`TransportYield`** → the handler returns that
+   command. `relay_exchange` responds; nothing runs on the remote until the next
+   POST.
+3. The local worker runs the export engine **in-process** on the returned
+   command — `Site_Export_HTTP_Server::handle_request()` already accepts a
+   synthetic `{get, post, body, server}` request array and returns without
+   exiting, so the worker drives it with the command's params and **captures**
+   the multipart body + `X-Cursor` response.
+4. The worker POSTs `{ last_command_id, result }` on its next exchange. **The
+   bytes travel local → remote here.** Back to step 1 for the next chunk.
 
 The remote sets the chunk-size params, so each command's response is bounded to
 one comfortable exchange body — no unbounded buffering on either side.
@@ -150,10 +168,11 @@ one comfortable exchange body — no unbounded buffering on either side.
   piece in the local-drives model).
 - **The local worker is stateless.** It executes idempotent, read-only export
   commands. Kill it and rerun — it re-exchanges and re-executes; the export side
-  is cursor-driven, so re-execution is safe.
+  is cursor-driven, so re-execution is safe. (The demo's second test does exactly
+  this: crash mid-transfer, resume clean.)
 - **It reuses the entire tested pull pipeline** (resume, delta, `--staged-apply`
-  atomic apply). The only new code is the transport seam + `RelayTransport` +
-  `relay_exchange` + the `relay-source` loop.
+  atomic apply). The only new code is the transport seam + the four small relay
+  classes + the `relay-source` loop.
 
 ## Security to design carefully (flagged, not solved here)
 
@@ -161,43 +180,43 @@ one comfortable exchange body — no unbounded buffering on either side.
   export engine with the source's own root/directory constraints** — a
   compromised or hostile remote can then only ask for paths the source already
   exposes over `export.php`, no more. The remote is handed the read-only export
-  API in reverse, never a shell.
+  API in reverse, never a shell. (The demo enforces a containment check in its
+  stand-in source to make this concrete.)
 - **HMAC** authenticates the worker↔remote channel (the worker holds the secret,
   as today). **TLS** for confidentiality: the file bytes traverse the wire inside
   the exchange bodies.
-- **Idempotency/replay:** `command_id`/`result_id` make the exchange idempotent —
-  a lost exchange re-fetches the same command; a lost result is re-posted; a
-  replayed command re-runs a read-only export safely.
+- **Idempotency/replay:** `command_id` makes the exchange idempotent — a lost
+  exchange re-fetches the same command; a lost result is re-posted; a replayed
+  command re-runs a read-only export safely.
 
 ## First iteration — "play with it in context of regular commands"
 
-In scope:
-1. Introduce the transport seam; default binding = direct HTTP (**no behavior
-   change**, existing pull tests green).
-2. Add `RelayTransport`, the `relay_exchange` endpoint, and a `relay-source` CLI
-   worker.
+Done:
+- The relay mechanism (`RelayTransport`, `TransportYield`, `RelayExchange`,
+  `RelaySourceWorker`) and a demo that moves real files over the reversed
+  single-endpoint channel, including crash-resume.
+
+Next, in scope:
+1. Introduce the transport seam in the importer; default binding = direct HTTP
+   (**no behavior change**, existing pull tests green).
+2. Adapt `files-pull` (then `db-pull`) to persist its cursor at the yield
+   boundary and drive through the seam, and add the `relay_exchange` endpoint +
+   `relay-source` CLI worker as thin wrappers over the classes above.
 3. Prove it: run an ordinary `files-pull` (and `db-pull`) **entirely over the
    relay** with source and destination on one host in a test — a real reversed
    pull, no staged-push subsystem involved.
 
-Out of scope for now: production deployment (how the remote importer is
-triggered/kept alive), multi-session concurrency, and any of the push-side
-staging store (unused in this model).
+Out of scope for now: multi-session concurrency and any of the push-side staging
+store (unused in this model).
 
 ## Open questions
 
-- **Remote importer liveness/trigger.** CLI vs cron vs a "kick" endpoint that
-  runs one bounded importer step per call. The bounded-step-per-call variant
-  would remove the held remote process entirely, but needs the importer to
-  checkpoint at the transport boundary (it currently resumes at command
-  granularity, not mid-transport-call) — worth exploring, possibly the cleanest
-  end state.
 - **Chunk sizing across the exchange.** The remote sets it, so it's bounded;
   confirm one `file_fetch` response fits one exchange body comfortably under the
   host's `post_max_size`.
-- **Backpressure / timeouts.** `waiting` backoff, exchange timeout, and how a
-  stalled worker surfaces to the operator.
+- **Backpressure / timeouts.** Exchange timeout, retry policy, and how a stalled
+  worker surfaces to the operator.
 - **`db-apply` writes on the remote.** `db-pull` fetches the dump via the relay;
-  `db-apply` then runs locally on the remote against its own DB — no relay
-  needed for the write side, which is another point in favor of "remote owns the
-  final writes."
+  `db-apply` then runs locally on the remote against its own DB — no relay needed
+  for the write side, which is another point in favor of "remote owns the final
+  writes."
