@@ -3,10 +3,9 @@
  * Loader for the reverse-transport relay classes.
  *
  * "Push as a remote-driven pull": the remote runs the importer and owns all
- * state; the local source only makes outbound requests. See
- * markdown/REVERSE-TRANSPORT.md.
+ * state; the local source only makes outbound requests.
  *
- * RelayTransport (with TransportYield) is the seam the importer talks to;
+ * RelayTransport (with TransportYield) is the transport the importer talks to;
  * RelayExchange is the remote endpoint; RelaySource is the outbound-only local
  * side (standalone — it needs neither the importer nor the exchange).
  */
