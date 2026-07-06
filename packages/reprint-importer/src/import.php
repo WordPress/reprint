@@ -62,6 +62,10 @@ require_once __DIR__ . '/lib/upload/class-upload-chunk-sizer.php';
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
+// Reverse transport: run ordinary pulls in the push direction over an
+// outbound-only local connection. See markdown/REVERSE-TRANSPORT.md.
+require_once __DIR__ . '/lib/relay/load.php';
+
 /**
  * If the ALL_PROXY environment variable is set, apply it to the cURL
  * handle via CURLOPT_PROXY.
@@ -1225,6 +1229,22 @@ class ImportClient
      * (caller should invoke again to continue).
      */
     public $exit_code = 0;
+
+    /**
+     * @var RelayTransport|null When set, outbound export requests are served by
+     * the reverse relay (a remote-driven pull) instead of curl. See
+     * markdown/REVERSE-TRANSPORT.md.
+     */
+    private $relay_transport = null;
+
+    /**
+     * Route this client's outbound export requests through the reverse relay
+     * instead of dialing the source. Pass null to restore direct HTTP.
+     */
+    public function set_relay_transport(?RelayTransport $transport): void
+    {
+        $this->relay_transport = $transport;
+    }
 
     public function __construct(string $remote_url, string $state_dir, string $fs_root)
     {
@@ -9663,7 +9683,13 @@ class ImportClient
             // Also include cursor in query params as a fallback when headers are stripped.
             $params["cursor"] = $cursor;
         }
-        $params["_cache_bust"] = time() . "-" . rand(0, 999999);
+        // The cache-buster defeats intermediary caches on the wire, but it also
+        // makes the URL non-deterministic. Over the relay there is no cache and
+        // the URL is the request's identity — a re-issued request after a yield
+        // must fingerprint identically to match its delivered result — so skip it.
+        if ($this->relay_transport === null) {
+            $params["_cache_bust"] = time() . "-" . rand(0, 999999);
+        }
 
         return $url . $separator . http_build_query($params);
     }
@@ -10366,10 +10392,136 @@ class ImportClient
     }
 
     /**
+     * Build the relay command envelope for one export request.
+     *
+     * The command is just the request's identity — its URL (which already
+     * encodes endpoint, cursor, and params) plus any POST body. A CURLFile
+     * upload (the file_fetch batch list) is inlined so the outbound worker can
+     * reconstruct it against its own export engine. The URL carries no
+     * cache-buster in relay mode, so the same logical request fingerprints
+     * identically across a yield/re-entry.
+     */
+    private function relay_build_command(string $url, ?array $post_data): array
+    {
+        $command = [
+            "method" => $post_data === null ? "GET" : "POST",
+            "url" => $url,
+        ];
+        if ($post_data !== null) {
+            $body = [];
+            foreach ($post_data as $key => $value) {
+                if ($value instanceof CURLFile) {
+                    $body[$key] = [
+                        "filename" => basename($value->getFilename()),
+                        "content_b64" => base64_encode(
+                            (string) file_get_contents($value->getFilename())
+                        ),
+                    ];
+                } else {
+                    $body[$key] = $value;
+                }
+            }
+            $command["body"] = $body;
+        }
+        return $command;
+    }
+
+    /**
+     * Recover the multipart boundary from the response body.
+     *
+     * The exporter announces the boundary in a Content-Type header, but the
+     * outbound worker runs the export engine in-process where header() is a
+     * no-op and unreadable. The body opens with the delimiter line
+     * "--<boundary>\r\n", so read it back from there — the same fallback the
+     * direct curl path already uses when the header is stripped.
+     */
+    private function relay_extract_boundary(string $body): ?string
+    {
+        if (strncmp($body, "--", 2) !== 0) {
+            return null;
+        }
+        $line_end = strpos($body, "\n");
+        $first = $line_end === false ? $body : substr($body, 0, $line_end);
+        $boundary = rtrim(substr($first, 2), "\r\n");
+        return $boundary === "" ? null : $boundary;
+    }
+
+    /**
+     * Relay counterpart to fetch_streaming(): the request's answer was carried
+     * back by the local worker instead of dialed. Feed the captured body to the
+     * exact same MultipartStreamParser + chunk handler the direct path uses, so
+     * every layer above the transport is oblivious to the reversal. If the
+     * answer is not in hand yet, relay_transport->request() throws
+     * TransportYield, which unwinds the importer back to the exchange handler.
+     */
+    private function relay_fetch_streaming(
+        string $url,
+        StreamingContext $context,
+        ?array $post_data
+    ): void {
+        $command = $this->relay_build_command($url, $post_data);
+        $result = $this->relay_transport->request($command);
+
+        $http_code = isset($result["http_code"]) ? (int) $result["http_code"] : 0;
+        $body = isset($result["body"]) ? (string) $result["body"] : "";
+
+        if (!isset($context->response_stats) || !is_array($context->response_stats)) {
+            $context->response_stats = [];
+        }
+        $context->response_stats["ttfb"] = 0.0;
+        $context->response_stats["total_time"] = 0.0;
+
+        if ($http_code !== 200) {
+            throw new RuntimeException("relay export request returned a non-200 status");
+        }
+
+        $boundary = $this->relay_extract_boundary($body);
+        if ($boundary === null) {
+            return;
+        }
+
+        $current_chunk = null;
+        $parser = new MultipartStreamParser(
+            $boundary,
+            $this->make_chunk_handler($context, $current_chunk)
+        );
+        $parser->feed($body);
+    }
+
+    /**
+     * Relay counterpart to fetch_json(): return the worker-carried answer in
+     * fetch_json()'s success shape, or throw TransportYield if not yet in hand.
+     */
+    private function relay_fetch_json(string $url): array
+    {
+        $command = ["method" => "GET", "url" => $url];
+        $result = $this->relay_transport->request($command);
+
+        $http_code = isset($result["http_code"]) ? (int) $result["http_code"] : 0;
+        $body = isset($result["body"]) ? (string) $result["body"] : "";
+        $json = $body === "" ? null : json_decode($body, true);
+
+        return [
+            "ok" => $http_code === 200 && $json !== null,
+            "http_code" => $http_code,
+            "elapsed" => 0.0,
+            "body" => $body,
+            "json" => $json,
+            "error" => $http_code === 200
+                ? null
+                : "relay request failed with HTTP {$http_code}",
+        ];
+    }
+
+    /**
      * Fetch a JSON response for a lightweight request (non-streaming).
      */
     private function fetch_json(string $url): array
     {
+        if ($this->relay_transport !== null) {
+            return $this->relay_fetch_json($url);
+        }
+
         $this->reset_curl_state();
 
         $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
@@ -10474,6 +10626,11 @@ class ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
+        if ($this->relay_transport !== null) {
+            $this->relay_fetch_streaming($url, $context, $post_data);
+            return;
+        }
+
         $this->reset_curl_state();
 
         // Log HTTP request details

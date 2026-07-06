@@ -1,22 +1,35 @@
 # Reverse transport: push as a remote-driven pull
 
-**Status: working prototype + demo of the transport mechanism; not yet wired to
-the real commands.** This describes how to run the *ordinary* pull commands
-(`files-index`, `files-pull`, `db-pull`, `db-apply`) in the push direction —
-local site → remote target — **without the local site being reachable inbound
-and without a new transfer subsystem.** It is deliberately scoped to the
-existing commands; the staged-transfer/push machinery is out of scope here.
+**Status: wired into the real importer; an ordinary `files-pull` runs end to
+end over the reverse channel in a test.** This describes how to run the
+*ordinary* pull commands (`files-index`, `files-pull`, `db-pull`, `db-apply`) in
+the push direction — local site → remote target — **without the local site being
+reachable inbound and without a new transfer subsystem.** It is deliberately
+scoped to the existing commands; the staged-transfer/push machinery is out of
+scope here.
 
-The relay mechanism now exists as small, tested classes:
+The relay mechanism exists as small classes, and the importer's transport is
+now pluggable so the real pull rides them:
 
 - `packages/reprint-importer/src/lib/relay/class-relay-transport.php` — `RelayTransport`
 - `packages/reprint-importer/src/lib/relay/class-transport-yield.php` — `TransportYield`
 - `packages/reprint-importer/src/lib/relay/class-relay-exchange.php` — `RelayExchange`
 - `packages/reprint-importer/src/lib/relay/class-relay-source-worker.php` — `RelaySourceWorker`
+- `packages/reprint-importer/src/lib/relay/class-relay-export-source.php` — `RelayExportSource` (runs the source's real `export.php` and gunzips the response)
+- `packages/reprint-importer/src/lib/relay/class-relay-import-driver.php` — `RelayImportDriver` (re-enters the real importer per exchange)
+- `ImportClient` gains a transport seam: `set_relay_transport()` plus a relay
+  branch at the two curl choke points (`fetch_json`, `fetch_streaming`), inert
+  in direct mode.
+
+Tests:
+
 - `tests/Relay/ReverseTransportDemoTest.php` — moves real file bytes source →
-  destination over the reversed single-endpoint channel and asserts byte
-  identity, plus a crash-resume case. Its stand-in file source and mirror
-  driver play the parts `export.php` and `files-pull` will play in production.
+  destination over the reversed channel with a stand-in source/driver (byte
+  identity + crash-resume).
+- `tests/Relay/ReverseTransportPullTest.php` — runs the **real** `files-pull`
+  (real `ImportClient`) against the **real** `export.php` entirely over the
+  reverse channel and mirrors a source tree to the fs-root byte-for-byte, in two
+  exchanges (`file_index` then `file_fetch`).
 
 ## The idea in one paragraph
 
@@ -195,16 +208,32 @@ Done:
 - The relay mechanism (`RelayTransport`, `TransportYield`, `RelayExchange`,
   `RelaySourceWorker`) and a demo that moves real files over the reversed
   single-endpoint channel, including crash-resume.
+- The importer transport seam: `fetch_json`/`fetch_streaming` route through
+  `RelayTransport` when it is set (a request's URL, cache-buster-free so it
+  fingerprints stably, is the command identity); direct mode is untouched and
+  every existing pull test stays green (504/74 PHPCS on `import.php`, unchanged).
+- `RelayExportSource` (the source's real `export.php`, gunzipped) and
+  `RelayImportDriver` (re-enter the real importer per exchange until it yields or
+  completes).
+- A real reversed `files-pull` — real importer, real exporter — mirroring a
+  source tree byte-for-byte in `tests/Relay/ReverseTransportPullTest.php`.
+
+Notes from wiring the real path:
+- `TransportYield` extends `Error`, not `Exception`, so it slips past the
+  importer's `catch (Exception)` command wrapper without persisting an error
+  status.
+- No explicit "persist cursor at the yield boundary" code was needed: the
+  importer already reads its resumable position from persisted state at the
+  start of each request and only issues one export request per invocation, so a
+  yield lands exactly on the existing exit-2 checkpoint.
 
 Next, in scope:
-1. Introduce the transport seam in the importer; default binding = direct HTTP
-   (**no behavior change**, existing pull tests green).
-2. Adapt `files-pull` (then `db-pull`) to persist its cursor at the yield
-   boundary and drive through the seam, and add the `relay_exchange` endpoint +
-   `relay-source` CLI worker as thin wrappers over the classes above.
-3. Prove it: run an ordinary `files-pull` (and `db-pull`) **entirely over the
-   relay** with source and destination on one host in a test — a real reversed
-   pull, no staged-push subsystem involved.
+1. `db-pull` (same seam; it uses `sql_chunk`/`db_index` through the same choke
+   points).
+2. Ship the `relay_exchange` endpoint (HMAC-authenticated) and the
+   `relay-source` CLI as thin wrappers over `RelayImportDriver` /
+   `RelaySourceWorker`, with the source worker making a real loopback request to
+   its own `export.php` in place of the test's subprocess.
 
 Out of scope for now: multi-session concurrency and any of the push-side staging
 store (unused in this model).
