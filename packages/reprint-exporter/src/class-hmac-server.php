@@ -9,6 +9,12 @@
  */
 final class Site_Export_HMAC_Server {
 
+    /**
+     * Content-hash sentinel for requests whose payload is deliberately
+     * unsigned. Must match Site_Export_HMAC_Client::UNSIGNED_PAYLOAD.
+     */
+    public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
+
     private const DEFAULT_MAX_CONTROL_BODY_BYTES = 1048576;
 
     /** @var string */
@@ -135,6 +141,38 @@ final class Site_Export_HMAC_Server {
     }
 
     /**
+     * Verify a request whose payload is deliberately unsigned.
+     *
+     * The signature binds the envelope — nonce, timestamp, method, and
+     * request target — and the content-hash header must carry the literal
+     * UNSIGNED-PAYLOAD sentinel. An envelope signature therefore never
+     * passes body verification and a body signature never passes here.
+     * Payload integrity belongs to TLS; data-plane routes opt into this so
+     * streams flow without buffering or hashing.
+     *
+     * @param string $request_target The "path?query" form of the request URL.
+     */
+    public function verify_envelope(array $headers, string $method, string $request_target, ?float $now = null): ?string {
+        $auth = $this->collect_auth_headers($headers);
+        if ($auth['content_hash'] !== self::UNSIGNED_PAYLOAD) {
+            return 'Envelope verification requires the UNSIGNED-PAYLOAD content hash sentinel';
+        }
+
+        $freshness_error = $this->verify_freshness($auth, $now);
+        if ($freshness_error !== null) {
+            return $freshness_error;
+        }
+
+        $message = $auth['nonce'] . $auth['timestamp'] . self::UNSIGNED_PAYLOAD . "\n" . strtoupper($method) . "\n" . $request_target;
+        $expected_signature = hash_hmac('sha256', $message, $this->secret);
+        if (!hash_equals($expected_signature, $auth['signature'])) {
+            return 'HMAC signature verification failed';
+        }
+
+        return null;
+    }
+
+    /**
      * Verify the current PHP request using superglobals.
      *
      * Returns null on success, or an error string on failure. This legacy
@@ -162,6 +200,25 @@ final class Site_Export_HMAC_Server {
     }
 
     private function verify_auth_headers(array $auth, ?float $now = null): ?string {
+        $freshness_error = $this->verify_freshness($auth, $now);
+        if ($freshness_error !== null) {
+            return $freshness_error;
+        }
+
+        $expected_signature = hash_hmac('sha256', $auth['nonce'] . $auth['timestamp'] . $auth['content_hash'], $this->secret);
+        if (!hash_equals($expected_signature, $auth['signature'])) {
+            return 'HMAC signature verification failed';
+        }
+
+        return null;
+    }
+
+    /**
+     * Checks header presence, timestamp tolerance, and nonce length — the
+     * scheme-independent half of verification. Signature checks differ per
+     * scheme and stay with their callers.
+     */
+    private function verify_freshness(array $auth, ?float $now = null): ?string {
         $signature = $auth['signature'];
         $nonce = $auth['nonce'];
         $timestamp = $auth['timestamp'];
@@ -197,11 +254,6 @@ final class Site_Export_HMAC_Server {
 
         if (strlen($nonce) < 16) {
             return 'Nonce must be at least 16 characters';
-        }
-
-        $expected_signature = hash_hmac('sha256', $nonce . $timestamp . $signed_content_hash, $this->secret);
-        if (!hash_equals($expected_signature, $signature)) {
-            return 'HMAC signature verification failed';
         }
 
         return null;

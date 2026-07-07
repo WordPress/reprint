@@ -206,8 +206,9 @@ Stated here so nobody rediscovers them as surprises:
 Files first, database second, each PR small and stacked in this order:
 
 1. **Design doc** — this file.
-2. **Envelope auth** — headers-only HMAC for data routes, `--force-http`
-   with honest help text.
+2. **Envelope auth** — headers-only HMAC for data routes: the
+   UNSIGNED-PAYLOAD sentinel with method and request target bound into the
+   signature.
 3. **Staged artifact store** — already built (PR #298); rebases here.
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
    the configured storage path; web guards for inside-docroot placement.
@@ -216,7 +217,8 @@ Files first, database second, each PR small and stacked in this order:
 6. **Scoped remote reindex and drift summary** — path-scoped index requests,
    baseline comparison, the summary/confirm UX.
 7. **Upload endpoint** — the store's HTTP surface plus the sender loop with
-   chunk sizing; deletion manifest staged.
+   chunk sizing; deletion manifest staged; `--force-http` with honest help
+   text (the first push networking this flag can gate).
 8. **Package unification** — importer and exporter become one Reprint
    package (lite = serve-only build). Placed here because apply is the
    first piece that needs import-side code running on the remote.
