@@ -51,9 +51,18 @@ class PushJournal
 {
     private string $site_dir;
 
+    public string $local_files_baseline_path;
+    public string $remote_files_baseline_path;
+    public string $upload_list_path;
+    public string $deletion_list_path;
+
     public function __construct(string $state_dir, string $site_url)
     {
         $this->site_dir = rtrim($state_dir, "/") . "/push/" . self::site_key($site_url);
+        $this->local_files_baseline_path = $this->site_dir . "/last-sync-local-files.jsonl";
+        $this->remote_files_baseline_path = $this->site_dir . "/last-sync-remote-files.jsonl";
+        $this->upload_list_path = $this->site_dir . "/upload-list.jsonl";
+        $this->deletion_list_path = $this->site_dir . "/deletion-list.jsonl";
     }
 
     /**
@@ -92,34 +101,14 @@ class PushJournal
         return $slug === "" ? $hash : "{$slug}-{$hash}";
     }
 
-    public function local_files_baseline_path(): string
-    {
-        return $this->site_dir . "/last-sync-local-files.jsonl";
-    }
-
-    public function remote_files_baseline_path(): string
-    {
-        return $this->site_dir . "/last-sync-remote-files.jsonl";
-    }
-
     public function capture_local_files_baseline(string $index_file): void
     {
-        $this->replace_file($this->local_files_baseline_path(), $index_file);
+        $this->replace_file($this->local_files_baseline_path, $index_file);
     }
 
     public function capture_remote_files_baseline(string $index_file): void
     {
-        $this->replace_file($this->remote_files_baseline_path(), $index_file);
-    }
-
-    public function upload_list_path(): string
-    {
-        return $this->site_dir . "/upload-list.jsonl";
-    }
-
-    public function deletion_list_path(): string
-    {
-        return $this->site_dir . "/deletion-list.jsonl";
+        $this->replace_file($this->remote_files_baseline_path, $index_file);
     }
 
     /**
@@ -147,17 +136,16 @@ class PushJournal
         if (!$current_handle) {
             throw new RuntimeException("Failed to open the current index: {$current_index_file}");
         }
-        $baseline_path = $this->local_files_baseline_path();
         $baseline_handle = null;
-        if (is_file($baseline_path)) {
-            $baseline_handle = fopen($baseline_path, "r");
+        if (is_file($this->local_files_baseline_path)) {
+            $baseline_handle = fopen($this->local_files_baseline_path, "r");
             if (!$baseline_handle) {
                 fclose($current_handle);
-                throw new RuntimeException("Failed to open the local baseline: {$baseline_path}");
+                throw new RuntimeException("Failed to open the local baseline: {$this->local_files_baseline_path}");
             }
         }
 
-        $upload_tmp = $this->upload_list_path() . ".tmp";
+        $upload_tmp = $this->upload_list_path . ".tmp";
         $upload_handle = fopen($upload_tmp, "w");
         if (!$upload_handle) {
             fclose($current_handle);
@@ -166,7 +154,7 @@ class PushJournal
             }
             throw new RuntimeException("Failed to open the upload list for writing: {$upload_tmp}");
         }
-        $deletion_tmp = $this->deletion_list_path() . ".tmp";
+        $deletion_tmp = $this->deletion_list_path . ".tmp";
         $deletion_handle = fopen($deletion_tmp, "w");
         if (!$deletion_handle) {
             fclose($current_handle);
@@ -230,11 +218,11 @@ class PushJournal
         if ($baseline_handle) {
             fclose($baseline_handle);
         }
-        if (!fclose($upload_handle) || !rename($upload_tmp, $this->upload_list_path())) {
-            throw new RuntimeException("Failed to move the upload list into place: {$this->upload_list_path()}");
+        if (!fclose($upload_handle) || !rename($upload_tmp, $this->upload_list_path)) {
+            throw new RuntimeException("Failed to move the upload list into place: {$this->upload_list_path}");
         }
-        if (!fclose($deletion_handle) || !rename($deletion_tmp, $this->deletion_list_path())) {
-            throw new RuntimeException("Failed to move the deletion list into place: {$this->deletion_list_path()}");
+        if (!fclose($deletion_handle) || !rename($deletion_tmp, $this->deletion_list_path)) {
+            throw new RuntimeException("Failed to move the deletion list into place: {$this->deletion_list_path}");
         }
 
         return ["changed" => $changed, "deleted" => $deleted];
