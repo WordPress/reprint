@@ -220,3 +220,8 @@ Files first, database second, each PR small and stacked in this order:
     diff generation and URL rewrite, the apply batch.
 11. **`reprint push`** — the one command that orchestrates plan, confirm,
     transfer, apply, resume.
+12. **Budgets and resumable limits** — upload stays bounded by chunk size and
+    explicit request limits; any endpoint that stops after durable work returns
+    the exact committed state the driver needs to retry. The apply step gets
+    the main budgeted loop: process until a deadline or operation limit, return
+    progress, and let the driver re-enter until complete.
