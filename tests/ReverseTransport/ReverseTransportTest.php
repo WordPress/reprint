@@ -13,35 +13,35 @@ require_once __DIR__ . '/../../importer/import.php';
  *
  * An ordinary `files-pull` mirrors a source tree to an fs-root over the reversed
  * single-endpoint channel: the remote (ReverseTransportEndpoint, driving the real
- * ImportClient inline) owns cursors/index/writes; the source (ReverseTransportWorker) is
- * outbound-only and runs its own export.php per command. The worker↔endpoint
+ * ImportClient inline) owns cursors/index/writes; the source (ReverseTransportSource) is
+ * outbound-only and runs its own export.php per command. The source↔endpoint
  * boundary is exactly the wire: raw result bytes as a stream in, small JSON
  * out. No curl, no sockets: just the reverse-transport seam.
  *
- * Also covers the failure story: a crashed worker is replaced by a fresh one
+ * Also covers the failure story: a crashed source is replaced by a fresh one
  * that resumes from the remote's persisted state, and exchange failures are
  * loud errors, never a clean-looking finish.
  */
 final class ReverseTransportTest extends TestCase
 {
-    private string $source;
+    private string $sourceRoot;
     private string $fsRoot;
     private string $stateDir;
 
     protected function setUp(): void
     {
         $suffix         = bin2hex(random_bytes(6));
-        $this->source   = sys_get_temp_dir() . '/reverse-transport-source-' . $suffix;
+        $this->sourceRoot   = sys_get_temp_dir() . '/reverse-transport-source-' . $suffix;
         $this->fsRoot   = sys_get_temp_dir() . '/reverse-transport-fsroot-' . $suffix;
         $this->stateDir = sys_get_temp_dir() . '/reverse-transport-state-' . $suffix;
-        mkdir($this->source, 0700, true);
+        mkdir($this->sourceRoot, 0700, true);
         mkdir($this->fsRoot, 0700, true);
         mkdir($this->stateDir, 0700, true);
     }
 
     protected function tearDown(): void
     {
-        foreach ([$this->source, $this->fsRoot, $this->stateDir] as $dir) {
+        foreach ([$this->sourceRoot, $this->fsRoot, $this->stateDir] as $dir) {
             $this->rmrf($dir);
         }
     }
@@ -86,16 +86,16 @@ final class ReverseTransportTest extends TestCase
 
     private function seedSourceTreeAndPreflight(): void
     {
-        $this->writeFile($this->source, 'index.php', "<?php // home\n");
-        $this->writeFile($this->source, 'wp-content/themes/t/style.css', "body{color:red}\n");
-        $this->writeFile($this->source, 'wp-content/uploads/a.bin', str_repeat("\x00\x01\x02\x03", 500));
-        $this->writeFile($this->source, 'readme.txt', "hello reverse transport\n");
+        $this->writeFile($this->sourceRoot, 'index.php', "<?php // home\n");
+        $this->writeFile($this->sourceRoot, 'wp-content/themes/t/style.css', "body{color:red}\n");
+        $this->writeFile($this->sourceRoot, 'wp-content/uploads/a.bin', str_repeat("\x00\x01\x02\x03", 500));
+        $this->writeFile($this->sourceRoot, 'readme.txt', "hello reverse transport\n");
 
         // Seed preflight so the importer knows which root to enumerate.
         file_put_contents(
             $this->stateDir . '/.import-state.json',
             (string) json_encode([
-                'preflight' => ['data' => ['wp_detect' => ['roots' => [['path' => $this->source]]]]],
+                'preflight' => ['data' => ['wp_detect' => ['roots' => [['path' => $this->sourceRoot]]]]],
             ])
         );
     }
@@ -124,7 +124,7 @@ final class ReverseTransportTest extends TestCase
     {
         $runner = __DIR__ . '/export-runner.php';
         return static function (array $request) use ($runner): array {
-            $stdout = tmpfile(); // deleted automatically when the worker fcloses it
+            $stdout = tmpfile(); // deleted automatically when the source fcloses it
             $descriptors = [0 => ['pipe', 'r'], 1 => $stdout, 2 => ['pipe', 'w']];
             $proc = proc_open([PHP_BINARY, '-d', 'display_errors=stderr', $runner], $descriptors, $pipes);
             fwrite($pipes[0], (string) json_encode($request));
@@ -139,10 +139,10 @@ final class ReverseTransportTest extends TestCase
         };
     }
 
-    /** Builds the worker↔endpoint wire: the in-process stand-in for the HTTP hop. */
-    private function newWorker(\ReverseTransportEndpoint $endpoint): \ReverseTransportWorker
+    /** Builds the source↔endpoint wire: the in-process stand-in for the HTTP hop. */
+    private function newSource(\ReverseTransportEndpoint $endpoint): \ReverseTransportSource
     {
-        return new \ReverseTransportWorker(
+        return new \ReverseTransportSource(
             static fn($resultStream, int $httpCode): string => $endpoint->handle_exchange($resultStream, $httpCode),
             $this->exportRunner()
         );
@@ -157,7 +157,7 @@ final class ReverseTransportTest extends TestCase
         $fsTree = $this->tree($this->fsRoot);
         $this->assertNotEmpty($fsTree, 'the reverse pull wrote files to the fs-root');
         $this->assertSame(
-            array_values($this->tree($this->source)),
+            array_values($this->tree($this->sourceRoot)),
             array_values($fsTree),
             'the fs-root holds exactly the source file contents'
         );
@@ -166,11 +166,11 @@ final class ReverseTransportTest extends TestCase
     public function testFilesPullMirrorsTheSourceOverTheReverseChannel(): void
     {
         $this->seedSourceTreeAndPreflight();
-        $worker = $this->newWorker($this->newEndpoint());
+        $source = $this->newSource($this->newEndpoint());
 
         ob_start();
         try {
-            $worker->run();
+            $source->run();
         } finally {
             ob_end_clean();
         }
@@ -186,7 +186,7 @@ final class ReverseTransportTest extends TestCase
         // random block never matches within the window), so the wire carries
         // ~24 MB and any whole-body buffering shows up as a memory spike of at
         // least that size.
-        $bigFile = $this->source . '/wp-content/uploads/big.bin';
+        $bigFile = $this->sourceRoot . '/wp-content/uploads/big.bin';
         $handle  = fopen($bigFile, 'wb');
         $block   = random_bytes(65536);
         for ($i = 0; $i < 384; $i++) {
@@ -194,12 +194,12 @@ final class ReverseTransportTest extends TestCase
         }
         fclose($handle);
 
-        $worker = $this->newWorker($this->newEndpoint());
+        $source = $this->newSource($this->newEndpoint());
 
         $peakBefore = memory_get_peak_usage(true);
         ob_start();
         try {
-            $worker->run();
+            $source->run();
         } finally {
             ob_end_clean();
         }
@@ -227,19 +227,19 @@ final class ReverseTransportTest extends TestCase
         );
     }
 
-    public function testAFreshWorkerResumesAfterTheFirstOneCrashesMidTransfer(): void
+    public function testAFreshSourceResumesAfterTheFirstOneCrashesMidTransfer(): void
     {
         $this->seedSourceTreeAndPreflight();
         $endpoint = $this->newEndpoint();
 
-        // The first worker dies before delivering the file_fetch result: the
+        // The first source dies before delivering the file_fetch result: the
         // remote has consumed the index and issued the fetch command, but no
         // file bytes have arrived yet.
         $calls   = 0;
-        $crashed = new \ReverseTransportWorker(
+        $crashed = new \ReverseTransportSource(
             static function ($resultStream, int $httpCode) use ($endpoint, &$calls): string {
                 if (++$calls > 2) {
-                    throw new \RuntimeException('worker crashed');
+                    throw new \RuntimeException('source crashed');
                 }
                 return $endpoint->handle_exchange($resultStream, $httpCode);
             },
@@ -249,18 +249,18 @@ final class ReverseTransportTest extends TestCase
         ob_start();
         try {
             $crashed->run();
-            $this->fail('expected the worker to crash');
+            $this->fail('expected the source to crash');
         } catch (\RuntimeException $e) {
-            $this->assertSame('worker crashed', $e->getMessage());
+            $this->assertSame('source crashed', $e->getMessage());
         } finally {
             ob_end_clean();
         }
         $this->assertSame([], $this->tree($this->fsRoot), 'no file bytes were delivered before the crash');
 
-        // The remote kept its own persisted state. A fresh worker starts with
+        // The remote kept its own persisted state. A fresh source starts with
         // no result, the remote re-asks for the request it is missing, and the
         // transfer completes.
-        $resumed = $this->newWorker($endpoint);
+        $resumed = $this->newSource($endpoint);
 
         ob_start();
         try {
@@ -274,33 +274,33 @@ final class ReverseTransportTest extends TestCase
 
     public function testATransportFailureIsAnErrorNotACleanFinish(): void
     {
-        $worker = new \ReverseTransportWorker(
+        $source = new \ReverseTransportSource(
             static fn($resultStream, int $httpCode): string => '<html>502 Bad Gateway</html>',
             static fn(array $request): array => ['http_code' => 200, 'stream' => fopen('php://memory', 'r')]
         );
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('malformed exchange response');
-        $worker->run();
+        $source->run();
     }
 
     public function testARemoteImporterFailureSurfacesWithItsMessage(): void
     {
         // The endpoint converts a non-yield importer failure into the error
-        // status, and the worker surfaces its message instead of finishing.
+        // status, and the source surfaces its message instead of finishing.
         $endpoint = new \ReverseTransportEndpoint(
             static function (): \ImportClient {
                 throw new \RuntimeException('importer exploded');
             },
             []
         );
-        $worker = new \ReverseTransportWorker(
+        $source = new \ReverseTransportSource(
             static fn($resultStream, int $httpCode): string => $endpoint->handle_exchange($resultStream, $httpCode),
             static fn(array $request): array => ['http_code' => 200, 'stream' => fopen('php://memory', 'r')]
         );
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('importer exploded');
-        $worker->run();
+        $source->run();
     }
 }

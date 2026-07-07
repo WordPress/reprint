@@ -7,7 +7,7 @@
  * real importer inline. The importer resumes from its persisted cursor, consumes
  * the delivered result, advances, and issues its next request — which throws
  * TransportYield and unwinds back here, so the carried command is returned to
- * the worker; or it completes, and "done" is returned. The local worker's
+ * the source; or it completes, and "done" is returned. The local source's
  * outbound request is the only trigger, so nothing runs on the remote between
  * exchanges.
  *
@@ -17,7 +17,7 @@
  * once even though the client is recreated.
  *
  * Wire request:  the raw (possibly gzip) result bytes as the request body —
- *                empty on the worker's first exchange — with the reported HTTP
+ *                empty on the source's first exchange — with the reported HTTP
  *                status carried beside it (a header in production, an argument
  *                in-process). The body is deliberately NOT JSON-embedded: a
  *                file_fetch result can be many megabytes, and base64-in-JSON
@@ -27,7 +27,7 @@
  *              | { "status": "command", "command": {...} }
  *              | { "status": "error", "message": string }
  * An importer failure is returned as the error status — this endpoint never
- * throws, so the worker can tell a remote failure from transport garbage.
+ * throws, so the source can tell a remote failure from transport garbage.
  */
 final class ReverseTransportEndpoint
 {
@@ -44,14 +44,14 @@ final class ReverseTransportEndpoint
     }
 
     /**
-     * Handles one exchange: banks the worker-delivered result of the previous
+     * Handles one exchange: banks the source-delivered result of the previous
      * export command, advances the importer by one request, and returns the
      * next command — or "done" / "error" — as the wire-response JSON.
      *
      * @param resource|null $result_stream Raw (possibly gzip) bytes of the
      *     previous command's response, read as a stream so a multi-megabyte
-     *     result is never buffered here. Null on the worker's first exchange.
-     * @param int $result_http_code HTTP status the worker's export run reported.
+     *     result is never buffered here. Null on the source's first exchange.
+     * @param int $result_http_code HTTP status the source's export run reported.
      */
     public function handle_exchange( $result_stream, int $result_http_code = 200 ): string
     {

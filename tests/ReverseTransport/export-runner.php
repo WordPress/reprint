@@ -2,7 +2,7 @@
 /**
  * Source-side export runner for the reverse-transport tests.
  *
- * Stands in for the loopback request a production reverse-transport worker would
+ * Stands in for the loopback request a production reverse-transport source would
  * make to its own site's export.php: reads one synthetic request (JSON on
  * stdin), runs the real export engine, and streams the response to stdout —
  * which export.php writes to after tearing down output buffering. The parent

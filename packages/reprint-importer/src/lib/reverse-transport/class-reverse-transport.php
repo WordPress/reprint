@@ -4,7 +4,7 @@
  * The importer's transport for a reverse (remote-driven) pull.
  *
  * The reverse transport is strictly sequential: the importer issues one export
- * request, the local worker runs it and brings the answer back on its next
+ * request, the local source runs it and brings the answer back on its next
  * outbound call. This object holds that one answer as a STREAM and serves the
  * importer's two fetch shapes from it: fetch_json() reads it whole (JSON
  * endpoint responses are small), fetch_streaming() reads it in bounded chunks —
@@ -12,7 +12,7 @@
  * multi-megabyte file_fetch response is never held in memory. The request after
  * the answered one has nothing to serve, so it throws TransportYield —
  * unwinding the importer back to the exchange endpoint with the command the
- * worker must run next.
+ * source must run next.
  *
  * There is no request/response matching: because the importer resumes
  * deterministically from its persisted cursor, the request it re-issues on
@@ -26,7 +26,7 @@ final class ReverseTransport
     /** @var resource|null Raw (possibly gzip) bytes of the delivered answer, or null on the first exchange. */
     private $result_stream;
 
-    /** @var int HTTP status the worker reported for the delivered answer. */
+    /** @var int HTTP status the source reported for the delivered answer. */
     private $result_http_code;
 
     /** @var bool One answer per exchange; every request after it must yield. */
@@ -135,12 +135,12 @@ final class ReverseTransport
     }
 
     /**
-     * Returns the stream of the worker-delivered result for the importer's
-     * current request, or hands the request to the worker by unwinding.
+     * Returns the stream of the source-delivered result for the importer's
+     * current request, or hands the request to the source by unwinding.
      *
      * @throws TransportYield When no result is left to serve; it carries
      *     $command out to the exchange endpoint, which returns it to the
-     *     worker as the next command to run.
+     *     source as the next command to run.
      * @return resource
      */
     private function serve_delivered_result( array $command )
@@ -156,7 +156,7 @@ final class ReverseTransport
      * Builds the wire command for one export request. A command is the
      * request's identity: its URL (endpoint, cursor, params) plus any POST
      * body. A CURLFile upload (the file_fetch batch list) is inlined base64 so
-     * the outbound worker can reconstruct it against its own export engine —
+     * the outbound source can reconstruct it against its own export engine —
      * the one JSON-embedded payload that can reach megabytes, bounded by the
      * batch-list size the direct path also holds in memory when signing.
      */
@@ -187,7 +187,7 @@ final class ReverseTransport
 
     /**
      * Recovers the multipart boundary from the response body. The exporter
-     * announces it in a Content-Type header, which the worker's export run
+     * announces it in a Content-Type header, which the source's export run
      * cannot capture — but the body opens with the "--<boundary>" delimiter
      * line, so read it back from there (the same fallback the curl path uses
      * when the header is stripped).

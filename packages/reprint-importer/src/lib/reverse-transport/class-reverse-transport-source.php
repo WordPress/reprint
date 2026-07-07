@@ -21,13 +21,13 @@
  *     many megabytes and must never be returned as a string).
  *
  * On any exchange failure — transport garbage, or an error the remote reports —
- * the worker throws; it never re-sends a result. The remote's persisted cursor
+ * the source throws; it never re-sends a result. The remote's persisted cursor
  * is the recovery mechanism: a rerun starts with no result, the remote re-asks
- * for the request it is missing, and the worker re-runs it. Re-sending could
+ * for the request it is missing, and the source re-runs it. Re-sending could
  * hand a stale result to a newer request, since results carry no ids to match
  * against — so the exchange callable must not retry either (no curl --retry).
  */
-final class ReverseTransportWorker
+final class ReverseTransportSource
 {
     /** @var callable fn(?resource $result_stream, int $result_http_code): string $response_json */
     private $send_exchange_request;
@@ -46,7 +46,7 @@ final class ReverseTransportWorker
      * command.
      *
      * @param int $max_exchanges Safety bound so a runaway remote cannot loop
-     *     the worker forever.
+     *     the source forever.
      * @throws RuntimeException When the remote reports an importer error, the
      *     exchange response is malformed, or the bound is exceeded.
      */
@@ -74,19 +74,19 @@ final class ReverseTransportWorker
             }
             if ( $status === "error" ) {
                 throw new RuntimeException(
-                    "reverse transport worker: remote importer error: " .
+                    "reverse transport source: remote importer error: " .
                         (string) ( $response["message"] ?? "(no message)" )
                 );
             }
             if ( $status !== "command" || ! is_array( $response["command"] ?? null ) ) {
                 throw new RuntimeException(
-                    "reverse transport worker: malformed exchange response: " . substr( $response_json, 0, 500 )
+                    "reverse transport source: malformed exchange response: " . substr( $response_json, 0, 500 )
                 );
             }
 
             $result = $this->execute_export_command( $response["command"] );
         }
-        throw new RuntimeException( "reverse transport worker: exceeded max exchanges" );
+        throw new RuntimeException( "reverse transport source: exceeded max exchanges" );
     }
 
     /**
