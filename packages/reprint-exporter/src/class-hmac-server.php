@@ -10,8 +10,9 @@
 final class Site_Export_HMAC_Server {
 
     /**
-     * Content-hash sentinel for requests whose payload is deliberately
-     * unsigned. Must match Site_Export_HMAC_Client::UNSIGNED_PAYLOAD.
+     * Value of the X-Auth-Content-Hash header when the request body is
+     * deliberately not signed: this literal string stands where a body hash
+     * would otherwise be. Must match Site_Export_HMAC_Client::UNSIGNED_PAYLOAD.
      */
     public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 
@@ -141,21 +142,28 @@ final class Site_Export_HMAC_Server {
     }
 
     /**
-     * Verify a request whose payload is deliberately unsigned.
+     * Verify a request whose body is deliberately not signed.
      *
-     * The signature binds the envelope — nonce, timestamp, method, and
-     * request target — and the content-hash header must carry the literal
-     * UNSIGNED-PAYLOAD sentinel. An envelope signature therefore never
-     * passes body verification and a body signature never passes here.
-     * Payload integrity belongs to TLS; data-plane routes opt into this so
-     * streams flow without buffering or hashing.
+     * Instead of a body hash, the signature covers the request itself:
+     * nonce, timestamp, HTTP method, and the request target (the
+     * "path?query" part of the URL). A request body of any size can then
+     * stream through without either side hashing it, and a captured set of
+     * auth headers still cannot be reused for a different endpoint or
+     * method. Protecting the body from tampering is TLS's job.
+     *
+     * The X-Auth-Content-Hash header must be the literal string
+     * UNSIGNED-PAYLOAD. Because of that, headers signed for this check can
+     * never pass the body-signed checks and vice versa — the two signatures
+     * are computed over strings that can never be equal. Each route decides
+     * which check it calls, so a client cannot pick the weaker one for a
+     * control-plane route.
      *
      * @param string $request_target The "path?query" form of the request URL.
      */
     public function verify_envelope(array $headers, string $method, string $request_target, ?float $now = null): ?string {
         $auth = $this->collect_auth_headers($headers);
         if ($auth['content_hash'] !== self::UNSIGNED_PAYLOAD) {
-            return 'Envelope verification requires the UNSIGNED-PAYLOAD content hash sentinel';
+            return 'Envelope verification requires the literal UNSIGNED-PAYLOAD content hash';
         }
 
         $freshness_error = $this->verify_freshness($auth, $now);
@@ -214,9 +222,10 @@ final class Site_Export_HMAC_Server {
     }
 
     /**
-     * Checks header presence, timestamp tolerance, and nonce length — the
-     * scheme-independent half of verification. Signature checks differ per
-     * scheme and stay with their callers.
+     * Checks header presence, timestamp tolerance, and nonce length —
+     * everything except the signature. Body-signed and envelope-signed
+     * requests compute their signatures over different strings, so each
+     * caller does its own signature check after this passes.
      */
     private function verify_freshness(array $auth, ?float $now = null): ?string {
         $signature = $auth['signature'];
