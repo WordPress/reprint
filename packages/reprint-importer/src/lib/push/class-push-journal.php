@@ -23,9 +23,10 @@
  * together — both are sorted by path, so one pass suffices — and writes
  * two lists into the site directory:
  *
- *     upload-list.jsonl     paths new since the baseline, or whose ctime,
- *                           size, or type differs
- *     deletion-list.jsonl   paths in the baseline but gone from the index
+ *     local-paths-to-push.jsonl    paths new since the baseline, or whose
+ *                                  ctime, size, or type differs
+ *     local-paths-to-delete.jsonl  paths in the baseline but gone from the
+ *                                  current index
  *
  * The diff parses one JSON line at a time from each input. Ordering compares
  * decoded paths; two entries with the same path count as unchanged when their
@@ -54,19 +55,19 @@ class PushJournal
     /** @var string Copy of the remote file index from the last completed push. */
     public string $remote_files_baseline_path;
 
-    /** @var string Paths to upload, written by diff_local_files(). */
-    public string $upload_list_path;
+    /** @var string JSONL file of local paths to push, written by diff_local_files(). */
+    public string $local_paths_to_push;
 
-    /** @var string Paths deleted locally since the baseline, written by diff_local_files(). */
-    public string $deletion_list_path;
+    /** @var string JSONL file of local paths whose deletion should be pushed, written by diff_local_files(). */
+    public string $local_paths_to_delete;
 
     public function __construct(string $state_dir, string $site_url)
     {
         $this->site_dir = rtrim($state_dir, "/") . "/push/" . self::site_key($site_url);
         $this->local_files_baseline_path = $this->site_dir . "/last-sync-local-files.jsonl";
         $this->remote_files_baseline_path = $this->site_dir . "/last-sync-remote-files.jsonl";
-        $this->upload_list_path = $this->site_dir . "/upload-list.jsonl";
-        $this->deletion_list_path = $this->site_dir . "/deletion-list.jsonl";
+        $this->local_paths_to_push = $this->site_dir . "/local-paths-to-push.jsonl";
+        $this->local_paths_to_delete = $this->site_dir . "/local-paths-to-delete.jsonl";
     }
 
     /**
@@ -131,15 +132,15 @@ class PushJournal
 
     /**
      * Compare the current local index against the local baseline and write
-     * upload-list.jsonl and deletion-list.jsonl, replacing any lists from
-     * an earlier run.
+     * the local paths to push and local paths to delete, replacing any lists
+     * from an earlier run.
      *
      * A single merge pass over the two path-sorted files: a path only in
      * the current index is new, a path in both whose lines differ has
-     * changed (both go to the upload list), a path only in the baseline
-     * was deleted. Unchanged paths produce no output. Each list is written
-     * to a temporary file and renamed into place, so a killed run never
-     * leaves a torn line behind.
+     * changed (both go to local_paths_to_push), a path only in the baseline
+     * was deleted (it goes to local_paths_to_delete). Unchanged paths produce
+     * no output. Each list is written to a temporary file and renamed into
+     * place, so a killed run never leaves a torn line behind.
      *
      * Memory stays constant however large the site is: the merge holds one
      * line from each input file and the lists go straight to disk, so an
@@ -167,24 +168,24 @@ class PushJournal
             }
         }
 
-        $upload_tmp = $this->upload_list_path . ".tmp";
-        $upload_handle = fopen($upload_tmp, "w");
-        if (!$upload_handle) {
+        $local_paths_to_push_tmp = $this->local_paths_to_push . ".tmp";
+        $paths_to_push_handle = fopen($local_paths_to_push_tmp, "w");
+        if (!$paths_to_push_handle) {
             fclose($current_handle);
             if ($baseline_handle) {
                 fclose($baseline_handle);
             }
-            throw new RuntimeException("Failed to open the upload list for writing: {$upload_tmp}");
+            throw new RuntimeException("Failed to open local_paths_to_push for writing: {$local_paths_to_push_tmp}");
         }
-        $deletion_tmp = $this->deletion_list_path . ".tmp";
-        $deletion_handle = fopen($deletion_tmp, "w");
-        if (!$deletion_handle) {
+        $local_paths_to_delete_tmp = $this->local_paths_to_delete . ".tmp";
+        $paths_to_delete_handle = fopen($local_paths_to_delete_tmp, "w");
+        if (!$paths_to_delete_handle) {
             fclose($current_handle);
             if ($baseline_handle) {
                 fclose($baseline_handle);
             }
-            fclose($upload_handle);
-            throw new RuntimeException("Failed to open the deletion list for writing: {$deletion_tmp}");
+            fclose($paths_to_push_handle);
+            throw new RuntimeException("Failed to open local_paths_to_delete for writing: {$local_paths_to_delete_tmp}");
         }
 
         $changed = 0;
@@ -206,16 +207,16 @@ class PushJournal
             if ($order < 0) {
                 // Only in the current index: new since the last push.
                 $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                if (fwrite($upload_handle, $out) !== strlen($out)) {
-                    throw new RuntimeException("Short write on the upload list, is the disk full?");
+                if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
+                    throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
                 }
                 $changed++;
                 $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
             } elseif ($order > 0) {
                 // Only in the baseline: deleted since the last push.
                 $out = json_encode(["path" => $baseline_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                if (fwrite($deletion_handle, $out) !== strlen($out)) {
-                    throw new RuntimeException("Short write on the deletion list, is the disk full?");
+                if (fwrite($paths_to_delete_handle, $out) !== strlen($out)) {
+                    throw new RuntimeException("Short write on local_paths_to_delete, is the disk full?");
                 }
                 $deleted++;
                 $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
@@ -226,8 +227,8 @@ class PushJournal
                 // wasted re-upload, never a missed one).
                 if ($current_entry != $baseline_entry) {
                     $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                    if (fwrite($upload_handle, $out) !== strlen($out)) {
-                        throw new RuntimeException("Short write on the upload list, is the disk full?");
+                    if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
+                        throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
                     }
                     $changed++;
                 }
@@ -240,11 +241,11 @@ class PushJournal
         if ($baseline_handle) {
             fclose($baseline_handle);
         }
-        if (!fclose($upload_handle) || !rename($upload_tmp, $this->upload_list_path)) {
-            throw new RuntimeException("Failed to move the upload list into place: {$this->upload_list_path}");
+        if (!fclose($paths_to_push_handle) || !rename($local_paths_to_push_tmp, $this->local_paths_to_push)) {
+            throw new RuntimeException("Failed to move local_paths_to_push into place: {$this->local_paths_to_push}");
         }
-        if (!fclose($deletion_handle) || !rename($deletion_tmp, $this->deletion_list_path)) {
-            throw new RuntimeException("Failed to move the deletion list into place: {$this->deletion_list_path}");
+        if (!fclose($paths_to_delete_handle) || !rename($local_paths_to_delete_tmp, $this->local_paths_to_delete)) {
+            throw new RuntimeException("Failed to move local_paths_to_delete into place: {$this->local_paths_to_delete}");
         }
 
         return ["changed" => $changed, "deleted" => $deleted];

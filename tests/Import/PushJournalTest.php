@@ -122,13 +122,13 @@ final class PushJournalTest extends TestCase
         $this->assertSame(['changed' => 3, 'deleted' => 0], $counts);
         $this->assertSame(
             ['index.php', 'wp-content', 'wp-content/themes/foo/style.css'],
-            $this->listPaths($journal->upload_list_path)
+            $this->listPaths($journal->local_paths_to_push)
         );
-        $this->assertSame([], $this->listPaths($journal->deletion_list_path));
+        $this->assertSame([], $this->listPaths($journal->local_paths_to_delete));
 
         // Pin the exact bytes: one {"path": <base64>} object per line, the
         // .import-download-list.jsonl shape.
-        $firstLine = strtok((string) file_get_contents($journal->upload_list_path), "\n");
+        $firstLine = strtok((string) file_get_contents($journal->local_paths_to_push), "\n");
         $this->assertSame('{"path":"' . base64_encode('index.php') . '"}', $firstLine);
     }
 
@@ -142,8 +142,8 @@ final class PushJournalTest extends TestCase
         $journal->capture_local_files_baseline($index);
 
         $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($index));
-        $this->assertSame([], $this->listPaths($journal->upload_list_path));
-        $this->assertSame([], $this->listPaths($journal->deletion_list_path));
+        $this->assertSame([], $this->listPaths($journal->local_paths_to_push));
+        $this->assertSame([], $this->listPaths($journal->local_paths_to_delete));
     }
 
     public function testCtimeSizeOrTypeChangeEachMarkThePathChanged(): void
@@ -166,7 +166,7 @@ final class PushJournalTest extends TestCase
         $this->assertSame(['changed' => 3, 'deleted' => 0], $counts);
         $this->assertSame(
             ['ctime-bump.txt', 'size-bump.txt', 'type-swap'],
-            $this->listPaths($journal->upload_list_path)
+            $this->listPaths($journal->local_paths_to_push)
         );
     }
 
@@ -187,8 +187,8 @@ final class PushJournalTest extends TestCase
 
         $this->assertSame(['changed' => 2, 'deleted' => 1], $counts);
         // Output order follows the sorted index order.
-        $this->assertSame(['added.txt', 'changed.txt'], $this->listPaths($journal->upload_list_path));
-        $this->assertSame(['deleted.txt'], $this->listPaths($journal->deletion_list_path));
+        $this->assertSame(['added.txt', 'changed.txt'], $this->listPaths($journal->local_paths_to_push));
+        $this->assertSame(['deleted.txt'], $this->listPaths($journal->local_paths_to_delete));
     }
 
     public function testDiffReplacesListsFromAnEarlierRun(): void
@@ -196,16 +196,16 @@ final class PushJournalTest extends TestCase
         $journal = $this->makeJournal();
         $index = $this->writeIndex(['a.txt' => [100, 5, 'file']]);
 
-        // First run, no baseline: a.txt lands on the upload list.
+        // First run, no baseline: a.txt lands in local_paths_to_push.
         $journal->diff_local_files($index);
-        $this->assertSame(['a.txt'], $this->listPaths($journal->upload_list_path));
+        $this->assertSame(['a.txt'], $this->listPaths($journal->local_paths_to_push));
 
         // Capture and rerun: the old list must be replaced, not appended to.
         $journal->capture_local_files_baseline($index);
         $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($index));
-        $this->assertSame([], $this->listPaths($journal->upload_list_path));
-        $this->assertFileDoesNotExist($journal->upload_list_path . '.tmp');
-        $this->assertFileDoesNotExist($journal->deletion_list_path . '.tmp');
+        $this->assertSame([], $this->listPaths($journal->local_paths_to_push));
+        $this->assertFileDoesNotExist($journal->local_paths_to_push . '.tmp');
+        $this->assertFileDoesNotExist($journal->local_paths_to_delete . '.tmp');
     }
 
     public function testPathsThatNeedBase64SurviveTheRoundTrip(): void
@@ -224,7 +224,7 @@ final class PushJournalTest extends TestCase
         $this->assertSame(['changed' => 2, 'deleted' => 0], $counts);
         $this->assertEqualsCanonicalizing(
             [$weird, $utf8],
-            $this->listPaths($journal->upload_list_path)
+            $this->listPaths($journal->local_paths_to_push)
         );
     }
 
@@ -248,8 +248,8 @@ final class PushJournalTest extends TestCase
         $journal->capture_local_files_baseline($baseline);
 
         $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($current));
-        $this->assertSame([], $this->listPaths($journal->upload_list_path));
-        $this->assertSame([], $this->listPaths($journal->deletion_list_path));
+        $this->assertSame([], $this->listPaths($journal->local_paths_to_push));
+        $this->assertSame([], $this->listPaths($journal->local_paths_to_delete));
     }
 
     public function testDiffRejectsLinesTheIndexWritersDoNotProduce(): void
@@ -324,7 +324,7 @@ final class PushJournalTest extends TestCase
     }
 
     /**
-     * Decode the paths from an upload/deletion list ({"path": <base64>} lines).
+     * Decode a {"path": <base64>} JSONL list.
      *
      * @return list<string>
      */
