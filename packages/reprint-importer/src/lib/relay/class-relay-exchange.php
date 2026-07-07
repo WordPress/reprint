@@ -17,8 +17,12 @@
  * once even though the client is recreated.
  *
  * Wire request:  { "result": { "http_code": int, "body_b64": string } | null }
- * Wire response: { "status": "done" } | { "status": "command", "command": {...} }
- * The result body is raw (gunzipped) multipart bytes, so it rides base64.
+ * Wire response: { "status": "done" }
+ *              | { "status": "command", "command": {...} }
+ *              | { "status": "error", "message": string }
+ * The result body is raw (gunzipped) multipart bytes, so it rides base64. An
+ * importer failure is returned as the error status — the handler never throws,
+ * so the worker can tell a remote failure from transport garbage.
  */
 final class RelayExchange
 {
@@ -59,6 +63,13 @@ final class RelayExchange
                 array(
                     "status"  => "command",
                     "command" => $yield->command,
+                )
+            );
+        } catch ( \Throwable $e ) {
+            return (string) json_encode(
+                array(
+                    "status"  => "error",
+                    "message" => $e->getMessage(),
                 )
             );
         }

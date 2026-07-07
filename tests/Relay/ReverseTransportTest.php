@@ -17,6 +17,10 @@ require_once __DIR__ . '/../../importer/import.php';
  * outbound-only and runs its own export.php per command. The worker↔endpoint
  * boundary is JSON strings — exactly the wire — so the binary result body rides
  * base64. No curl, no sockets: just the relay seam.
+ *
+ * Also covers the failure story: a crashed worker is replaced by a fresh one
+ * that resumes from the remote's persisted state, and exchange failures are
+ * loud errors, never a clean-looking finish.
  */
 final class ReverseTransportTest extends TestCase
 {
@@ -80,7 +84,7 @@ final class ReverseTransportTest extends TestCase
         return $out;
     }
 
-    public function testFilesPullMirrorsTheSourceOverTheReverseChannel(): void
+    private function seedSourceTreeAndPreflight(): void
     {
         $this->put($this->source, 'index.php', "<?php // home\n");
         $this->put($this->source, 'wp-content/themes/t/style.css', "body{color:red}\n");
@@ -94,14 +98,30 @@ final class ReverseTransportTest extends TestCase
                 'preflight' => ['data' => ['wp_detect' => ['roots' => [['path' => $this->source]]]]],
             ])
         );
+    }
 
-        // The source's own export engine, run in a subprocess per command
-        // (the exporter tears down output buffering to stream, so it can only be
-        // captured from a real output stream; display_errors=stderr keeps PHP
-        // startup notices out of the response). Production would loopback into
-        // the source's export.php over HTTP instead.
+    /** The remote endpoint, driving the real importer against this test's dirs. */
+    private function newExchange(): \RelayExchange
+    {
+        $stateDir = $this->stateDir;
+        $fsRoot   = $this->fsRoot;
+        return new \RelayExchange(
+            static fn() => new \ImportClient('http://relay.invalid/export.php', $stateDir, $fsRoot),
+            ['command' => 'files-pull', 'follow_symlinks' => false, 'verbose' => false]
+        );
+    }
+
+    /**
+     * The source's own export engine, run in a subprocess per command (the
+     * exporter tears down output buffering to stream, so it can only be
+     * captured from a real output stream; display_errors=stderr keeps PHP
+     * startup notices out of the response). Production would loopback into
+     * the source's export.php over HTTP instead.
+     */
+    private function exportRunner(): callable
+    {
         $runner = __DIR__ . '/export-runner.php';
-        $runExport = static function (array $request) use ($runner): string {
+        return static function (array $request) use ($runner): string {
             $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
             $proc = proc_open([PHP_BINARY, '-d', 'display_errors=stderr', $runner], $descriptors, $pipes);
             fwrite($pipes[0], (string) json_encode($request));
@@ -112,38 +132,120 @@ final class ReverseTransportTest extends TestCase
             proc_close($proc);
             return $body;
         };
+    }
 
-        // The remote endpoint drives the real importer inline.
-        $stateDir = $this->stateDir;
-        $fsRoot   = $this->fsRoot;
-        $exchange = new \RelayExchange(
-            static fn() => new \ImportClient('http://relay.invalid/export.php', $stateDir, $fsRoot),
-            ['command' => 'files-pull', 'follow_symlinks' => false, 'verbose' => false]
+    /**
+     * Every source file landed on the remote, byte-for-byte. Compare by
+     * contents so the assertion is independent of path-mapping style.
+     */
+    private function assertFsRootMirrorsSource(): void
+    {
+        $fsTree = $this->tree($this->fsRoot);
+        $this->assertNotEmpty($fsTree, 'the reverse pull wrote files to the fs-root');
+        $this->assertSame(
+            array_values($this->tree($this->source)),
+            array_values($fsTree),
+            'the fs-root holds exactly the source file contents'
         );
+    }
 
-        // The outbound-only source talks to it over JSON strings.
-        $source = new \RelaySource(
+    public function testFilesPullMirrorsTheSourceOverTheReverseChannel(): void
+    {
+        $this->seedSourceTreeAndPreflight();
+        $exchange = $this->newExchange();
+
+        $worker = new \RelaySource(
             static fn(string $requestJson): string => $exchange->handle_json($requestJson),
-            $runExport
+            $this->exportRunner()
         );
 
         ob_start();
         try {
-            $source->run();
+            $worker->run();
         } finally {
             ob_end_clean();
         }
 
-        // Every source file landed on the remote, byte-for-byte. Compare by
-        // contents so the assertion is independent of path-mapping style.
-        $sourceTree = $this->tree($this->source);
-        $fsTree     = $this->tree($this->fsRoot);
+        $this->assertFsRootMirrorsSource();
+    }
 
-        $this->assertNotEmpty($fsTree, 'the reverse pull wrote files to the fs-root');
-        $this->assertSame(
-            array_values($sourceTree),
-            array_values($fsTree),
-            'the fs-root holds exactly the source file contents'
+    public function testAFreshWorkerResumesAfterTheFirstOneCrashesMidTransfer(): void
+    {
+        $this->seedSourceTreeAndPreflight();
+        $exchange = $this->newExchange();
+
+        // The first worker dies before delivering the file_fetch result: the
+        // remote has consumed the index and issued the fetch command, but no
+        // file bytes have arrived yet.
+        $calls   = 0;
+        $crashed = new \RelaySource(
+            static function (string $requestJson) use ($exchange, &$calls): string {
+                if (++$calls > 2) {
+                    throw new \RuntimeException('worker crashed');
+                }
+                return $exchange->handle_json($requestJson);
+            },
+            $this->exportRunner()
         );
+
+        ob_start();
+        try {
+            $crashed->run();
+            $this->fail('expected the worker to crash');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('worker crashed', $e->getMessage());
+        } finally {
+            ob_end_clean();
+        }
+        $this->assertSame([], $this->tree($this->fsRoot), 'no file bytes were delivered before the crash');
+
+        // The remote kept its own persisted state. A fresh worker starts with
+        // no result, the remote re-asks for the request it is missing, and the
+        // transfer completes.
+        $resumed = new \RelaySource(
+            static fn(string $requestJson): string => $exchange->handle_json($requestJson),
+            $this->exportRunner()
+        );
+
+        ob_start();
+        try {
+            $resumed->run();
+        } finally {
+            ob_end_clean();
+        }
+
+        $this->assertFsRootMirrorsSource();
+    }
+
+    public function testATransportFailureIsAnErrorNotACleanFinish(): void
+    {
+        $worker = new \RelaySource(
+            static fn(string $requestJson): string => '<html>502 Bad Gateway</html>',
+            static fn(array $request): string => ''
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('malformed exchange response');
+        $worker->run();
+    }
+
+    public function testARemoteImporterFailureSurfacesWithItsMessage(): void
+    {
+        // The endpoint converts a non-yield importer failure into the error
+        // status, and the worker surfaces its message instead of finishing.
+        $exchange = new \RelayExchange(
+            static function (): \ImportClient {
+                throw new \RuntimeException('importer exploded');
+            },
+            []
+        );
+        $worker = new \RelaySource(
+            static fn(string $requestJson): string => $exchange->handle_json($requestJson),
+            static fn(array $request): string => ''
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('importer exploded');
+        $worker->run();
     }
 }

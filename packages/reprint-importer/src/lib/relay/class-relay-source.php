@@ -16,6 +16,13 @@
  *   - $run_export: fn(array $request): string — run the source's export engine
  *     for one request and return its raw response bytes (a loopback request to
  *     the source's own export.php in production).
+ *
+ * On any exchange failure — transport garbage, or an error the remote reports —
+ * the worker throws; it never re-sends a result. The remote's persisted cursor
+ * is the recovery mechanism: a rerun starts with no result, the remote re-asks
+ * for the request it is missing, and the worker re-runs it. Re-sending could
+ * hand a stale result to a newer request, since results carry no ids to match
+ * against — so the exchange callable must not retry either (no curl --retry).
  */
 final class RelaySource
 {
@@ -43,15 +50,26 @@ final class RelaySource
                 );
             }
 
-            $response = json_decode(
-                call_user_func( $this->exchange, (string) json_encode( $request ) ),
-                true
-            );
-            if ( ! is_array( $response ) || ( $response["status"] ?? "" ) === "done" ) {
+            $response_json = (string) call_user_func( $this->exchange, (string) json_encode( $request ) );
+            $response      = json_decode( $response_json, true );
+            $status        = is_array( $response ) ? ( $response["status"] ?? null ) : null;
+
+            if ( $status === "done" ) {
                 return;
             }
+            if ( $status === "error" ) {
+                throw new RuntimeException(
+                    "relay source: remote importer error: " .
+                        (string) ( $response["message"] ?? "(no message)" )
+                );
+            }
+            if ( $status !== "command" || ! is_array( $response["command"] ?? null ) ) {
+                throw new RuntimeException(
+                    "relay source: malformed exchange response: " . substr( $response_json, 0, 500 )
+                );
+            }
 
-            $result = $this->execute( (array) ( $response["command"] ?? array() ) );
+            $result = $this->execute( $response["command"] );
         }
         throw new RuntimeException( "relay source: exceeded max exchanges" );
     }
