@@ -64,6 +64,9 @@ final class FileIndexSkipDefaultsTest extends TestCase
 
         $this->assertSame([], reprint_storage_index_exclusions([]));
         $this->assertSame([], reprint_storage_index_exclusions(['storage_path' => '']));
+        // A relative path could never match the traversal's absolute paths;
+        // when it does not exist, there is no realpath() to exclude through.
+        $this->assertSame([], reprint_storage_index_exclusions(['storage_path' => 'no/such/dir']));
         $this->assertSame(
             ['/srv/site/reprint-storage'],
             reprint_storage_index_exclusions(['storage_path' => '/srv/site/reprint-storage/'])

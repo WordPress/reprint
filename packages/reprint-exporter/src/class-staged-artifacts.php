@@ -613,7 +613,8 @@ final class Site_Export_Staged_Artifacts {
      * Best-effort deny rules for staging directories inside the document
      * root. Some hosts allow writing nowhere else, and anything under the
      * document root is servable: Apache honors the .htaccess, and the blank
-     * index.php blunts directory listings elsewhere. Failures are ignored —
+     * index.php keeps the staging root itself from listing its contents on
+     * servers that ignore .htaccess. Failures are ignored —
      * the store works the same either way, and placing the staging directory
      * outside the web-served tree remains the endpoint's first advice.
      */

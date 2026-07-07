@@ -3593,12 +3593,20 @@ function reprint_storage_covers_path(string $path, array $storage_paths): bool
 }
 
 /**
- * The raw and resolved forms of the configured reprint storage path, for
- * index exclusion. Empty when no storage path is configured.
+ * The configured reprint storage path in the forms the exclusion checks
+ * compare against: the path as configured, plus its realpath() when that
+ * resolves to something different. Empty when no storage path is configured.
  *
- * The raw form keeps the per-entry check syscall-free (see the pre-stat
- * exclusion in the traversal loop); the resolved form lets the descent
- * check stop symlinked routes into the same directory.
+ * The as-configured form lets the per-entry check stay a plain string
+ * comparison with no filesystem access (see the pre-stat exclusion in the
+ * traversal loop); the realpath() form lets the descent check stop
+ * symlinked routes into the same directory.
+ *
+ * Only absolute paths are returned, because the traversal compares
+ * absolute paths — a relative form could never match anything and would
+ * silently turn the exclusion off. Configuring an absolute path is the
+ * endpoint's job; a relative value still excludes through its realpath()
+ * when the directory exists.
  *
  * @return array<int,string> Absolute paths without a trailing slash.
  */
@@ -3613,9 +3621,12 @@ function reprint_storage_index_exclusions(array $config): array
         return [];
     }
 
-    $paths = [$configured];
+    $paths = [];
+    if ($configured[0] === "/") {
+        $paths[] = $configured;
+    }
     $real = realpath($configured);
-    if ($real !== false && $real !== $configured) {
+    if ($real !== false && !in_array($real, $paths, true)) {
         $paths[] = $real;
     }
 
