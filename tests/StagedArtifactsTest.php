@@ -458,10 +458,13 @@ final class StagedArtifactsTest extends TestCase
         $this->assertFileExists($this->staging_dir . '/state.json');
     }
 
-    public function testStagingDirectoryGetsWebGuards(): void
+    public function testStagingDirectoryGetsItsMarkerFiles(): void
     {
         $store = $this->makeStore();
         $store->append('artifact-1', 0, 'bytes');
+
+        $brand = file_get_contents($this->staging_dir . '/.reprint-storage');
+        $this->assertStringContainsString('Reprint', $brand);
 
         $htaccess = file_get_contents($this->staging_dir . '/.htaccess');
         $this->assertStringContainsString('Require all denied', $htaccess);
@@ -472,6 +475,7 @@ final class StagedArtifactsTest extends TestCase
         // stages site files with the same names.
         $this->assertSame('accepted', $store->append('.htaccess', 0, 'site rules')['status']);
         $this->assertSame('site rules', file_get_contents($this->staging_dir . '/files/.htaccess'));
+        $this->assertSame('accepted', $store->append('.reprint-storage', 0, 'site file')['status']);
     }
 
     public function testSiteFilenamesThatLookLikeStagingRecordsStageVerbatim(): void

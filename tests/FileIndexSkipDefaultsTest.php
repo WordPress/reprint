@@ -241,6 +241,16 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertContains('wp-content/themes/foo/style.css~', $rel);
     }
 
+    public function testReprintDirIsStorageChecksTheBrandFile(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+
+        mkdir($this->tempDir . '/branded');
+        $this->assertFalse(reprint_dir_is_storage($this->tempDir . '/branded'));
+        file_put_contents($this->tempDir . '/branded/.reprint-storage', 'brand');
+        $this->assertTrue(reprint_dir_is_storage($this->tempDir . '/branded'));
+    }
+
     public function testFileIndexNeverListsReprintStorage(): void
     {
         $siteDir = $this->buildFixtureSite();
@@ -252,6 +262,11 @@ final class FileIndexSkipDefaultsTest extends TestCase
         file_put_contents($storage . '/state.json', '{}');
         mkdir($siteDir . '/wp-content/reprint-storage-2', 0755, true);
         file_put_contents($siteDir . '/wp-content/reprint-storage-2/keep.txt', 'mine');
+        // A branded directory no configuration names — the situation when a
+        // peer pulls from this site and finds another reprint's storage.
+        mkdir($siteDir . '/wp-content/other-site-storage', 0755, true);
+        file_put_contents($siteDir . '/wp-content/other-site-storage/.reprint-storage', 'brand');
+        file_put_contents($siteDir . '/wp-content/other-site-storage/state.json', '{}');
 
         $rel = $this->relativePaths(
             $this->runFileIndexEntries($siteDir, false, 5000, $storage),
@@ -262,6 +277,8 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/reprint-storage/state.json', $rel);
         $this->assertNotContains('wp-content/reprint-storage/files/wp-content/themes/foo/style.css', $rel);
         $this->assertContains('wp-content/reprint-storage-2/keep.txt', $rel, 'a shared name prefix must not widen the exclusion');
+        $this->assertNotContains('wp-content/other-site-storage', $rel);
+        $this->assertNotContains('wp-content/other-site-storage/state.json', $rel);
 
         // include_caches=1 turns the junk filter off; it must not turn the
         // storage exclusion off.
@@ -271,6 +288,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
         );
         $this->assertContains('wp-content/cache/page.html', $withCaches);
         $this->assertNotContains('wp-content/reprint-storage/state.json', $withCaches);
+        $this->assertNotContains('wp-content/other-site-storage/state.json', $withCaches);
     }
 
     public function testFileIndexFilterDoesNotBreakResume(): void

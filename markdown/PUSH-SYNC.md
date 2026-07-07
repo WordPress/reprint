@@ -116,12 +116,16 @@ The remote is configured with one storage path for everything reprint keeps:
 the staging area and any apply bookkeeping. Preferably outside the document
 root. When the host only allows writing inside the document root:
 
-- the file indexer hard-excludes the configured path — it never appears in
-  any index, so it is never synced in either direction,
+- the file indexer skips it two ways: the configured path is excluded,
+  and the directory itself carries a `.reprint-storage` brand file, so
+  any reprint indexer skips it even when no configuration names it — a
+  peer pulling from this site never scans another site's staging data,
 - the deletion step refuses to touch anything under it,
-- best-effort web guards are written into it (`.htaccess` deny-all and an
-  empty `index.php`), since anything under the document root is otherwise
-  servable.
+- an `.htaccess` (deny-all) and an empty `index.php` are written into
+  it. That is all that can be done from inside the directory: Apache
+  honors the deny rules, nginx ignores both files and loses nothing by
+  their presence. Do not keep this directory inside the document root
+  unless the host offers nowhere else to write.
 
 ## Apply
 

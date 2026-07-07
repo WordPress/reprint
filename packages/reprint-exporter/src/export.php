@@ -3095,6 +3095,14 @@ function endpoint_file_index(
                     $type = "other";
                 }
 
+                // A directory branded as reprint storage never appears in an
+                // index, even when this request's config does not name it —
+                // a peer pulling from this site must not scan another
+                // reprint's staging data. One file_exists per directory.
+                if ($type === "dir" && reprint_dir_is_storage($path)) {
+                    continue;
+                }
+
                 $ctime = (int) ($stat["ctime"] ?? 0);
                 $size = $type === "file" ? (int) ($stat["size"] ?? 0) : 0;
 
@@ -3549,32 +3557,20 @@ function path_head_looks_like_text(string $path): bool
 }
 
 /**
- * Returns true if $path is a generated cache file, version-control or
- * dev-tooling artifact, or OS-level junk that is not worth shipping in
- * a typical site migration.
+ * True when the directory carries reprint's storage brand file.
  *
- * Matching rules:
- *
- *   - Path-component-aware: a segment that *contains* a skipped name as a
- *     substring (e.g. "cache-control" or "node_modules-backup") does NOT
- *     trigger a skip. Only whole-segment matches do. This is done by
- *     wrapping `/` around both the haystack and needle and doing a
- *     substring check.
- *
- *   - Cache/upgrade dirs are matched only under `wp-content/` so a user
- *     directory literally called `cache` in some other tree doesn't
- *     silently disappear.
- *
- *   - Dotfiles that ship in real WordPress sites — `.htaccess`,
- *     `.user.ini`, `.well-known/` — are preserved. Editor/VCS dotfiles
- *     and macOS metadata are not.
- *
- * The default deny-list is conservative: false-negatives (something we
- * could have skipped but didn't) are mere wire-byte waste; false-positives
- * (something the user actually wanted) are silent data loss. Callers
- * opting in to a more aggressive filter can pass extra patterns; callers
- * who want everything can set include_caches=1 on the request.
+ * The staging store writes a ".reprint-storage" file into its directory on
+ * first use (Site_Export_Staged_Artifacts::STORAGE_BRAND_FILE — the two
+ * names must match). The brand makes the exclusion self-contained: the
+ * indexer skips the directory even when the request's config names no
+ * storage path, which is exactly the situation when a peer pulls from
+ * this site.
  */
+function reprint_dir_is_storage(string $dir_path): bool
+{
+    return file_exists($dir_path . "/.reprint-storage");
+}
+
 /**
  * True when $path is the reprint storage directory or lies inside it.
  *
@@ -3633,6 +3629,33 @@ function reprint_storage_index_exclusions(array $config): array
     return $paths;
 }
 
+/**
+ * Returns true if $path is a generated cache file, version-control or
+ * dev-tooling artifact, or OS-level junk that is not worth shipping in
+ * a typical site migration.
+ *
+ * Matching rules:
+ *
+ *   - Path-component-aware: a segment that *contains* a skipped name as a
+ *     substring (e.g. "cache-control" or "node_modules-backup") does NOT
+ *     trigger a skip. Only whole-segment matches do. This is done by
+ *     wrapping `/` around both the haystack and needle and doing a
+ *     substring check.
+ *
+ *   - Cache/upgrade dirs are matched only under `wp-content/` so a user
+ *     directory literally called `cache` in some other tree doesn't
+ *     silently disappear.
+ *
+ *   - Dotfiles that ship in real WordPress sites — `.htaccess`,
+ *     `.user.ini`, `.well-known/` — are preserved. Editor/VCS dotfiles
+ *     and macOS metadata are not.
+ *
+ * The default deny-list is conservative: false-negatives (something we
+ * could have skipped but didn't) are mere wire-byte waste; false-positives
+ * (something the user actually wanted) are silent data loss. Callers
+ * opting in to a more aggressive filter can pass extra patterns; callers
+ * who want everything can set include_caches=1 on the request.
+ */
 function path_is_default_skipped(string $path): bool
 {
     // Sentinel slashes on each side make "starts-with" / "ends-with" /
