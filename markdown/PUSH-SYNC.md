@@ -96,8 +96,10 @@ the drift summary.
 ## The staging store
 
 The staging area is `Site_Export_Staged_Artifacts` as built: artifact bytes
-at plain target-relative paths under `files/`, a rename-atomic cursor in
-`state.json`, an append-only `verified.jsonl`, one `lock` file. The caller
+at plain target-relative paths under `files/`, a cursor in `state.json`
+(replaced by writing a temp file and renaming it, so readers never see a
+half-written record), one small verified marker per finished artifact under
+`verified/`, and one `lock` file. The caller
 drives the loop — one `append()` per buffer, individually committed, so the
 transfer can stop after any step and resume from `committed_bytes` in a new
 request. `finalize()` checks the assembled size against the size declared in
@@ -131,8 +133,9 @@ Order:
    siblings next to their targets. The site runs normally throughout.
 2. **Maintenance on.** We write the `.maintenance` file ourselves, and since
    WordPress executes that file, ours whitelists reprint API requests
-   (`$upgrading = 0` for us, `time()` for everyone else). Core's built-in
-   10-minute expiry stays intact as the dead-man switch.
+   (`$upgrading = 0` for us, `time()` for everyone else). WordPress's own
+   rule that a `.maintenance` file older than 10 minutes is ignored stays
+   intact, so an interrupted apply can never leave the site down for good.
 3. **Recheck, now that web writes are frozen:** the apply command carries the
    expected `(path, ctime, size)` tuples; the remote re-verifies them and
    refuses with a fresh conflict list instead of overwriting drift.
@@ -141,10 +144,10 @@ Order:
    seconds, independent of payload size.
 5. **Maintenance off**, scoped reindex, baselines updated.
 
-If the driver dies mid-apply: core expires maintenance after 10 minutes, the
-journal is resumable by the next apply command, and any authenticated push
-request that notices an incomplete journal finishes it before doing its own
-work (a lazy janitor — no worker, no cron).
+If the driver dies mid-apply: WordPress stops honoring the `.maintenance`
+file after 10 minutes on its own, the journal is resumable by the next apply
+command, and any authenticated push request that notices an unfinished
+journal finishes it before doing its own work — no worker or cron needed.
 
 **The reprint plugin's own directory is never touched by apply.** It is
 excluded from swaps and deletions and reported as excluded in the summary.
@@ -207,8 +210,9 @@ Files first, database second, each PR small and stacked in this order:
 
 1. **Design doc** — this file.
 2. **Envelope auth** — headers-only HMAC for data routes: the
-   UNSIGNED-PAYLOAD sentinel with method and request target bound into the
-   signature.
+   X-Auth-Content-Hash header carries the literal string UNSIGNED-PAYLOAD,
+   and the signature covers the method and request target instead of a
+   body hash.
 3. **Staged artifact store** — already built (PR #298); rebases here.
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
    the configured storage path; web guards for inside-docroot placement.
@@ -222,9 +226,11 @@ Files first, database second, each PR small and stacked in this order:
 8. **Package unification** — importer and exporter become one Reprint
    package (lite = serve-only build). Placed here because apply is the
    first piece that needs import-side code running on the remote.
-9. **Apply engine, files** — journaled swaps, copy-first, maintenance
-   whitelist, recheck, janitor, post-apply reindex. Harvests the apply
-   primitives from PR #277; the relay around them is dropped.
+9. **Apply engine, files** — journaled swaps, copy-first, the whitelisted
+   maintenance file, the recheck, unfinished-journal completion, post-apply
+   reindex. Reuses the apply code already built in PR #277 (the journaled
+   `.new`/`.bak` swaps and the copy-first flow); the relay around that code
+   is dropped.
 10. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
 11. **Row index and database diff** — the row index producer and endpoint,
     local row baselines, diff generation and URL rewrite, the apply batch.
