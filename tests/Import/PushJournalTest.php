@@ -7,14 +7,15 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push-journal.php';
 
 /**
- * Coverage for PushJournal: per-remote-site baselines and the local diff.
+ * Coverage for PushJournal: per-remote-site baselines and file diffs.
  *
  * The diff drives real uploads and deletions later in a push, so the tests
  * pin the classification exactly: new, ctime-changed, size-changed,
  * type-changed, deleted, unchanged — plus the two boundary situations
  * (no baseline yet; stale lists from an earlier run), the encoding
  * round-trip for paths that need base64 in the first place, and the JSON
- * parsing behavior that keeps the diff independent from field order.
+ * parsing behavior that keeps the diff independent from field order, and the
+ * scoped remote drift comparison that only checks paths a push will touch.
  */
 final class PushJournalTest extends TestCase
 {
@@ -284,6 +285,73 @@ final class PushJournalTest extends TestCase
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('current index file is missing');
         $this->makeJournal()->diff_local_files($this->tempDir . '/no-such-index.jsonl');
+    }
+
+    // ------------------------------------------------------------------
+    //  Remote drift
+    // ------------------------------------------------------------------
+
+    public function testRemoteDiffReportsOnlyDriftInTheLocalPushScope(): void
+    {
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'changed-remotely.txt' => [100, 5, 'file'],
+            'deleted-locally.txt' => [100, 5, 'file'],
+            'deleted-remotely.txt' => [100, 5, 'file'],
+            'unchanged.txt' => [100, 5, 'file'],
+        ]));
+        $journal->capture_remote_files_baseline($this->writeIndex([
+            'changed-remotely.txt' => [200, 5, 'file'],
+            'deleted-locally.txt' => [200, 5, 'file'],
+            'deleted-remotely.txt' => [200, 5, 'file'],
+            'unchanged.txt' => [200, 5, 'file'],
+            'unrelated-remote-change.txt' => [200, 5, 'file'],
+        ]));
+
+        $journal->diff_local_files($this->writeIndex([
+            'changed-remotely.txt' => [101, 5, 'file'],
+            'deleted-remotely.txt' => [101, 5, 'file'],
+            'unchanged.txt' => [100, 5, 'file'],
+        ]));
+
+        $counts = $journal->diff_remote_files($this->writeIndex([
+            'changed-remotely.txt' => [201, 5, 'file'],
+            'deleted-locally.txt' => [200, 5, 'file'],
+        ]));
+
+        $this->assertSame(['changed' => 1, 'deleted' => 1, 'baseline_missing' => false], $counts);
+        $this->assertSame(['changed-remotely.txt'], $this->listPaths($journal->remote_paths_changed_since_last_sync));
+        $this->assertSame(['deleted-remotely.txt'], $this->listPaths($journal->remote_paths_deleted_since_last_sync));
+    }
+
+    public function testRemoteDiffCannotCheckDriftBeforeTheFirstRemoteBaseline(): void
+    {
+        $journal = $this->makeJournal();
+        $journal->diff_local_files($this->writeIndex([
+            'first-push.txt' => [100, 5, 'file'],
+        ]));
+
+        $counts = $journal->diff_remote_files($this->writeIndex([
+            'first-push.txt' => [200, 5, 'file'],
+        ]));
+
+        $this->assertSame(['changed' => 0, 'deleted' => 0, 'baseline_missing' => true], $counts);
+        $this->assertSame([], $this->listPaths($journal->remote_paths_changed_since_last_sync));
+        $this->assertSame([], $this->listPaths($journal->remote_paths_deleted_since_last_sync));
+    }
+
+    public function testRemoteDiffRequiresTheLocalDiffLists(): void
+    {
+        $journal = $this->makeJournal();
+        $journal->capture_remote_files_baseline($this->writeIndex([
+            'a.txt' => [100, 5, 'file'],
+        ]));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('local_paths_to_push is missing');
+        $journal->diff_remote_files($this->writeIndex([
+            'a.txt' => [101, 5, 'file'],
+        ]));
     }
 
     // ------------------------------------------------------------------
