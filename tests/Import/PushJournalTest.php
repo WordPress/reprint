@@ -126,6 +126,11 @@ final class PushJournalTest extends TestCase
             $this->listPaths($journal->upload_list_path())
         );
         $this->assertSame([], $this->listPaths($journal->deletion_list_path()));
+
+        // Pin the exact bytes: one {"path": <base64>} object per line, the
+        // .import-download-list.jsonl shape.
+        $firstLine = strtok((string) file_get_contents($journal->upload_list_path()), "\n");
+        $this->assertSame('{"path":"' . base64_encode('index.php') . '"}', $firstLine);
     }
 
     public function testUnchangedIndexProducesEmptyLists(): void
@@ -224,22 +229,20 @@ final class PushJournalTest extends TestCase
         );
     }
 
-    public function testDiffSkipsBlankLinesAndRejectsGarbage(): void
+    public function testDiffRejectsLinesTheIndexWritersDoNotProduce(): void
     {
+        // The diff reads paths out of raw lines by position, so it accepts
+        // exactly what the index writers emit — anything else (including a
+        // blank line) means the file is not an index and the diff stops.
         $journal = $this->makeJournal();
-
-        $withBlanks = $this->tempDir . '/with-blanks.jsonl';
-        file_put_contents(
-            $withBlanks,
-            $this->indexLine('a.txt', 100, 5, 'file') . "\n\n" .
-            $this->indexLine('b.txt', 100, 5, 'file') . "\n"
-        );
-        $this->assertSame(['changed' => 2, 'deleted' => 0], $journal->diff_local_files($withBlanks));
-
         $garbage = $this->tempDir . '/garbage.jsonl';
-        file_put_contents($garbage, "not json at all\n");
+        file_put_contents(
+            $garbage,
+            $this->indexLine('a.txt', 100, 5, 'file') . "\n\nnot json at all\n"
+        );
+
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Invalid index line');
+        $this->expectExceptionMessage('Unexpected index line');
         $journal->diff_local_files($garbage);
     }
 
@@ -291,9 +294,12 @@ final class PushJournalTest extends TestCase
 
     private function indexLine(string $path, int $ctime, int $size, string $type): string
     {
+        // JSON_UNESCAPED_SLASHES matters: the real index writers use it, and
+        // the diff reads the base64 path out of the raw line, where an
+        // escaped slash would not decode.
         return json_encode(
             ['path' => base64_encode($path), 'ctime' => $ctime, 'size' => $size, 'type' => $type],
-            JSON_THROW_ON_ERROR
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
         );
     }
 

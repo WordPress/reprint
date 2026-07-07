@@ -19,19 +19,25 @@
  * rename lands, the previous baseline stays in effect.
  *
  * diff_local_files() answers "what changed on this machine since the last
- * push to this site". It walks the current index and the local baseline
- * together — both are sorted by path, so one pass suffices, the same merge
- * diff_indexes_and_build_fetch_list() in import.php runs against a remote
- * index — and writes two lists into the site directory:
+ * push to this site". It streams the current index and the local baseline
+ * together — both are sorted by path, so one pass suffices — and writes
+ * two lists into the site directory:
  *
  *     upload-list.jsonl     paths new since the baseline, or whose ctime,
  *                           size, or type differs
  *     deletion-list.jsonl   paths in the baseline but gone from the index
  *
- * Both lists hold one {"path": <base64>} object per line, the same shape
- * as .import-download-list.jsonl. They carry no sizes or types on purpose:
- * the files are local, so the upload step reads the filesystem when it
- * stages them instead of trusting a snapshot that may already be stale.
+ * The diff works on raw lines and never touches a JSON function. Index
+ * lines always start with {"path":"<base64>" — every index writer in
+ * import.php puts the path field first — so the path comes out of the
+ * line by position. Ordering compares decoded paths; two entries with the
+ * same path count as unchanged only when their lines are byte-identical,
+ * which holds because both files come from the same writer. Output lines
+ * reuse the base64 substring as-is, producing the .import-download-list.jsonl
+ * shape: one {"path": <base64>} object per line. The lists carry no sizes
+ * or types on purpose — the files are local, so the upload step reads the
+ * filesystem when it stages them instead of trusting a snapshot that may
+ * already be stale.
  *
  * With no baseline yet — the first push to a site — every current entry
  * counts as changed and no deletion can be detected.
@@ -136,12 +142,12 @@ class PushJournal
      * upload-list.jsonl and deletion-list.jsonl, replacing any lists from
      * an earlier run.
      *
-     * Both inputs are sorted by decoded path, so this is a single merge
-     * pass: a path only in the current index is new, a path in both with
-     * a different ctime, size, or type has changed (both go to the upload
-     * list), a path only in the baseline was deleted. Unchanged paths
-     * produce no output. Each list is written to a temporary file and
-     * renamed into place, so a killed run never leaves a torn line behind.
+     * A single merge pass over the two path-sorted files: a path only in
+     * the current index is new, a path in both whose lines differ has
+     * changed (both go to the upload list), a path only in the baseline
+     * was deleted. Unchanged paths produce no output. Each list is written
+     * to a temporary file and renamed into place, so a killed run never
+     * leaves a torn line behind.
      *
      * @return array{changed: int, deleted: int} Entry counts, for the push summary.
      */
@@ -187,38 +193,50 @@ class PushJournal
 
         $changed = 0;
         $deleted = 0;
-        $current = $this->read_index_line($current_handle);
-        $baseline = $this->read_index_line($baseline_handle);
-        while ($current !== null || $baseline !== null) {
-            if ($baseline === null) {
+        $this->read_line($current_handle, $cur_line, $cur_path, $cur_b64);
+        $this->read_line($baseline_handle, $base_line, $base_path, $base_b64);
+        while ($cur_line !== null || $base_line !== null) {
+            // base64 does not preserve byte order ('0' sorts before 'A' in
+            // ASCII but encodes a higher value), so ordering has to use the
+            // decoded paths.
+            if ($base_line === null) {
                 $order = -1;
-            } elseif ($current === null) {
+            } elseif ($cur_line === null) {
                 $order = 1;
             } else {
-                $order = strcmp($current["path"], $baseline["path"]);
+                $order = strcmp($cur_path, $base_path);
             }
 
             if ($order < 0) {
                 // Only in the current index: new since the last push.
-                $this->append_path_line($upload_handle, $current["path"]);
+                $out = '{"path":"' . $cur_b64 . "\"}\n";
+                if (fwrite($upload_handle, $out) !== strlen($out)) {
+                    throw new RuntimeException("Short write on the upload list, is the disk full?");
+                }
                 $changed++;
-                $current = $this->read_index_line($current_handle);
+                $this->read_line($current_handle, $cur_line, $cur_path, $cur_b64);
             } elseif ($order > 0) {
                 // Only in the baseline: deleted since the last push.
-                $this->append_path_line($deletion_handle, $baseline["path"]);
+                $out = '{"path":"' . $base_b64 . "\"}\n";
+                if (fwrite($deletion_handle, $out) !== strlen($out)) {
+                    throw new RuntimeException("Short write on the deletion list, is the disk full?");
+                }
                 $deleted++;
-                $baseline = $this->read_index_line($baseline_handle);
+                $this->read_line($baseline_handle, $base_line, $base_path, $base_b64);
             } else {
-                if (
-                    $current["ctime"] !== $baseline["ctime"] ||
-                    $current["size"] !== $baseline["size"] ||
-                    $current["type"] !== $baseline["type"]
-                ) {
-                    $this->append_path_line($upload_handle, $current["path"]);
+                // Same path on both sides. Same writer, same fields — so a
+                // changed ctime, size, or type is exactly a changed line.
+                // A writer format change would mark everything changed once
+                // (a wasted re-upload, never a missed one).
+                if ($cur_line !== $base_line) {
+                    $out = '{"path":"' . $cur_b64 . "\"}\n";
+                    if (fwrite($upload_handle, $out) !== strlen($out)) {
+                        throw new RuntimeException("Short write on the upload list, is the disk full?");
+                    }
                     $changed++;
                 }
-                $current = $this->read_index_line($current_handle);
-                $baseline = $this->read_index_line($baseline_handle);
+                $this->read_line($current_handle, $cur_line, $cur_path, $cur_b64);
+                $this->read_line($baseline_handle, $base_line, $base_path, $base_b64);
             }
         }
 
@@ -234,6 +252,47 @@ class PushJournal
         }
 
         return ["changed" => $changed, "deleted" => $deleted];
+    }
+
+    /**
+     * Read the next index line and pull the path out of it by position,
+     * without decoding the JSON.
+     *
+     * Index lines start with {"path":"<base64>" — every index writer in
+     * import.php emits the path field first, and base64 never contains a
+     * quote or a backslash, so the first quote after the prefix ends the
+     * encoded path. Anything else is not an index file and stops the diff.
+     *
+     * All three out-parameters become null at end of file: $line is the
+     * raw line, $path the decoded path (for ordering), $b64 the encoded
+     * path (reused verbatim in output lines).
+     *
+     * @param resource|null $handle
+     */
+    private function read_line($handle, ?string &$line, ?string &$path, ?string &$b64): void
+    {
+        $line = null;
+        $path = null;
+        $b64 = null;
+        if (!$handle) {
+            return;
+        }
+        $raw = fgets($handle);
+        if ($raw === false) {
+            return;
+        }
+        if (strncmp($raw, '{"path":"', 9) !== 0) {
+            throw new RuntimeException('Unexpected index line, it does not start with {"path":" — ' . substr($raw, 0, 120));
+        }
+        $quote = strpos($raw, '"', 9);
+        $encoded = $quote === false ? "" : substr($raw, 9, $quote - 9);
+        $decoded = $encoded === "" ? false : base64_decode($encoded, true);
+        if ($decoded === false || $decoded === "") {
+            throw new RuntimeException("Invalid index path in line: " . substr($raw, 0, 120));
+        }
+        $line = $raw;
+        $path = $decoded;
+        $b64 = $encoded;
     }
 
     /**
@@ -259,66 +318,6 @@ class PushJournal
     {
         if (!is_dir($this->site_dir) && !@mkdir($this->site_dir, 0755, true) && !is_dir($this->site_dir)) {
             throw new RuntimeException("Failed to create the push journal directory: {$this->site_dir}");
-        }
-    }
-
-    /**
-     * Read the next entry from a sorted index file, skipping blank lines.
-     *
-     * Mirrors read_index_line()/parse_index_line() in import.php, minus
-     * their path validation: the baselines are this class's own files, and
-     * everything that later acts on these paths — the upload step, the
-     * remote staging store — validates them again at that boundary.
-     *
-     * @param resource|null $handle
-     * @return array{path: string, ctime: int, size: int, type: string}|null
-     */
-    private function read_index_line($handle): ?array
-    {
-        if (!$handle) {
-            return null;
-        }
-        while (($line = fgets($handle)) !== false) {
-            $line = trim($line);
-            if ($line === "") {
-                continue;
-            }
-            $data = json_decode($line, true);
-            if (!is_array($data)) {
-                throw new RuntimeException("Invalid index line: " . substr($line, 0, 120));
-            }
-            $path_encoded = $data["path"] ?? "";
-            $path = is_string($path_encoded) ? base64_decode($path_encoded, true) : false;
-            if ($path === false || $path === "") {
-                throw new RuntimeException("Invalid index path in line: " . substr($line, 0, 120));
-            }
-            return [
-                "path" => $path,
-                "ctime" => (int) ($data["ctime"] ?? 0),
-                "size" => (int) ($data["size"] ?? 0),
-                "type" => (string) ($data["type"] ?? "file"),
-            ];
-        }
-        return null;
-    }
-
-    /**
-     * Write one {"path": <base64>} line — the .import-download-list.jsonl
-     * shape. The byte-count check is there because a silently short write
-     * (disk full) would drop a path from a list that drives real uploads
-     * and deletions.
-     *
-     * @param resource $handle
-     */
-    private function append_path_line($handle, string $path): void
-    {
-        $line = json_encode(["path" => base64_encode($path)], JSON_UNESCAPED_SLASHES);
-        if ($line === false) {
-            throw new RuntimeException("Failed to encode a list line for path: {$path}");
-        }
-        $written = fwrite($handle, $line . "\n");
-        if ($written !== strlen($line) + 1) {
-            throw new RuntimeException("Short write on a push list, is the disk full?");
         }
     }
 }
