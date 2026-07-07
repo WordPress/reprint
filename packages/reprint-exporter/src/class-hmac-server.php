@@ -30,7 +30,7 @@ final class Site_Export_HMAC_Server {
     }
 
     /**
-     * Verify a bounded control-plane request.
+     * Verify a small command request with a bounded body.
      *
      * HMAC is the guard for small protocol commands such as preflight, session
      * start, plan confirmation, and abort/resume. Large data uploads should use
@@ -144,9 +144,9 @@ final class Site_Export_HMAC_Server {
     /**
      * Verify a request whose body is deliberately not signed.
      *
-     * Instead of a body hash, the signature covers the request itself:
-     * nonce, timestamp, HTTP method, and the request target (the
-     * "path?query" part of the URL). A request body of any size can then
+     * Instead of a body hash, the signature covers exactly four values:
+     * the nonce, the timestamp, the HTTP method, and the request target
+     * (the "path?query" part of the URL). A request body of any size can then
      * stream through without either side hashing it, and a captured set of
      * auth headers still cannot be reused for a different endpoint or
      * method. Protecting the body from tampering is TLS's job.
@@ -155,8 +155,8 @@ final class Site_Export_HMAC_Server {
      * UNSIGNED-PAYLOAD. Because of that, headers signed for this check can
      * never pass the body-signed checks and vice versa — the two signatures
      * are computed over strings that can never be equal. Each route decides
-     * which check it calls, so a client cannot pick the weaker one for a
-     * control-plane route.
+     * which check it calls, so a client cannot make a command endpoint
+     * that requires verify_control_request() accept this body-less check.
      *
      * @param string $request_target The "path?query" form of the request URL.
      */
@@ -185,7 +185,7 @@ final class Site_Export_HMAC_Server {
      *
      * Returns null on success, or an error string on failure. This legacy
      * convenience path buffers php://input and should only be used for small
-     * request bodies. New control-plane routes should bound the body and call
+     * request bodies. New command endpoints should bound the body and call
      * verify_control_request(). Large data routes should not use whole-body
      * HMAC verification.
      */
