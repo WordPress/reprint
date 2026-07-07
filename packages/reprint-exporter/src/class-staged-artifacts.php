@@ -103,11 +103,13 @@
 final class Site_Export_Staged_Artifacts {
 
     /**
-     * Name of the file that brands a directory as reprint storage. The
-     * file indexer skips any directory containing it. Must match the name
-     * reprint_dir_is_storage() checks in export.php.
+     * Name of the file that marks a directory as reprint's own: the file
+     * indexer never lists a directory containing it. The staging store
+     * writes it here; the same mark works for any directory reprint must
+     * leave alone, such as the reprint plugin's own directory. Must match
+     * the name reprint_dir_is_skipped() checks in export.php.
      */
-    public const STORAGE_BRAND_FILE = '.reprint-storage';
+    public const SKIP_FILE = '.reprint-skip';
 
     /** @var string */
     private $files_dir;
@@ -619,10 +621,10 @@ final class Site_Export_Staged_Artifacts {
     /**
      * Writes the three marker files every staging directory carries.
      *
-     * The brand file names this directory as reprint storage, so the file
-     * indexer skips the whole subtree even when no configuration mentions
-     * it — a peer pulling from this site never scans another site's staging
-     * data. See reprint_dir_is_storage() in export.php.
+     * The skip file tells every reprint indexer to leave this directory
+     * out, even when no configuration mentions it — a peer pulling from
+     * this site never scans another site's staging data. See
+     * reprint_dir_is_skipped() in export.php.
      *
      * The .htaccess and the blank index.php exist for staging directories
      * inside the document root, and they are all we can do from here:
@@ -635,12 +637,12 @@ final class Site_Export_Staged_Artifacts {
      * files, and the config-based index exclusion still applies.
      */
     private function mark_staging_dir(string $dir): void {
-        $brand = $dir . '/' . self::STORAGE_BRAND_FILE;
-        if (!file_exists($brand)) {
+        $skip_file = $dir . '/' . self::SKIP_FILE;
+        if (!file_exists($skip_file)) {
             @file_put_contents(
-                $brand,
-                "This directory holds Reprint's transfer state. Reprint file\n" .
-                "indexes skip any directory containing this file.\n"
+                $skip_file,
+                "Reprint never lists a directory containing this file when it\n" .
+                "indexes a site. This directory holds Reprint's transfer state.\n"
             );
         }
 

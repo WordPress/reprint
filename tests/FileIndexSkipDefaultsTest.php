@@ -241,14 +241,14 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertContains('wp-content/themes/foo/style.css~', $rel);
     }
 
-    public function testReprintDirIsStorageChecksTheBrandFile(): void
+    public function testReprintDirIsSkippedChecksTheSkipFile(): void
     {
         require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
 
         mkdir($this->tempDir . '/branded');
-        $this->assertFalse(reprint_dir_is_storage($this->tempDir . '/branded'));
-        file_put_contents($this->tempDir . '/branded/.reprint-storage', 'brand');
-        $this->assertTrue(reprint_dir_is_storage($this->tempDir . '/branded'));
+        $this->assertFalse(reprint_dir_is_skipped($this->tempDir . '/branded'));
+        file_put_contents($this->tempDir . '/branded/.reprint-skip', 'brand');
+        $this->assertTrue(reprint_dir_is_skipped($this->tempDir . '/branded'));
     }
 
     public function testFileIndexNeverListsReprintStorage(): void
@@ -265,7 +265,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
         // A branded directory no configuration names — the situation when a
         // peer pulls from this site and finds another reprint's storage.
         mkdir($siteDir . '/wp-content/other-site-storage', 0755, true);
-        file_put_contents($siteDir . '/wp-content/other-site-storage/.reprint-storage', 'brand');
+        file_put_contents($siteDir . '/wp-content/other-site-storage/.reprint-skip', 'brand');
         file_put_contents($siteDir . '/wp-content/other-site-storage/state.json', '{}');
 
         $rel = $this->relativePaths(

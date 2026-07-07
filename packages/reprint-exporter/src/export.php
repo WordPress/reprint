@@ -3095,11 +3095,11 @@ function endpoint_file_index(
                     $type = "other";
                 }
 
-                // A directory branded as reprint storage never appears in an
-                // index, even when this request's config does not name it —
-                // a peer pulling from this site must not scan another
-                // reprint's staging data. One file_exists per directory.
-                if ($type === "dir" && reprint_dir_is_storage($path)) {
+                // A directory carrying reprint's skip file never appears in
+                // an index, even when this request's config does not name
+                // it — a peer pulling from this site must not scan another
+                // reprint's own directories. One file_exists per directory.
+                if ($type === "dir" && reprint_dir_is_skipped($path)) {
                     continue;
                 }
 
@@ -3557,18 +3557,20 @@ function path_head_looks_like_text(string $path): bool
 }
 
 /**
- * True when the directory carries reprint's storage brand file.
+ * True when the directory carries reprint's skip file.
  *
- * The staging store writes a ".reprint-storage" file into its directory on
- * first use (Site_Export_Staged_Artifacts::STORAGE_BRAND_FILE — the two
- * names must match). The brand makes the exclusion self-contained: the
- * indexer skips the directory even when the request's config names no
- * storage path, which is exactly the situation when a peer pulls from
- * this site.
+ * Reprint marks its own directories with a ".reprint-skip" file — the
+ * staging store writes one on first use
+ * (Site_Export_Staged_Artifacts::SKIP_FILE — the two names must match),
+ * and the same mark fits any directory reprint must leave alone, such as
+ * the reprint plugin's own directory. The mark makes the exclusion
+ * self-contained: the indexer skips the directory even when the request's
+ * config names no storage path, which is exactly the situation when a
+ * peer pulls from this site.
  */
-function reprint_dir_is_storage(string $dir_path): bool
+function reprint_dir_is_skipped(string $dir_path): bool
 {
-    return file_exists($dir_path . "/.reprint-storage");
+    return file_exists($dir_path . "/.reprint-skip");
 }
 
 /**
