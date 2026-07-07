@@ -40,8 +40,9 @@
  * file and a 50 GB dump. Corruption that preserves length — including a
  * staging file that shrank between requests and was zero-filled back to the
  * committed size by the next append's ftruncate — is not detected, the same
- * trust pull's writer places in its local disk. The wire belongs to TLS and
- * request authorization to the control plane's HMAC.
+ * trust pull's writer places in its local disk. The wire belongs to TLS,
+ * and whether a caller may talk to the endpoint at all is checked by
+ * Site_Export_HMAC_Server before any of this code runs.
  *
  * Layout and state follow the pull importer's mechanics. Artifact bytes live
  * at their plain target-relative paths under files/ — no suffixes, so any
