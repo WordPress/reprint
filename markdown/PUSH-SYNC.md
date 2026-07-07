@@ -7,27 +7,21 @@ the end maps it to a PR stack.
 
 ## Shape of a push
 
-1. The local machine knows what changed locally since its last sync with this
-   remote (files, deletions, database rows), by comparing against baselines it
-   stored at the end of that sync.
-2. It asks the remote to reindex just the paths (later: rows) the local
-   changes touch, and compares the result against the remote baseline from
-   the last sync. That reveals remote drift — files someone changed on the
-   remote that this push would overwrite.
-3. It shows a summary: changed locally, changed on the remote (within the
-   pushed scope), deletions. The user confirms. Conflicts are file-level and
-   row-level; the only resolutions are "override" and "skip". We never show
-   line-level or field-level diffs.
-4. It transfers everything into a staging area on the remote — file bytes,
+1. The local machine knows what changed locally since its last push to this
+   remote (files, deletions, database rows), by comparing against the local
+   baselines it stored at the end of that push.
+2. It shows a summary of local uploads and deletions. The user confirms that
+   local should win for those paths and rows.
+3. It transfers everything into a staging area on the remote — file bytes,
    a deletion manifest, and (phase two) the database diff. The transfer is
    resumable at byte granularity.
-5. It drives the apply step with repeated commands until done. The remote
+4. It drives the apply step with repeated commands until done. The remote
    moves staged files into place, executes deletions, applies the database
    diff, and fixes symlinks — inside a maintenance window that lasts seconds,
    not the length of the transfer.
-6. It runs one more scoped reindex and stores the results as the new
-   baselines. The push is complete only after this step; a crashed push is
-   re-driven from the top and converges.
+5. It stores the current local indexes as the new local baselines. The push is
+   complete only after this step; a crashed push is re-driven from the top and
+   converges.
 
 Both sides act only when the local machine calls: no worker, no polling, no
 sessions. The remote is a passive authenticated API.
@@ -58,48 +52,36 @@ of buffering pain. Signing cost is constant per request regardless of payload
 size. The secret travels in no URL and no body, so it never lands in an
 access log.
 
-## Change detection: each machine compared against itself
+## Change detection: local machine compared against itself
 
-ctime is machine-local, so we never compare a local timestamp to a remote
-one. Each side is compared only against its own past:
-
-- "changed on my machine since the last sync" — local index now vs the local
-  baseline,
-- "changed on the remote since the last sync" — remote index now (scoped to
-  the pushed paths) vs the remote baseline.
+ctime is machine-local, so push never compares a local timestamp to a remote
+one. It only answers "what changed locally since my last successful push to
+this remote" by comparing the current local indexes against local baselines.
 
 The local machine keeps one set of baselines **per remote site**, overwritten
 after each successful apply:
 
     <state-dir>/push/<site>/last-sync-local-files.jsonl
-    <state-dir>/push/<site>/last-sync-remote-files.jsonl
     <state-dir>/push/<site>/last-sync-local-rows.jsonl   (phase two)
 
-Each baseline is a copy of a file index in the `.import-index.jsonl` format
-the pull path already reads and writes — one JSON object per line, sorted by
-path.
+Each file baseline is a copy of a local file index in the `.import-index.jsonl`
+format the pull path already reads and writes — one JSON object per line,
+sorted by path.
 
-The remote baseline must stay a full last-synced remote index. Apply itself
-changes remote ctimes, so the paths written by a successful push need a
-post-apply refresh, but a scoped refresh cannot replace the whole baseline. If
-the push only reindexes the paths it touched, those scoped entries must be
-merged into the previous full remote baseline while preserving untouched
-entries. Otherwise a later push of a different path would compare against an
-incomplete remote history.
+The first push to a site has no baselines: every current local file counts as
+changed, and no local deletion can be detected yet.
 
-The first push to a site has no baselines: everything is "changed locally",
-nothing can be checked for drift, and the summary says so. ctime is trusted
-as-is; events that bump it without changing content (chmod, restores, host
-migrations) produce false drift warnings, and "override" is how the user
-moves past them.
+Push is intentionally local-wins. If a developer edited the remote site
+outside Reprint, a later push of the same path or row overwrites that remote
+edit. This keeps push as a simple deployment tool instead of a conflict
+manager.
 
 ## Deletions
 
-Local deletions since the last sync come out of the baseline comparison. They
+Local deletions since the last push come out of the baseline comparison. They
 travel as a deletion manifest — itself a staged artifact, uploaded through
 the same store as file bytes — and the apply step executes the unlinks inside
-the same window as the moves. Remote deletions since the last sync appear in
-the drift summary.
+the same window as the moves.
 
 ## The staging store
 
@@ -147,13 +129,11 @@ Order:
    (`$upgrading = 0` for us, `time()` for everyone else). WordPress's own
    rule that a `.maintenance` file older than 10 minutes is ignored stays
    intact, so an interrupted apply can never leave the site down for good.
-3. **Recheck, now that web writes are frozen:** the apply command carries the
-   expected `(path, ctime, size)` tuples; the remote re-verifies them and
-   refuses with a fresh conflict list instead of overwriting drift.
-4. **Swap:** journaled `.new`/`.bak` renames, deletion unlinks, the database
+3. **Swap:** journaled `.new`/`.bak` renames, deletion unlinks, the database
    batch, symlink fixes. The window contains renames and a row batch —
    seconds, independent of payload size.
-5. **Maintenance off**, scoped reindex, baselines updated.
+4. **Maintenance off**, local baselines updated by the driver after apply
+   completes.
 
 If the driver dies mid-apply: WordPress stops honoring the `.maintenance`
 file after 10 minutes on its own, the journal is resumable by the next apply
@@ -182,14 +162,10 @@ that replaces tables. The mechanics mirror the file design:
 
 - A **row index** — `(table, primary key, row hash)` — plays the role
   `(path, ctime, size)` plays for files. The local machine keeps the row
-  index from the last sync as a baseline; diffing against it yields the
+  index from the last push as a baseline; diffing against it yields the
   upsert and delete sets.
-- The remote exposes a row-index endpoint scoped to the touched primary
-  keys, cursor-paginated the same way the dump producer already walks
-  tables, for drift detection.
-- Conflicts are row-level: a serialized option conflicts as a whole row, and
-  the resolutions are override or skip. Rows inserted on both sides with the
-  same primary key are conflicts; we do not remap keys.
+- Push is local-wins for rows too. Rows changed on the remote outside Reprint
+  are overwritten when the local diff touches the same primary key.
 - The diff stream passes through the URL rewriter in the local-to-remote
   direction before staging.
 - Volatile rows are excluded by default (transients, sessions, cron), the
@@ -204,13 +180,12 @@ Stated here so nobody rediscovers them as surprises:
 - **Same-size corruption is invisible.** Transfers are verified by byte
   count only. Corruption that preserves length passes. We decided detection
   is not worth hashing multi-gigabyte artifacts inside PHP time limits.
-- **ctime produces false drift** after chmod, restores, or host migrations.
-  The cost is a noisy summary, not wrong data; "override" moves past it.
+- **Remote edits are overwritten.** Push is a local-wins deployment tool, not
+  a bidirectional conflict resolver. Developers who edit the remote site
+  outside Reprint are responsible for pulling or preserving those changes
+  before pushing over them.
 - **Shell and cron can write during the maintenance window.** Maintenance
-  blocks web requests; it cannot block SSH or system cron. The recheck runs
-  after freezing web writes; what happens under it from a shell is accepted.
-- **Conflicts are whole-file and whole-row.** No line or field granularity,
-  by design.
+  blocks web requests; it cannot block SSH or system cron.
 - **A sender that abandons a failed discard and re-uploads anyway** can end
   up with a zero-filled prefix that passes the size check. The discard
   retry rule exists precisely to make this unreachable.
@@ -228,23 +203,20 @@ Files first, database second, each PR small and stacked in this order:
    the closed #298).
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
    the configured storage path; web guards for inside-docroot placement.
-5. **Push journal and local diff** — per-site baselines, capture and
+5. **Push journal and local diff** — per-site local baselines, capture and
    overwrite logic, local change and deletion detection.
-6. **Scoped remote reindex and drift summary** — path-scoped index requests,
-   baseline comparison, the summary/confirm UX.
-7. **Upload endpoint** — the store's HTTP surface plus the sender loop with
+6. **Upload endpoint** — the store's HTTP surface plus the sender loop with
    chunk sizing; deletion manifest staged; `--force-http` with honest help
    text (the first push networking this flag can gate).
-8. **Package unification** — importer and exporter become one Reprint
+7. **Package unification** — importer and exporter become one Reprint
    package (lite = serve-only build). Placed here because apply is the
    first piece that needs import-side code running on the remote.
-9. **Apply engine, files** — journaled swaps, copy-first, the whitelisted
-   maintenance file, the recheck, unfinished-journal completion, post-apply
-   reindex. Reuses the apply code already built in PR #277 (the journaled
-   `.new`/`.bak` swaps and the copy-first flow); the relay around that code
-   is dropped.
-10. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
-11. **Row index and database diff** — the row index producer and endpoint,
-    local row baselines, diff generation and URL rewrite, the apply batch.
-12. **`reprint push`** — the one command that orchestrates plan, confirm,
+8. **Apply engine, files** — journaled swaps, copy-first, the whitelisted
+   maintenance file, unfinished-journal completion. Reuses the apply code
+   already built in PR #277 (the journaled `.new`/`.bak` swaps and the
+   copy-first flow); the relay around that code is dropped.
+9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
+10. **Row index and database diff** — the local row index, row baseline,
+    diff generation and URL rewrite, the apply batch.
+11. **`reprint push`** — the one command that orchestrates plan, confirm,
     transfer, apply, resume.

@@ -1,6 +1,6 @@
 <?php
 /**
- * Per-remote-site memory of the last completed push: the baselines.
+ * Per-remote-site memory of the last completed push: the local baseline.
  *
  * ctime is machine-local, so push never compares a local timestamp against
  * a remote one. Each machine is compared against its own past instead
@@ -8,12 +8,11 @@
  * on the local machine, one directory per remote site:
  *
  *     <state-dir>/push/<site>/last-sync-local-files.jsonl
- *     <state-dir>/push/<site>/last-sync-remote-files.jsonl
  *
- * Each baseline is a copy of a file index in the same format as
+ * The baseline is a copy of a file index in the same format as
  * .import-index.jsonl: one JSON object per line with a base64-encoded path
  * plus ctime, size, and type, sorted by decoded path. The push driver
- * captures both at the end of a successful push. A capture writes a
+ * captures it at the end of a successful push. A capture writes a
  * temporary file and renames it into place, so a killed process never
  * leaves a truncated baseline for the next push to trust — until the
  * rename lands, the previous baseline stays in effect.
@@ -40,13 +39,6 @@
  * With no baseline yet — the first push to a site — every current entry
  * counts as changed and no deletion can be detected.
  *
- * diff_remote_files() answers "did the remote change any path this push is
- * about to touch". Its current index input must be the scoped remote reindex
- * for local_paths_to_push plus local_paths_to_delete. The stored remote
- * baseline must still be the full last-synced remote index; this class filters
- * it to the current local scope before comparison, so unrelated remote changes
- * do not block a push.
- *
  * Producing the current index is the caller's job; this class only
  * compares and stores. The lists belong to the run that produced them:
  * a resumed push reruns the diff (one cheap local pass) rather than
@@ -59,30 +51,18 @@ class PushJournal
     /** @var string Copy of the local file index from the last completed push. */
     public string $local_files_baseline_path;
 
-    /** @var string Copy of the remote file index from the last completed push. */
-    public string $remote_files_baseline_path;
-
     /** @var string JSONL file of local paths to push, written by diff_local_files(). */
     public string $local_paths_to_push;
 
     /** @var string JSONL file of local paths whose deletion should be pushed, written by diff_local_files(). */
     public string $local_paths_to_delete;
 
-    /** @var string JSONL file of scoped remote paths changed since the remote baseline. */
-    public string $remote_paths_changed_since_last_sync;
-
-    /** @var string JSONL file of scoped remote paths deleted since the remote baseline. */
-    public string $remote_paths_deleted_since_last_sync;
-
     public function __construct(string $state_dir, string $site_url)
     {
         $this->site_dir = rtrim($state_dir, "/") . "/push/" . self::site_key($site_url);
         $this->local_files_baseline_path = $this->site_dir . "/last-sync-local-files.jsonl";
-        $this->remote_files_baseline_path = $this->site_dir . "/last-sync-remote-files.jsonl";
         $this->local_paths_to_push = $this->site_dir . "/local-paths-to-push.jsonl";
         $this->local_paths_to_delete = $this->site_dir . "/local-paths-to-delete.jsonl";
-        $this->remote_paths_changed_since_last_sync = $this->site_dir . "/remote-paths-changed-since-last-sync.jsonl";
-        $this->remote_paths_deleted_since_last_sync = $this->site_dir . "/remote-paths-deleted-since-last-sync.jsonl";
     }
 
     /**
@@ -134,22 +114,6 @@ class PushJournal
     }
 
     /**
-     * Store a copy of the full remote file index as the new remote baseline.
-     *
-     * The index must cover the whole remote tree, not only the paths touched
-     * by the latest push. diff_remote_files() treats a path absent from this
-     * baseline as absent from the remote at the last sync, so replacing the
-     * baseline with a scoped reindex would make a later push of different
-     * paths compare against an incomplete history. If the push driver only
-     * has a scoped post-apply reindex, it must merge those scoped entries into
-     * the previous full remote baseline instead of calling this method.
-     */
-    public function capture_full_remote_files_baseline(string $index_file): void
-    {
-        $this->replace_file($this->remote_files_baseline_path, $index_file);
-    }
-
-    /**
      * Compare the current local index against the local baseline and write
      * the local paths to push and local paths to delete, replacing any lists
      * from an earlier run.
@@ -174,292 +138,100 @@ class PushJournal
         }
         $this->ensure_site_dir();
 
-        return $this->diff_index_files(
-            $current_index_file,
-            is_file($this->local_files_baseline_path) ? $this->local_files_baseline_path : null,
-            $this->local_paths_to_push,
-            $this->local_paths_to_delete,
-            true
-        );
-    }
-
-    /**
-     * Compare a scoped current remote index against the remote baseline and
-     * write the remote paths that changed or disappeared since the last sync.
-     *
-     * The scoped current remote index must contain exactly the paths from the
-     * local push/delete lists that still exist on the remote. The stored
-     * remote baseline must be the full last-synced remote index; the method
-     * filters it to those same local paths before the merge, so a remote edit
-     * outside the pushed scope cannot become a false conflict.
-     *
-     * If there is no remote baseline yet, this is the first push to the site:
-     * drift cannot be detected, stale drift lists are replaced with empty
-     * files, and baseline_missing is true for the summary UI.
-     *
-     * @return array{changed: int, deleted: int, baseline_missing: bool} Entry counts, for the push summary.
-     */
-    public function diff_remote_files(string $current_remote_index_file): array
-    {
-        if (!is_file($current_remote_index_file)) {
-            throw new RuntimeException("Cannot diff, the current remote index file is missing: {$current_remote_index_file}");
-        }
-        $this->ensure_site_dir();
-
-        if (!is_file($this->local_paths_to_push)) {
-            throw new RuntimeException("Cannot diff remote drift, local_paths_to_push is missing: {$this->local_paths_to_push}");
-        }
-        if (!is_file($this->local_paths_to_delete)) {
-            throw new RuntimeException("Cannot diff remote drift, local_paths_to_delete is missing: {$this->local_paths_to_delete}");
-        }
-
-        if (!is_file($this->remote_files_baseline_path)) {
-            $this->write_empty_jsonl($this->remote_paths_changed_since_last_sync);
-            $this->write_empty_jsonl($this->remote_paths_deleted_since_last_sync);
-            return ["changed" => 0, "deleted" => 0, "baseline_missing" => true];
-        }
-
-        $scoped_last_synced_remote_index = $this->site_dir . "/last-synced-remote-index-for-local-paths.jsonl.tmp";
-        $this->write_scoped_last_synced_remote_index($scoped_last_synced_remote_index);
-        try {
-            $counts = $this->diff_index_files(
-                $current_remote_index_file,
-                $scoped_last_synced_remote_index,
-                $this->remote_paths_changed_since_last_sync,
-                $this->remote_paths_deleted_since_last_sync,
-                false
-            );
-        } finally {
-            if (is_file($scoped_last_synced_remote_index)) {
-                unlink($scoped_last_synced_remote_index);
-            }
-        }
-
-        return [
-            "changed" => $counts["changed"],
-            "deleted" => $counts["deleted"],
-            "baseline_missing" => false,
-        ];
-    }
-
-    /**
-     * Compare two sorted index files and write {"path": <base64>} lists for
-     * entries that changed or disappeared.
-     *
-     * @return array{changed: int, deleted: int}
-     */
-    private function diff_index_files(
-        string $current_index_file,
-        ?string $previous_index_file,
-        string $changed_paths_file,
-        string $deleted_paths_file,
-        bool $missing_previous_index_marks_current_changed
-    ): array {
-        $current_index_handle = fopen($current_index_file, "r");
-        if (!$current_index_handle) {
+        $current_handle = fopen($current_index_file, "r");
+        if (!$current_handle) {
             throw new RuntimeException("Failed to open the current index: {$current_index_file}");
         }
-        $previous_index_handle = null;
-        if ($previous_index_file !== null && is_file($previous_index_file)) {
-            $previous_index_handle = fopen($previous_index_file, "r");
-            if (!$previous_index_handle) {
-                fclose($current_index_handle);
-                throw new RuntimeException("Failed to open the previous index: {$previous_index_file}");
+        $baseline_handle = null;
+        if (is_file($this->local_files_baseline_path)) {
+            $baseline_handle = fopen($this->local_files_baseline_path, "r");
+            if (!$baseline_handle) {
+                fclose($current_handle);
+                throw new RuntimeException("Failed to open the local baseline: {$this->local_files_baseline_path}");
             }
         }
 
-        $changed_paths_tmp = $changed_paths_file . ".tmp";
-        $changed_paths_handle = fopen($changed_paths_tmp, "w");
-        if (!$changed_paths_handle) {
-            fclose($current_index_handle);
-            if ($previous_index_handle) {
-                fclose($previous_index_handle);
+        $local_paths_to_push_tmp = $this->local_paths_to_push . ".tmp";
+        $paths_to_push_handle = fopen($local_paths_to_push_tmp, "w");
+        if (!$paths_to_push_handle) {
+            fclose($current_handle);
+            if ($baseline_handle) {
+                fclose($baseline_handle);
             }
-            throw new RuntimeException("Failed to open changed paths list for writing: {$changed_paths_tmp}");
+            throw new RuntimeException("Failed to open local_paths_to_push for writing: {$local_paths_to_push_tmp}");
         }
-        $deleted_paths_tmp = $deleted_paths_file . ".tmp";
-        $deleted_paths_handle = fopen($deleted_paths_tmp, "w");
-        if (!$deleted_paths_handle) {
-            fclose($current_index_handle);
-            if ($previous_index_handle) {
-                fclose($previous_index_handle);
+        $local_paths_to_delete_tmp = $this->local_paths_to_delete . ".tmp";
+        $paths_to_delete_handle = fopen($local_paths_to_delete_tmp, "w");
+        if (!$paths_to_delete_handle) {
+            fclose($current_handle);
+            if ($baseline_handle) {
+                fclose($baseline_handle);
             }
-            fclose($changed_paths_handle);
-            throw new RuntimeException("Failed to open deleted paths list for writing: {$deleted_paths_tmp}");
+            fclose($paths_to_push_handle);
+            throw new RuntimeException("Failed to open local_paths_to_delete for writing: {$local_paths_to_delete_tmp}");
         }
 
         $changed = 0;
         $deleted = 0;
-        $this->read_line($current_index_handle, $current_entry, $current_path, $current_base64_path);
-        $this->read_line($previous_index_handle, $previous_index_entry, $previous_index_path, $previous_index_base64_path);
-        while ($current_entry !== null || $previous_index_entry !== null) {
+        $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
+        $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
+        while ($current_entry !== null || $baseline_entry !== null) {
             // base64 does not preserve byte order ('0' sorts before 'A' in
             // ASCII but encodes a higher value), so ordering has to use the
             // decoded paths.
-            if ($previous_index_entry === null) {
+            if ($baseline_entry === null) {
                 $order = -1;
             } elseif ($current_entry === null) {
                 $order = 1;
             } else {
-                $order = strcmp($current_path, $previous_index_path);
+                $order = strcmp($current_path, $baseline_path);
             }
 
             if ($order < 0) {
                 // Only in the current index: new since the last push.
-                if ($previous_index_handle || $missing_previous_index_marks_current_changed) {
-                    $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                    if (fwrite($changed_paths_handle, $out) !== strlen($out)) {
-                        throw new RuntimeException("Short write on changed paths list, is the disk full?");
-                    }
-                    $changed++;
+                $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
+                    throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
                 }
-                $this->read_line($current_index_handle, $current_entry, $current_path, $current_base64_path);
+                $changed++;
+                $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
             } elseif ($order > 0) {
-                // Only in the previous index: deleted since the last push.
-                $out = json_encode(["path" => $previous_index_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                if (fwrite($deleted_paths_handle, $out) !== strlen($out)) {
-                    throw new RuntimeException("Short write on deleted paths list, is the disk full?");
+                // Only in the baseline: deleted since the last push.
+                $out = json_encode(["path" => $baseline_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                if (fwrite($paths_to_delete_handle, $out) !== strlen($out)) {
+                    throw new RuntimeException("Short write on local_paths_to_delete, is the disk full?");
                 }
                 $deleted++;
-                $this->read_line($previous_index_handle, $previous_index_entry, $previous_index_path, $previous_index_base64_path);
+                $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
             } else {
                 // Same path on both sides. Decoded JSON array comparison keeps
                 // field order and slash escaping out of change detection. A
                 // writer field change would mark everything changed once (a
                 // wasted re-upload, never a missed one).
-                if ($current_entry != $previous_index_entry) {
+                if ($current_entry != $baseline_entry) {
                     $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                    if (fwrite($changed_paths_handle, $out) !== strlen($out)) {
-                        throw new RuntimeException("Short write on changed paths list, is the disk full?");
+                    if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
+                        throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
                     }
                     $changed++;
                 }
-                $this->read_line($current_index_handle, $current_entry, $current_path, $current_base64_path);
-                $this->read_line($previous_index_handle, $previous_index_entry, $previous_index_path, $previous_index_base64_path);
+                $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
+                $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
             }
         }
 
-        fclose($current_index_handle);
-        if ($previous_index_handle) {
-            fclose($previous_index_handle);
+        fclose($current_handle);
+        if ($baseline_handle) {
+            fclose($baseline_handle);
         }
-        if (!fclose($changed_paths_handle) || !rename($changed_paths_tmp, $changed_paths_file)) {
-            throw new RuntimeException("Failed to move changed paths list into place: {$changed_paths_file}");
+        if (!fclose($paths_to_push_handle) || !rename($local_paths_to_push_tmp, $this->local_paths_to_push)) {
+            throw new RuntimeException("Failed to move local_paths_to_push into place: {$this->local_paths_to_push}");
         }
-        if (!fclose($deleted_paths_handle) || !rename($deleted_paths_tmp, $deleted_paths_file)) {
-            throw new RuntimeException("Failed to move deleted paths list into place: {$deleted_paths_file}");
+        if (!fclose($paths_to_delete_handle) || !rename($local_paths_to_delete_tmp, $this->local_paths_to_delete)) {
+            throw new RuntimeException("Failed to move local_paths_to_delete into place: {$this->local_paths_to_delete}");
         }
 
         return ["changed" => $changed, "deleted" => $deleted];
-    }
-
-    /**
-     * Write the last-synced remote index entries for paths this push will touch.
-     *
-     * local_paths_to_push and local_paths_to_delete are already sorted by
-     * decoded path because diff_local_files() writes them during a merge over
-     * the sorted local index. The last-synced remote index is sorted the same
-     * way. This merge keeps memory constant and ignores last-synced remote
-     * entries outside the local push scope.
-     */
-    private function write_scoped_last_synced_remote_index(string $scoped_last_synced_remote_index_path): void
-    {
-        $last_synced_remote_index_handle = fopen($this->remote_files_baseline_path, "r");
-        if (!$last_synced_remote_index_handle) {
-            throw new RuntimeException("Failed to open the last-synced remote index: {$this->remote_files_baseline_path}");
-        }
-        $local_paths_to_push_handle = fopen($this->local_paths_to_push, "r");
-        if (!$local_paths_to_push_handle) {
-            fclose($last_synced_remote_index_handle);
-            throw new RuntimeException("Failed to open local_paths_to_push: {$this->local_paths_to_push}");
-        }
-        $local_paths_to_delete_handle = fopen($this->local_paths_to_delete, "r");
-        if (!$local_paths_to_delete_handle) {
-            fclose($last_synced_remote_index_handle);
-            fclose($local_paths_to_push_handle);
-            throw new RuntimeException("Failed to open local_paths_to_delete: {$this->local_paths_to_delete}");
-        }
-        $scoped_last_synced_remote_index_handle = fopen($scoped_last_synced_remote_index_path, "w");
-        if (!$scoped_last_synced_remote_index_handle) {
-            fclose($last_synced_remote_index_handle);
-            fclose($local_paths_to_push_handle);
-            fclose($local_paths_to_delete_handle);
-            throw new RuntimeException("Failed to open scoped last-synced remote index for writing: {$scoped_last_synced_remote_index_path}");
-        }
-
-        $last_local_scope_path = null;
-        $this->read_line($last_synced_remote_index_handle, $last_synced_remote_entry, $last_synced_remote_path, $last_synced_remote_base64_path);
-        $this->read_line($local_paths_to_push_handle, $local_path_to_push_entry, $local_path_to_push, $local_path_to_push_base64);
-        $this->read_line($local_paths_to_delete_handle, $local_path_to_delete_entry, $local_path_to_delete, $local_path_to_delete_base64);
-
-        while ($last_synced_remote_entry !== null && ($local_path_to_push_entry !== null || $local_path_to_delete_entry !== null)) {
-            if ($local_path_to_push_entry !== null && ($local_path_to_delete_entry === null || strcmp($local_path_to_push, $local_path_to_delete) <= 0)) {
-                $local_scope_path = $local_path_to_push;
-            } else {
-                $local_scope_path = $local_path_to_delete;
-            }
-
-            if ($local_scope_path === $last_local_scope_path) {
-                if ($local_path_to_push === $local_scope_path) {
-                    $this->read_line($local_paths_to_push_handle, $local_path_to_push_entry, $local_path_to_push, $local_path_to_push_base64);
-                }
-                if ($local_path_to_delete === $local_scope_path) {
-                    $this->read_line($local_paths_to_delete_handle, $local_path_to_delete_entry, $local_path_to_delete, $local_path_to_delete_base64);
-                }
-                continue;
-            }
-
-            $order = strcmp($last_synced_remote_path, $local_scope_path);
-            if ($order < 0) {
-                $this->read_line($last_synced_remote_index_handle, $last_synced_remote_entry, $last_synced_remote_path, $last_synced_remote_base64_path);
-                continue;
-            }
-            if ($order > 0) {
-                $last_local_scope_path = $local_scope_path;
-                if ($local_path_to_push === $local_scope_path) {
-                    $this->read_line($local_paths_to_push_handle, $local_path_to_push_entry, $local_path_to_push, $local_path_to_push_base64);
-                }
-                if ($local_path_to_delete === $local_scope_path) {
-                    $this->read_line($local_paths_to_delete_handle, $local_path_to_delete_entry, $local_path_to_delete, $local_path_to_delete_base64);
-                }
-                continue;
-            }
-
-            $line = json_encode($last_synced_remote_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-            if (fwrite($scoped_last_synced_remote_index_handle, $line) !== strlen($line)) {
-                throw new RuntimeException("Short write on scoped last-synced remote index, is the disk full?");
-            }
-            $last_local_scope_path = $local_scope_path;
-            $this->read_line($last_synced_remote_index_handle, $last_synced_remote_entry, $last_synced_remote_path, $last_synced_remote_base64_path);
-            if ($local_path_to_push === $local_scope_path) {
-                $this->read_line($local_paths_to_push_handle, $local_path_to_push_entry, $local_path_to_push, $local_path_to_push_base64);
-            }
-            if ($local_path_to_delete === $local_scope_path) {
-                $this->read_line($local_paths_to_delete_handle, $local_path_to_delete_entry, $local_path_to_delete, $local_path_to_delete_base64);
-            }
-        }
-
-        fclose($last_synced_remote_index_handle);
-        fclose($local_paths_to_push_handle);
-        fclose($local_paths_to_delete_handle);
-        if (!fclose($scoped_last_synced_remote_index_handle)) {
-            throw new RuntimeException("Failed to close scoped last-synced remote index: {$scoped_last_synced_remote_index_path}");
-        }
-    }
-
-    /**
-     * Atomically replace a JSONL list with an empty file.
-     */
-    private function write_empty_jsonl(string $jsonl_path): void
-    {
-        $tmp = $jsonl_path . ".tmp";
-        $handle = fopen($tmp, "w");
-        if (!$handle) {
-            throw new RuntimeException("Failed to open empty JSONL temp file for writing: {$tmp}");
-        }
-        if (!fclose($handle) || !rename($tmp, $jsonl_path)) {
-            throw new RuntimeException("Failed to move empty JSONL file into place: {$jsonl_path}");
-        }
     }
 
     /**
@@ -506,18 +278,18 @@ class PushJournal
      * Copy an index file over a baseline: temp file in the same directory,
      * then rename, so readers only ever see the old or the new baseline.
      */
-    private function replace_file(string $target_baseline_path, string $source_index_file): void
+    private function replace_file(string $target, string $source_index_file): void
     {
         if (!is_file($source_index_file)) {
             throw new RuntimeException("Cannot capture a baseline, the index file is missing: {$source_index_file}");
         }
         $this->ensure_site_dir();
-        $tmp = $target_baseline_path . ".tmp";
+        $tmp = $target . ".tmp";
         if (!copy($source_index_file, $tmp)) {
             throw new RuntimeException("Failed to copy the index into a baseline temp file: {$tmp}");
         }
-        if (!rename($tmp, $target_baseline_path)) {
-            throw new RuntimeException("Failed to move the baseline into place: {$target_baseline_path}");
+        if (!rename($tmp, $target)) {
+            throw new RuntimeException("Failed to move the baseline into place: {$target}");
         }
     }
 
