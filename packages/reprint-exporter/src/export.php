@@ -7,6 +7,7 @@ use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\build_pdo_dsn;
 use function WordPress\Reprint\Exporter\json_encode_or_throw;
 use function WordPress\Reprint\Exporter\parse_size;
+use function WordPress\Reprint\Exporter\path_is_within_root;
 
 // Capture any accidental output before headers are set so we can discard it
 // when switching to streaming mode later.
@@ -2729,6 +2730,28 @@ function endpoint_file_index(
     // scratch files unless the client explicitly opts in. See
     // path_is_default_skipped() for the full deny-list and rationale.
     $include_caches = !empty($config["include_caches"]);
+    // Reprint's own storage (the push staging area and apply bookkeeping)
+    // must never appear in an index: it can sit inside the document root on
+    // hosts that allow writing nowhere else, and indexing it would sync or
+    // delete reprint's own records mid-transfer. storage_path is the
+    // server's own setting, so it is known here for every request — a
+    // pulling peer's request does not need to mention it.
+    $storage_path = isset($config["storage_path"]) && is_string($config["storage_path"])
+        ? rtrim($config["storage_path"], "/")
+        : "";
+    if ($storage_path !== "") {
+        // The traversal canonicalizes every path with realpath() (see the
+        // wp.com note further down), so the setting must be compared in the
+        // same form. path_is_within_root() compares plain strings, and a
+        // trailing slash on the setting would make it miss — hence the
+        // rtrim above. When the directory does not exist yet there is
+        // nothing to exclude and the trimmed value stays as a harmless
+        // fallback.
+        $storage_real = realpath($storage_path);
+        if ($storage_real !== false) {
+            $storage_path = $storage_real;
+        }
+    }
 
     // Find the starting point – either by parsing the cursor, or by
     // sourcing it from the filesystem.
@@ -3056,6 +3079,11 @@ function endpoint_file_index(
                 // is updated above this check, so resume correctly skips
                 // past the filtered entry on the next request.
                 if (!$include_caches && path_is_default_skipped($path)) {
+                    continue;
+                }
+                // The "" guard matters: path_is_within_root() with an empty
+                // root would match every absolute path.
+                if ($storage_path !== "" && path_is_within_root($path, $storage_path)) {
                     continue;
                 }
                 clearstatcache(true, $path);

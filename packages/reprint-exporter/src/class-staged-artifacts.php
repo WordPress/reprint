@@ -605,7 +605,39 @@ final class Site_Export_Staged_Artifacts {
         if (!$this->ensure_parent_dir($this->lock_path)) {
             return false;
         }
+        $this->ensure_web_guards(dirname($this->lock_path));
         return @fopen($this->lock_path, 'c+b');
+    }
+
+    /**
+     * Writes deny rules for staging directories inside the document root.
+     * They are all we can do from here: Apache reads the .htaccess and
+     * refuses to serve the directory; nginx ignores both files and loses
+     * nothing by their presence. Do not keep the staging directory inside
+     * the document root unless the host offers nowhere else to write.
+     *
+     * Write failures are ignored: the store works the same without the
+     * files, and the index exclusion of storage_path still applies.
+     */
+    private function ensure_web_guards(string $dir): void {
+        $htaccess = $dir . '/.htaccess';
+        if (!file_exists($htaccess)) {
+            @file_put_contents(
+                $htaccess,
+                "# Reprint staging area - never web-served.\n" .
+                "<IfModule mod_authz_core.c>\n" .
+                "    Require all denied\n" .
+                "</IfModule>\n" .
+                "<IfModule !mod_authz_core.c>\n" .
+                "    Deny from all\n" .
+                "</IfModule>\n"
+            );
+        }
+
+        $index = $dir . '/index.php';
+        if (!file_exists($index)) {
+            @file_put_contents($index, "<?php\n");
+        }
     }
 
     private function ensure_parent_dir(string $path): bool {

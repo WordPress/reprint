@@ -205,6 +205,40 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertContains('wp-content/themes/foo/style.css~', $rel);
     }
 
+    public function testFileIndexNeverListsReprintStorage(): void
+    {
+        $siteDir = $this->buildFixtureSite();
+        // Reprint's own storage inside the document root, plus a sibling
+        // whose name shares the prefix and must survive the exclusion.
+        $storage = $siteDir . '/wp-content/reprint-storage';
+        mkdir($storage . '/files/wp-content/themes/foo', 0755, true);
+        file_put_contents($storage . '/files/wp-content/themes/foo/style.css', 'staged');
+        file_put_contents($storage . '/state.json', '{}');
+        mkdir($siteDir . '/wp-content/reprint-storage-2', 0755, true);
+        file_put_contents($siteDir . '/wp-content/reprint-storage-2/keep.txt', 'mine');
+
+        // Configured with a trailing slash on purpose: the endpoint must
+        // normalize the setting before comparing it against entry paths.
+        $rel = $this->relativePaths(
+            $this->runFileIndexEntries($siteDir, false, 5000, $storage . '/'),
+            $siteDir
+        );
+
+        $this->assertNotContains('wp-content/reprint-storage', $rel);
+        $this->assertNotContains('wp-content/reprint-storage/state.json', $rel);
+        $this->assertNotContains('wp-content/reprint-storage/files/wp-content/themes/foo/style.css', $rel);
+        $this->assertContains('wp-content/reprint-storage-2/keep.txt', $rel, 'a shared name prefix must not widen the exclusion');
+
+        // include_caches=1 turns the junk filter off; it must not turn the
+        // storage exclusion off.
+        $withCaches = $this->relativePaths(
+            $this->runFileIndexEntries($siteDir, true, 5000, $storage),
+            $siteDir
+        );
+        $this->assertContains('wp-content/cache/page.html', $withCaches);
+        $this->assertNotContains('wp-content/reprint-storage/state.json', $withCaches);
+    }
+
     public function testFileIndexFilterDoesNotBreakResume(): void
     {
         // The skip is applied AFTER the cursor's "after" pointer is updated,
@@ -276,9 +310,9 @@ final class FileIndexSkipDefaultsTest extends TestCase
     /**
      * @return list<array{path: string, type: string}>
      */
-    private function runFileIndexEntries(string $siteDir, bool $includeCaches, int $batchSize = 5000): array
+    private function runFileIndexEntries(string $siteDir, bool $includeCaches, int $batchSize = 5000, ?string $storagePath = null): array
     {
-        $stdout = $this->runFileIndex($siteDir, $includeCaches, $batchSize);
+        $stdout = $this->runFileIndex($siteDir, $includeCaches, $batchSize, $storagePath);
 
         // The response is `multipart/mixed; boundary="…"` containing one or
         // more `index_batch` JSON chunks. Parse out each batch and flatten.
@@ -346,15 +380,19 @@ final class FileIndexSkipDefaultsTest extends TestCase
         return $out;
     }
 
-    private function runFileIndex(string $siteDir, bool $includeCaches, int $batchSize): string
+    private function runFileIndex(string $siteDir, bool $includeCaches, int $batchSize, ?string $storagePath = null): string
     {
         $configPath = $this->tempDir . '/index-config.json';
-        file_put_contents($configPath, json_encode([
+        $config = [
             'directory' => $siteDir,
             'list_dir' => $siteDir,
             'batch_size' => $batchSize,
             'include_caches' => $includeCaches,
-        ], JSON_THROW_ON_ERROR));
+        ];
+        if ($storagePath !== null) {
+            $config['storage_path'] = $storagePath;
+        }
+        file_put_contents($configPath, json_encode($config, JSON_THROW_ON_ERROR));
 
         $scriptPath = $this->tempDir . '/run-file-index.php';
         file_put_contents(

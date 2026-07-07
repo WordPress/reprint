@@ -458,6 +458,22 @@ final class StagedArtifactsTest extends TestCase
         $this->assertFileExists($this->staging_dir . '/state.json');
     }
 
+    public function testStagingDirectoryGetsWebGuards(): void
+    {
+        $store = $this->makeStore();
+        $store->append('artifact-1', 0, 'bytes');
+
+        $htaccess = file_get_contents($this->staging_dir . '/.htaccess');
+        $this->assertStringContainsString('Require all denied', $htaccess);
+        $this->assertStringContainsString('Deny from all', $htaccess);
+        $this->assertFileExists($this->staging_dir . '/index.php');
+
+        // The guards live at the staging root; the mirror under files/ still
+        // stages site files with the same names.
+        $this->assertSame('accepted', $store->append('.htaccess', 0, 'site rules')['status']);
+        $this->assertSame('site rules', file_get_contents($this->staging_dir . '/files/.htaccess'));
+    }
+
     public function testSiteFilenamesThatLookLikeStagingRecordsStageVerbatim(): void
     {
         $store = $this->makeStore();
