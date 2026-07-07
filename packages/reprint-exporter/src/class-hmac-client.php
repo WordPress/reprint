@@ -44,6 +44,12 @@
  */
 class Site_Export_HMAC_Client {
 
+    /**
+     * Content-hash sentinel for requests whose payload is deliberately
+     * unsigned. Must match Site_Export_HMAC_Server::UNSIGNED_PAYLOAD.
+     */
+    public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
+
     /** @var string */
     private $secret;
 
@@ -107,6 +113,45 @@ class Site_Export_HMAC_Client {
             'X-Auth-Timestamp' => $timestamp,
             'X-Auth-Content-Hash' => $content_hash,
         ];
+    }
+
+    /**
+     * Returns X-Auth-* headers that sign only the request envelope.
+     *
+     * The signature binds the method and request target instead of a body
+     * digest, so a payload of any size streams through without buffering or
+     * hashing, and a captured envelope cannot be replayed against another
+     * route. Payload integrity belongs to TLS; over --force-http a tampered
+     * body is accepted — that is the flag's documented trade.
+     *
+     * Signature = HMAC-SHA256(nonce + timestamp + "UNSIGNED-PAYLOAD\n" + METHOD + "\n" + target, secret)
+     *
+     * @param string $method Uppercased into the signature (GET, POST, ...).
+     * @param string $url    Full request URL; only path and query are signed.
+     */
+    public function get_envelope_auth_headers(string $method, string $url): array {
+        $nonce = $this->generate_nonce();
+        $timestamp = $this->get_timestamp();
+        $message = $nonce . $timestamp . self::UNSIGNED_PAYLOAD . "\n" . strtoupper($method) . "\n" . self::request_target($url);
+
+        return [
+            'X-Auth-Signature' => hash_hmac('sha256', $message, $this->secret),
+            'X-Auth-Nonce' => $nonce,
+            'X-Auth-Timestamp' => $timestamp,
+            'X-Auth-Content-Hash' => self::UNSIGNED_PAYLOAD,
+        ];
+    }
+
+    /**
+     * Normalizes a URL to the "path?query" form both sides sign — the same
+     * shape PHP exposes as $_SERVER['REQUEST_URI'] on the receiving end.
+     */
+    public static function request_target(string $url): string {
+        $path = parse_url($url, PHP_URL_PATH);
+        $query = parse_url($url, PHP_URL_QUERY);
+        $target = is_string($path) && $path !== '' ? $path : '/';
+
+        return is_string($query) && $query !== '' ? $target . '?' . $query : $target;
     }
 
     /** Returns auth headers formatted for CURLOPT_HTTPHEADER (["Name: value", ...]). */

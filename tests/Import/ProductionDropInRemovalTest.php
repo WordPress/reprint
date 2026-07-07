@@ -169,6 +169,9 @@ class ProductionDropInRemovalTest extends TestCase
         mkdir($wpContent, 0755, true);
         file_put_contents($wpContent . '/object-cache.php', "<?php // Memcached object cache\n");
 
+        // advanced-cache.php (file)
+        file_put_contents($wpContent . '/advanced-cache.php', "<?php // Advanced page cache\n");
+
         // wpcomsh directory with files inside
         $muPlugins = $wpContent . '/mu-plugins';
         mkdir($muPlugins . '/wpcomsh', 0755, true);
@@ -196,6 +199,21 @@ class ProductionDropInRemovalTest extends TestCase
         $this->runApplyRuntime($client);
 
         $this->assertFileDoesNotExist($objectCachePath);
+    }
+
+    public function testApplyRuntimeRemovesAdvancedCacheFile(): void
+    {
+        $this->writeState(['command' => 'files-pull', 'status' => 'complete']);
+        $this->createProductionDropIns();
+
+        $advancedCachePath = $this->fsRoot . '/wp-content/advanced-cache.php';
+        $this->assertFileExists($advancedCachePath);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+
+        $this->assertFileDoesNotExist($advancedCachePath);
     }
 
     public function testApplyRuntimeRemovesWpcomshDirectory(): void
@@ -291,6 +309,10 @@ class ProductionDropInRemovalTest extends TestCase
             $auditLog,
         );
         $this->assertStringContainsString(
+            'removed wp-content/advanced-cache.php (production-only)',
+            $auditLog,
+        );
+        $this->assertStringContainsString(
             'removed wp-content/mu-plugins/wpcomsh (production-only)',
             $auditLog,
         );
@@ -317,6 +339,7 @@ class ProductionDropInRemovalTest extends TestCase
 
         $this->assertArrayHasKey('remote_paths_removed_from_local_site', $state['apply']);
         $this->assertContains('wp-content/object-cache.php', $state['apply']['remote_paths_removed_from_local_site']);
+        $this->assertContains('wp-content/advanced-cache.php', $state['apply']['remote_paths_removed_from_local_site']);
         $this->assertContains('wp-content/mu-plugins/wpcomsh', $state['apply']['remote_paths_removed_from_local_site']);
         $this->assertContains('wp-content/mu-plugins/wpcomsh-dev', $state['apply']['remote_paths_removed_from_local_site']);
         $this->assertContains('wp-content/mu-plugins/wpcomsh-loader.php', $state['apply']['remote_paths_removed_from_local_site']);
