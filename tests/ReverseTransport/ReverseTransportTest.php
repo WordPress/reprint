@@ -108,14 +108,26 @@ final class ReverseTransportTest extends TestCase
     }
 
     /** The remote endpoint, driving the real importer against this test's dirs. */
-    private function newEndpoint(): \ReverseTransportEndpoint
+    private function newEndpoint(array $optionOverrides = []): \ReverseTransportEndpoint
     {
         $stateDir = $this->stateDir;
         $fsRoot   = $this->fsRoot;
         return new \ReverseTransportEndpoint(
             static fn() => new \ImportClient('http://reverse-transport.invalid/export.php', $stateDir, $fsRoot),
-            ['command' => 'files-pull', 'follow_symlinks' => false, 'verbose' => false]
+            array_merge(
+                ['command' => 'files-pull', 'follow_symlinks' => false, 'verbose' => false],
+                $optionOverrides
+            )
         );
+    }
+
+    /** @return resource A rewound in-memory stream holding $bytes. */
+    private static function memoryStream(string $bytes)
+    {
+        $stream = fopen('php://memory', 'r+');
+        fwrite($stream, $bytes);
+        rewind($stream);
+        return $stream;
     }
 
     /**
@@ -299,7 +311,7 @@ final class ReverseTransportTest extends TestCase
             static function (): \ImportClient {
                 throw new \RuntimeException('importer exploded');
             },
-            []
+            ['command' => 'files-pull']
         );
         $source = new \ReverseTransportSource(
             static fn($resultStream, int $httpCode): string => $endpoint->handle_exchange($resultStream, $httpCode),
@@ -309,5 +321,172 @@ final class ReverseTransportTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('importer exploded');
         $source->run();
+    }
+
+    public function testAGarbage200BodyFailsLoudlyInsteadOfLooping(): void
+    {
+        // A source whose export deterministically produces a non-multipart
+        // body (fatal after headers, HTML error page) must abort with the
+        // curl path's message, not re-ask the same command forever.
+        $this->seedSourceTreeAndPreflight();
+        $endpoint = $this->newEndpoint();
+
+        $source = new \ReverseTransportSource(
+            static fn($resultStream, int $httpCode): string => $endpoint->handle_exchange($resultStream, $httpCode),
+            static fn(array $request): array => [
+                'http_code' => 200,
+                'stream'    => self::memoryStream("<html>502 Bad Gateway</html>\n"),
+            ]
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('missing multipart boundary');
+        ob_start();
+        try {
+            $source->run();
+        } finally {
+            ob_end_clean();
+        }
+    }
+
+    public function testATruncatedResultFailsWithMissingCompletion(): void
+    {
+        // A stream that ends without the completion chunk is a failed
+        // request (same contract the curl tail enforces), not a clean partial.
+        $this->seedSourceTreeAndPreflight();
+        $endpoint   = $this->newEndpoint();
+        $realExport = $this->exportRunner();
+
+        $truncating = static function (array $request) use ($realExport): array {
+            $result = $realExport($request);
+            $body   = (string) stream_get_contents($result['stream']);
+            fclose($result['stream']);
+            return [
+                'http_code' => 200,
+                'stream'    => self::memoryStream(substr($body, 0, (int) (strlen($body) * 0.8))),
+            ];
+        };
+
+        $source = new \ReverseTransportSource(
+            static fn($resultStream, int $httpCode): string => $endpoint->handle_exchange($resultStream, $httpCode),
+            $truncating
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('missing completion chunk');
+        ob_start();
+        try {
+            $source->run();
+        } finally {
+            ob_end_clean();
+        }
+    }
+
+    public function testCorruptGzipFailsLoudlyInsteadOfTruncating(): void
+    {
+        $this->seedSourceTreeAndPreflight();
+        $endpoint   = $this->newEndpoint();
+        $realExport = $this->exportRunner();
+
+        // Flip one byte inside the deflate data (the gzip header is the
+        // first 10 bytes) — inflate_add() must surface this, not truncate.
+        $corrupting = static function (array $request) use ($realExport): array {
+            $result = $realExport($request);
+            $body   = (string) stream_get_contents($result['stream']);
+            fclose($result['stream']);
+            $body[20] = chr(ord($body[20]) ^ 0xFF);
+            return ['http_code' => 200, 'stream' => self::memoryStream($body)];
+        };
+
+        $source = new \ReverseTransportSource(
+            static fn($resultStream, int $httpCode): string => $endpoint->handle_exchange($resultStream, $httpCode),
+            $corrupting
+        );
+
+        $this->expectException(\RuntimeException::class);
+        ob_start();
+        try {
+            $source->run();
+        } finally {
+            ob_end_clean();
+        }
+    }
+
+    public function testANon200ResultIsNotAcceptedAsFetchJsonData(): void
+    {
+        // The curl path forces json=>null on non-200 so callers (preflight's
+        // "payload !== null" gate) cannot mistake an error body for data.
+        // The reverse guard must convert to the exact same shape.
+        $client = new \ImportClient('http://reverse-transport.invalid/export.php', $this->stateDir, $this->fsRoot);
+        $client->set_reverse_transport(
+            new \ReverseTransport(self::memoryStream('{"error":"boom","trace":"t0"}'), 500)
+        );
+
+        $fetchJson = new \ReflectionMethod($client, 'fetch_json');
+        $fetchJson->setAccessible(true);
+        $result = $fetchJson->invoke($client, 'http://reverse-transport.invalid/export.php?endpoint=preflight');
+
+        $this->assertFalse($result['ok']);
+        $this->assertNull($result['json'], 'an error body must never surface as data');
+        $this->assertSame(500, $result['http_code']);
+        $this->assertArrayHasKey('error_code', $result);
+    }
+
+    public function testCommandsWithoutPerRequestCheckpointsAreRejected(): void
+    {
+        // preflight (and the composite pull) issue several requests per
+        // invocation with no persisted checkpoint between them, which breaks
+        // resume-to-the-same-request; the endpoint refuses them up front.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('unsupported command');
+        new \ReverseTransportEndpoint(
+            static fn() => new \stdClass(),
+            ['command' => 'preflight']
+        );
+    }
+
+    public function testFollowSymlinksIsRefusedOverTheReverseTransport(): void
+    {
+        // Symlink discovery re-scans without a sub-stage checkpoint; until it
+        // has one, silently mis-pairing results would corrupt the index — so
+        // the importer refuses loudly (and the refusal reaches the source).
+        $this->seedSourceTreeAndPreflight();
+        $endpoint = $this->newEndpoint(['follow_symlinks' => true]);
+
+        $source = new \ReverseTransportSource(
+            static fn($resultStream, int $httpCode): string => $endpoint->handle_exchange($resultStream, $httpCode),
+            $this->exportRunner()
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('follow_symlinks');
+        ob_start();
+        try {
+            $source->run();
+        } finally {
+            ob_end_clean();
+        }
+    }
+
+    public function testARunawayImporterIsCappedInsteadOfSpinning(): void
+    {
+        // A pass that neither finishes nor asks for anything must fail the
+        // exchange loudly, not spin inside one HTTP request.
+        $endpoint = new \ReverseTransportEndpoint(
+            static fn() => new class {
+                public $exit_code = 2;
+                public function set_reverse_transport($transport): void
+                {
+                }
+                public function run(array $options): void
+                {
+                }
+            },
+            ['command' => 'files-pull']
+        );
+
+        $response = json_decode($endpoint->handle_exchange(null), true);
+        $this->assertSame('error', $response['status']);
+        $this->assertStringContainsString('no outbound progress', $response['message']);
     }
 }

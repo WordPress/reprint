@@ -56,24 +56,19 @@ final class ReverseTransport
                 "url"    => $url,
             )
         );
-        $body   = (string) stream_get_contents( $stream );
-        if ( strncmp( $body, "\x1f\x8b", 2 ) === 0 ) {
-            $decoded = @gzdecode( $body );
-            if ( $decoded !== false ) {
-                $body = $decoded;
-            }
+        $body = $this->read_small_body( $stream );
+        if ( $this->result_http_code !== 200 ) {
+            throw new ReverseTransportHttpError( $this->result_http_code, $body );
         }
         $json = $body === "" ? null : json_decode( $body, true );
 
         return array(
-            "ok"        => $this->result_http_code === 200 && $json !== null,
+            "ok"        => $json !== null,
             "http_code" => $this->result_http_code,
             "elapsed"   => 0.0,
             "body"      => $body,
             "json"      => $json,
-            "error"     => $this->result_http_code === 200
-                ? null
-                : "reverse-transport request failed with HTTP {$this->result_http_code}",
+            "error"     => $json !== null ? null : "Invalid JSON in reverse-transport response",
         );
     }
 
@@ -91,13 +86,29 @@ final class ReverseTransport
             fn() => $this->build_export_command( $url, $post_data )
         );
         if ( $this->result_http_code !== 200 ) {
-            throw new RuntimeException( "reverse-transport export request returned a non-200 status" );
+            throw new ReverseTransportHttpError(
+                $this->result_http_code,
+                $this->read_small_body( $stream )
+            );
         }
 
-        // Sniff the gzip magic to decide on incremental inflation. The two
-        // sniffed bytes are part of the payload, so they enter the loop as the
-        // first raw chunk.
-        $head    = (string) fread( $stream, 2 );
+        // Sniff the gzip magic to decide on incremental inflation. Read
+        // exactly two bytes — a short first read on a socket-backed stream
+        // must not misclassify a gzipped body as raw. Both bytes are part of
+        // the payload, so they enter the loop as the first raw chunk.
+        $head = "";
+        $need = 2;
+        while ( $need > 0 && ! feof( $stream ) ) {
+            $bytes = fread( $stream, $need );
+            if ( $bytes === false ) {
+                throw new RuntimeException( "reverse transport: failed to read the result stream" );
+            }
+            if ( $bytes === "" ) {
+                break;
+            }
+            $head .= $bytes;
+            $need  -= strlen( $bytes );
+        }
         $inflate = strncmp( $head, "\x1f\x8b", 2 ) === 0
             ? inflate_init( ZLIB_ENCODING_GZIP )
             : null;
@@ -107,7 +118,14 @@ final class ReverseTransport
         $raw     = $head;
 
         while ( $raw !== "" ) {
-            $chunk = $inflate ? (string) inflate_add( $inflate, $raw ) : $raw;
+            // @ because inflate_add also raises a PHP warning on bad data;
+            // the false return below is the real, handled signal.
+            $chunk = $inflate ? @inflate_add( $inflate, $raw ) : $raw;
+            if ( $chunk === false ) {
+                // curl fails this as CURLE_BAD_CONTENT_ENCODING; swallowing it
+                // here would silently truncate the transfer instead.
+                throw new RuntimeException( "reverse transport: corrupt gzip in the result stream" );
+            }
 
             if ( $parser !== null ) {
                 $parser->feed( $chunk );
@@ -120,7 +138,7 @@ final class ReverseTransport
                 if ( strpos( $pending, "\n" ) !== false ) {
                     $boundary = $this->extract_multipart_boundary( $pending );
                     if ( $boundary === null ) {
-                        return;
+                        break; // Not multipart — the post-loop check throws with a snippet.
                     }
                     $parser = new MultipartStreamParser( $boundary, $chunk_handler );
                     $parser->feed( $pending );
@@ -128,17 +146,45 @@ final class ReverseTransport
                 }
             }
 
-            $raw = (string) fread( $stream, 65536 );
-        }
-
-        // A body smaller than one line never hit the newline branch above.
-        if ( $parser === null && $pending !== "" ) {
-            $boundary = $this->extract_multipart_boundary( $pending );
-            if ( $boundary !== null ) {
-                $parser = new MultipartStreamParser( $boundary, $chunk_handler );
-                $parser->feed( $pending );
+            if ( feof( $stream ) ) {
+                break;
+            }
+            $raw = fread( $stream, 65536 );
+            if ( $raw === false ) {
+                throw new RuntimeException( "reverse transport: failed to read the result stream" );
             }
         }
+
+        if ( $parser === null ) {
+            // Same failure the curl path throws for a 200 body that is not
+            // multipart (import.php's fetch_streaming tail) — the message
+            // shape matters, downstream recovery classifies on it.
+            $snippet = substr( $pending, 0, 500 );
+            throw new RuntimeException(
+                "Invalid response: missing multipart boundary. " .
+                    ( $snippet !== "" ? "Body: {$snippet}" : "" )
+            );
+        }
+    }
+
+    /**
+     * Reads a small body (JSON endpoint responses, error pages) whole,
+     * gunzipping when the export engine compressed it. Capped at 1 MiB so a
+     * rogue error body cannot balloon memory — only file_fetch results are
+     * legitimately large, and those stream through fetch_streaming().
+     *
+     * @param resource $stream
+     */
+    private function read_small_body( $stream ): string
+    {
+        $body = (string) stream_get_contents( $stream, 1048576 );
+        if ( strncmp( $body, "\x1f\x8b", 2 ) === 0 ) {
+            $decoded = @gzdecode( $body );
+            if ( $decoded !== false ) {
+                $body = $decoded;
+            }
+        }
+        return $body;
     }
 
     /**

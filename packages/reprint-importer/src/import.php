@@ -1582,6 +1582,17 @@ class ImportClient
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
+        // Symlink discovery issues follow-up file_index requests without a
+        // persisted checkpoint between them, which breaks the reverse
+        // transport's resume-to-the-same-request invariant. Refuse loudly
+        // rather than silently skipping symlinks — symlinked layouts are a
+        // primary target for this tool.
+        if ($this->reverse_transport !== null && $this->follow_symlinks) {
+            throw new InvalidArgumentException(
+                "follow_symlinks is not supported over the reverse transport yet. " .
+                    "Pass follow_symlinks=false to run without symlink discovery.",
+            );
+        }
         $this->include_caches = $options["include_caches"] ?? false;
         $this->extra_directory = $options["extra_directory"] ?? null;
         if (isset($options["fs_root_nonempty_behavior"])) {
@@ -10396,12 +10407,69 @@ class ImportClient
     }
 
     /**
+     * Diagnose a non-200 streaming response and throw the operator-facing
+     * error, appending the server's stack trace when the body carries one.
+     * Shared by the curl tail and the reverse-transport guard so both
+     * transports fail with the same diagnosed message (and the same
+     * "HTTP error 4xx" shapes that callers classify on).
+     */
+    private function throw_diagnosed_stream_error(
+        ?string $endpoint,
+        int $http_code,
+        string $error_body,
+        ?string $redirect_url
+    ): void {
+        if ($endpoint !== null) {
+            $this->handle_tuner_error($endpoint, [
+                "http_code" => $http_code,
+                "timeout" => false,
+                "curl_errno" => 0,
+            ]);
+        }
+
+        // Log what we received
+        $this->audit_log(
+            "HTTP error {$http_code} | error_body length: " .
+                strlen($error_body),
+            true,
+        );
+
+        $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url);
+        $error_msg = $this->format_diagnosed_error($diagnosis);
+
+        // Append stack trace from the server if available.
+        if ($error_body) {
+            $error_data = json_decode($error_body, true);
+            if (is_array($error_data) && isset($error_data["trace"])) {
+                $error_msg .= "\n\nServer stack trace:\n" . $error_data["trace"];
+            }
+        }
+
+        throw new RuntimeException($error_msg);
+    }
+
+    /**
      * Fetch a JSON response for a lightweight request (non-streaming).
      */
     private function fetch_json(string $url): array
     {
         if ($this->reverse_transport !== null) {
-            return $this->reverse_transport->fetch_json($url);
+            try {
+                return $this->reverse_transport->fetch_json($url);
+            } catch (ReverseTransportHttpError $e) {
+                // Mirror the curl path's non-200 return shape exactly —
+                // callers gate on json being null and read error_code.
+                $diagnosis = $this->diagnose_http_error($e->http_code, $e->body, null);
+                return [
+                    "ok" => false,
+                    "http_code" => $e->http_code,
+                    "elapsed" => 0.0,
+                    "body" => $e->body,
+                    "json" => null,
+                    "error" => $this->format_diagnosed_error($diagnosis),
+                    "error_code" => $diagnosis['code'],
+                ];
+            }
         }
 
         $this->reset_curl_state();
@@ -10510,11 +10578,24 @@ class ImportClient
     ): void {
         if ($this->reverse_transport !== null) {
             $current_chunk = null;
-            $this->reverse_transport->fetch_streaming(
-                $url,
-                $post_data,
-                $this->make_chunk_handler($context, $current_chunk)
-            );
+            try {
+                $this->reverse_transport->fetch_streaming(
+                    $url,
+                    $post_data,
+                    $this->make_chunk_handler($context, $current_chunk)
+                );
+            } catch (ReverseTransportHttpError $e) {
+                $this->throw_diagnosed_stream_error($endpoint, $e->http_code, $e->body, null);
+            }
+
+            // Same completeness contract the curl tail enforces below: a
+            // stream that ended without the completion chunk is a failed
+            // request, not a clean partial.
+            if (!$context->saw_completion) {
+                throw new RuntimeException(
+                    "Invalid response: missing completion chunk from server.",
+                );
+            }
             return;
         }
 
@@ -10818,33 +10899,7 @@ class ImportClient
         $context->response_stats["total_time"] = $total_time;
 
         if ($http_code !== 200) {
-            if ($endpoint !== null) {
-                $this->handle_tuner_error($endpoint, [
-                    "http_code" => $http_code,
-                    "timeout" => false,
-                    "curl_errno" => 0,
-                ]);
-            }
-
-            // Log what we received
-            $this->audit_log(
-                "HTTP error {$http_code} | error_body length: " .
-                    strlen($error_body),
-                true,
-            );
-
-            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url);
-            $error_msg = $this->format_diagnosed_error($diagnosis);
-
-            // Append stack trace from the server if available.
-            if ($error_body) {
-                $error_data = json_decode($error_body, true);
-                if (is_array($error_data) && isset($error_data["trace"])) {
-                    $error_msg .= "\n\nServer stack trace:\n" . $error_data["trace"];
-                }
-            }
-
-            throw new RuntimeException($error_msg);
+            $this->throw_diagnosed_stream_error($endpoint, (int) $http_code, $error_body, $redirect_url);
         }
 
         if (!$parser) {

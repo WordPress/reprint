@@ -31,6 +31,25 @@
  */
 final class ReverseTransportEndpoint
 {
+    /**
+     * Commands whose every export request sits behind a persisted checkpoint.
+     * That is the reverse transport's core invariant — the request a fresh
+     * client re-issues on re-entry must be the one the banked result belongs
+     * to. Commands that fire several requests per invocation without
+     * checkpointing between them (preflight's runtime-file fetches, and
+     * therefore the composite pull) would consume results with the wrong
+     * request; grow this list only after verifying the checkpointing.
+     */
+    private const SUPPORTED_COMMANDS = array( "files-pull" );
+
+    /**
+     * Re-entry bound per exchange. A healthy exchange takes a handful of
+     * passes (consume, local stages, yield); a pass loop that neither
+     * finishes nor asks for anything must fail loudly, not spin inside one
+     * HTTP request.
+     */
+    private const MAX_PASSES = 100;
+
     /** @var callable fn(): object A fresh importer client with the reverse transport set. */
     private $client_factory;
 
@@ -39,6 +58,13 @@ final class ReverseTransportEndpoint
 
     public function __construct( callable $client_factory, array $run_options )
     {
+        if ( ! in_array( $run_options["command"] ?? "", self::SUPPORTED_COMMANDS, true ) ) {
+            throw new InvalidArgumentException(
+                "reverse transport: unsupported command; only commands that persist a " .
+                    "checkpoint before every export request can ride the reverse " .
+                    "transport (supported: files-pull)"
+            );
+        }
         $this->client_factory = $client_factory;
         $this->run_options    = $run_options;
     }
@@ -57,7 +83,13 @@ final class ReverseTransportEndpoint
     {
         $transport = new ReverseTransport( $result_stream, $result_http_code );
         try {
+            $passes = 0;
             do {
+                if ( ++$passes > self::MAX_PASSES ) {
+                    throw new RuntimeException(
+                        "reverse transport: importer made no outbound progress"
+                    );
+                }
                 $client = call_user_func( $this->client_factory );
                 $client->set_reverse_transport( $transport );
                 $client->run( $this->run_options );

@@ -12,6 +12,7 @@
  */
 
 require_once __DIR__ . '/class-transport-yield.php';
+require_once __DIR__ . '/class-reverse-transport-http-error.php';
 require_once __DIR__ . '/class-reverse-transport.php';
 require_once __DIR__ . '/class-reverse-transport-endpoint.php';
 require_once __DIR__ . '/class-reverse-transport-source.php';
