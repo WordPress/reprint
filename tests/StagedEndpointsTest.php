@@ -574,4 +574,39 @@ final class StagedEndpointsTest extends TestCase {
         ]);
         $this->assertSame(1, $reads, 'a JSON body still feeds config parsing');
     }
+
+    public function testHandleRequestDoesNotBufferStagedUploadBodies(): void
+    {
+        $reads = 0;
+        $server = new Site_Export_HTTP_Server([
+            'staged' => ['staging_dir' => $this->staging_dir, 'secret' => self::SECRET],
+            'body_reader' => function () use (&$reads): string {
+                ++$reads;
+                return 'this would buffer the raw upload';
+            },
+        ]);
+
+        $previous_request_method = $_SERVER['REQUEST_METHOD'] ?? null;
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        ob_start();
+        try {
+            $server->handle_request([
+                'get' => ['endpoint' => 'staged_upload', 'artifact_id' => 'artifact-1', 'offset' => 0],
+                'server' => ['REQUEST_METHOD' => 'POST', 'CONTENT_TYPE' => 'application/json'],
+            ]);
+            $output = ob_get_clean();
+        } finally {
+            if (ob_get_level() > 0) {
+                ob_end_clean();
+            }
+            if ($previous_request_method === null) {
+                unset($_SERVER['REQUEST_METHOD']);
+            } else {
+                $_SERVER['REQUEST_METHOD'] = $previous_request_method;
+            }
+        }
+
+        $this->assertSame(0, $reads, 'staged_upload body bytes must only be read by the upload handler');
+        $this->assertSame('auth_failed', json_decode( (string) $output, true)['reason']);
+    }
 }

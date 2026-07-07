@@ -42,17 +42,22 @@ final class Site_Export_HTTP_Server {
 
     public function handle_request(array $request = []): void {
         $server = $request['server'] ?? $_SERVER;
+        $get = $request['get'] ?? $_GET;
+        $post = $request['post'] ?? $_POST;
         if (array_key_exists('body', $request)) {
             $body = (string) $request['body'];
         } else {
-            // Config parsing only consumes JSON bodies. Reading anything
-            // else here would buffer a raw upload body (staged_upload) in
-            // memory before its handler can stream it.
-            $body = $this->is_json_content_type($server) ? call_user_func($this->body_reader) : '';
+            $endpoint = (string) ( $get['endpoint'] ?? $post['endpoint'] ?? '' );
+            // staged_upload parameters live in the query string; its body
+            // is raw artifact bytes and must only be read by the upload
+            // handler. Other JSON requests still feed config parsing.
+            $body = $endpoint !== 'staged_upload' && $this->is_json_content_type($server)
+                ? call_user_func($this->body_reader)
+                : '';
         }
         $config = $request['config'] ?? $this->parse_http_config(
-            $request['get'] ?? $_GET,
-            $request['post'] ?? $_POST,
+            $get,
+            $post,
             $server,
             $body
         );

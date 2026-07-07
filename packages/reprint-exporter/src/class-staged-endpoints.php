@@ -113,24 +113,26 @@ final class Site_Export_Staged_Endpoints {
         $secret = $options['secret'] ?? null;
         $this->secret = is_string($secret) && $secret !== '' ? $secret : null;
 
-        $max = $options['max_request_bytes'] ?? null;
-        if (!is_numeric($max) || (int) $max <= 0) {
-            $post_max = ini_get('post_max_size');
-            $max = is_string($post_max) && $post_max !== '' ? parse_size($post_max) : 0;
-            if ($max <= 0) {
-                $max = self::DEFAULT_MAX_REQUEST_BYTES;
+        $max_request_bytes_option = $options['max_request_bytes'] ?? null;
+        if (!is_numeric($max_request_bytes_option) || (int) $max_request_bytes_option <= 0) {
+            $post_max_size = ini_get('post_max_size');
+            $max_request_bytes_option = is_string($post_max_size) && $post_max_size !== ''
+                ? parse_size($post_max_size)
+                : 0;
+            if ($max_request_bytes_option <= 0) {
+                $max_request_bytes_option = self::DEFAULT_MAX_REQUEST_BYTES;
             }
         }
-        $this->max_request_bytes = (int) $max;
+        $this->max_request_bytes = (int) $max_request_bytes_option;
 
-        $buffer = $options['append_buffer_bytes'] ?? null;
-        $this->append_buffer_bytes = is_numeric($buffer) && (int) $buffer > 0
-            ? (int) $buffer
+        $append_buffer_bytes_option = $options['append_buffer_bytes'] ?? null;
+        $this->append_buffer_bytes = is_numeric($append_buffer_bytes_option) && (int) $append_buffer_bytes_option > 0
+            ? (int) $append_buffer_bytes_option
             : self::DEFAULT_APPEND_BUFFER_BYTES;
 
-        $tolerance = $options['timestamp_tolerance'] ?? null;
-        $this->timestamp_tolerance = is_numeric($tolerance) && (int) $tolerance > 0
-            ? (int) $tolerance
+        $timestamp_tolerance_option = $options['timestamp_tolerance'] ?? null;
+        $this->timestamp_tolerance = is_numeric($timestamp_tolerance_option) && (int) $timestamp_tolerance_option > 0
+            ? (int) $timestamp_tolerance_option
             : 300;
     }
 
@@ -163,10 +165,10 @@ final class Site_Export_Staged_Endpoints {
         }
 
         // Headers first: nobody without the secret gets a body read.
-        $hmac = new Site_Export_HMAC_Server($this->secret, $this->timestamp_tolerance);
-        $auth = $hmac->verify_signed_content_hash($headers);
-        if ($auth['error'] !== null) {
-            return $this->rejected(403, 'auth_failed', $auth['error']);
+        $hmac_server = new Site_Export_HMAC_Server($this->secret, $this->timestamp_tolerance);
+        $authentication_result = $hmac_server->verify_signed_content_hash($headers);
+        if ($authentication_result['error'] !== null) {
+            return $this->rejected(403, 'auth_failed', $authentication_result['error']);
         }
 
         $declared_length = $headers['CONTENT_LENGTH'] ?? ( $headers['HTTP_CONTENT_LENGTH'] ?? null );
@@ -184,29 +186,29 @@ final class Site_Export_Staged_Endpoints {
         }
 
         try {
-            $context = hash_init('sha256');
-            $spooled = 0;
-            while (( $buffer = fread($input, self::READ_BUFFER_BYTES) ) !== false && $buffer !== '') {
-                $spooled += strlen($buffer);
-                if ($spooled > $this->max_request_bytes) {
+            $hash_context = hash_init('sha256');
+            $spooled_bytes = 0;
+            while (( $request_body_chunk = fread($input, self::READ_BUFFER_BYTES) ) !== false && $request_body_chunk !== '') {
+                $spooled_bytes += strlen($request_body_chunk);
+                if ($spooled_bytes > $this->max_request_bytes) {
                     return $this->too_large($artifact_id);
                 }
-                hash_update($context, $buffer);
-                if (fwrite($spool, $buffer) !== strlen($buffer)) {
+                hash_update($hash_context, $request_body_chunk);
+                if (fwrite($spool, $request_body_chunk) !== strlen($request_body_chunk)) {
                     return $this->rejected(500, 'io_error', 'write_spool');
                 }
             }
-            if ($buffer === false && !feof($input)) {
+            if ($request_body_chunk === false && !feof($input)) {
                 return $this->rejected(400, 'body_read_failed');
             }
 
             // The signature authenticated the hash claim; this comparison
             // authenticates the bytes. Nothing reached the store yet.
-            if (!hash_equals( (string) $auth['content_hash'], hash_final($context))) {
+            if (!hash_equals( (string) $authentication_result['content_hash'], hash_final($hash_context))) {
                 return $this->rejected(403, 'content_hash_mismatch');
             }
 
-            if ($spooled === 0) {
+            if ($spooled_bytes === 0) {
                 return $this->rejected(400, 'empty_body');
             }
 
@@ -214,8 +216,8 @@ final class Site_Export_Staged_Endpoints {
             if ($status['verified']) {
                 return $this->rejected(409, 'already_verified', null, $status['committed_bytes']);
             }
-            $committed = $status['committed_bytes'];
-            if ($committed >= $offset + $spooled) {
+            $committed_bytes = $status['committed_bytes'];
+            if ($committed_bytes >= $offset + $spooled_bytes) {
                 // A retried chunk that fully landed before the sender's
                 // timeout. Nothing to write.
                 return [
@@ -224,28 +226,28 @@ final class Site_Export_Staged_Endpoints {
                         'status' => 'duplicate',
                         'reason' => null,
                         'detail' => null,
-                        'committed_bytes' => $committed,
+                        'committed_bytes' => $committed_bytes,
                     ],
                 ];
             }
-            if ($committed < $offset) {
-                return $this->rejected(409, 'offset_gap', null, $committed);
+            if ($committed_bytes < $offset) {
+                return $this->rejected(409, 'offset_gap', null, $committed_bytes);
             }
 
             // A resent chunk may straddle the committed frontier; skip the
             // prefix the store already has so appends line up with it.
             rewind($spool);
-            if ($committed > $offset && fseek($spool, $committed - $offset) !== 0) {
+            if ($committed_bytes > $offset && fseek($spool, $committed_bytes - $offset) !== 0) {
                 return $this->rejected(500, 'io_error', 'seek_spool');
             }
 
-            $position = $committed;
-            while (( $buffer = fread($spool, $this->append_buffer_bytes) ) !== false && $buffer !== '') {
-                $result = $this->store->append($artifact_id, $position, $buffer);
-                if ($result['status'] !== 'accepted') {
-                    return $this->from_store_result($result);
+            $append_offset = $committed_bytes;
+            while (( $spooled_chunk = fread($spool, $this->append_buffer_bytes) ) !== false && $spooled_chunk !== '') {
+                $append_result = $this->store->append($artifact_id, $append_offset, $spooled_chunk);
+                if ($append_result['status'] !== 'accepted') {
+                    return $this->from_store_result($append_result);
                 }
-                $position = $result['committed_bytes'];
+                $append_offset = $append_result['committed_bytes'];
             }
 
             return [
@@ -254,7 +256,7 @@ final class Site_Export_Staged_Endpoints {
                     'status' => 'accepted',
                     'reason' => null,
                     'detail' => null,
-                    'committed_bytes' => $position,
+                    'committed_bytes' => $append_offset,
                 ],
             ];
         } finally {
