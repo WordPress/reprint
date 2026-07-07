@@ -50,7 +50,12 @@ final class ReverseTransport
      */
     public function fetch_json( string $url ): array
     {
-        $stream = $this->serve_delivered_result( array( "method" => "GET", "url" => $url ) );
+        $stream = $this->serve_delivered_result(
+            static fn() => array(
+                "method" => "GET",
+                "url"    => $url,
+            )
+        );
         $body   = (string) stream_get_contents( $stream );
         if ( strncmp( $body, "\x1f\x8b", 2 ) === 0 ) {
             $decoded = @gzdecode( $body );
@@ -82,7 +87,9 @@ final class ReverseTransport
      */
     public function fetch_streaming( string $url, ?array $post_data, callable $chunk_handler ): void
     {
-        $stream = $this->serve_delivered_result( $this->build_export_command( $url, $post_data ) );
+        $stream = $this->serve_delivered_result(
+            fn() => $this->build_export_command( $url, $post_data )
+        );
         if ( $this->result_http_code !== 200 ) {
             throw new RuntimeException( "reverse-transport export request returned a non-200 status" );
         }
@@ -138,18 +145,21 @@ final class ReverseTransport
      * Returns the stream of the source-delivered result for the importer's
      * current request, or hands the request to the source by unwinding.
      *
-     * @throws TransportYield When no result is left to serve; it carries
-     *     $command out to the exchange endpoint, which returns it to the
+     * @param callable $build_command Builds the wire command; called only on
+     *     the yield path, so the consume pass never pays for it (for
+     *     file_fetch, building re-reads and base64-encodes the batch list).
+     * @throws TransportYield When no result is left to serve; it carries the
+     *     built command out to the exchange endpoint, which returns it to the
      *     source as the next command to run.
      * @return resource
      */
-    private function serve_delivered_result( array $command )
+    private function serve_delivered_result( callable $build_command )
     {
         if ( $this->result_stream !== null && ! $this->consumed ) {
             $this->consumed = true;
             return $this->result_stream;
         }
-        throw new TransportYield( $command );
+        throw new TransportYield( $build_command() );
     }
 
     /**

@@ -2110,6 +2110,17 @@ class ImportClient
      */
     private function initialize_tuner(array $options): void
     {
+        // The tuner adapts request size and paces the dialing client with
+        // duty-cycle sleeps between its own requests. Over the reverse
+        // transport the remote is not the dialer — its requests are answered
+        // inside the source's exchange calls, where a pacing usleep would only
+        // hold the exchange open — so run untuned and let the exporter's
+        // server-side defaults rule, as with --no-adaptive.
+        if ($this->reverse_transport !== null) {
+            $this->tuner = null;
+            return;
+        }
+
         $config = $this->import_state()->tuning->config ?? [];
         $state = $this->import_state()->tuning->state ?? [];
         $cli_config = $options["tuning_config"] ?? [];
@@ -10498,14 +10509,6 @@ class ImportClient
         ?string $endpoint = null
     ): void {
         if ($this->reverse_transport !== null) {
-            // The reverse transport has no timing signal; zero stats keep the tuner fed
-            // with the same shape the curl path produces below.
-            if (!isset($context->response_stats) || !is_array($context->response_stats)) {
-                $context->response_stats = [];
-            }
-            $context->response_stats["ttfb"] = 0.0;
-            $context->response_stats["total_time"] = 0.0;
-
             $current_chunk = null;
             $this->reverse_transport->fetch_streaming(
                 $url,

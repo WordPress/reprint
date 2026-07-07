@@ -42,17 +42,24 @@ final class ReverseTransportTest extends TestCase
     protected function tearDown(): void
     {
         foreach ([$this->sourceRoot, $this->fsRoot, $this->stateDir] as $dir) {
-            $this->rmrf($dir);
+            $this->recursiveDelete($dir);
         }
     }
 
-    private function rmrf(string $dir): void
+    private function recursiveDelete(string $dir): void
     {
         if (!is_dir($dir)) {
             return;
         }
-        foreach (glob($dir . '/*') ?: [] as $entry) {
-            is_dir($entry) ? $this->rmrf($entry) : @unlink($entry);
+        // scandir, not glob('*'): the state dir is full of dotfiles
+        // (.import-state.json, .import-index.jsonl, ...) that glob skips,
+        // which would leak the directory on teardown.
+        foreach (scandir($dir) ?: [] as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $path = $dir . '/' . $entry;
+            is_dir($path) ? $this->recursiveDelete($path) : @unlink($path);
         }
         @rmdir($dir);
     }
