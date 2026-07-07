@@ -144,9 +144,9 @@ final class Site_Export_HMAC_Server {
     /**
      * Verify a request whose body is deliberately not signed.
      *
-     * Instead of a body hash, the signature covers the request itself:
-     * nonce, timestamp, HTTP method, and the request target (the
-     * "path?query" part of the URL). A request body of any size can then
+     * Instead of a body hash, the signature covers exactly four values:
+     * the nonce, the timestamp, the HTTP method, and the request target
+     * (the "path?query" part of the URL). A request body of any size can then
      * stream through without either side hashing it, and a captured set of
      * auth headers still cannot be reused for a different endpoint or
      * method. Protecting the body from tampering is TLS's job.
