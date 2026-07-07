@@ -44,6 +44,13 @@
  */
 class Site_Export_HMAC_Client {
 
+    /**
+     * Value of the X-Auth-Content-Hash header when the request body is
+     * deliberately not signed: this literal string stands where a body hash
+     * would otherwise be. Must match Site_Export_HMAC_Server::UNSIGNED_PAYLOAD.
+     */
+    public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
+
     /** @var string */
     private $secret;
 
@@ -75,7 +82,8 @@ class Site_Export_HMAC_Client {
      * request to a digest: the server verifies the timestamp, nonce, and HMAC
      * over X-Auth-Content-Hash before it computes or compares any body hash.
      *
-     * This is intended for small control-plane requests. Large data transfers
+     * This is intended for small command requests such as preflight or plan
+     * confirmation. Large data transfers
      * should use an authenticated session and per-chunk hashes instead of
      * HMAC-signing one large request body.
      *
@@ -107,6 +115,46 @@ class Site_Export_HMAC_Client {
             'X-Auth-Timestamp' => $timestamp,
             'X-Auth-Content-Hash' => $content_hash,
         ];
+    }
+
+    /**
+     * Returns X-Auth-* headers for a request whose body is not signed.
+     *
+     * The signature covers the nonce, the timestamp, the method, and the
+     * request target instead of a body hash, so a body of any size streams
+     * through without either side hashing it, and captured auth headers still cannot be reused for a
+     * different endpoint or method. Protecting the body from tampering is
+     * TLS's job — over --force-http a tampered body would be accepted,
+     * which is what that flag's help text warns about.
+     *
+     * Signature = HMAC-SHA256(nonce + timestamp + "UNSIGNED-PAYLOAD\n" + METHOD + "\n" + target, secret)
+     *
+     * @param string $method Uppercased into the signature (GET, POST, ...).
+     * @param string $url    Full request URL; only path and query are signed.
+     */
+    public function get_envelope_auth_headers(string $method, string $url): array {
+        $nonce = $this->generate_nonce();
+        $timestamp = $this->get_timestamp();
+        $message = $nonce . $timestamp . self::UNSIGNED_PAYLOAD . "\n" . strtoupper($method) . "\n" . self::request_target($url);
+
+        return [
+            'X-Auth-Signature' => hash_hmac('sha256', $message, $this->secret),
+            'X-Auth-Nonce' => $nonce,
+            'X-Auth-Timestamp' => $timestamp,
+            'X-Auth-Content-Hash' => self::UNSIGNED_PAYLOAD,
+        ];
+    }
+
+    /**
+     * Normalizes a URL to the "path?query" form both sides sign — the same
+     * shape PHP exposes as $_SERVER['REQUEST_URI'] on the receiving end.
+     */
+    public static function request_target(string $url): string {
+        $path = parse_url($url, PHP_URL_PATH);
+        $query = parse_url($url, PHP_URL_QUERY);
+        $target = is_string($path) && $path !== '' ? $path : '/';
+
+        return is_string($query) && $query !== '' ? $target . '?' . $query : $target;
     }
 
     /** Returns auth headers formatted for CURLOPT_HTTPHEADER (["Name: value", ...]). */

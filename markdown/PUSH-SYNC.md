@@ -51,8 +51,8 @@ what it gives up: over plain HTTP an active attacker can read and modify
 transferred content; the flag only keeps the shared secret off the wire and
 limits replay.
 
-Every request carries an HMAC over the envelope only — method, path,
-timestamp, nonce. Payloads are not signed and not hashed: TLS already
+Every request carries an HMAC signature over exactly four values — the
+HTTP method, the URL's path and query, a timestamp, and a random nonce. Payloads are not signed and not hashed: TLS already
 guarantees their integrity, and signing streams was the single biggest source
 of buffering pain. Signing cost is constant per request regardless of payload
 size. The secret travels in no URL and no body, so it never lands in an
@@ -96,8 +96,10 @@ the drift summary.
 ## The staging store
 
 The staging area is `Site_Export_Staged_Artifacts` as built: artifact bytes
-at plain target-relative paths under `files/`, a rename-atomic cursor in
-`state.json`, an append-only `verified.jsonl`, one `lock` file. The caller
+at plain target-relative paths under `files/`, a cursor in `state.json`
+(replaced by writing a temp file and renaming it, so readers never see a
+half-written record), one small verified marker per finished artifact under
+`verified/`, and one `lock` file. The caller
 drives the loop — one `append()` per buffer, individually committed, so the
 transfer can stop after any step and resume from `committed_bytes` in a new
 request. `finalize()` checks the assembled size against the size declared in
@@ -207,8 +209,10 @@ Stated here so nobody rediscovers them as surprises:
 Files first, database second, each PR small and stacked in this order:
 
 1. **Design doc** — this file.
-2. **Envelope auth** — headers-only HMAC for data routes, `--force-http`
-   with honest help text.
+2. **Envelope auth** — headers-only HMAC for data routes: the
+   X-Auth-Content-Hash header carries the literal string UNSIGNED-PAYLOAD,
+   and the signature covers the method and request target instead of a
+   body hash.
 3. **Staged artifact store** — already built (PR #298); rebases here.
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
    the configured storage path; web guards for inside-docroot placement.
@@ -217,7 +221,8 @@ Files first, database second, each PR small and stacked in this order:
 6. **Scoped remote reindex and drift summary** — path-scoped index requests,
    baseline comparison, the summary/confirm UX.
 7. **Upload endpoint** — the store's HTTP surface plus the sender loop with
-   chunk sizing; deletion manifest staged.
+   chunk sizing; deletion manifest staged; `--force-http` with honest help
+   text (the first push networking this flag can gate).
 8. **Package unification** — importer and exporter become one Reprint
    package (lite = serve-only build). Placed here because apply is the
    first piece that needs import-side code running on the remote.

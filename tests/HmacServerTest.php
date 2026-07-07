@@ -212,6 +212,91 @@ final class HmacServerTest extends TestCase
         );
     }
 
+    public function testEnvelopeSignedRequestVerifies(): void
+    {
+        $client = new Site_Export_HMAC_Client(self::SECRET);
+        $url = 'https://example.com/?reprint-api&endpoint=push-append&artifact=a.txt';
+        $headers = $client->get_envelope_auth_headers('POST', $url);
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertNull($server->verify_envelope(
+            $headers,
+            'post', // Method casing must not matter.
+            '/?reprint-api&endpoint=push-append&artifact=a.txt',
+            (float) $headers['X-Auth-Timestamp']
+        ));
+    }
+
+    public function testEnvelopeRejectsAnotherRouteOrMethod(): void
+    {
+        $client = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $client->get_envelope_auth_headers('POST', 'https://example.com/?endpoint=push-append');
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+        $now = (float) $headers['X-Auth-Timestamp'];
+
+        $this->assertSame(
+            'HMAC signature verification failed',
+            $server->verify_envelope($headers, 'POST', '/?endpoint=push-apply', $now),
+            'A captured envelope must not replay against a different route.'
+        );
+        $this->assertSame(
+            'HMAC signature verification failed',
+            $server->verify_envelope($headers, 'DELETE', '/?endpoint=push-append', $now)
+        );
+    }
+
+    public function testEnvelopeRequiresTheUnsignedPayloadHeader(): void
+    {
+        $headers = $this->buildHeadersForBody('{"command":"push"}');
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'Envelope verification requires the literal UNSIGNED-PAYLOAD content hash',
+            $server->verify_envelope($headers, 'POST', '/?endpoint=push-append', 1700000001.0)
+        );
+    }
+
+    public function testEnvelopeHeadersDoNotPassBodyVerification(): void
+    {
+        $client = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $client->get_envelope_auth_headers('POST', 'https://example.com/?endpoint=push-append');
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $this->assertSame(
+            'HMAC signature verification failed',
+            $server->verify($headers, 'any-body', [], (float) $headers['X-Auth-Timestamp'])
+        );
+    }
+
+    public function testEnvelopeExpiredTimestampIsRejected(): void
+    {
+        $client = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $client->get_envelope_auth_headers('POST', 'https://example.com/?endpoint=push-append');
+        $server = new Site_Export_HMAC_Server(self::SECRET);
+
+        $result = $server->verify_envelope(
+            $headers,
+            'POST',
+            '/?endpoint=push-append',
+            (float) $headers['X-Auth-Timestamp'] + 301.0
+        );
+
+        $this->assertStringContainsString('Request timestamp expired', (string) $result);
+    }
+
+    public function testRequestTargetNormalization(): void
+    {
+        $this->assertSame(
+            '/?reprint-api&endpoint=push-append',
+            Site_Export_HMAC_Client::request_target('https://example.com/?reprint-api&endpoint=push-append')
+        );
+        $this->assertSame(
+            '/wp/index.php?a=1',
+            Site_Export_HMAC_Client::request_target('http://example.com:8080/wp/index.php?a=1#frag')
+        );
+        $this->assertSame('/', Site_Export_HMAC_Client::request_target('https://example.com'));
+    }
+
     private function buildHeadersForBody(
         string $body,
         string $timestamp = '1700000000.000000',

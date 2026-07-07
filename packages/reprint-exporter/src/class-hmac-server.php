@@ -9,6 +9,13 @@
  */
 final class Site_Export_HMAC_Server {
 
+    /**
+     * Value of the X-Auth-Content-Hash header when the request body is
+     * deliberately not signed: this literal string stands where a body hash
+     * would otherwise be. Must match Site_Export_HMAC_Client::UNSIGNED_PAYLOAD.
+     */
+    public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
+
     private const DEFAULT_MAX_CONTROL_BODY_BYTES = 1048576;
 
     /** @var string */
@@ -23,7 +30,7 @@ final class Site_Export_HMAC_Server {
     }
 
     /**
-     * Verify a bounded control-plane request.
+     * Verify a small command request with a bounded body.
      *
      * HMAC is the guard for small protocol commands such as preflight, session
      * start, plan confirmation, and abort/resume. Large data uploads should use
@@ -135,11 +142,50 @@ final class Site_Export_HMAC_Server {
     }
 
     /**
+     * Verify a request whose body is deliberately not signed.
+     *
+     * Instead of a body hash, the signature covers exactly four values:
+     * the nonce, the timestamp, the HTTP method, and the request target
+     * (the "path?query" part of the URL). A request body of any size can then
+     * stream through without either side hashing it, and a captured set of
+     * auth headers still cannot be reused for a different endpoint or
+     * method. Protecting the body from tampering is TLS's job.
+     *
+     * The X-Auth-Content-Hash header must be the literal string
+     * UNSIGNED-PAYLOAD. Because of that, headers signed for this check can
+     * never pass the body-signed checks and vice versa — the two signatures
+     * are computed over strings that can never be equal. Each route decides
+     * which check it calls, so a client cannot make a command endpoint
+     * that requires verify_control_request() accept this body-less check.
+     *
+     * @param string $request_target The "path?query" form of the request URL.
+     */
+    public function verify_envelope(array $headers, string $method, string $request_target, ?float $now = null): ?string {
+        $auth = $this->collect_auth_headers($headers);
+        if ($auth['content_hash'] !== self::UNSIGNED_PAYLOAD) {
+            return 'Envelope verification requires the literal UNSIGNED-PAYLOAD content hash';
+        }
+
+        $freshness_error = $this->verify_freshness($auth, $now);
+        if ($freshness_error !== null) {
+            return $freshness_error;
+        }
+
+        $message = $auth['nonce'] . $auth['timestamp'] . self::UNSIGNED_PAYLOAD . "\n" . strtoupper($method) . "\n" . $request_target;
+        $expected_signature = hash_hmac('sha256', $message, $this->secret);
+        if (!hash_equals($expected_signature, $auth['signature'])) {
+            return 'HMAC signature verification failed';
+        }
+
+        return null;
+    }
+
+    /**
      * Verify the current PHP request using superglobals.
      *
      * Returns null on success, or an error string on failure. This legacy
      * convenience path buffers php://input and should only be used for small
-     * request bodies. New control-plane routes should bound the body and call
+     * request bodies. New command endpoints should bound the body and call
      * verify_control_request(). Large data routes should not use whole-body
      * HMAC verification.
      */
@@ -162,6 +208,26 @@ final class Site_Export_HMAC_Server {
     }
 
     private function verify_auth_headers(array $auth, ?float $now = null): ?string {
+        $freshness_error = $this->verify_freshness($auth, $now);
+        if ($freshness_error !== null) {
+            return $freshness_error;
+        }
+
+        $expected_signature = hash_hmac('sha256', $auth['nonce'] . $auth['timestamp'] . $auth['content_hash'], $this->secret);
+        if (!hash_equals($expected_signature, $auth['signature'])) {
+            return 'HMAC signature verification failed';
+        }
+
+        return null;
+    }
+
+    /**
+     * Checks header presence, timestamp tolerance, and nonce length —
+     * everything except the signature. Body-signed and envelope-signed
+     * requests compute their signatures over different strings, so each
+     * caller does its own signature check after this passes.
+     */
+    private function verify_freshness(array $auth, ?float $now = null): ?string {
         $signature = $auth['signature'];
         $nonce = $auth['nonce'];
         $timestamp = $auth['timestamp'];
@@ -197,11 +263,6 @@ final class Site_Export_HMAC_Server {
 
         if (strlen($nonce) < 16) {
             return 'Nonce must be at least 16 characters';
-        }
-
-        $expected_signature = hash_hmac('sha256', $nonce . $timestamp . $signed_content_hash, $this->secret);
-        if (!hash_equals($expected_signature, $signature)) {
-            return 'HMAC signature verification failed';
         }
 
         return null;
