@@ -205,6 +205,18 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertContains('wp-content/themes/foo/style.css~', $rel);
     }
 
+    public function testFileIndexCanStartAtSingleFileForOnlySelections(): void
+    {
+        $siteDir = $this->buildFixtureSite();
+        $selected = $siteDir . '/wp-content/themes/foo/style.css';
+        $entries = $this->runFileIndexEntries($siteDir, false, 5000, $selected, $selected);
+
+        $this->assertSame(
+            ['wp-content/themes/foo/style.css'],
+            $this->relativePaths($entries, $siteDir),
+        );
+    }
+
     public function testFileIndexFilterDoesNotBreakResume(): void
     {
         // The skip is applied AFTER the cursor's "after" pointer is updated,
@@ -276,9 +288,9 @@ final class FileIndexSkipDefaultsTest extends TestCase
     /**
      * @return list<array{path: string, type: string}>
      */
-    private function runFileIndexEntries(string $siteDir, bool $includeCaches, int $batchSize = 5000): array
+    private function runFileIndexEntries(string $siteDir, bool $includeCaches, int $batchSize = 5000, ?string $listDir = null, ?string $directory = null): array
     {
-        $stdout = $this->runFileIndex($siteDir, $includeCaches, $batchSize);
+        $stdout = $this->runFileIndex($siteDir, $includeCaches, $batchSize, $listDir, $directory);
 
         // The response is `multipart/mixed; boundary="…"` containing one or
         // more `index_batch` JSON chunks. Parse out each batch and flatten.
@@ -334,6 +346,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
      */
     private function relativePaths(array $entries, string $siteDir): array
     {
+        $siteDir = realpath($siteDir) ?: $siteDir;
         $prefix = $siteDir . '/';
         $out = [];
         foreach ($entries as $e) {
@@ -346,12 +359,12 @@ final class FileIndexSkipDefaultsTest extends TestCase
         return $out;
     }
 
-    private function runFileIndex(string $siteDir, bool $includeCaches, int $batchSize): string
+    private function runFileIndex(string $siteDir, bool $includeCaches, int $batchSize, ?string $listDir = null, ?string $directory = null): string
     {
         $configPath = $this->tempDir . '/index-config.json';
         file_put_contents($configPath, json_encode([
-            'directory' => $siteDir,
-            'list_dir' => $siteDir,
+            'directory' => $directory ?? $siteDir,
+            'list_dir' => $listDir ?? $siteDir,
             'batch_size' => $batchSize,
             'include_caches' => $includeCaches,
         ], JSON_THROW_ON_ERROR));
@@ -373,7 +386,7 @@ PHP,
             ),
         );
 
-        $command = sprintf('%s %s', escapeshellarg(PHP_BINARY), escapeshellarg($scriptPath));
+        $command = sprintf('%s -d display_startup_errors=0 %s', escapeshellarg(PHP_BINARY), escapeshellarg($scriptPath));
         $descriptorSpec = [
             1 => ['pipe', 'w'],
             2 => ['pipe', 'w'],

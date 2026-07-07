@@ -2695,11 +2695,13 @@ function encode_index_batch(array $batch_items): array
 }
 
 /**
- * Streams a directory index as gzipped JSON batches of {path, ctime, size, type}.
+ * Streams a file index as gzipped JSON batches of {path, ctime, size, type}.
  *
  * The client supplies list_dir and drives traversal depth-first by
- * enqueuing directories as they are discovered. Resumption is supported
- * via cursor containing the directory stack and last-seen entry.
+ * enqueuing directories as they are discovered. list_dir may also point at
+ * one explicit file, which lets --only selections reuse the same pull file
+ * skipping flow without indexing the file's parent directory. Resumption is
+ * supported via cursor containing the directory stack and last-seen entry.
  */
 function endpoint_file_index(
     array $config,
@@ -2723,6 +2725,7 @@ function endpoint_file_index(
     $list_dir_real = null;
     $stack = [];
     $ordered = [];
+    $direct_files = [];
     $follow_symlinks = !empty($config["follow_symlinks"]);
     $cursor_provided = isset($config["cursor"]);
     // Default-skip generated caches, VCS metadata, OS junk, and editor
@@ -2780,7 +2783,7 @@ function endpoint_file_index(
 
         clearstatcache(true, $list_dir);
         $list_dir_real = realpath($list_dir);
-        if ($list_dir_real === false || !is_dir($list_dir_real)) {
+        if ($list_dir_real === false || (!is_dir($list_dir_real) && !is_file($list_dir_real))) {
             throw new InvalidArgumentException(
                 "list_dir does not exist or is not accessible: {$list_dir}",
             );
@@ -2796,7 +2799,7 @@ function endpoint_file_index(
                 break;
             }
         }
-        // When follow_symlinks is enabled, allow any directory that the
+        // When follow_symlinks is enabled, allow any path that the
         // authenticated client requests.  The client is already authenticated
         // via HMAC, so there is no untrusted-input risk.
         if (!$allowed && !$follow_symlinks) {
@@ -2832,10 +2835,17 @@ function endpoint_file_index(
         }
 
         for ($i = count($ordered) - 1; $i >= 0; $i--) {
-            $stack[] = [
-                "dir" => $ordered[$i],
-                "after" => null,
-            ];
+            if (is_dir($ordered[$i])) {
+                $stack[] = [
+                    "dir" => $ordered[$i],
+                    "after" => null,
+                ];
+            }
+        }
+        foreach ($ordered as $root) {
+            if (!is_dir($root)) {
+                $direct_files[] = $root;
+            }
         }
     }
 
@@ -2858,6 +2868,13 @@ function endpoint_file_index(
     $status = "partial";
     $aborted = false;
     $abort_payload = null;
+
+    foreach ($direct_files as $path) {
+        if (!$include_caches && path_is_default_skipped($path)) {
+            continue;
+        }
+        $batch_items[] = file_index_item_for_path($path);
+    }
 
     // -- Pre-scan: discover intermediate symlinks --
     // When following symlinks, discover intermediate symlinks along each
@@ -3270,6 +3287,42 @@ function endpoint_file_index(
             "time_elapsed" => microtime(true) - $budget->start_time,
         ],
     ];
+}
+
+/** Builds one file_index entry for an explicitly selected file path. */
+function file_index_item_for_path(string $path): array
+{
+    clearstatcache(true, $path);
+    $stat = @lstat($path);
+    if ($stat === false) {
+        throw new InvalidArgumentException(
+            "list_dir does not exist or is not accessible: {$path}",
+        );
+    }
+
+    $mode = $stat["mode"] & STAT_TYPE_MASK;
+    $type = "file";
+    $link_target = null;
+    if ($mode === STAT_TYPE_LINK) {
+        $type = "link";
+        $resolved = resolve_symlink_target($path);
+        $link_target = $resolved['target'];
+    } elseif ($mode === STAT_TYPE_DIR) {
+        $type = "dir";
+    } elseif ($mode !== STAT_TYPE_FILE) {
+        $type = "other";
+    }
+
+    $item = [
+        "path" => $path,
+        "ctime" => (int) ($stat["ctime"] ?? 0),
+        "size" => $type === "file" ? (int) ($stat["size"] ?? 0) : 0,
+        "type" => $type,
+    ];
+    if ($link_target !== null) {
+        $item["target"] = $link_target;
+    }
+    return $item;
 }
 
 /**
