@@ -13,7 +13,7 @@ final class TransportYield extends Error
 
     public function __construct( array $command )
     {
-        parent::__construct( "relay transport yielded" );
+        parent::__construct( "reverse transport yielded" );
         $this->command = $command;
     }
 }

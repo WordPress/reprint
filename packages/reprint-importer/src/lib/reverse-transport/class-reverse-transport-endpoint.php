@@ -24,9 +24,9 @@
  * importer failure is returned as the error status — the handler never throws,
  * so the worker can tell a remote failure from transport garbage.
  */
-final class RelayExchange
+final class ReverseTransportEndpoint
 {
-    /** @var callable fn(): object A fresh, relay-capable importer client. */
+    /** @var callable fn(): object A fresh importer client with the reverse transport set. */
     private $client_factory;
 
     /** @var array run() options selecting the command, e.g. ['command'=>'files-pull']. */

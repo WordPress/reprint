@@ -33,7 +33,7 @@ final class ReverseTransport
     }
 
     /**
-     * Relay counterpart to the importer's buffered JSON GET.
+     * Reverse-transport counterpart to the importer's buffered JSON GET.
      */
     public function fetch_json( string $url ): array
     {
@@ -50,12 +50,12 @@ final class ReverseTransport
             "json"      => $json,
             "error"     => $http_code === 200
                 ? null
-                : "relay request failed with HTTP {$http_code}",
+                : "reverse-transport request failed with HTTP {$http_code}",
         );
     }
 
     /**
-     * Relay counterpart to the importer's streaming multipart fetch. The whole
+     * Reverse-transport counterpart to the importer's streaming multipart fetch. The whole
      * response body was carried back by the worker, so feed it to the same
      * chunk handler the curl path uses — everything above the transport is
      * oblivious to the reversal.
@@ -65,7 +65,7 @@ final class ReverseTransport
         $result    = $this->deliver( $this->build_command( $url, $post_data ) );
         $http_code = isset( $result["http_code"] ) ? (int) $result["http_code"] : 0;
         if ( $http_code !== 200 ) {
-            throw new RuntimeException( "relay export request returned a non-200 status" );
+            throw new RuntimeException( "reverse-transport export request returned a non-200 status" );
         }
 
         $body     = isset( $result["body"] ) ? (string) $result["body"] : "";

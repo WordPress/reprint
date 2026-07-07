@@ -2,7 +2,7 @@
 /**
  * Source-side export runner for the reverse-transport tests.
  *
- * Stands in for the loopback request a production relay-source worker would
+ * Stands in for the loopback request a production reverse-transport worker would
  * make to its own site's export.php: reads one synthetic request (JSON on
  * stdin), runs the real export engine, and streams the response to stdout —
  * which export.php writes to after tearing down output buffering. The parent
@@ -17,7 +17,7 @@ require_once __DIR__ . '/../../packages/reprint-exporter/src/class-http-server.p
 $raw = stream_get_contents(STDIN);
 $request = json_decode((string) $raw, true);
 if (!is_array($request)) {
-    fwrite(STDERR, "relay export runner: invalid request json\n");
+    fwrite(STDERR, "reverse-transport export runner: invalid request json\n");
     exit(1);
 }
 

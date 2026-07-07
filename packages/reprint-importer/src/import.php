@@ -64,7 +64,7 @@ require_once __DIR__ . '/lib/pull/class-pull.php';
 
 // Reverse transport: run ordinary pulls in the push direction over an
 // outbound-only local connection.
-require_once __DIR__ . '/lib/relay/load.php';
+require_once __DIR__ . '/lib/reverse-transport/load.php';
 
 /**
  * If the ALL_PROXY environment variable is set, apply it to the cURL
@@ -1232,12 +1232,12 @@ class ImportClient
 
     /**
      * @var ReverseTransport|null When set, outbound export requests are served by
-     * the reverse relay (a remote-driven pull) instead of curl.
+     * the reverse transport (a remote-driven pull) instead of curl.
      */
     private $reverse_transport = null;
 
     /**
-     * Route this client's outbound export requests through the reverse relay
+     * Route this client's outbound export requests through the reverse transport
      * instead of dialing the source. Pass null to restore direct HTTP.
      */
     public function set_reverse_transport(?ReverseTransport $transport): void
@@ -10498,7 +10498,7 @@ class ImportClient
         ?string $endpoint = null
     ): void {
         if ($this->reverse_transport !== null) {
-            // The relay has no timing signal; zero stats keep the tuner fed
+            // The reverse transport has no timing signal; zero stats keep the tuner fed
             // with the same shape the curl path produces below.
             if (!isset($context->response_stats) || !is_array($context->response_stats)) {
                 $context->response_stats = [];

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace RelayTests;
+namespace ReverseTransportTests;
 
 use PHPUnit\Framework\TestCase;
 
@@ -12,11 +12,11 @@ require_once __DIR__ . '/../../importer/import.php';
  * End-to-end reverse pull against the REAL importer and REAL exporter.
  *
  * An ordinary `files-pull` mirrors a source tree to an fs-root over the reversed
- * single-endpoint channel: the remote (RelayExchange, driving the real
- * ImportClient inline) owns cursors/index/writes; the source (RelaySource) is
+ * single-endpoint channel: the remote (ReverseTransportEndpoint, driving the real
+ * ImportClient inline) owns cursors/index/writes; the source (ReverseTransportWorker) is
  * outbound-only and runs its own export.php per command. The worker↔endpoint
  * boundary is JSON strings — exactly the wire — so the binary result body rides
- * base64. No curl, no sockets: just the relay seam.
+ * base64. No curl, no sockets: just the reverse-transport seam.
  *
  * Also covers the failure story: a crashed worker is replaced by a fresh one
  * that resumes from the remote's persisted state, and exchange failures are
@@ -31,9 +31,9 @@ final class ReverseTransportTest extends TestCase
     protected function setUp(): void
     {
         $suffix         = bin2hex(random_bytes(6));
-        $this->source   = sys_get_temp_dir() . '/relay-source-' . $suffix;
-        $this->fsRoot   = sys_get_temp_dir() . '/relay-fsroot-' . $suffix;
-        $this->stateDir = sys_get_temp_dir() . '/relay-state-' . $suffix;
+        $this->source   = sys_get_temp_dir() . '/reverse-transport-source-' . $suffix;
+        $this->fsRoot   = sys_get_temp_dir() . '/reverse-transport-fsroot-' . $suffix;
+        $this->stateDir = sys_get_temp_dir() . '/reverse-transport-state-' . $suffix;
         mkdir($this->source, 0700, true);
         mkdir($this->fsRoot, 0700, true);
         mkdir($this->stateDir, 0700, true);
@@ -101,12 +101,12 @@ final class ReverseTransportTest extends TestCase
     }
 
     /** The remote endpoint, driving the real importer against this test's dirs. */
-    private function newExchange(): \RelayExchange
+    private function newExchange(): \ReverseTransportEndpoint
     {
         $stateDir = $this->stateDir;
         $fsRoot   = $this->fsRoot;
-        return new \RelayExchange(
-            static fn() => new \ImportClient('http://relay.invalid/export.php', $stateDir, $fsRoot),
+        return new \ReverseTransportEndpoint(
+            static fn() => new \ImportClient('http://reverse-transport.invalid/export.php', $stateDir, $fsRoot),
             ['command' => 'files-pull', 'follow_symlinks' => false, 'verbose' => false]
         );
     }
@@ -154,7 +154,7 @@ final class ReverseTransportTest extends TestCase
         $this->seedSourceTreeAndPreflight();
         $exchange = $this->newExchange();
 
-        $worker = new \RelaySource(
+        $worker = new \ReverseTransportWorker(
             static fn(string $requestJson): string => $exchange->handle_json($requestJson),
             $this->exportRunner()
         );
@@ -178,7 +178,7 @@ final class ReverseTransportTest extends TestCase
         // remote has consumed the index and issued the fetch command, but no
         // file bytes have arrived yet.
         $calls   = 0;
-        $crashed = new \RelaySource(
+        $crashed = new \ReverseTransportWorker(
             static function (string $requestJson) use ($exchange, &$calls): string {
                 if (++$calls > 2) {
                     throw new \RuntimeException('worker crashed');
@@ -202,7 +202,7 @@ final class ReverseTransportTest extends TestCase
         // The remote kept its own persisted state. A fresh worker starts with
         // no result, the remote re-asks for the request it is missing, and the
         // transfer completes.
-        $resumed = new \RelaySource(
+        $resumed = new \ReverseTransportWorker(
             static fn(string $requestJson): string => $exchange->handle_json($requestJson),
             $this->exportRunner()
         );
@@ -219,7 +219,7 @@ final class ReverseTransportTest extends TestCase
 
     public function testATransportFailureIsAnErrorNotACleanFinish(): void
     {
-        $worker = new \RelaySource(
+        $worker = new \ReverseTransportWorker(
             static fn(string $requestJson): string => '<html>502 Bad Gateway</html>',
             static fn(array $request): string => ''
         );
@@ -233,13 +233,13 @@ final class ReverseTransportTest extends TestCase
     {
         // The endpoint converts a non-yield importer failure into the error
         // status, and the worker surfaces its message instead of finishing.
-        $exchange = new \RelayExchange(
+        $exchange = new \ReverseTransportEndpoint(
             static function (): \ImportClient {
                 throw new \RuntimeException('importer exploded');
             },
             []
         );
-        $worker = new \RelaySource(
+        $worker = new \ReverseTransportWorker(
             static fn(string $requestJson): string => $exchange->handle_json($requestJson),
             static fn(array $request): string => ''
         );

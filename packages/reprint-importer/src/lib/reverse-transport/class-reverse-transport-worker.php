@@ -4,7 +4,7 @@
  * The local (source) side of a reverse pull: outbound-only.
  *
  * The source never listens. This loop makes one outbound call at a time to the
- * remote's relay_exchange, each call delivering the previous command's result
+ * remote's exchange endpoint, each call delivering the previous command's result
  * and receiving the next command, which it runs against its OWN export engine.
  * It is stateless — kill it and rerun; export commands are read-only and
  * cursor-driven, so re-running is safe. A hostile remote can only ask for what
@@ -24,7 +24,7 @@
  * hand a stale result to a newer request, since results carry no ids to match
  * against — so the exchange callable must not retry either (no curl --retry).
  */
-final class RelaySource
+final class ReverseTransportWorker
 {
     /** @var callable fn(string): string */
     private $exchange;
@@ -59,19 +59,19 @@ final class RelaySource
             }
             if ( $status === "error" ) {
                 throw new RuntimeException(
-                    "relay source: remote importer error: " .
+                    "reverse transport worker: remote importer error: " .
                         (string) ( $response["message"] ?? "(no message)" )
                 );
             }
             if ( $status !== "command" || ! is_array( $response["command"] ?? null ) ) {
                 throw new RuntimeException(
-                    "relay source: malformed exchange response: " . substr( $response_json, 0, 500 )
+                    "reverse transport worker: malformed exchange response: " . substr( $response_json, 0, 500 )
                 );
             }
 
             $result = $this->execute( $response["command"] );
         }
-        throw new RuntimeException( "relay source: exceeded max exchanges" );
+        throw new RuntimeException( "reverse transport worker: exceeded max exchanges" );
     }
 
     /**
@@ -102,7 +102,7 @@ final class RelaySource
     }
 
     /**
-     * Turn a relay command into export.php's synthetic request array. A
+     * Turn a command into export.php's synthetic request array. A
      * file_fetch batch list arrives inlined; the exporter reads it from a path
      * (config file_list_path), so materialize it and point there.
      *
@@ -118,7 +118,7 @@ final class RelaySource
 
         $file_list = $command["body"]["file_list"] ?? null;
         if ( is_array( $file_list ) && isset( $file_list["content_b64"] ) ) {
-            $tmp = tempnam( sys_get_temp_dir(), "relay-file-list-" );
+            $tmp = tempnam( sys_get_temp_dir(), "reverse-transport-file-list-" );
             file_put_contents( $tmp, (string) base64_decode( (string) $file_list["content_b64"] ) );
             $get["file_list_path"] = $tmp;
             $temp_files[]          = $tmp;

@@ -16,8 +16,8 @@
         <testsuite name="Import Tests">
             <directory>Import</directory>
         </testsuite>
-        <testsuite name="Relay Tests">
-            <directory>Relay</directory>
+        <testsuite name="Reverse Transport Tests">
+            <directory>ReverseTransport</directory>
         </testsuite>
         <testsuite name="Uploads Proxy Tests">
             <directory>UploadsProxy</directory>
