@@ -14,8 +14,8 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push
  * type-changed, deleted, unchanged — plus the two boundary situations
  * (no baseline yet; stale lists from an earlier run), the encoding
  * round-trip for paths that need base64 in the first place, and the JSON
- * parsing behavior that keeps the diff independent from field order, and the
- * scoped remote drift comparison that only checks paths a push will touch.
+ * parsing behavior that keeps the diff independent from field order, plus
+ * the scoped remote drift comparison that only checks paths a push will touch.
  */
 final class PushJournalTest extends TestCase
 {
@@ -346,6 +346,17 @@ final class PushJournalTest extends TestCase
         $journal->capture_remote_files_baseline($this->writeIndex([
             'a.txt' => [100, 5, 'file'],
         ]));
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('local_paths_to_push is missing');
+        $journal->diff_remote_files($this->writeIndex([
+            'a.txt' => [101, 5, 'file'],
+        ]));
+    }
+
+    public function testRemoteDiffRequiresTheLocalDiffListsBeforeFirstRemoteBaseline(): void
+    {
+        $journal = $this->makeJournal();
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('local_paths_to_push is missing');

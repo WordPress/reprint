@@ -201,17 +201,17 @@ class PushJournal
         }
         $this->ensure_site_dir();
 
-        if (!is_file($this->remote_files_baseline_path)) {
-            $this->write_empty_jsonl($this->remote_paths_changed_since_last_sync);
-            $this->write_empty_jsonl($this->remote_paths_deleted_since_last_sync);
-            return ["changed" => 0, "deleted" => 0, "baseline_missing" => true];
-        }
-
         if (!is_file($this->local_paths_to_push)) {
             throw new RuntimeException("Cannot diff remote drift, local_paths_to_push is missing: {$this->local_paths_to_push}");
         }
         if (!is_file($this->local_paths_to_delete)) {
             throw new RuntimeException("Cannot diff remote drift, local_paths_to_delete is missing: {$this->local_paths_to_delete}");
+        }
+
+        if (!is_file($this->remote_files_baseline_path)) {
+            $this->write_empty_jsonl($this->remote_paths_changed_since_last_sync);
+            $this->write_empty_jsonl($this->remote_paths_deleted_since_last_sync);
+            return ["changed" => 0, "deleted" => 0, "baseline_missing" => true];
         }
 
         $scoped_remote_baseline = $this->site_dir . "/remote-baseline-for-local-paths.jsonl.tmp";
@@ -395,17 +395,12 @@ class PushJournal
             }
 
             if ($scope_path === $last_scope_path) {
-                $this->advance_scope_path(
-                    $scope_path,
-                    $paths_to_push_handle,
-                    $path_to_push_entry,
-                    $path_to_push,
-                    $path_to_push_base64,
-                    $paths_to_delete_handle,
-                    $path_to_delete_entry,
-                    $path_to_delete,
-                    $path_to_delete_base64
-                );
+                if ($path_to_push === $scope_path) {
+                    $this->read_line($paths_to_push_handle, $path_to_push_entry, $path_to_push, $path_to_push_base64);
+                }
+                if ($path_to_delete === $scope_path) {
+                    $this->read_line($paths_to_delete_handle, $path_to_delete_entry, $path_to_delete, $path_to_delete_base64);
+                }
                 continue;
             }
 
@@ -416,17 +411,12 @@ class PushJournal
             }
             if ($order > 0) {
                 $last_scope_path = $scope_path;
-                $this->advance_scope_path(
-                    $scope_path,
-                    $paths_to_push_handle,
-                    $path_to_push_entry,
-                    $path_to_push,
-                    $path_to_push_base64,
-                    $paths_to_delete_handle,
-                    $path_to_delete_entry,
-                    $path_to_delete,
-                    $path_to_delete_base64
-                );
+                if ($path_to_push === $scope_path) {
+                    $this->read_line($paths_to_push_handle, $path_to_push_entry, $path_to_push, $path_to_push_base64);
+                }
+                if ($path_to_delete === $scope_path) {
+                    $this->read_line($paths_to_delete_handle, $path_to_delete_entry, $path_to_delete, $path_to_delete_base64);
+                }
                 continue;
             }
 
@@ -436,17 +426,12 @@ class PushJournal
             }
             $last_scope_path = $scope_path;
             $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
-            $this->advance_scope_path(
-                $scope_path,
-                $paths_to_push_handle,
-                $path_to_push_entry,
-                $path_to_push,
-                $path_to_push_base64,
-                $paths_to_delete_handle,
-                $path_to_delete_entry,
-                $path_to_delete,
-                $path_to_delete_base64
-            );
+            if ($path_to_push === $scope_path) {
+                $this->read_line($paths_to_push_handle, $path_to_push_entry, $path_to_push, $path_to_push_base64);
+            }
+            if ($path_to_delete === $scope_path) {
+                $this->read_line($paths_to_delete_handle, $path_to_delete_entry, $path_to_delete, $path_to_delete_base64);
+            }
         }
 
         fclose($baseline_handle);
@@ -454,33 +439,6 @@ class PushJournal
         fclose($paths_to_delete_handle);
         if (!fclose($target_handle)) {
             throw new RuntimeException("Failed to close scoped remote baseline: {$target}");
-        }
-    }
-
-    /**
-     * Advance both local scope lists past one decoded path.
-     *
-     * @param resource $paths_to_push_handle
-     * @param array<string, mixed>|null $path_to_push_entry
-     * @param resource $paths_to_delete_handle
-     * @param array<string, mixed>|null $path_to_delete_entry
-     */
-    private function advance_scope_path(
-        string $scope_path,
-        $paths_to_push_handle,
-        ?array &$path_to_push_entry,
-        ?string &$path_to_push,
-        ?string &$path_to_push_base64,
-        $paths_to_delete_handle,
-        ?array &$path_to_delete_entry,
-        ?string &$path_to_delete,
-        ?string &$path_to_delete_base64
-    ): void {
-        if ($path_to_push === $scope_path) {
-            $this->read_line($paths_to_push_handle, $path_to_push_entry, $path_to_push, $path_to_push_base64);
-        }
-        if ($path_to_delete === $scope_path) {
-            $this->read_line($paths_to_delete_handle, $path_to_delete_entry, $path_to_delete, $path_to_delete_base64);
         }
     }
 
