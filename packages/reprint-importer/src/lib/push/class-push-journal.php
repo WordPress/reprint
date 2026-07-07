@@ -51,9 +51,16 @@ class PushJournal
 {
     private string $site_dir;
 
+    /** @var string Copy of the local file index from the last completed push. */
     public string $local_files_baseline_path;
+
+    /** @var string Copy of the remote file index from the last completed push. */
     public string $remote_files_baseline_path;
+
+    /** @var string Paths to upload, written by diff_local_files(). */
     public string $upload_list_path;
+
+    /** @var string Paths deleted locally since the baseline, written by diff_local_files(). */
     public string $deletion_list_path;
 
     public function __construct(string $state_dir, string $site_url)
@@ -101,11 +108,25 @@ class PushJournal
         return $slug === "" ? $hash : "{$slug}-{$hash}";
     }
 
+    /**
+     * Store a copy of the local file index as the new local baseline.
+     *
+     * The push driver calls this at the end of a successful push; from then
+     * on "changed locally" means "different from this index". The copy is
+     * atomic (temp file + rename) and the source file is left untouched.
+     */
     public function capture_local_files_baseline(string $index_file): void
     {
         $this->replace_file($this->local_files_baseline_path, $index_file);
     }
 
+    /**
+     * Store a copy of the remote file index as the new remote baseline.
+     *
+     * Captured from the scoped reindex that runs after apply — apply itself
+     * changes remote ctimes, so without this refresh the next push would
+     * report everything it just wrote as remote drift.
+     */
     public function capture_remote_files_baseline(string $index_file): void
     {
         $this->replace_file($this->remote_files_baseline_path, $index_file);
@@ -122,6 +143,10 @@ class PushJournal
      * was deleted. Unchanged paths produce no output. Each list is written
      * to a temporary file and renamed into place, so a killed run never
      * leaves a torn line behind.
+     *
+     * Memory stays constant however large the site is: the merge holds one
+     * line from each input file and the lists go straight to disk, so an
+     * index with a million entries costs the same as one with ten.
      *
      * @return array{changed: int, deleted: int} Entry counts, for the push summary.
      */
