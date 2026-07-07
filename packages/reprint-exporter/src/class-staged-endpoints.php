@@ -2,29 +2,37 @@
 
 use function WordPress\Reprint\Exporter\parse_size;
 
+if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
+    require_once __DIR__ . '/class-staged-push-stream-protocol.php';
+}
+
 /**
  * HTTP endpoints for the staged artifact store.
  *
- * This is the target side of a push chunk upload: the sender reads its
- * source in bounded chunks (sized by UploadChunkSizer on the importer
- * side) and posts each chunk here, where it accumulates in
- * Site_Export_Staged_Artifacts instead of touching the live site.
+ * This is the target side of a push stream: the sender opens one request,
+ * frames many bounded chunks for many files, and this endpoint commits each
+ * frame into Site_Export_Staged_Artifacts instead of touching the live site.
  *
- * Four routes share the existing endpoint dispatcher:
+ * Five routes share the existing endpoint dispatcher:
  *
- * - staged_upload   (POST, data plane): raw chunk bytes in the request
- *   body, artifact_id and offset in the query string.
+ * - staged_push     (POST, data plane): framed file chunks in one streamed
+ *   request body.
+ * - staged_upload   (POST, data plane, legacy route): raw chunk bytes in the
+ *   request body, artifact_id and offset in the query string.
  * - staged_finalize (POST, control plane): confirm the assembled size.
  * - staged_status   (GET, control plane): resume hint for a sender.
  * - staged_discard  (POST, control plane): drop an artifact; retry
  *   until the response says discarded.
  *
  * Control-plane routes have small bodies and ride the embedding layer's
- * existing HMAC verification, like every other endpoint. staged_upload
- * cannot: that verification buffers the whole request body to hash it,
- * and a chunk can be as large as the sizer's 1 GiB cap. So the upload
- * route authenticates inside the handler, in two steps that keep memory
- * bounded and keep unauthenticated bytes away from the store:
+ * existing HMAC verification, like every other endpoint. staged_push uses
+ * envelope HMAC instead: authenticate method + request target before reading
+ * bytes, then let TLS protect the body. That keeps one push stream as one
+ * request even when it carries many frames for many files.
+ *
+ * The legacy staged_upload route still authenticates each raw chunk body in
+ * two steps that keep memory bounded and keep unauthenticated bytes away from
+ * the store:
  *
  * 1. verify_signed_content_hash() checks the signature, nonce, and
  *    timestamp headers before a single body byte is read. A caller
@@ -265,6 +273,154 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
+     * Stage a framed stream of chunks for many artifacts in one request.
+     *
+     * Each frame is one JSON line followed by exactly "bytes" raw bytes:
+     *
+     * {"type":"chunk","artifact_id":"path","offset":0,"bytes":123,"total_bytes":456,"final":false}\n
+     *
+     * A frame commits before the next frame is read. If the request dies after
+     * a commit, the next request may replay from the last sender cursor or from
+     * the beginning; verified artifacts and duplicate ranges are absorbed.
+     *
+     * @param array $config Request parameters.
+     * @param array $headers Request headers/server vars ($_SERVER shape).
+     * @param resource|null $input Request body stream (php://input).
+     * @return array{http_code:int,body:array}
+     */
+    public function push_stream(array $config, array $headers, $input): array {
+        $method_error = $this->require_post($headers);
+        if ($method_error !== null) {
+            return $method_error;
+        }
+        if ($this->secret === null) {
+            return $this->rejected(503, 'not_configured', 'shared_secret');
+        }
+        if (!is_resource($input)) {
+            return $this->rejected(500, 'io_error', 'open_request_body');
+        }
+
+        $request_target = $headers['REQUEST_URI'] ?? null;
+        if (!is_string($request_target) || $request_target === '') {
+            return $this->rejected(400, 'missing_request_target');
+        }
+        $auth_error = (new Site_Export_HMAC_Server($this->secret, $this->timestamp_tolerance))
+            ->verify_envelope($headers, (string) ( $headers['REQUEST_METHOD'] ?? 'POST' ), $request_target);
+        if ($auth_error !== null) {
+            return $this->rejected(403, 'auth_failed', $auth_error);
+        }
+
+        $files_verified = 0;
+        $cursor = null;
+        while (!feof($input)) {
+            $line = Site_Export_Staged_Push_Stream_Protocol::read_header_line($input);
+            if ($line === null) {
+                break;
+            }
+            try {
+                $frame = Site_Export_Staged_Push_Stream_Protocol::decode_chunk_header($line);
+            } catch (InvalidArgumentException $e) {
+                return $this->stream_rejected(400, 'invalid_frame', $e->getMessage(), $cursor, $files_verified);
+            }
+            $artifact_id = $frame['artifact_id'];
+            $offset = $frame['offset'];
+            $bytes = $frame['bytes'];
+            $total_bytes = $frame['total_bytes'];
+            $final = $frame['final'];
+            $cursor = ['artifact_id' => $artifact_id, 'committed_bytes' => $offset];
+
+            if ($bytes > $this->max_request_bytes) {
+                $response = $this->stream_rejected(413, 'frame_too_large', null, $cursor, $files_verified);
+                $response['body']['max_frame_bytes'] = $this->max_request_bytes;
+                return $response;
+            }
+
+            $status = $this->store->status($artifact_id);
+            if ($status['verified']) {
+                if ($status['committed_bytes'] !== $total_bytes) {
+                    return $this->stream_rejected(409, 'size_mismatch', null, [
+                        'artifact_id' => $artifact_id,
+                        'committed_bytes' => $status['committed_bytes'],
+                    ], $files_verified);
+                }
+                if (!Site_Export_Staged_Push_Stream_Protocol::discard_exactly($input, $bytes, self::READ_BUFFER_BYTES)) {
+                    return $this->stream_rejected(400, 'body_read_failed', null, $cursor, $files_verified);
+                }
+                $cursor = ['artifact_id' => $artifact_id, 'committed_bytes' => $status['committed_bytes']];
+                if ($final) {
+                    $files_verified++;
+                }
+                continue;
+            }
+
+            if ($bytes > 0) {
+                $remaining_frame_bytes = $bytes;
+                $append_offset = $offset;
+                while ($remaining_frame_bytes > 0) {
+                    $payload_piece_bytes = min($this->append_buffer_bytes, $remaining_frame_bytes);
+                    $payload_piece = Site_Export_Staged_Push_Stream_Protocol::read_exactly($input, $payload_piece_bytes);
+                    if ($payload_piece === null) {
+                        return $this->stream_rejected(400, 'body_read_failed', null, $cursor, $files_verified);
+                    }
+                    $remaining_frame_bytes -= $payload_piece_bytes;
+
+                    while ($payload_piece !== '') {
+                        $append_result = $this->store->append($artifact_id, $append_offset, $payload_piece);
+                        if ($append_result['status'] === 'accepted' || $append_result['status'] === 'duplicate') {
+                            $append_offset = max($append_offset + strlen($payload_piece), (int) $append_result['committed_bytes']);
+                            $cursor = ['artifact_id' => $artifact_id, 'committed_bytes' => (int) $append_result['committed_bytes']];
+                            break;
+                        }
+
+                        $committed_bytes = (int) $append_result['committed_bytes'];
+                        if (
+                            $append_result['reason'] === 'offset_gap'
+                            && $committed_bytes > $append_offset
+                            && $committed_bytes < $append_offset + strlen($payload_piece)
+                        ) {
+                            $payload_piece = substr($payload_piece, $committed_bytes - $append_offset);
+                            $append_offset = $committed_bytes;
+                            continue;
+                        }
+
+                        $response = $this->from_store_result($append_result);
+                        $response['body']['cursor'] = [
+                            'artifact_id' => $artifact_id,
+                            'committed_bytes' => $committed_bytes,
+                        ];
+                        $response['body']['files_verified'] = $files_verified;
+                        return $response;
+                    }
+                }
+            }
+
+            if ($final) {
+                $finalize_result = $this->store->finalize($artifact_id, $total_bytes);
+                unset($finalize_result['path']);
+                if ($finalize_result['status'] !== 'verified') {
+                    $response = $this->from_store_result($finalize_result);
+                    $response['body']['cursor'] = $cursor;
+                    $response['body']['files_verified'] = $files_verified;
+                    return $response;
+                }
+                $files_verified++;
+                $cursor = ['artifact_id' => $artifact_id, 'committed_bytes' => (int) $finalize_result['committed_bytes']];
+            }
+        }
+
+        return [
+            'http_code' => 200,
+            'body' => [
+                'status' => 'complete',
+                'reason' => null,
+                'detail' => null,
+                'cursor' => $cursor,
+                'files_verified' => $files_verified,
+            ],
+        ];
+    }
+
+    /**
      * Confirm an assembled artifact against its plan-declared size.
      *
      * @return array{http_code:int,body:array}
@@ -390,6 +546,22 @@ final class Site_Export_Staged_Endpoints {
     /**
      * @return array{http_code:int,body:array}
      */
+    private function stream_rejected(int $http_code, string $reason, ?string $detail, ?array $cursor, int $files_verified): array {
+        return [
+            'http_code' => $http_code,
+            'body' => [
+                'status' => 'rejected',
+                'reason' => $reason,
+                'detail' => $detail,
+                'cursor' => $cursor,
+                'files_verified' => $files_verified,
+            ],
+        ];
+    }
+
+    /**
+     * @return array{http_code:int,body:array}
+     */
     private function rejected(int $http_code, string $reason, ?string $detail = null, int $committed_bytes = 0): array {
         return [
             'http_code' => $http_code,
@@ -403,7 +575,7 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
-     * The structured too-large rejection UploadChunkSizer::record_too_large()
+     * The structured too-large rejection PushFrameSizer::record_too_large()
      * consumes: HTTP 413 plus the cap it must stay under.
      *
      * @return array{http_code:int,body:array}
@@ -418,4 +590,5 @@ final class Site_Export_Staged_Endpoints {
         $response['body']['max_request_bytes'] = $this->max_request_bytes;
         return $response;
     }
+
 }

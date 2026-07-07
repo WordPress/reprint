@@ -205,9 +205,10 @@ Files first, database second, each PR small and stacked in this order:
    the configured storage path; web guards for inside-docroot placement.
 5. **Push journal and local diff** — per-site local baselines, capture and
    overwrite logic, local change and deletion detection.
-6. **Upload endpoint** — the store's HTTP surface plus the sender loop with
-   chunk sizing; deletion manifest staged; `--force-http` with honest help
-   text (the first push networking this flag can gate).
+6. **Push stream endpoint** — the store's HTTP surface plus a sender that
+   streams framed chunks for many files through one authenticated request;
+   deletion manifest staged; `--force-http` with honest help text (the first
+   push networking this flag can gate).
 7. **Package unification** — importer and exporter become one Reprint
    package (lite = serve-only build). Placed here because apply is the
    first piece that needs import-side code running on the remote.
@@ -220,8 +221,8 @@ Files first, database second, each PR small and stacked in this order:
     diff generation and URL rewrite, the apply batch.
 11. **`reprint push`** — the one command that orchestrates plan, confirm,
     transfer, apply, resume.
-12. **Budgets and resumable limits** — upload stays bounded by chunk size and
-    explicit request limits; any endpoint that stops after durable work returns
-    the exact committed state the driver needs to retry. The apply step gets
-    the main budgeted loop: process until a deadline or operation limit, return
-    progress, and let the driver re-enter until complete.
+12. **Budgets and resumable limits** — push stream frames stay bounded by chunk
+    size and explicit frame limits; any endpoint that stops after durable work
+    returns the exact committed state the driver needs to retry. The apply step
+    gets the main budgeted loop: process until a deadline or operation limit,
+    return progress, and let the driver re-enter until complete.

@@ -3,11 +3,11 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use UploadChunkSizer;
+use PushFrameSizer;
 
 require_once __DIR__ . '/../../importer/import.php';
 
-class UploadChunkSizerTest extends TestCase
+class PushFrameSizerTest extends TestCase
 {
     private const MIB = 1024 * 1024;
 
@@ -17,14 +17,14 @@ class UploadChunkSizerTest extends TestCase
 
     public function testStartsAtConservativeBootstrapSizeWithoutLimits(): void
     {
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
 
         $this->assertSame(32 * self::MIB, $sizer->chunk_bytes());
     }
 
     public function testReportedLimitAboveChunkKeepsCurrentSize(): void
     {
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
 
         $decision = $sizer->apply_reported_limits([256 * self::MIB, null, 128 * self::MIB]);
 
@@ -34,7 +34,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testSmallestReportedLimitClampsChunkWithSafetyMargin(): void
     {
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
 
         $decision = $sizer->apply_reported_limits([64 * self::MIB, 8 * self::MIB]);
 
@@ -44,7 +44,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testUnknownLimitValuesAreIgnored(): void
     {
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
 
         $decision = $sizer->apply_reported_limits([null, 0, -1]);
 
@@ -54,7 +54,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testLaterHigherReportedLimitDoesNotRaiseTheCeiling(): void
     {
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
         $sizer->apply_reported_limits([8 * self::MIB]);
 
         // A re-preflight reporting a raised limit must not undo what the
@@ -69,7 +69,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testReportedLimitBelowFloorGivesUp(): void
     {
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
 
         $decision = $sizer->apply_reported_limits([512 * 1024]);
 
@@ -83,7 +83,7 @@ class UploadChunkSizerTest extends TestCase
     public function testSuccessDoublesTowardReportedLimit(): void
     {
         // A host reporting 256M must not stay capped at the 32 MiB bootstrap.
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
         $sizer->apply_reported_limits([256 * self::MIB]);
 
         $this->assertSame('grow', $sizer->record_success()['action']);
@@ -100,7 +100,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testGrowthWithoutLimitsStopsAtConfiguredMax(): void
     {
-        $sizer = new UploadChunkSizer(["max_bytes" => 64 * self::MIB]);
+        $sizer = new PushFrameSizer(["max_bytes" => 64 * self::MIB]);
 
         $sizer->record_success();
         $this->assertSame(64 * self::MIB, $sizer->chunk_bytes());
@@ -109,7 +109,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testHardCapAppliesEvenWhenHostReportsALargerLimit(): void
     {
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
         $sizer->apply_reported_limits([4 * 1024 * self::MIB]);
 
         for ($i = 0; $i < 10; $i++) {
@@ -125,7 +125,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testTooLargeWithServerReportedLimitDropsBelowIt(): void
     {
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
 
         $decision = $sizer->record_too_large(16 * self::MIB);
 
@@ -137,7 +137,7 @@ class UploadChunkSizerTest extends TestCase
     {
         // A proxy can reject at a lower bound than the limit PHP reports, so
         // a rejected size must never be retried unchanged.
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
 
         $decision = $sizer->record_too_large(512 * self::MIB);
 
@@ -147,7 +147,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testTooLargeWithoutReportedLimitHalves(): void
     {
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
 
         $decision = $sizer->record_too_large();
 
@@ -157,7 +157,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testGrowthNeverRetriesARefusedSize(): void
     {
-        $sizer = new UploadChunkSizer(["growth_holdoff_successes" => 1]);
+        $sizer = new PushFrameSizer(["growth_holdoff_successes" => 1]);
         $sizer->record_too_large(); // 32 MiB refused, ceiling capped at 16 MiB
 
         $sizer->record_success(); // absorbs the holdoff
@@ -170,7 +170,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testTooLargeBetweenFloorAndTwiceFloorStillTriesTheFloor(): void
     {
-        $sizer = new UploadChunkSizer(["start_bytes" => 3 * 512 * 1024]); // 1.5 MiB
+        $sizer = new PushFrameSizer(["start_bytes" => 3 * 512 * 1024]); // 1.5 MiB
 
         $decision = $sizer->record_too_large();
 
@@ -180,7 +180,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testTooLargeAtFloorGivesUp(): void
     {
-        $sizer = new UploadChunkSizer(["start_bytes" => self::MIB]);
+        $sizer = new PushFrameSizer(["start_bytes" => self::MIB]);
 
         $decision = $sizer->record_too_large();
 
@@ -189,14 +189,14 @@ class UploadChunkSizerTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // Transport failures
+    // HTTP request failures
     // ---------------------------------------------------------------
 
-    public function testTransportFailureHalvesWithoutCappingTheCeiling(): void
+    public function testRequestFailureHalvesWithoutCappingTheCeiling(): void
     {
-        $sizer = new UploadChunkSizer(["growth_holdoff_successes" => 2]);
+        $sizer = new PushFrameSizer(["growth_holdoff_successes" => 2]);
 
-        $decision = $sizer->record_transport_failure();
+        $decision = $sizer->record_request_failure();
         $this->assertSame('shrink', $decision['action']);
         $this->assertSame(16 * self::MIB, $sizer->chunk_bytes());
 
@@ -209,11 +209,11 @@ class UploadChunkSizerTest extends TestCase
         $this->assertSame(64 * self::MIB, $sizer->chunk_bytes());
     }
 
-    public function testTransportFailureAtFloorGivesUp(): void
+    public function testRequestFailureAtFloorGivesUp(): void
     {
-        $sizer = new UploadChunkSizer(["start_bytes" => self::MIB]);
+        $sizer = new PushFrameSizer(["start_bytes" => self::MIB]);
 
-        $this->assertSame('give_up', $sizer->record_transport_failure()['action']);
+        $this->assertSame('give_up', $sizer->record_request_failure()['action']);
     }
 
     // ---------------------------------------------------------------
@@ -222,11 +222,11 @@ class UploadChunkSizerTest extends TestCase
 
     public function testStateSurvivesRoundTrip(): void
     {
-        $sizer = new UploadChunkSizer();
+        $sizer = new PushFrameSizer();
         $sizer->apply_reported_limits([64 * self::MIB]);
         $sizer->record_too_large();
 
-        $resumed = new UploadChunkSizer([], $sizer->get_state());
+        $resumed = new PushFrameSizer([], $sizer->get_state());
 
         $this->assertSame($sizer->chunk_bytes(), $resumed->chunk_bytes());
         $this->assertSame($sizer->get_state(), $resumed->get_state());
@@ -240,7 +240,7 @@ class UploadChunkSizerTest extends TestCase
 
     public function testRestoredStateIsClampedToConfiguredBounds(): void
     {
-        $sizer = new UploadChunkSizer(
+        $sizer = new PushFrameSizer(
             ["max_bytes" => 64 * self::MIB],
             ["chunk_bytes" => PHP_INT_MAX, "ceiling_bytes" => -5, "growth_holdoff_remaining" => -2],
         );

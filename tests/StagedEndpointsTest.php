@@ -575,7 +575,7 @@ final class StagedEndpointsTest extends TestCase {
         $this->assertSame(1, $reads, 'a JSON body still feeds config parsing');
     }
 
-    public function testHandleRequestDoesNotBufferStagedUploadBodies(): void
+    public function testHandleRequestDoesNotBufferStagedDataPlaneBodies(): void
     {
         $reads = 0;
         $server = new Site_Export_HTTP_Server([
@@ -586,27 +586,40 @@ final class StagedEndpointsTest extends TestCase {
             },
         ]);
 
-        $previous_request_method = $_SERVER['REQUEST_METHOD'] ?? null;
-        $_SERVER['REQUEST_METHOD'] = 'POST';
-        ob_start();
-        try {
-            $server->handle_request([
-                'get' => ['endpoint' => 'staged_upload', 'artifact_id' => 'artifact-1', 'offset' => 0],
-                'server' => ['REQUEST_METHOD' => 'POST', 'CONTENT_TYPE' => 'application/json'],
-            ]);
-            $output = ob_get_clean();
-        } finally {
-            if (ob_get_level() > 0) {
-                ob_end_clean();
+        foreach ([
+            ['endpoint' => 'staged_upload', 'artifact_id' => 'artifact-1', 'offset' => 0],
+            ['endpoint' => 'staged_push'],
+        ] as $request_query) {
+            $previous_request_method = $_SERVER['REQUEST_METHOD'] ?? null;
+            $previous_request_uri = $_SERVER['REQUEST_URI'] ?? null;
+            $_SERVER['REQUEST_METHOD'] = 'POST';
+            $_SERVER['REQUEST_URI'] = '/?endpoint=' . $request_query['endpoint'];
+            $buffer_level = ob_get_level();
+            ob_start();
+            try {
+                $server->handle_request([
+                    'get' => $request_query,
+                    'server' => ['REQUEST_METHOD' => 'POST', 'CONTENT_TYPE' => 'application/json'],
+                ]);
+                $output = ob_get_clean();
+            } finally {
+                while (ob_get_level() > $buffer_level) {
+                    ob_end_clean();
+                }
+                if ($previous_request_method === null) {
+                    unset($_SERVER['REQUEST_METHOD']);
+                } else {
+                    $_SERVER['REQUEST_METHOD'] = $previous_request_method;
+                }
+                if ($previous_request_uri === null) {
+                    unset($_SERVER['REQUEST_URI']);
+                } else {
+                    $_SERVER['REQUEST_URI'] = $previous_request_uri;
+                }
             }
-            if ($previous_request_method === null) {
-                unset($_SERVER['REQUEST_METHOD']);
-            } else {
-                $_SERVER['REQUEST_METHOD'] = $previous_request_method;
-            }
-        }
 
-        $this->assertSame(0, $reads, 'staged_upload body bytes must only be read by the upload handler');
-        $this->assertSame('auth_failed', json_decode( (string) $output, true)['reason']);
+            $this->assertSame(0, $reads, $request_query['endpoint'] . ' body bytes must only be read by the staged handler');
+            $this->assertSame('auth_failed', json_decode( (string) $output, true)['reason']);
+        }
     }
 }

@@ -14,8 +14,8 @@
  * moves verified artifacts into place in one short, controlled window
  * instead of mutating the live tree for the duration of the transfer.
  *
- * The first consumer is push: bounded upload requests from an outbound-only
- * local site, sized by UploadChunkSizer on the importer side. The pull file
+ * The first consumer is push: bounded frames from an outbound-only local
+ * site, sized by PushFrameSizer on the importer side. The pull file
  * writer has the same needs whenever its target is a live site — today it
  * streams downloads straight to their final paths, which is fine for a fresh
  * local directory but not for a web-served tree — so nothing here is

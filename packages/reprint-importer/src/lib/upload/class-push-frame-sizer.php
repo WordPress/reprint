@@ -1,49 +1,49 @@
 <?php
 /**
- * Adaptive sizing for bounded local-to-remote upload chunks.
+ * Adaptive sizing for bounded local-to-remote push stream frames.
  *
  * Push moves bytes from an outbound-only local site to a remote WordPress
- * site through PHP request bodies, and most hosts buffer an inbound body
- * before userland code runs (nginx fastcgi_request_buffering, PHP multipart
- * handling). Reprint therefore never streams one large request; it uploads
- * bounded chunks that stay small enough for host buffering to be acceptable.
+ * site through PHP request bodies. The push stream keeps many files inside
+ * one authenticated request, but each file frame still needs a bounded size:
+ * a target may reject a frame before committing it, and the sender must be
+ * able to retry from a cursor with a smaller frame size.
  *
  * This class owns the chunk-size decision:
  *
  * - Remote-reported request limits (post_max_size, upload_max_filesize, and
  *   similar) establish the session ceiling, minus a safety margin for headers
- *   and multipart framing. A reverse proxy or CDN may still reject earlier,
- *   so the ceiling is an upper bound, not a guarantee.
- * - Without a useful reported limit, uploads start at a conservative 32 MiB.
+ *   and frame metadata. A reverse proxy or CDN may still reject earlier, so
+ *   the ceiling is an upper bound, not a guarantee.
+ * - Without a useful reported limit, frames start at a conservative 32 MiB.
  * - A hard cap (default 1 GiB) bounds every chunk even when the host reports
  *   a larger limit.
  * - Accepted chunks double the size toward the ceiling.
  * - The two rejection kinds back off differently because they carry different
  *   evidence. A rejection known to be size-related — HTTP 413 or a structured
  *   "request too large" response — caps the session ceiling permanently, so
- *   growth never retries a size the server already refused. A transport
- *   failure (timeout, reset, empty response) may have nothing to do with
- *   size, and a push session can run for hours over thousands of chunks —
+ *   growth never retries a size the server already refused. An HTTP
+ *   request failure (timeout, reset, empty response) may have nothing to do
+ *   with size, and a push session can run for hours over thousands of chunks —
  *   permanently halving it over one network blip would double the request
- *   count for everything that follows. So a transport failure only halves the
+ *   count for everything that follows. So a request failure only halves the
  *   chunk and holds growth back for a few successes. The accepted cost: a
  *   size-related failure that never surfaces as a 413 is re-probed once per
  *   holdoff window instead of converging.
  * - When even the floor size is rejected, decisions report "give_up" so the
  *   caller can stop with a clear error instead of retrying forever.
  *
- * Callers should retry transient transport errors at the same size first and
- * record a failure only once a size is considered rejected. The decision
+ * Callers should retry transient HTTP request errors at the same size first
+ * and record a failure only once a size is considered rejected. The decision
  * state survives get_state()/constructor round-trips so a resumed session
  * keeps the learned safe chunk size.
  *
  * This is a sibling of AdaptiveTuner, not an extension of it: AdaptiveTuner
  * tunes how much work a pull request asks for so the exporter fits its time
- * budget, driven by server-reported timing and a throughput average. Upload
- * chunks have no timing signal — the only feedback is accept/reject against
- * hard request-size limits — so the two keep separate state and logic.
+ * budget, driven by server-reported timing and a throughput average. Push
+ * frames have no timing signal — the only feedback is accept/reject against
+ * hard size limits — so the two keep separate state and logic.
  */
-class UploadChunkSizer
+class PushFrameSizer
 {
     private array $config;
 
@@ -72,9 +72,9 @@ class UploadChunkSizer
             // a larger limit.
             "max_bytes" => 1024 * 1024 * 1024,
             // Fraction of a reported limit usable for the chunk payload; the
-            // rest absorbs headers, multipart framing, and host quirks.
+            // rest absorbs headers, frame metadata, and host quirks.
             "limit_safety_ratio" => 0.9,
-            // Successful uploads required after a failure before growing again.
+            // Successful frames required after a failure before growing again.
             "growth_holdoff_successes" => 3,
         ];
 
@@ -100,7 +100,7 @@ class UploadChunkSizer
     }
 
     /**
-     * The chunk size the next upload should use, in bytes.
+     * The chunk size the next push stream frame should use, in bytes.
      */
     public function chunk_bytes(): int
     {
@@ -196,7 +196,7 @@ class UploadChunkSizer
 
     /**
      * Record a rejection that may or may not be size-related: timeout, empty
-     * response, connection reset, or similar during an upload.
+     * response, connection reset, or similar during a push stream.
      *
      * Halves the chunk and holds growth back, but does not cap the ceiling —
      * after the holdoff the size may grow back, so one transient failure does
@@ -204,7 +204,7 @@ class UploadChunkSizer
      *
      * @return array{action:string,chunk_bytes:int} Decision summary.
      */
-    public function record_transport_failure(): array
+    public function record_request_failure(): array
     {
         $this->growth_holdoff_remaining = $this->config["growth_holdoff_successes"];
 
