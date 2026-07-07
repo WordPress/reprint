@@ -213,7 +213,8 @@ Files first, database second, each PR small and stacked in this order:
    X-Auth-Content-Hash header carries the literal string UNSIGNED-PAYLOAD,
    and the signature covers the method and request target instead of a
    body hash.
-3. **Staged artifact store** — already built (PR #298); rebases here.
+3. **Staged artifact store** — the store itself (PR #317, which succeeded
+   the closed #298).
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
    the configured storage path; web guards for inside-docroot placement.
 5. **Push journal and local diff** — per-site baselines, capture and
