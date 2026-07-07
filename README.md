@@ -135,6 +135,15 @@ code should follow WPCS unless the ruleset explicitly excludes that sniff.
 
 Run `composer lint:php:compat` for the separate PHP 7.4+ compatibility check.
 
+### Cutting a release
+
+To cut a release, run the **Tag Release** workflow from the GitHub Actions tab
+(`.github/workflows/tag-release.yml`) and pick a bump type (`patch`, `minor`,
+`major`, or `custom`). It creates and pushes the `vMAJOR.MINOR.PATCH` tag, then
+bumps `trunk` to the next `-dev` version. Pushing the tag automatically triggers
+the build, which publishes the GitHub Release (`reprint.phar` +
+`reprint-exporter-wp.zip`) and the Composer packages to Packagist.
+
 ---
 
 ## Integrating with a hosting platform
