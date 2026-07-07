@@ -250,15 +250,15 @@ class PushJournal
         string $deleted_paths_file,
         bool $missing_baseline_marks_current_changed
     ): array {
-        $current_handle = fopen($current_index_file, "r");
-        if (!$current_handle) {
+        $current_index_handle = fopen($current_index_file, "r");
+        if (!$current_index_handle) {
             throw new RuntimeException("Failed to open the current index: {$current_index_file}");
         }
-        $baseline_handle = null;
+        $baseline_index_handle = null;
         if ($baseline_index_file !== null && is_file($baseline_index_file)) {
-            $baseline_handle = fopen($baseline_index_file, "r");
-            if (!$baseline_handle) {
-                fclose($current_handle);
+            $baseline_index_handle = fopen($baseline_index_file, "r");
+            if (!$baseline_index_handle) {
+                fclose($current_index_handle);
                 throw new RuntimeException("Failed to open the baseline index: {$baseline_index_file}");
             }
         }
@@ -266,18 +266,18 @@ class PushJournal
         $changed_paths_tmp = $changed_paths_file . ".tmp";
         $changed_paths_handle = fopen($changed_paths_tmp, "w");
         if (!$changed_paths_handle) {
-            fclose($current_handle);
-            if ($baseline_handle) {
-                fclose($baseline_handle);
+            fclose($current_index_handle);
+            if ($baseline_index_handle) {
+                fclose($baseline_index_handle);
             }
             throw new RuntimeException("Failed to open changed paths list for writing: {$changed_paths_tmp}");
         }
         $deleted_paths_tmp = $deleted_paths_file . ".tmp";
         $deleted_paths_handle = fopen($deleted_paths_tmp, "w");
         if (!$deleted_paths_handle) {
-            fclose($current_handle);
-            if ($baseline_handle) {
-                fclose($baseline_handle);
+            fclose($current_index_handle);
+            if ($baseline_index_handle) {
+                fclose($baseline_index_handle);
             }
             fclose($changed_paths_handle);
             throw new RuntimeException("Failed to open deleted paths list for writing: {$deleted_paths_tmp}");
@@ -285,58 +285,58 @@ class PushJournal
 
         $changed = 0;
         $deleted = 0;
-        $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
-        $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
-        while ($current_entry !== null || $baseline_entry !== null) {
+        $this->read_line($current_index_handle, $current_entry, $current_path, $current_base64_path);
+        $this->read_line($baseline_index_handle, $baseline_index_entry, $baseline_index_path, $baseline_index_base64_path);
+        while ($current_entry !== null || $baseline_index_entry !== null) {
             // base64 does not preserve byte order ('0' sorts before 'A' in
             // ASCII but encodes a higher value), so ordering has to use the
             // decoded paths.
-            if ($baseline_entry === null) {
+            if ($baseline_index_entry === null) {
                 $order = -1;
             } elseif ($current_entry === null) {
                 $order = 1;
             } else {
-                $order = strcmp($current_path, $baseline_path);
+                $order = strcmp($current_path, $baseline_index_path);
             }
 
             if ($order < 0) {
                 // Only in the current index: new since the last push.
-                if ($baseline_handle || $missing_baseline_marks_current_changed) {
+                if ($baseline_index_handle || $missing_baseline_marks_current_changed) {
                     $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
                     if (fwrite($changed_paths_handle, $out) !== strlen($out)) {
                         throw new RuntimeException("Short write on changed paths list, is the disk full?");
                     }
                     $changed++;
                 }
-                $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
+                $this->read_line($current_index_handle, $current_entry, $current_path, $current_base64_path);
             } elseif ($order > 0) {
                 // Only in the baseline: deleted since the last push.
-                $out = json_encode(["path" => $baseline_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                $out = json_encode(["path" => $baseline_index_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
                 if (fwrite($deleted_paths_handle, $out) !== strlen($out)) {
                     throw new RuntimeException("Short write on deleted paths list, is the disk full?");
                 }
                 $deleted++;
-                $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
+                $this->read_line($baseline_index_handle, $baseline_index_entry, $baseline_index_path, $baseline_index_base64_path);
             } else {
                 // Same path on both sides. Decoded JSON array comparison keeps
                 // field order and slash escaping out of change detection. A
                 // writer field change would mark everything changed once (a
                 // wasted re-upload, never a missed one).
-                if ($current_entry != $baseline_entry) {
+                if ($current_entry != $baseline_index_entry) {
                     $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
                     if (fwrite($changed_paths_handle, $out) !== strlen($out)) {
                         throw new RuntimeException("Short write on changed paths list, is the disk full?");
                     }
                     $changed++;
                 }
-                $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
-                $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
+                $this->read_line($current_index_handle, $current_entry, $current_path, $current_base64_path);
+                $this->read_line($baseline_index_handle, $baseline_index_entry, $baseline_index_path, $baseline_index_base64_path);
             }
         }
 
-        fclose($current_handle);
-        if ($baseline_handle) {
-            fclose($baseline_handle);
+        fclose($current_index_handle);
+        if ($baseline_index_handle) {
+            fclose($baseline_index_handle);
         }
         if (!fclose($changed_paths_handle) || !rename($changed_paths_tmp, $changed_paths_file)) {
             throw new RuntimeException("Failed to move changed paths list into place: {$changed_paths_file}");
@@ -357,103 +357,103 @@ class PushJournal
      * merge keeps memory constant and ignores remote baseline entries outside
      * the local push scope.
      */
-    private function write_scoped_remote_baseline(string $target): void
+    private function write_scoped_remote_baseline(string $scoped_remote_baseline_path): void
     {
-        $baseline_handle = fopen($this->remote_files_baseline_path, "r");
-        if (!$baseline_handle) {
+        $remote_baseline_handle = fopen($this->remote_files_baseline_path, "r");
+        if (!$remote_baseline_handle) {
             throw new RuntimeException("Failed to open the remote baseline: {$this->remote_files_baseline_path}");
         }
-        $paths_to_push_handle = fopen($this->local_paths_to_push, "r");
-        if (!$paths_to_push_handle) {
-            fclose($baseline_handle);
+        $local_paths_to_push_handle = fopen($this->local_paths_to_push, "r");
+        if (!$local_paths_to_push_handle) {
+            fclose($remote_baseline_handle);
             throw new RuntimeException("Failed to open local_paths_to_push: {$this->local_paths_to_push}");
         }
-        $paths_to_delete_handle = fopen($this->local_paths_to_delete, "r");
-        if (!$paths_to_delete_handle) {
-            fclose($baseline_handle);
-            fclose($paths_to_push_handle);
+        $local_paths_to_delete_handle = fopen($this->local_paths_to_delete, "r");
+        if (!$local_paths_to_delete_handle) {
+            fclose($remote_baseline_handle);
+            fclose($local_paths_to_push_handle);
             throw new RuntimeException("Failed to open local_paths_to_delete: {$this->local_paths_to_delete}");
         }
-        $target_handle = fopen($target, "w");
-        if (!$target_handle) {
-            fclose($baseline_handle);
-            fclose($paths_to_push_handle);
-            fclose($paths_to_delete_handle);
-            throw new RuntimeException("Failed to open scoped remote baseline for writing: {$target}");
+        $scoped_remote_baseline_handle = fopen($scoped_remote_baseline_path, "w");
+        if (!$scoped_remote_baseline_handle) {
+            fclose($remote_baseline_handle);
+            fclose($local_paths_to_push_handle);
+            fclose($local_paths_to_delete_handle);
+            throw new RuntimeException("Failed to open scoped remote baseline for writing: {$scoped_remote_baseline_path}");
         }
 
-        $last_scope_path = null;
-        $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
-        $this->read_line($paths_to_push_handle, $path_to_push_entry, $path_to_push, $path_to_push_base64);
-        $this->read_line($paths_to_delete_handle, $path_to_delete_entry, $path_to_delete, $path_to_delete_base64);
+        $last_local_scope_path = null;
+        $this->read_line($remote_baseline_handle, $remote_baseline_entry, $remote_baseline_path, $remote_baseline_base64_path);
+        $this->read_line($local_paths_to_push_handle, $local_path_to_push_entry, $local_path_to_push, $local_path_to_push_base64);
+        $this->read_line($local_paths_to_delete_handle, $local_path_to_delete_entry, $local_path_to_delete, $local_path_to_delete_base64);
 
-        while ($baseline_entry !== null && ($path_to_push_entry !== null || $path_to_delete_entry !== null)) {
-            if ($path_to_push_entry !== null && ($path_to_delete_entry === null || strcmp($path_to_push, $path_to_delete) <= 0)) {
-                $scope_path = $path_to_push;
+        while ($remote_baseline_entry !== null && ($local_path_to_push_entry !== null || $local_path_to_delete_entry !== null)) {
+            if ($local_path_to_push_entry !== null && ($local_path_to_delete_entry === null || strcmp($local_path_to_push, $local_path_to_delete) <= 0)) {
+                $local_scope_path = $local_path_to_push;
             } else {
-                $scope_path = $path_to_delete;
+                $local_scope_path = $local_path_to_delete;
             }
 
-            if ($scope_path === $last_scope_path) {
-                if ($path_to_push === $scope_path) {
-                    $this->read_line($paths_to_push_handle, $path_to_push_entry, $path_to_push, $path_to_push_base64);
+            if ($local_scope_path === $last_local_scope_path) {
+                if ($local_path_to_push === $local_scope_path) {
+                    $this->read_line($local_paths_to_push_handle, $local_path_to_push_entry, $local_path_to_push, $local_path_to_push_base64);
                 }
-                if ($path_to_delete === $scope_path) {
-                    $this->read_line($paths_to_delete_handle, $path_to_delete_entry, $path_to_delete, $path_to_delete_base64);
+                if ($local_path_to_delete === $local_scope_path) {
+                    $this->read_line($local_paths_to_delete_handle, $local_path_to_delete_entry, $local_path_to_delete, $local_path_to_delete_base64);
                 }
                 continue;
             }
 
-            $order = strcmp($baseline_path, $scope_path);
+            $order = strcmp($remote_baseline_path, $local_scope_path);
             if ($order < 0) {
-                $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
+                $this->read_line($remote_baseline_handle, $remote_baseline_entry, $remote_baseline_path, $remote_baseline_base64_path);
                 continue;
             }
             if ($order > 0) {
-                $last_scope_path = $scope_path;
-                if ($path_to_push === $scope_path) {
-                    $this->read_line($paths_to_push_handle, $path_to_push_entry, $path_to_push, $path_to_push_base64);
+                $last_local_scope_path = $local_scope_path;
+                if ($local_path_to_push === $local_scope_path) {
+                    $this->read_line($local_paths_to_push_handle, $local_path_to_push_entry, $local_path_to_push, $local_path_to_push_base64);
                 }
-                if ($path_to_delete === $scope_path) {
-                    $this->read_line($paths_to_delete_handle, $path_to_delete_entry, $path_to_delete, $path_to_delete_base64);
+                if ($local_path_to_delete === $local_scope_path) {
+                    $this->read_line($local_paths_to_delete_handle, $local_path_to_delete_entry, $local_path_to_delete, $local_path_to_delete_base64);
                 }
                 continue;
             }
 
-            $line = json_encode($baseline_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-            if (fwrite($target_handle, $line) !== strlen($line)) {
+            $line = json_encode($remote_baseline_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+            if (fwrite($scoped_remote_baseline_handle, $line) !== strlen($line)) {
                 throw new RuntimeException("Short write on scoped remote baseline, is the disk full?");
             }
-            $last_scope_path = $scope_path;
-            $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
-            if ($path_to_push === $scope_path) {
-                $this->read_line($paths_to_push_handle, $path_to_push_entry, $path_to_push, $path_to_push_base64);
+            $last_local_scope_path = $local_scope_path;
+            $this->read_line($remote_baseline_handle, $remote_baseline_entry, $remote_baseline_path, $remote_baseline_base64_path);
+            if ($local_path_to_push === $local_scope_path) {
+                $this->read_line($local_paths_to_push_handle, $local_path_to_push_entry, $local_path_to_push, $local_path_to_push_base64);
             }
-            if ($path_to_delete === $scope_path) {
-                $this->read_line($paths_to_delete_handle, $path_to_delete_entry, $path_to_delete, $path_to_delete_base64);
+            if ($local_path_to_delete === $local_scope_path) {
+                $this->read_line($local_paths_to_delete_handle, $local_path_to_delete_entry, $local_path_to_delete, $local_path_to_delete_base64);
             }
         }
 
-        fclose($baseline_handle);
-        fclose($paths_to_push_handle);
-        fclose($paths_to_delete_handle);
-        if (!fclose($target_handle)) {
-            throw new RuntimeException("Failed to close scoped remote baseline: {$target}");
+        fclose($remote_baseline_handle);
+        fclose($local_paths_to_push_handle);
+        fclose($local_paths_to_delete_handle);
+        if (!fclose($scoped_remote_baseline_handle)) {
+            throw new RuntimeException("Failed to close scoped remote baseline: {$scoped_remote_baseline_path}");
         }
     }
 
     /**
      * Atomically replace a JSONL list with an empty file.
      */
-    private function write_empty_jsonl(string $target): void
+    private function write_empty_jsonl(string $jsonl_path): void
     {
-        $tmp = $target . ".tmp";
+        $tmp = $jsonl_path . ".tmp";
         $handle = fopen($tmp, "w");
         if (!$handle) {
             throw new RuntimeException("Failed to open empty JSONL temp file for writing: {$tmp}");
         }
-        if (!fclose($handle) || !rename($tmp, $target)) {
-            throw new RuntimeException("Failed to move empty JSONL file into place: {$target}");
+        if (!fclose($handle) || !rename($tmp, $jsonl_path)) {
+            throw new RuntimeException("Failed to move empty JSONL file into place: {$jsonl_path}");
         }
     }
 
@@ -501,18 +501,18 @@ class PushJournal
      * Copy an index file over a baseline: temp file in the same directory,
      * then rename, so readers only ever see the old or the new baseline.
      */
-    private function replace_file(string $target, string $source_index_file): void
+    private function replace_file(string $scoped_remote_baseline_path, string $source_index_file): void
     {
         if (!is_file($source_index_file)) {
             throw new RuntimeException("Cannot capture a baseline, the index file is missing: {$source_index_file}");
         }
         $this->ensure_site_dir();
-        $tmp = $target . ".tmp";
+        $tmp = $scoped_remote_baseline_path . ".tmp";
         if (!copy($source_index_file, $tmp)) {
             throw new RuntimeException("Failed to copy the index into a baseline temp file: {$tmp}");
         }
-        if (!rename($tmp, $target)) {
-            throw new RuntimeException("Failed to move the baseline into place: {$target}");
+        if (!rename($tmp, $scoped_remote_baseline_path)) {
+            throw new RuntimeException("Failed to move the baseline into place: {$scoped_remote_baseline_path}");
         }
     }
 
