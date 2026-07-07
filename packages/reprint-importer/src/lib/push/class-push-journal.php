@@ -42,8 +42,9 @@
  *
  * diff_remote_files() answers "did the remote change any path this push is
  * about to touch". Its current index input must be the scoped remote reindex
- * for local_paths_to_push plus local_paths_to_delete. The remote baseline is
- * filtered to that same scope before comparison, so unrelated remote changes
+ * for local_paths_to_push plus local_paths_to_delete. The stored remote
+ * baseline must still be the full last-synced remote index; this class filters
+ * it to the current local scope before comparison, so unrelated remote changes
  * do not block a push.
  *
  * Producing the current index is the caller's job; this class only
@@ -133,13 +134,17 @@ class PushJournal
     }
 
     /**
-     * Store a copy of the remote file index as the new remote baseline.
+     * Store a copy of the full remote file index as the new remote baseline.
      *
-     * Captured from the scoped reindex that runs after apply — apply itself
-     * changes remote ctimes, so without this refresh the next push would
-     * report everything it just wrote as remote drift.
+     * The index must cover the whole remote tree, not only the paths touched
+     * by the latest push. diff_remote_files() treats a path absent from this
+     * baseline as absent from the remote at the last sync, so replacing the
+     * baseline with a scoped reindex would make a later push of different
+     * paths compare against an incomplete history. If the push driver only
+     * has a scoped post-apply reindex, it must merge those scoped entries into
+     * the previous full remote baseline instead of calling this method.
      */
-    public function capture_remote_files_baseline(string $index_file): void
+    public function capture_full_remote_files_baseline(string $index_file): void
     {
         $this->replace_file($this->remote_files_baseline_path, $index_file);
     }
@@ -183,10 +188,10 @@ class PushJournal
      * write the remote paths that changed or disappeared since the last sync.
      *
      * The scoped current remote index must contain exactly the paths from the
-     * local push/delete lists that still exist on the remote. The method
-     * filters the stored remote baseline to those same local paths before the
-     * merge, so a remote edit outside the pushed scope cannot become a false
-     * conflict.
+     * local push/delete lists that still exist on the remote. The stored
+     * remote baseline must be the full last-synced remote index; the method
+     * filters it to those same local paths before the merge, so a remote edit
+     * outside the pushed scope cannot become a false conflict.
      *
      * If there is no remote baseline yet, this is the first push to the site:
      * drift cannot be detected, stale drift lists are replaced with empty

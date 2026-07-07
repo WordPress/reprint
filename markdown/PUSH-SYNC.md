@@ -79,9 +79,13 @@ Each baseline is a copy of a file index in the `.import-index.jsonl` format
 the pull path already reads and writes — one JSON object per line, sorted by
 path.
 
-The remote baseline is captured by a scoped reindex that runs *after* apply —
-apply itself changes remote ctimes, and without this refresh the next push
-would report everything we just wrote as drift.
+The remote baseline must stay a full last-synced remote index. Apply itself
+changes remote ctimes, so the paths written by a successful push need a
+post-apply refresh, but a scoped refresh cannot replace the whole baseline. If
+the push only reindexes the paths it touched, those scoped entries must be
+merged into the previous full remote baseline while preserving untouched
+entries. Otherwise a later push of a different path would compare against an
+incomplete remote history.
 
 The first push to a site has no baselines: everything is "changed locally",
 nothing can be checked for drift, and the summary says so. ctime is trusted

@@ -100,7 +100,7 @@ final class PushJournalTest extends TestCase
     {
         $journal = $this->makeJournal();
         $journal->capture_local_files_baseline($this->writeIndex(['a' => [1, 1, 'file']]));
-        $journal->capture_remote_files_baseline($this->writeIndex(['b' => [2, 2, 'file']]));
+        $journal->capture_full_remote_files_baseline($this->writeIndex(['b' => [2, 2, 'file']]));
 
         $this->assertNotSame($journal->local_files_baseline_path, $journal->remote_files_baseline_path);
         $this->assertSame(['a'], $this->listPaths($journal->local_files_baseline_path));
@@ -300,7 +300,7 @@ final class PushJournalTest extends TestCase
             'deleted-remotely.txt' => [100, 5, 'file'],
             'unchanged.txt' => [100, 5, 'file'],
         ]));
-        $journal->capture_remote_files_baseline($this->writeIndex([
+        $journal->capture_full_remote_files_baseline($this->writeIndex([
             'changed-remotely.txt' => [200, 5, 'file'],
             'deleted-locally.txt' => [200, 5, 'file'],
             'deleted-remotely.txt' => [200, 5, 'file'],
@@ -324,6 +324,41 @@ final class PushJournalTest extends TestCase
         $this->assertSame(['deleted-remotely.txt'], $this->listPaths($journal->remote_paths_deleted_since_last_sync));
     }
 
+    public function testRemoteDiffCanCheckDifferentLocalScopesAgainstOneFullRemoteBaseline(): void
+    {
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'first-scope.txt' => [100, 5, 'file'],
+            'second-scope.txt' => [100, 5, 'file'],
+        ]));
+        $journal->capture_full_remote_files_baseline($this->writeIndex([
+            'first-scope.txt' => [200, 5, 'file'],
+            'second-scope.txt' => [200, 5, 'file'],
+        ]));
+
+        $journal->diff_local_files($this->writeIndex([
+            'first-scope.txt' => [101, 5, 'file'],
+            'second-scope.txt' => [100, 5, 'file'],
+        ]));
+        $this->assertSame(
+            ['changed' => 0, 'deleted' => 0, 'baseline_missing' => false],
+            $journal->diff_remote_files($this->writeIndex([
+                'first-scope.txt' => [200, 5, 'file'],
+            ]))
+        );
+
+        $journal->diff_local_files($this->writeIndex([
+            'first-scope.txt' => [100, 5, 'file'],
+            'second-scope.txt' => [101, 5, 'file'],
+        ]));
+        $this->assertSame(
+            ['changed' => 0, 'deleted' => 0, 'baseline_missing' => false],
+            $journal->diff_remote_files($this->writeIndex([
+                'second-scope.txt' => [200, 5, 'file'],
+            ]))
+        );
+    }
+
     public function testRemoteDiffCannotCheckDriftBeforeTheFirstRemoteBaseline(): void
     {
         $journal = $this->makeJournal();
@@ -343,7 +378,7 @@ final class PushJournalTest extends TestCase
     public function testRemoteDiffRequiresTheLocalDiffLists(): void
     {
         $journal = $this->makeJournal();
-        $journal->capture_remote_files_baseline($this->writeIndex([
+        $journal->capture_full_remote_files_baseline($this->writeIndex([
             'a.txt' => [100, 5, 'file'],
         ]));
 
