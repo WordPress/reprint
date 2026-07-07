@@ -285,6 +285,53 @@ class FilesSyncStateTest extends TestCase
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
     }
 
+    /**
+     * After a full `pull`, active_resumable_command points at the last stage
+     * (db-apply), not files-pull, but pull_pipeline records a deferred tail. A
+     * standalone skipped-earlier run must recover the completed files-pull and
+     * fetch the tail rather than throwing "no completed sync with skipped
+     * files".
+     */
+    public function testSkippedEarlierAfterCompositePullAdoptsFilesPullState(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/.import-download-list-skipped.jsonl',
+            $this->indexLine('/wp-content/uploads/2024/01/photo.jpg', 1000, 100),
+        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "db-apply",
+                "completion_state" => "complete",
+            ],
+            "filter" => "skipped-earlier",
+            "pull_pipeline" => [
+                "files_filter" => "essential-files",
+                "skipped_pending" => true,
+            ],
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $filterProp = $reflection->getProperty('filter');
+        $filterProp->setValue($client, 'skipped-earlier');
+
+        try {
+            $reflection->getMethod('run_files_sync')->invoke($client);
+        } catch (\Exception $e) {
+            // Expected: the fetch fails against the fake URL. The point is that
+            // it got PAST the "no completed sync with skipped files" guard.
+            $this->assertStringNotContainsString(
+                'no completed sync with skipped files',
+                $e->getMessage(),
+            );
+        }
+
+        // The checkpoint was restored to the completed files-pull and the
+        // deferred-tail fetch started.
+        $state = $this->readState();
+        $this->assertSame('files-pull', $state["active_resumable_command"]["command_name"]);
+        $this->assertSame('fetch-skipped', $state["active_resumable_command"]["current_stage"]);
+    }
+
     // ---------------------------------------------------------------
     // Preserve-local diff tests
     // ---------------------------------------------------------------
