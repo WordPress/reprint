@@ -1,6 +1,6 @@
 <?php
 /**
- * Per-remote-site memory of the last completed push: the baselines.
+ * Per-remote-site memory of the last completed push: the local baseline.
  *
  * ctime is machine-local, so push never compares a local timestamp against
  * a remote one. Each machine is compared against its own past instead
@@ -8,12 +8,11 @@
  * on the local machine, one directory per remote site:
  *
  *     <state-dir>/push/<site>/last-sync-local-files.jsonl
- *     <state-dir>/push/<site>/last-sync-remote-files.jsonl
  *
- * Each baseline is a copy of a file index in the same format as
+ * The baseline is a copy of a file index in the same format as
  * .import-index.jsonl: one JSON object per line with a base64-encoded path
  * plus ctime, size, and type, sorted by decoded path. The push driver
- * captures both at the end of a successful push. A capture writes a
+ * captures it at the end of a successful push. A capture writes a
  * temporary file and renames it into place, so a killed process never
  * leaves a truncated baseline for the next push to trust — until the
  * rename lands, the previous baseline stays in effect.
@@ -52,9 +51,6 @@ class PushJournal
     /** @var string Copy of the local file index from the last completed push. */
     public string $local_files_baseline_path;
 
-    /** @var string Copy of the remote file index from the last completed push. */
-    public string $remote_files_baseline_path;
-
     /** @var string JSONL file of local paths to push, written by diff_local_files(). */
     public string $local_paths_to_push;
 
@@ -65,7 +61,6 @@ class PushJournal
     {
         $this->site_dir = rtrim($state_dir, "/") . "/push/" . self::site_key($site_url);
         $this->local_files_baseline_path = $this->site_dir . "/last-sync-local-files.jsonl";
-        $this->remote_files_baseline_path = $this->site_dir . "/last-sync-remote-files.jsonl";
         $this->local_paths_to_push = $this->site_dir . "/local-paths-to-push.jsonl";
         $this->local_paths_to_delete = $this->site_dir . "/local-paths-to-delete.jsonl";
     }
@@ -116,18 +111,6 @@ class PushJournal
     public function capture_local_files_baseline(string $index_file): void
     {
         $this->replace_file($this->local_files_baseline_path, $index_file);
-    }
-
-    /**
-     * Store a copy of the remote file index as the new remote baseline.
-     *
-     * Captured from the scoped reindex that runs after apply — apply itself
-     * changes remote ctimes, so without this refresh the next push would
-     * report everything it just wrote as remote drift.
-     */
-    public function capture_remote_files_baseline(string $index_file): void
-    {
-        $this->replace_file($this->remote_files_baseline_path, $index_file);
     }
 
     /**

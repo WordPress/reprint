@@ -95,17 +95,6 @@ final class PushJournalTest extends TestCase
         $this->makeJournal()->capture_local_files_baseline($this->tempDir . '/no-such-index.jsonl');
     }
 
-    public function testLocalAndRemoteBaselinesAreSeparateFiles(): void
-    {
-        $journal = $this->makeJournal();
-        $journal->capture_local_files_baseline($this->writeIndex(['a' => [1, 1, 'file']]));
-        $journal->capture_remote_files_baseline($this->writeIndex(['b' => [2, 2, 'file']]));
-
-        $this->assertNotSame($journal->local_files_baseline_path, $journal->remote_files_baseline_path);
-        $this->assertSame(['a'], $this->listPaths($journal->local_files_baseline_path));
-        $this->assertSame(['b'], $this->listPaths($journal->remote_files_baseline_path));
-    }
-
     // ------------------------------------------------------------------
     //  Local diff
     // ------------------------------------------------------------------
