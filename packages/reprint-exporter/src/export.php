@@ -7,6 +7,7 @@ use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\build_pdo_dsn;
 use function WordPress\Reprint\Exporter\json_encode_or_throw;
 use function WordPress\Reprint\Exporter\parse_size;
+use function WordPress\Reprint\Exporter\path_is_within_root;
 
 // Capture any accidental output before headers are set so we can discard it
 // when switching to streaming mode later.
@@ -2736,13 +2737,16 @@ function endpoint_file_index(
     // server's own setting, so it is known here for every request — a
     // pulling peer's request does not need to mention it.
     $storage_path = isset($config["storage_path"]) && is_string($config["storage_path"])
-        ? $config["storage_path"]
+        ? rtrim($config["storage_path"], "/")
         : "";
     if ($storage_path !== "") {
         // The traversal canonicalizes every path with realpath() (see the
         // wp.com note further down), so the setting must be compared in the
-        // same form. When the directory does not exist yet there is nothing
-        // to exclude and the raw value stays as a harmless fallback.
+        // same form. path_is_within_root() compares plain strings, and a
+        // trailing slash on the setting would make it miss — hence the
+        // rtrim above. When the directory does not exist yet there is
+        // nothing to exclude and the trimmed value stays as a harmless
+        // fallback.
         $storage_real = realpath($storage_path);
         if ($storage_real !== false) {
             $storage_path = $storage_real;
@@ -3077,7 +3081,9 @@ function endpoint_file_index(
                 if (!$include_caches && path_is_default_skipped($path)) {
                     continue;
                 }
-                if (reprint_storage_covers_path($path, $storage_path)) {
+                // The "" guard matters: path_is_within_root() with an empty
+                // root would match every absolute path.
+                if ($storage_path !== "" && path_is_within_root($path, $storage_path)) {
                     continue;
                 }
                 clearstatcache(true, $path);
@@ -3554,26 +3560,6 @@ function path_head_looks_like_text(string $path): bool
         return false;
     }
     return true;
-}
-
-/**
- * True when $path is the reprint storage directory or lies inside it.
- *
- * $storage_path is the server's storage_path setting, canonicalized with
- * realpath() by the endpoint before the traversal starts — the traversal
- * walks realpath-canonical paths, so both sides compare in the same form.
- * It must be absolute: the traversal compares absolute paths, and a
- * relative value could never match anything. A plain string comparison
- * with no filesystem access; this runs per index entry.
- */
-function reprint_storage_covers_path(string $path, string $storage_path): bool
-{
-    $storage_path = rtrim($storage_path, "/");
-    if ($storage_path === "" || $storage_path[0] !== "/") {
-        return false;
-    }
-
-    return $path === $storage_path || strpos($path, $storage_path . "/") === 0;
 }
 
 /**

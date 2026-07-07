@@ -58,25 +58,6 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertSame($expected, path_is_default_skipped($path), "classifier for '$path'");
     }
 
-
-    public function testReprintStorageCoversPathMatchesTheSubtreeOnly(): void
-    {
-        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
-        $storage = '/var/www/site/reprint-storage';
-
-        $this->assertTrue(reprint_storage_covers_path('/var/www/site/reprint-storage', $storage));
-        $this->assertTrue(reprint_storage_covers_path('/var/www/site/reprint-storage/files/a.php', $storage));
-        // A trailing slash on the setting changes nothing.
-        $this->assertTrue(reprint_storage_covers_path('/var/www/site/reprint-storage/x', $storage . '/'));
-        $this->assertFalse(reprint_storage_covers_path('/var/www/site/reprint-storage-2/a.php', $storage));
-        $this->assertFalse(reprint_storage_covers_path('/var/www/site/wp-content/a.php', $storage));
-        $this->assertFalse(reprint_storage_covers_path('/var/www/site', $storage));
-        // Unset and relative settings never match: the traversal compares
-        // absolute paths.
-        $this->assertFalse(reprint_storage_covers_path('/var/www/site/reprint-storage/x', ''));
-        $this->assertFalse(reprint_storage_covers_path('/var/www/site/reprint-storage/x', 'relative/dir'));
-    }
-
     /**
      * @return list<array{0:string,1:bool}>
      */
@@ -236,8 +217,10 @@ final class FileIndexSkipDefaultsTest extends TestCase
         mkdir($siteDir . '/wp-content/reprint-storage-2', 0755, true);
         file_put_contents($siteDir . '/wp-content/reprint-storage-2/keep.txt', 'mine');
 
+        // Configured with a trailing slash on purpose: the endpoint must
+        // normalize the setting before comparing it against entry paths.
         $rel = $this->relativePaths(
-            $this->runFileIndexEntries($siteDir, false, 5000, $storage),
+            $this->runFileIndexEntries($siteDir, false, 5000, $storage . '/'),
             $siteDir
         );
 
