@@ -15,8 +15,8 @@ require_once __DIR__ . '/../../importer/import.php';
  * single-endpoint channel: the remote (ReverseTransportEndpoint, driving the real
  * ImportClient inline) owns cursors/index/writes; the source (ReverseTransportWorker) is
  * outbound-only and runs its own export.php per command. The worker↔endpoint
- * boundary is JSON strings — exactly the wire — so the binary result body rides
- * base64. No curl, no sockets: just the reverse-transport seam.
+ * boundary is exactly the wire: raw result bytes as a stream in, small JSON
+ * out. No curl, no sockets: just the reverse-transport seam.
  *
  * Also covers the failure story: a crashed worker is replaced by a fresh one
  * that resumes from the remote's persisted state, and exchange failures are
@@ -115,23 +115,37 @@ final class ReverseTransportTest extends TestCase
      * The source's own export engine, run in a subprocess per command (the
      * exporter tears down output buffering to stream, so it can only be
      * captured from a real output stream; display_errors=stderr keeps PHP
-     * startup notices out of the response). Production would loopback into
-     * the source's export.php over HTTP instead.
+     * startup notices out of the response). The subprocess writes straight to
+     * a temp file — never a PHP string — because a file_fetch response can be
+     * many megabytes. Production would loopback into the source's export.php
+     * over HTTP instead, spooling the same way.
      */
     private function exportRunner(): callable
     {
         $runner = __DIR__ . '/export-runner.php';
-        return static function (array $request) use ($runner): string {
-            $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        return static function (array $request) use ($runner): array {
+            $stdout = tmpfile(); // deleted automatically when the worker fcloses it
+            $descriptors = [0 => ['pipe', 'r'], 1 => $stdout, 2 => ['pipe', 'w']];
             $proc = proc_open([PHP_BINARY, '-d', 'display_errors=stderr', $runner], $descriptors, $pipes);
             fwrite($pipes[0], (string) json_encode($request));
             fclose($pipes[0]);
-            $body = (string) stream_get_contents($pipes[1]);
-            fclose($pipes[1]);
+            // Drain stderr (PHP startup noise) so the child never blocks on a
+            // full pipe before exiting.
+            stream_get_contents($pipes[2]);
             fclose($pipes[2]);
             proc_close($proc);
-            return $body;
+            rewind($stdout);
+            return ['http_code' => 200, 'stream' => $stdout];
         };
+    }
+
+    /** Builds the worker↔endpoint wire: the in-process stand-in for the HTTP hop. */
+    private function newWorker(\ReverseTransportEndpoint $endpoint): \ReverseTransportWorker
+    {
+        return new \ReverseTransportWorker(
+            static fn($resultStream, int $httpCode): string => $endpoint->handle_exchange($resultStream, $httpCode),
+            $this->exportRunner()
+        );
     }
 
     /**
@@ -152,12 +166,7 @@ final class ReverseTransportTest extends TestCase
     public function testFilesPullMirrorsTheSourceOverTheReverseChannel(): void
     {
         $this->seedSourceTreeAndPreflight();
-        $endpoint = $this->newEndpoint();
-
-        $worker = new \ReverseTransportWorker(
-            static fn(string $requestJson): string => $endpoint->handle_exchange($requestJson),
-            $this->exportRunner()
-        );
+        $worker = $this->newWorker($this->newEndpoint());
 
         ob_start();
         try {
@@ -167,6 +176,55 @@ final class ReverseTransportTest extends TestCase
         }
 
         $this->assertFsRootMirrorsSource();
+    }
+
+    public function testAMultiMegabyteFileStreamsWithoutBeingBufferedWhole(): void
+    {
+        $this->seedSourceTreeAndPreflight();
+
+        // 24 MB of content that defeats gzip's 32 KB window (a repeated 64 KB
+        // random block never matches within the window), so the wire carries
+        // ~24 MB and any whole-body buffering shows up as a memory spike of at
+        // least that size.
+        $bigFile = $this->source . '/wp-content/uploads/big.bin';
+        $handle  = fopen($bigFile, 'wb');
+        $block   = random_bytes(65536);
+        for ($i = 0; $i < 384; $i++) {
+            fwrite($handle, $block);
+        }
+        fclose($handle);
+
+        $worker = $this->newWorker($this->newEndpoint());
+
+        $peakBefore = memory_get_peak_usage(true);
+        ob_start();
+        try {
+            $worker->run();
+        } finally {
+            ob_end_clean();
+        }
+        $peakDelta = memory_get_peak_usage(true) - $peakBefore;
+
+        // Compare by hash, not tree(), so the assertion itself doesn't load
+        // the 24 MB files into memory.
+        $mirrored = null;
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($this->fsRoot, \FilesystemIterator::SKIP_DOTS)
+        );
+        foreach ($it as $file) {
+            if ($file->isFile() && $file->getFilename() === 'big.bin') {
+                $mirrored = $file->getPathname();
+            }
+        }
+        $this->assertNotNull($mirrored, 'the 24 MB file landed on the remote');
+        $this->assertSame(hash_file('sha256', $bigFile), hash_file('sha256', $mirrored));
+
+        $this->assertLessThan(
+            8 * 1024 * 1024,
+            $peakDelta,
+            "peak memory grew by {$peakDelta} bytes while transferring a 24 MB file — " .
+                'a response body is being buffered whole somewhere'
+        );
     }
 
     public function testAFreshWorkerResumesAfterTheFirstOneCrashesMidTransfer(): void
@@ -179,11 +237,11 @@ final class ReverseTransportTest extends TestCase
         // file bytes have arrived yet.
         $calls   = 0;
         $crashed = new \ReverseTransportWorker(
-            static function (string $requestJson) use ($endpoint, &$calls): string {
+            static function ($resultStream, int $httpCode) use ($endpoint, &$calls): string {
                 if (++$calls > 2) {
                     throw new \RuntimeException('worker crashed');
                 }
-                return $endpoint->handle_exchange($requestJson);
+                return $endpoint->handle_exchange($resultStream, $httpCode);
             },
             $this->exportRunner()
         );
@@ -202,10 +260,7 @@ final class ReverseTransportTest extends TestCase
         // The remote kept its own persisted state. A fresh worker starts with
         // no result, the remote re-asks for the request it is missing, and the
         // transfer completes.
-        $resumed = new \ReverseTransportWorker(
-            static fn(string $requestJson): string => $endpoint->handle_exchange($requestJson),
-            $this->exportRunner()
-        );
+        $resumed = $this->newWorker($endpoint);
 
         ob_start();
         try {
@@ -220,8 +275,8 @@ final class ReverseTransportTest extends TestCase
     public function testATransportFailureIsAnErrorNotACleanFinish(): void
     {
         $worker = new \ReverseTransportWorker(
-            static fn(string $requestJson): string => '<html>502 Bad Gateway</html>',
-            static fn(array $request): string => ''
+            static fn($resultStream, int $httpCode): string => '<html>502 Bad Gateway</html>',
+            static fn(array $request): array => ['http_code' => 200, 'stream' => fopen('php://memory', 'r')]
         );
 
         $this->expectException(\RuntimeException::class);
@@ -240,8 +295,8 @@ final class ReverseTransportTest extends TestCase
             []
         );
         $worker = new \ReverseTransportWorker(
-            static fn(string $requestJson): string => $endpoint->handle_exchange($requestJson),
-            static fn(array $request): string => ''
+            static fn($resultStream, int $httpCode): string => $endpoint->handle_exchange($resultStream, $httpCode),
+            static fn(array $request): array => ['http_code' => 200, 'stream' => fopen('php://memory', 'r')]
         );
 
         $this->expectException(\RuntimeException::class);

@@ -11,12 +11,14 @@
  * the source already exposes over export.php.
  *
  * Two seams are injected:
- *   - $send_exchange_request: fn(string $request_json): string $response_json —
- *     the outbound HTTP POST to the remote's exchange endpoint (an in-process
- *     call in tests).
- *   - $run_export_request: fn(array $request): string — run the source's export
- *     engine for one request and return its raw response bytes (a loopback
- *     request to the source's own export.php in production).
+ *   - $send_exchange_request: fn(?resource $result_stream, int $result_http_code):
+ *     string $response_json — the outbound POST to the remote's exchange
+ *     endpoint; the stream is the raw result body (an in-process call in tests).
+ *   - $run_export_request: fn(array $request): array{ http_code: int, stream: resource }
+ *     — run the source's export engine for one request and return its raw
+ *     response bytes as a stream (in production a loopback request to the
+ *     source's own export.php, spooled to disk — a file_fetch result can be
+ *     many megabytes and must never be returned as a string).
  *
  * On any exchange failure — transport garbage, or an error the remote reports —
  * the worker throws; it never re-sends a result. The remote's persisted cursor
@@ -27,10 +29,10 @@
  */
 final class ReverseTransportWorker
 {
-    /** @var callable fn(string $request_json): string $response_json */
+    /** @var callable fn(?resource $result_stream, int $result_http_code): string $response_json */
     private $send_exchange_request;
 
-    /** @var callable fn(array $request): string $raw_response_bytes */
+    /** @var callable fn(array $request): array{ http_code: int, stream: resource } */
     private $run_export_request;
 
     public function __construct( callable $send_exchange_request, callable $run_export_request )
@@ -52,17 +54,20 @@ final class ReverseTransportWorker
     {
         $result = null;
         for ( $i = 0; $i < $max_exchanges; $i++ ) {
-            $request = array();
-            if ( $result !== null ) {
-                $request["result"] = array(
-                    "http_code" => $result["http_code"],
-                    "body_b64"  => base64_encode( $result["body"] ),
+            $response_json = $result === null
+                ? (string) call_user_func( $this->send_exchange_request, null, 200 )
+                : (string) call_user_func(
+                    $this->send_exchange_request,
+                    $result["stream"],
+                    $result["http_code"]
                 );
+            if ( $result !== null ) {
+                fclose( $result["stream"] );
+                $result = null;
             }
 
-            $response_json = (string) call_user_func( $this->send_exchange_request, (string) json_encode( $request ) );
-            $response      = json_decode( $response_json, true );
-            $status        = is_array( $response ) ? ( $response["status"] ?? null ) : null;
+            $response = json_decode( $response_json, true );
+            $status   = is_array( $response ) ? ( $response["status"] ?? null ) : null;
 
             if ( $status === "done" ) {
                 return;
@@ -86,7 +91,10 @@ final class ReverseTransportWorker
 
     /**
      * Runs one export command against the source's own export engine and
-     * returns the { http_code, body } result to deliver on the next exchange.
+     * returns its { http_code, stream } result to deliver on the next
+     * exchange. The response is left exactly as the engine produced it
+     * (typically gzip) — the remote inflates incrementally while parsing, the
+     * way curl would — so nothing here holds or decodes the body in memory.
      */
     private function execute_export_command( array $command ): array
     {
@@ -94,22 +102,17 @@ final class ReverseTransportWorker
         $request    = $this->build_export_request( $command, $temp_files );
 
         try {
-            $raw = (string) call_user_func( $this->run_export_request, $request );
+            $result = call_user_func( $this->run_export_request, $request );
         } finally {
             foreach ( $temp_files as $file ) {
                 @unlink( $file );
             }
         }
 
-        // curl would gunzip transparently; the export stream is gzip-encoded.
-        if ( strncmp( $raw, "\x1f\x8b", 2 ) === 0 ) {
-            $decoded = @gzdecode( $raw );
-            if ( $decoded !== false ) {
-                $raw = $decoded;
-            }
-        }
-
-        return array( "http_code" => 200, "body" => $raw );
+        return array(
+            "http_code" => (int) ( $result["http_code"] ?? 0 ),
+            "stream"    => $result["stream"],
+        );
     }
 
     /**

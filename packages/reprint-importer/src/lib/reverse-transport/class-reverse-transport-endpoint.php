@@ -1,7 +1,7 @@
 <?php
 
 /**
- * The remote's single reverse-transport endpoint: JSON in, JSON out.
+ * The remote's single reverse-transport endpoint.
  *
  * There is no separate importer process and no held socket. Each call runs the
  * real importer inline. The importer resumes from its persisted cursor, consumes
@@ -16,13 +16,18 @@
  * ReverseTransport is shared across those passes so the result is consumed exactly
  * once even though the client is recreated.
  *
- * Wire request:  { "result": { "http_code": int, "body_b64": string } | null }
+ * Wire request:  the raw (possibly gzip) result bytes as the request body —
+ *                empty on the worker's first exchange — with the reported HTTP
+ *                status carried beside it (a header in production, an argument
+ *                in-process). The body is deliberately NOT JSON-embedded: a
+ *                file_fetch result can be many megabytes, and base64-in-JSON
+ *                would force both sides to buffer it whole. Commands are small;
+ *                results are not.
  * Wire response: { "status": "done" }
  *              | { "status": "command", "command": {...} }
  *              | { "status": "error", "message": string }
- * The result body is raw (gunzipped) multipart bytes, so it rides base64. An
- * importer failure is returned as the error status — the handler never throws,
- * so the worker can tell a remote failure from transport garbage.
+ * An importer failure is returned as the error status — this endpoint never
+ * throws, so the worker can tell a remote failure from transport garbage.
  */
 final class ReverseTransportEndpoint
 {
@@ -42,19 +47,15 @@ final class ReverseTransportEndpoint
      * Handles one exchange: banks the worker-delivered result of the previous
      * export command, advances the importer by one request, and returns the
      * next command — or "done" / "error" — as the wire-response JSON.
+     *
+     * @param resource|null $result_stream Raw (possibly gzip) bytes of the
+     *     previous command's response, read as a stream so a multi-megabyte
+     *     result is never buffered here. Null on the worker's first exchange.
+     * @param int $result_http_code HTTP status the worker's export run reported.
      */
-    public function handle_exchange( string $exchange_request_json ): string
+    public function handle_exchange( $result_stream, int $result_http_code = 200 ): string
     {
-        $request = json_decode( $exchange_request_json, true );
-        $result  = null;
-        if ( is_array( $request ) && isset( $request["result"] ) && is_array( $request["result"] ) ) {
-            $result = array(
-                "http_code" => (int) ( $request["result"]["http_code"] ?? 0 ),
-                "body"      => (string) base64_decode( (string) ( $request["result"]["body_b64"] ?? "" ) ),
-            );
-        }
-
-        $transport = new ReverseTransport( $result );
+        $transport = new ReverseTransport( $result_stream, $result_http_code );
         try {
             do {
                 $client = call_user_func( $this->client_factory );
