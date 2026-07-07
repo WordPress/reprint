@@ -82,7 +82,8 @@ class Site_Export_HMAC_Client {
      * request to a digest: the server verifies the timestamp, nonce, and HMAC
      * over X-Auth-Content-Hash before it computes or compares any body hash.
      *
-     * This is intended for small control-plane requests. Large data transfers
+     * This is intended for small command requests such as preflight or plan
+     * confirmation. Large data transfers
      * should use an authenticated session and per-chunk hashes instead of
      * HMAC-signing one large request body.
      *
