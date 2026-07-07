@@ -51,8 +51,8 @@ what it gives up: over plain HTTP an active attacker can read and modify
 transferred content; the flag only keeps the shared secret off the wire and
 limits replay.
 
-Every request carries an HMAC over the envelope only — method, path,
-timestamp, nonce. Payloads are not signed and not hashed: TLS already
+Every request carries an HMAC signature over exactly four values — the
+HTTP method, the URL's path and query, a timestamp, and a random nonce. Payloads are not signed and not hashed: TLS already
 guarantees their integrity, and signing streams was the single biggest source
 of buffering pain. Signing cost is constant per request regardless of payload
 size. The secret travels in no URL and no body, so it never lands in an
