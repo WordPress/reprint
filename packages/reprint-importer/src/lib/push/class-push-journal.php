@@ -27,17 +27,14 @@
  *                           size, or type differs
  *     deletion-list.jsonl   paths in the baseline but gone from the index
  *
- * The diff works on raw lines and never touches a JSON function. Index
- * lines always start with {"path":"<base64>" — every index writer in
- * import.php puts the path field first — so the path comes out of the
- * line by position. Ordering compares decoded paths; two entries with the
- * same path count as unchanged only when their lines are byte-identical,
- * which holds because both files come from the same writer. Output lines
- * reuse the base64 substring as-is, producing the .import-download-list.jsonl
- * shape: one {"path": <base64>} object per line. The lists carry no sizes
- * or types on purpose — the files are local, so the upload step reads the
- * filesystem when it stages them instead of trusting a snapshot that may
- * already be stale.
+ * The diff parses one JSON line at a time from each input. Ordering compares
+ * decoded paths; two entries with the same path count as unchanged when their
+ * decoded JSON objects match, so JSON field order or escaping changes do not
+ * affect the diff. Output lines carry only the base64 path, producing the
+ * .import-download-list.jsonl shape: one {"path": <base64>} object per line.
+ * The lists carry no sizes or types on purpose — the files are local, so the
+ * upload step reads the filesystem when it stages them instead of trusting a
+ * snapshot that may already be stale.
  *
  * With no baseline yet — the first push to a site — every current entry
  * counts as changed and no deletion can be detected.
@@ -192,50 +189,50 @@ class PushJournal
 
         $changed = 0;
         $deleted = 0;
-        $this->read_line($current_handle, $cur_line, $cur_path, $cur_b64);
-        $this->read_line($baseline_handle, $base_line, $base_path, $base_b64);
-        while ($cur_line !== null || $base_line !== null) {
+        $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
+        $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
+        while ($current_entry !== null || $baseline_entry !== null) {
             // base64 does not preserve byte order ('0' sorts before 'A' in
             // ASCII but encodes a higher value), so ordering has to use the
             // decoded paths.
-            if ($base_line === null) {
+            if ($baseline_entry === null) {
                 $order = -1;
-            } elseif ($cur_line === null) {
+            } elseif ($current_entry === null) {
                 $order = 1;
             } else {
-                $order = strcmp($cur_path, $base_path);
+                $order = strcmp($current_path, $baseline_path);
             }
 
             if ($order < 0) {
                 // Only in the current index: new since the last push.
-                $out = '{"path":"' . $cur_b64 . "\"}\n";
+                $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
                 if (fwrite($upload_handle, $out) !== strlen($out)) {
                     throw new RuntimeException("Short write on the upload list, is the disk full?");
                 }
                 $changed++;
-                $this->read_line($current_handle, $cur_line, $cur_path, $cur_b64);
+                $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
             } elseif ($order > 0) {
                 // Only in the baseline: deleted since the last push.
-                $out = '{"path":"' . $base_b64 . "\"}\n";
+                $out = json_encode(["path" => $baseline_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
                 if (fwrite($deletion_handle, $out) !== strlen($out)) {
                     throw new RuntimeException("Short write on the deletion list, is the disk full?");
                 }
                 $deleted++;
-                $this->read_line($baseline_handle, $base_line, $base_path, $base_b64);
+                $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
             } else {
-                // Same path on both sides. Same writer, same fields — so a
-                // changed ctime, size, or type is exactly a changed line.
-                // A writer format change would mark everything changed once
-                // (a wasted re-upload, never a missed one).
-                if ($cur_line !== $base_line) {
-                    $out = '{"path":"' . $cur_b64 . "\"}\n";
+                // Same path on both sides. Decoded JSON array comparison keeps
+                // field order and slash escaping out of change detection. A
+                // writer field change would mark everything changed once (a
+                // wasted re-upload, never a missed one).
+                if ($current_entry != $baseline_entry) {
+                    $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
                     if (fwrite($upload_handle, $out) !== strlen($out)) {
                         throw new RuntimeException("Short write on the upload list, is the disk full?");
                     }
                     $changed++;
                 }
-                $this->read_line($current_handle, $cur_line, $cur_path, $cur_b64);
-                $this->read_line($baseline_handle, $base_line, $base_path, $base_b64);
+                $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
+                $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
             }
         }
 
@@ -254,44 +251,43 @@ class PushJournal
     }
 
     /**
-     * Read the next index line and pull the path out of it by position,
-     * without decoding the JSON.
+     * Read the next index line and parse its JSON object.
      *
-     * Index lines start with {"path":"<base64>" — every index writer in
-     * import.php emits the path field first, and base64 never contains a
-     * quote or a backslash, so the first quote after the prefix ends the
-     * encoded path. Anything else is not an index file and stops the diff.
-     *
-     * All three out-parameters become null at end of file: $line is the
-     * raw line, $path the decoded path (for ordering), $b64 the encoded
-     * path (reused verbatim in output lines).
+     * All three out-parameters become null at end of file: $entry is the
+     * decoded index object, $path the decoded path (for ordering),
+     * $base64_path the encoded path (reused in output lines).
      *
      * @param resource|null $handle
+     * @param array<string, mixed>|null $entry
      */
-    private function read_line($handle, ?string &$line, ?string &$path, ?string &$b64): void
+    private function read_line($handle, ?array &$entry, ?string &$path, ?string &$base64_path): void
     {
-        $line = null;
+        $entry = null;
         $path = null;
-        $b64 = null;
+        $base64_path = null;
         if (!$handle) {
             return;
         }
-        $raw = fgets($handle);
-        if ($raw === false) {
+        $raw_line = fgets($handle);
+        if ($raw_line === false) {
             return;
         }
-        if (strncmp($raw, '{"path":"', 9) !== 0) {
-            throw new RuntimeException('Unexpected index line, it does not start with {"path":" — ' . substr($raw, 0, 120));
+
+        try {
+            $decoded_entry = json_decode($raw_line, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new RuntimeException("Unexpected index line, it is not valid JSON: " . substr($raw_line, 0, 120), 0, $exception);
         }
-        $quote = strpos($raw, '"', 9);
-        $encoded = $quote === false ? "" : substr($raw, 9, $quote - 9);
-        $decoded = $encoded === "" ? false : base64_decode($encoded, true);
-        if ($decoded === false || $decoded === "") {
-            throw new RuntimeException("Invalid index path in line: " . substr($raw, 0, 120));
+        if (!is_array($decoded_entry) || !array_key_exists("path", $decoded_entry) || !is_string($decoded_entry["path"])) {
+            throw new RuntimeException("Invalid index path in line: " . substr($raw_line, 0, 120));
         }
-        $line = $raw;
-        $path = $decoded;
-        $b64 = $encoded;
+        $decoded_path = base64_decode($decoded_entry["path"], true);
+        if ($decoded_path === false || $decoded_path === "") {
+            throw new RuntimeException("Invalid index path in line: " . substr($raw_line, 0, 120));
+        }
+        $entry = $decoded_entry;
+        $path = $decoded_path;
+        $base64_path = $decoded_entry["path"];
     }
 
     /**

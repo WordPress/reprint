@@ -12,8 +12,9 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push
  * The diff drives real uploads and deletions later in a push, so the tests
  * pin the classification exactly: new, ctime-changed, size-changed,
  * type-changed, deleted, unchanged — plus the two boundary situations
- * (no baseline yet; stale lists from an earlier run) and the encoding
- * round-trip for paths that need base64 in the first place.
+ * (no baseline yet; stale lists from an earlier run), the encoding
+ * round-trip for paths that need base64 in the first place, and the JSON
+ * parsing behavior that keeps the diff independent from field order.
  */
 final class PushJournalTest extends TestCase
 {
@@ -227,11 +228,34 @@ final class PushJournalTest extends TestCase
         );
     }
 
+    public function testDiffParsesJsonWithoutDependingOnFieldOrderOrEscaping(): void
+    {
+        $journal = $this->makeJournal();
+        $path = 'wp-content/???';
+        $base64Path = base64_encode($path);
+        $baseline = $this->tempDir . '/baseline-shape.jsonl';
+        $current = $this->tempDir . '/current-shape.jsonl';
+
+        file_put_contents(
+            $baseline,
+            json_encode(['path' => $base64Path, 'ctime' => 100, 'size' => 5, 'type' => 'file'], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
+        );
+        file_put_contents(
+            $current,
+            json_encode(['type' => 'file', 'size' => 5, 'ctime' => 100, 'path' => $base64Path], JSON_THROW_ON_ERROR) . "\n"
+        );
+
+        $journal->capture_local_files_baseline($baseline);
+
+        $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($current));
+        $this->assertSame([], $this->listPaths($journal->upload_list_path));
+        $this->assertSame([], $this->listPaths($journal->deletion_list_path));
+    }
+
     public function testDiffRejectsLinesTheIndexWritersDoNotProduce(): void
     {
-        // The diff reads paths out of raw lines by position, so it accepts
-        // exactly what the index writers emit — anything else (including a
-        // blank line) means the file is not an index and the diff stops.
+        // A blank line means the file is not a JSONL index and the diff
+        // stops instead of silently skipping a possibly-corrupt entry.
         $journal = $this->makeJournal();
         $garbage = $this->tempDir . '/garbage.jsonl';
         file_put_contents(
@@ -240,7 +264,7 @@ final class PushJournalTest extends TestCase
         );
 
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Unexpected index line');
+        $this->expectExceptionMessage('not valid JSON');
         $journal->diff_local_files($garbage);
     }
 
@@ -292,9 +316,7 @@ final class PushJournalTest extends TestCase
 
     private function indexLine(string $path, int $ctime, int $size, string $type): string
     {
-        // JSON_UNESCAPED_SLASHES matters: the real index writers use it, and
-        // the diff reads the base64 path out of the raw line, where an
-        // escaped slash would not decode.
+        // Match the real index writers so fixtures use production-shaped JSON.
         return json_encode(
             ['path' => base64_encode($path), 'ctime' => $ctime, 'size' => $size, 'type' => $type],
             JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
