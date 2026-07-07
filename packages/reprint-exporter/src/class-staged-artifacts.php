@@ -1,21 +1,21 @@
 <?php
 
 /**
- * Staged storage for chunked artifact transfers.
+ * Staged storage for artifact transfers.
  *
  * A transfer moves many files plus database changes at network speed and can
  * be interrupted or aborted at any point — the live site must never see that
  * as half-applied state, and partial content must never exist under the
- * web-served tree, where the server would hand out a half-uploaded plugin
- * file as plain text. So staging exists for apply atomicity and containment,
+ * web-served tree, where the server would execute a half-uploaded plugin
+ * file. So staging exists for apply atomicity and containment,
  * not for authentication: nothing a transfer receives touches the site
  * directly, the bytes accumulate here while the site keeps running, aborting
  * before apply is free (discard the staged data), and the apply step later
  * moves verified artifacts into place in one short, controlled window
  * instead of mutating the live tree for the duration of the transfer.
  *
- * The first consumer is push: bounded chunk uploads from an outbound-only
- * local site (see UploadChunkSizer on the importer side). The pull file
+ * The first consumer is push: bounded upload requests from an outbound-only
+ * local site, sized by UploadChunkSizer on the importer side. The pull file
  * writer has the same needs whenever its target is a live site — today it
  * streams downloads straight to their final paths, which is fine for a fresh
  * local directory but not for a web-served tree — so nothing here is

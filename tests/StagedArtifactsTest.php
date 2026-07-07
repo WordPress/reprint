@@ -482,7 +482,7 @@ final class StagedArtifactsTest extends TestCase
         fclose($holder);
     }
 
-    public function testDeeplyNestedIdsStageAndDiscardCleanly(): void
+    public function testDeeplyNestedIdsStageAndDiscard(): void
     {
         // Hosting trees nest far deeper than fixtures; the files/ mirror,
         // the verified/ marker tree, and discard must all handle it.
@@ -497,6 +497,9 @@ final class StagedArtifactsTest extends TestCase
         $this->assertTrue($store->discard($id));
         $this->assertFalse($store->status($id)['exists']);
         $this->assertFileDoesNotExist($this->staging_dir . '/files/' . $id);
+        // Discard removes the file and the records, not the directory
+        // skeleton it grew — that goes when the staging dir is torn down.
+        $this->assertDirectoryExists($this->staging_dir . '/files/d');
     }
 
     public function testIdsOutsideTheStagingDirAreRejected(): void
