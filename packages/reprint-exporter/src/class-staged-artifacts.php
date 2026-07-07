@@ -1,21 +1,21 @@
 <?php
 
 /**
- * Staged storage for chunked artifact transfers.
+ * Staged storage for artifact transfers.
  *
  * A transfer moves many files plus database changes at network speed and can
  * be interrupted or aborted at any point — the live site must never see that
  * as half-applied state, and partial content must never exist under the
- * web-served tree, where the server would hand out a half-uploaded plugin
- * file as plain text. So staging exists for apply atomicity and containment,
+ * web-served tree, where the server would execute a half-uploaded plugin
+ * file. So staging exists for apply atomicity and containment,
  * not for authentication: nothing a transfer receives touches the site
  * directly, the bytes accumulate here while the site keeps running, aborting
  * before apply is free (discard the staged data), and the apply step later
  * moves verified artifacts into place in one short, controlled window
  * instead of mutating the live tree for the duration of the transfer.
  *
- * The first consumer is push: bounded chunk uploads from an outbound-only
- * local site (see UploadChunkSizer on the importer side). The pull file
+ * The first consumer is push: bounded upload requests from an outbound-only
+ * local site, sized by UploadChunkSizer on the importer side. The pull file
  * writer has the same needs whenever its target is a live site — today it
  * streams downloads straight to their final paths, which is fine for a fresh
  * local directory but not for a web-served tree — so nothing here is
@@ -50,10 +50,10 @@
  * mirror: state.json holds the cursor for the single in-flight artifact,
  * and each artifact finalize() accepted has a marker at the same relative
  * path under verified/, holding the verified size. Markers, not a shared
- * log, because the already-verified check runs on every append: one stat
- * per call no matter how many artifacts a transfer has finished, where a
- * log would be re-read and re-parsed in full each time and a 50k-file
- * push would spend its appends parsing it.
+ * log, because the already-verified check runs on every append: it reads
+ * one known path per call no matter how many artifacts a transfer has
+ * finished, where a log would be re-read and re-parsed in full each time
+ * and a 50k-file push would spend its appends parsing it.
  *
  * Transfers are sequential, like pull: progress is tracked for one artifact
  * at a time — the one currently being uploaded. That artifact can be
@@ -71,8 +71,10 @@
  * never-replaced file: state.json commits by rename, and renaming a locked
  * file strands the held flock on the orphaned inode while the next opener
  * locks the fresh one. Readers stay lock-free — state.json and verified
- * markers appear whole or not at all (both commit by rename), and
- * committed_bytes only grows — so status() always reads a safe resume hint.
+ * markers appear whole or not at all (both commit by rename), and a hint
+ * that goes stale mid-read (a discard or finalize can reset the cursor)
+ * is corrected by the next append's duplicate or offset_gap answer — so
+ * status() is always a safe starting point for a resume.
  *
  * Contract:
  *
@@ -137,7 +139,8 @@ final class Site_Export_Staged_Artifacts {
      * bytes are already committed and the caller should skip forward in
      * its own source and continue from committed_bytes.
      *
-     * @param string $artifact_id Opaque artifact identifier.
+     * @param string $artifact_id The file's target-relative path, e.g.
+     *                            "wp-content/themes/foo/style.css".
      * @param int    $offset      Byte offset this buffer starts at.
      * @param string $bytes       The buffer to append.
      * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
@@ -418,7 +421,7 @@ final class Site_Export_Staged_Artifacts {
                         'status' => 'rejected',
                         'reason' => 'io_error',
                         'detail' => 'create_staging_dir',
-                        'committed_bytes' => 0,
+                        'committed_bytes' => $committed,
                         'path' => null,
                     ];
                 }
@@ -696,7 +699,7 @@ final class Site_Export_Staged_Artifacts {
 
     /**
      * The verified marker mirrors the artifact's relative path under
-     * verified/, so lookup is one stat regardless of transfer size.
+     * verified/, so lookup reads one known path regardless of transfer size.
      */
     private function verified_marker_path(string $artifact_id): string {
         return $this->verified_dir . '/' . $artifact_id;

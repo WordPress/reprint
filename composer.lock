@@ -358,7 +358,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-push/staged-artifact-batches",
+            "version": "dev-push/staged-chunk-uploads",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
