@@ -4946,6 +4946,85 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "e00d8c1f1cec30048459287ff7ccabc938c9744c",
+      "shortSha": "e00d8c1",
+      "date": "2026-07-08T01:11:58+02:00",
+      "message": "[Push] Expose staged artifact upload endpoints",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.8",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "preflightImporter": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 138.73026000000027,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5253.985928999999,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 103630.921283,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 36350.971143,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 92.73494699998992,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-pull",
+          "elapsedMs": 277792.67713799997,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-apply",
+          "elapsedMs": 60634.126615999965,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 198.2639049999416,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-binary-compression",
+          "elapsedMs": 124.64639599993825,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull-large-part-peak-memory",
+          "elapsedMs": 4353.033075000043,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
