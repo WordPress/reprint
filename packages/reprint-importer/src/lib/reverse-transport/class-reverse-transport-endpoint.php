@@ -38,9 +38,14 @@ final class ReverseTransportEndpoint
         $this->run_options    = $run_options;
     }
 
-    public function handle_json( string $request_json ): string
+    /**
+     * Handles one exchange: banks the worker-delivered result of the previous
+     * export command, advances the importer by one request, and returns the
+     * next command — or "done" / "error" — as the wire-response JSON.
+     */
+    public function handle_exchange( string $exchange_request_json ): string
     {
-        $request = json_decode( $request_json, true );
+        $request = json_decode( $exchange_request_json, true );
         $result  = null;
         if ( is_array( $request ) && isset( $request["result"] ) && is_array( $request["result"] ) ) {
             $result = array(

@@ -9,7 +9,7 @@
  * two fetch shapes from it: fetch_json() returns it in the buffered-JSON shape,
  * fetch_streaming() feeds it through the same multipart chunk handler the curl
  * path uses. The request after the answered one has nothing to serve, so it
- * throws TransportYield — unwinding the importer back to the exchange handler
+ * throws TransportYield — unwinding the importer back to the exchange endpoint
  * with the command the worker must run next.
  *
  * There is no request/response matching: because the importer resumes
@@ -33,11 +33,14 @@ final class ReverseTransport
     }
 
     /**
-     * Reverse-transport counterpart to the importer's buffered JSON GET.
+     * Returns the delivered answer in ImportClient::fetch_json()'s return
+     * shape — the buffered-JSON half of the importer's transport seam. Named
+     * after its ImportClient counterpart on purpose: the guard there delegates
+     * 1:1 to this method.
      */
     public function fetch_json( string $url ): array
     {
-        $result    = $this->deliver( array( "method" => "GET", "url" => $url ) );
+        $result    = $this->serve_delivered_result( array( "method" => "GET", "url" => $url ) );
         $http_code = isset( $result["http_code"] ) ? (int) $result["http_code"] : 0;
         $body      = isset( $result["body"] ) ? (string) $result["body"] : "";
         $json      = $body === "" ? null : json_decode( $body, true );
@@ -55,21 +58,22 @@ final class ReverseTransport
     }
 
     /**
-     * Reverse-transport counterpart to the importer's streaming multipart fetch. The whole
-     * response body was carried back by the worker, so feed it to the same
-     * chunk handler the curl path uses — everything above the transport is
-     * oblivious to the reversal.
+     * Feeds the delivered answer through the caller's multipart chunk handler —
+     * the streaming half of the importer's transport seam, named after its
+     * ImportClient::fetch_streaming() counterpart. The whole response body was
+     * carried back by the worker; everything above the transport is oblivious
+     * to the reversal.
      */
     public function fetch_streaming( string $url, ?array $post_data, callable $chunk_handler ): void
     {
-        $result    = $this->deliver( $this->build_command( $url, $post_data ) );
+        $result    = $this->serve_delivered_result( $this->build_export_command( $url, $post_data ) );
         $http_code = isset( $result["http_code"] ) ? (int) $result["http_code"] : 0;
         if ( $http_code !== 200 ) {
             throw new RuntimeException( "reverse-transport export request returned a non-200 status" );
         }
 
         $body     = isset( $result["body"] ) ? (string) $result["body"] : "";
-        $boundary = $this->extract_boundary( $body );
+        $boundary = $this->extract_multipart_boundary( $body );
         if ( $boundary === null ) {
             return;
         }
@@ -79,11 +83,14 @@ final class ReverseTransport
     }
 
     /**
-     * Serve the one delivered answer, or yield the command to the worker.
+     * Returns the worker-delivered result for the importer's current request,
+     * or hands the request to the worker by unwinding.
      *
-     * @throws TransportYield when there is no answer left to give.
+     * @throws TransportYield When no result is left to serve; it carries
+     *     $command out to the exchange endpoint, which returns it to the
+     *     worker as the next command to run.
      */
-    private function deliver( array $command ): array
+    private function serve_delivered_result( array $command ): array
     {
         if ( $this->result !== null && ! $this->consumed ) {
             $this->consumed = true;
@@ -93,12 +100,12 @@ final class ReverseTransport
     }
 
     /**
-     * A command is the request's identity: its URL (endpoint, cursor, params)
-     * plus any POST body. A CURLFile upload (the file_fetch batch list) is
-     * inlined base64 so the outbound worker can reconstruct it against its own
-     * export engine.
+     * Builds the wire command for one export request. A command is the
+     * request's identity: its URL (endpoint, cursor, params) plus any POST
+     * body. A CURLFile upload (the file_fetch batch list) is inlined base64 so
+     * the outbound worker can reconstruct it against its own export engine.
      */
-    private function build_command( string $url, ?array $post_data ): array
+    private function build_export_command( string $url, ?array $post_data ): array
     {
         $command = array(
             "method" => $post_data === null ? "GET" : "POST",
@@ -124,12 +131,13 @@ final class ReverseTransport
     }
 
     /**
-     * The exporter announces the multipart boundary in a Content-Type header,
-     * which the worker's in-process export run cannot capture — but the body
-     * opens with the "--<boundary>" delimiter line, so read it back from there
-     * (the same fallback the curl path uses when the header is stripped).
+     * Recovers the multipart boundary from the response body. The exporter
+     * announces it in a Content-Type header, which the worker's in-process
+     * export run cannot capture — but the body opens with the "--<boundary>"
+     * delimiter line, so read it back from there (the same fallback the curl
+     * path uses when the header is stripped).
      */
-    private function extract_boundary( string $body ): ?string
+    private function extract_multipart_boundary( string $body ): ?string
     {
         if ( strncmp( $body, "--", 2 ) !== 0 ) {
             return null;

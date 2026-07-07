@@ -11,11 +11,12 @@
  * the source already exposes over export.php.
  *
  * Two seams are injected:
- *   - $exchange: fn(string $request_json): string $response_json — the outbound
- *     HTTP POST to the remote (an in-process call in tests).
- *   - $run_export: fn(array $request): string — run the source's export engine
- *     for one request and return its raw response bytes (a loopback request to
- *     the source's own export.php in production).
+ *   - $send_exchange_request: fn(string $request_json): string $response_json —
+ *     the outbound HTTP POST to the remote's exchange endpoint (an in-process
+ *     call in tests).
+ *   - $run_export_request: fn(array $request): string — run the source's export
+ *     engine for one request and return its raw response bytes (a loopback
+ *     request to the source's own export.php in production).
  *
  * On any exchange failure — transport garbage, or an error the remote reports —
  * the worker throws; it never re-sends a result. The remote's persisted cursor
@@ -26,18 +27,27 @@
  */
 final class ReverseTransportWorker
 {
-    /** @var callable fn(string): string */
-    private $exchange;
+    /** @var callable fn(string $request_json): string $response_json */
+    private $send_exchange_request;
 
-    /** @var callable fn(array): string */
-    private $run_export;
+    /** @var callable fn(array $request): string $raw_response_bytes */
+    private $run_export_request;
 
-    public function __construct( callable $exchange, callable $run_export )
+    public function __construct( callable $send_exchange_request, callable $run_export_request )
     {
-        $this->exchange   = $exchange;
-        $this->run_export = $run_export;
+        $this->send_exchange_request = $send_exchange_request;
+        $this->run_export_request    = $run_export_request;
     }
 
+    /**
+     * Drives the transfer to completion, one outbound exchange per export
+     * command.
+     *
+     * @param int $max_exchanges Safety bound so a runaway remote cannot loop
+     *     the worker forever.
+     * @throws RuntimeException When the remote reports an importer error, the
+     *     exchange response is malformed, or the bound is exceeded.
+     */
     public function run( int $max_exchanges = 100000 ): void
     {
         $result = null;
@@ -50,7 +60,7 @@ final class ReverseTransportWorker
                 );
             }
 
-            $response_json = (string) call_user_func( $this->exchange, (string) json_encode( $request ) );
+            $response_json = (string) call_user_func( $this->send_exchange_request, (string) json_encode( $request ) );
             $response      = json_decode( $response_json, true );
             $status        = is_array( $response ) ? ( $response["status"] ?? null ) : null;
 
@@ -69,21 +79,22 @@ final class ReverseTransportWorker
                 );
             }
 
-            $result = $this->execute( $response["command"] );
+            $result = $this->execute_export_command( $response["command"] );
         }
         throw new RuntimeException( "reverse transport worker: exceeded max exchanges" );
     }
 
     /**
-     * Run one export command against the source and return { http_code, body }.
+     * Runs one export command against the source's own export engine and
+     * returns the { http_code, body } result to deliver on the next exchange.
      */
-    private function execute( array $command ): array
+    private function execute_export_command( array $command ): array
     {
         $temp_files = array();
-        $request    = $this->build_request( $command, $temp_files );
+        $request    = $this->build_export_request( $command, $temp_files );
 
         try {
-            $raw = (string) call_user_func( $this->run_export, $request );
+            $raw = (string) call_user_func( $this->run_export_request, $request );
         } finally {
             foreach ( $temp_files as $file ) {
                 @unlink( $file );
@@ -102,13 +113,13 @@ final class ReverseTransportWorker
     }
 
     /**
-     * Turn a command into export.php's synthetic request array. A
+     * Converts a wire command into export.php's synthetic request array. A
      * file_fetch batch list arrives inlined; the exporter reads it from a path
      * (config file_list_path), so materialize it and point there.
      *
      * @param array $temp_files Filled with paths the caller must clean up.
      */
-    private function build_request( array $command, array &$temp_files ): array
+    private function build_export_request( array $command, array &$temp_files ): array
     {
         $url   = (string) ( $command["url"] ?? "" );
         $query = (string) ( parse_url( $url, PHP_URL_QUERY ) ?? "" );

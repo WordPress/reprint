@@ -57,7 +57,7 @@ final class ReverseTransportTest extends TestCase
         @rmdir($dir);
     }
 
-    private function put(string $root, string $rel, string $body): void
+    private function writeFile(string $root, string $rel, string $body): void
     {
         $path = $root . '/' . $rel;
         @mkdir(dirname($path), 0700, true);
@@ -86,10 +86,10 @@ final class ReverseTransportTest extends TestCase
 
     private function seedSourceTreeAndPreflight(): void
     {
-        $this->put($this->source, 'index.php', "<?php // home\n");
-        $this->put($this->source, 'wp-content/themes/t/style.css', "body{color:red}\n");
-        $this->put($this->source, 'wp-content/uploads/a.bin', str_repeat("\x00\x01\x02\x03", 500));
-        $this->put($this->source, 'readme.txt', "hello reverse transport\n");
+        $this->writeFile($this->source, 'index.php', "<?php // home\n");
+        $this->writeFile($this->source, 'wp-content/themes/t/style.css', "body{color:red}\n");
+        $this->writeFile($this->source, 'wp-content/uploads/a.bin', str_repeat("\x00\x01\x02\x03", 500));
+        $this->writeFile($this->source, 'readme.txt', "hello reverse transport\n");
 
         // Seed preflight so the importer knows which root to enumerate.
         file_put_contents(
@@ -101,7 +101,7 @@ final class ReverseTransportTest extends TestCase
     }
 
     /** The remote endpoint, driving the real importer against this test's dirs. */
-    private function newExchange(): \ReverseTransportEndpoint
+    private function newEndpoint(): \ReverseTransportEndpoint
     {
         $stateDir = $this->stateDir;
         $fsRoot   = $this->fsRoot;
@@ -152,10 +152,10 @@ final class ReverseTransportTest extends TestCase
     public function testFilesPullMirrorsTheSourceOverTheReverseChannel(): void
     {
         $this->seedSourceTreeAndPreflight();
-        $exchange = $this->newExchange();
+        $endpoint = $this->newEndpoint();
 
         $worker = new \ReverseTransportWorker(
-            static fn(string $requestJson): string => $exchange->handle_json($requestJson),
+            static fn(string $requestJson): string => $endpoint->handle_exchange($requestJson),
             $this->exportRunner()
         );
 
@@ -172,18 +172,18 @@ final class ReverseTransportTest extends TestCase
     public function testAFreshWorkerResumesAfterTheFirstOneCrashesMidTransfer(): void
     {
         $this->seedSourceTreeAndPreflight();
-        $exchange = $this->newExchange();
+        $endpoint = $this->newEndpoint();
 
         // The first worker dies before delivering the file_fetch result: the
         // remote has consumed the index and issued the fetch command, but no
         // file bytes have arrived yet.
         $calls   = 0;
         $crashed = new \ReverseTransportWorker(
-            static function (string $requestJson) use ($exchange, &$calls): string {
+            static function (string $requestJson) use ($endpoint, &$calls): string {
                 if (++$calls > 2) {
                     throw new \RuntimeException('worker crashed');
                 }
-                return $exchange->handle_json($requestJson);
+                return $endpoint->handle_exchange($requestJson);
             },
             $this->exportRunner()
         );
@@ -203,7 +203,7 @@ final class ReverseTransportTest extends TestCase
         // no result, the remote re-asks for the request it is missing, and the
         // transfer completes.
         $resumed = new \ReverseTransportWorker(
-            static fn(string $requestJson): string => $exchange->handle_json($requestJson),
+            static fn(string $requestJson): string => $endpoint->handle_exchange($requestJson),
             $this->exportRunner()
         );
 
@@ -233,14 +233,14 @@ final class ReverseTransportTest extends TestCase
     {
         // The endpoint converts a non-yield importer failure into the error
         // status, and the worker surfaces its message instead of finishing.
-        $exchange = new \ReverseTransportEndpoint(
+        $endpoint = new \ReverseTransportEndpoint(
             static function (): \ImportClient {
                 throw new \RuntimeException('importer exploded');
             },
             []
         );
         $worker = new \ReverseTransportWorker(
-            static fn(string $requestJson): string => $exchange->handle_json($requestJson),
+            static fn(string $requestJson): string => $endpoint->handle_exchange($requestJson),
             static fn(array $request): string => ''
         );
 
