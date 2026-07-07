@@ -116,12 +116,9 @@ The remote is configured with one storage path for everything reprint keeps:
 the staging area and any apply bookkeeping. Preferably outside the document
 root. When the host only allows writing inside the document root:
 
-- the file indexer skips it two ways: the configured path is excluded,
-  and the directory itself carries a `.reprint-skip` file, so any
-  reprint indexer skips it even when no configuration names it — a peer
-  pulling from this site never scans another site's staging data. The
-  same file can mark any directory reprint must leave alone, such as
-  the reprint plugin's own directory,
+- the file indexer never lists anything under it. `storage_path` is the
+  server's own setting, so every index request knows it — including a
+  pulling peer's, which never scans this site's staging data,
 - the deletion step refuses to touch anything under it,
 - an `.htaccess` (deny-all) and an empty `index.php` are written into
   it. That is all that can be done from inside the directory: Apache

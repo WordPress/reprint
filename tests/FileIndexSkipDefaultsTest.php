@@ -58,40 +58,23 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertSame($expected, path_is_default_skipped($path), "classifier for '$path'");
     }
 
-    public function testReprintStorageExclusionsResolveRawAndRealForms(): void
-    {
-        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
-
-        $this->assertSame([], reprint_storage_index_exclusions([]));
-        $this->assertSame([], reprint_storage_index_exclusions(['storage_path' => '']));
-        // A relative path could never match the traversal's absolute paths;
-        // when it does not exist, there is no realpath() to exclude through.
-        $this->assertSame([], reprint_storage_index_exclusions(['storage_path' => 'no/such/dir']));
-        $this->assertSame(
-            ['/srv/site/reprint-storage'],
-            reprint_storage_index_exclusions(['storage_path' => '/srv/site/reprint-storage/'])
-        );
-
-        // A symlinked storage path resolves to both its raw and real forms,
-        // so both routes into it are excluded.
-        mkdir($this->tempDir . '/real-storage');
-        symlink($this->tempDir . '/real-storage', $this->tempDir . '/storage-link');
-        $paths = reprint_storage_index_exclusions(['storage_path' => $this->tempDir . '/storage-link']);
-        $this->assertContains($this->tempDir . '/storage-link', $paths);
-        $this->assertContains(realpath($this->tempDir . '/real-storage'), $paths);
-    }
 
     public function testReprintStorageCoversPathMatchesTheSubtreeOnly(): void
     {
         require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
-        $storage = ['/var/www/site/reprint-storage'];
+        $storage = '/var/www/site/reprint-storage';
 
         $this->assertTrue(reprint_storage_covers_path('/var/www/site/reprint-storage', $storage));
         $this->assertTrue(reprint_storage_covers_path('/var/www/site/reprint-storage/files/a.php', $storage));
+        // A trailing slash on the setting changes nothing.
+        $this->assertTrue(reprint_storage_covers_path('/var/www/site/reprint-storage/x', $storage . '/'));
         $this->assertFalse(reprint_storage_covers_path('/var/www/site/reprint-storage-2/a.php', $storage));
         $this->assertFalse(reprint_storage_covers_path('/var/www/site/wp-content/a.php', $storage));
         $this->assertFalse(reprint_storage_covers_path('/var/www/site', $storage));
-        $this->assertFalse(reprint_storage_covers_path('/var/www/site/reprint-storage/x', []));
+        // Unset and relative settings never match: the traversal compares
+        // absolute paths.
+        $this->assertFalse(reprint_storage_covers_path('/var/www/site/reprint-storage/x', ''));
+        $this->assertFalse(reprint_storage_covers_path('/var/www/site/reprint-storage/x', 'relative/dir'));
     }
 
     /**
@@ -241,16 +224,6 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertContains('wp-content/themes/foo/style.css~', $rel);
     }
 
-    public function testReprintDirIsSkippedChecksTheSkipFile(): void
-    {
-        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
-
-        mkdir($this->tempDir . '/branded');
-        $this->assertFalse(reprint_dir_is_skipped($this->tempDir . '/branded'));
-        file_put_contents($this->tempDir . '/branded/.reprint-skip', 'brand');
-        $this->assertTrue(reprint_dir_is_skipped($this->tempDir . '/branded'));
-    }
-
     public function testFileIndexNeverListsReprintStorage(): void
     {
         $siteDir = $this->buildFixtureSite();
@@ -262,11 +235,6 @@ final class FileIndexSkipDefaultsTest extends TestCase
         file_put_contents($storage . '/state.json', '{}');
         mkdir($siteDir . '/wp-content/reprint-storage-2', 0755, true);
         file_put_contents($siteDir . '/wp-content/reprint-storage-2/keep.txt', 'mine');
-        // A branded directory no configuration names — the situation when a
-        // peer pulls from this site and finds another reprint's storage.
-        mkdir($siteDir . '/wp-content/other-site-storage', 0755, true);
-        file_put_contents($siteDir . '/wp-content/other-site-storage/.reprint-skip', 'brand');
-        file_put_contents($siteDir . '/wp-content/other-site-storage/state.json', '{}');
 
         $rel = $this->relativePaths(
             $this->runFileIndexEntries($siteDir, false, 5000, $storage),
@@ -277,8 +245,6 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/reprint-storage/state.json', $rel);
         $this->assertNotContains('wp-content/reprint-storage/files/wp-content/themes/foo/style.css', $rel);
         $this->assertContains('wp-content/reprint-storage-2/keep.txt', $rel, 'a shared name prefix must not widen the exclusion');
-        $this->assertNotContains('wp-content/other-site-storage', $rel);
-        $this->assertNotContains('wp-content/other-site-storage/state.json', $rel);
 
         // include_caches=1 turns the junk filter off; it must not turn the
         // storage exclusion off.
@@ -288,7 +254,6 @@ final class FileIndexSkipDefaultsTest extends TestCase
         );
         $this->assertContains('wp-content/cache/page.html', $withCaches);
         $this->assertNotContains('wp-content/reprint-storage/state.json', $withCaches);
-        $this->assertNotContains('wp-content/other-site-storage/state.json', $withCaches);
     }
 
     public function testFileIndexFilterDoesNotBreakResume(): void

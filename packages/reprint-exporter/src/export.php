@@ -2732,8 +2732,22 @@ function endpoint_file_index(
     // Reprint's own storage (the push staging area and apply bookkeeping)
     // must never appear in an index: it can sit inside the document root on
     // hosts that allow writing nowhere else, and indexing it would sync or
-    // delete reprint's own records mid-transfer.
-    $storage_exclusions = reprint_storage_index_exclusions($config);
+    // delete reprint's own records mid-transfer. storage_path is the
+    // server's own setting, so it is known here for every request — a
+    // pulling peer's request does not need to mention it.
+    $storage_path = isset($config["storage_path"]) && is_string($config["storage_path"])
+        ? $config["storage_path"]
+        : "";
+    if ($storage_path !== "") {
+        // The traversal canonicalizes every path with realpath() (see the
+        // wp.com note further down), so the setting must be compared in the
+        // same form. When the directory does not exist yet there is nothing
+        // to exclude and the raw value stays as a harmless fallback.
+        $storage_real = realpath($storage_path);
+        if ($storage_real !== false) {
+            $storage_path = $storage_real;
+        }
+    }
 
     // Find the starting point – either by parsing the cursor, or by
     // sourcing it from the filesystem.
@@ -3063,7 +3077,7 @@ function endpoint_file_index(
                 if (!$include_caches && path_is_default_skipped($path)) {
                     continue;
                 }
-                if (reprint_storage_covers_path($path, $storage_exclusions)) {
+                if (reprint_storage_covers_path($path, $storage_path)) {
                     continue;
                 }
                 clearstatcache(true, $path);
@@ -3093,14 +3107,6 @@ function endpoint_file_index(
                     $type = "dir";
                 } elseif ($mode !== STAT_TYPE_FILE) {
                     $type = "other";
-                }
-
-                // A directory carrying reprint's skip file never appears in
-                // an index, even when this request's config does not name
-                // it — a peer pulling from this site must not scan another
-                // reprint's own directories. One file_exists per directory.
-                if ($type === "dir" && reprint_dir_is_skipped($path)) {
-                    continue;
                 }
 
                 $ctime = (int) ($stat["ctime"] ?? 0);
@@ -3161,12 +3167,6 @@ function endpoint_file_index(
                     $dir_real = realpath($path);
                     if ($dir_real !== false && should_skip_index_root($dir_real, $directories)) {
                         // Don't push — emit the entry but skip traversal
-                        continue;
-                    }
-                    if ($dir_real !== false && reprint_storage_covers_path($dir_real, $storage_exclusions)) {
-                        // A symlinked route into reprint's storage: the raw
-                        // path escaped the pre-stat check, so stop it here —
-                        // the boundary entry was emitted, its contents never are.
                         continue;
                     }
                     $stack[] = [
@@ -3557,78 +3557,23 @@ function path_head_looks_like_text(string $path): bool
 }
 
 /**
- * True when the directory carries reprint's skip file.
- *
- * Reprint marks its own directories with a ".reprint-skip" file — the
- * staging store writes one on first use
- * (Site_Export_Staged_Artifacts::SKIP_FILE — the two names must match),
- * and the same mark fits any directory reprint must leave alone, such as
- * the reprint plugin's own directory. The mark makes the exclusion
- * self-contained: the indexer skips the directory even when the request's
- * config names no storage path, which is exactly the situation when a
- * peer pulls from this site.
- */
-function reprint_dir_is_skipped(string $dir_path): bool
-{
-    return file_exists($dir_path . "/.reprint-skip");
-}
-
-/**
  * True when $path is the reprint storage directory or lies inside it.
  *
- * $storage_paths comes from reprint_storage_index_exclusions(). Plain
- * prefix comparison, no filesystem access — this runs per index entry.
+ * $storage_path is the server's storage_path setting, canonicalized with
+ * realpath() by the endpoint before the traversal starts — the traversal
+ * walks realpath-canonical paths, so both sides compare in the same form.
+ * It must be absolute: the traversal compares absolute paths, and a
+ * relative value could never match anything. A plain string comparison
+ * with no filesystem access; this runs per index entry.
  */
-function reprint_storage_covers_path(string $path, array $storage_paths): bool
+function reprint_storage_covers_path(string $path, string $storage_path): bool
 {
-    foreach ($storage_paths as $storage_path) {
-        if ($path === $storage_path || strpos($path, $storage_path . "/") === 0) {
-            return true;
-        }
+    $storage_path = rtrim($storage_path, "/");
+    if ($storage_path === "" || $storage_path[0] !== "/") {
+        return false;
     }
 
-    return false;
-}
-
-/**
- * The configured reprint storage path in the forms the exclusion checks
- * compare against: the path as configured, plus its realpath() when that
- * resolves to something different. Empty when no storage path is configured.
- *
- * The as-configured form lets the per-entry check stay a plain string
- * comparison with no filesystem access (see the pre-stat exclusion in the
- * traversal loop); the realpath() form lets the descent check stop
- * symlinked routes into the same directory.
- *
- * Only absolute paths are returned, because the traversal compares
- * absolute paths — a relative form could never match anything and would
- * silently turn the exclusion off. Configuring an absolute path is the
- * endpoint's job; a relative value still excludes through its realpath()
- * when the directory exists.
- *
- * @return array<int,string> Absolute paths without a trailing slash.
- */
-function reprint_storage_index_exclusions(array $config): array
-{
-    $configured = $config["storage_path"] ?? null;
-    if (!is_string($configured)) {
-        return [];
-    }
-    $configured = rtrim($configured, "/");
-    if ($configured === "") {
-        return [];
-    }
-
-    $paths = [];
-    if ($configured[0] === "/") {
-        $paths[] = $configured;
-    }
-    $real = realpath($configured);
-    if ($real !== false && !in_array($real, $paths, true)) {
-        $paths[] = $real;
-    }
-
-    return $paths;
+    return $path === $storage_path || strpos($path, $storage_path . "/") === 0;
 }
 
 /**

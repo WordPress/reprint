@@ -102,15 +102,6 @@
  */
 final class Site_Export_Staged_Artifacts {
 
-    /**
-     * Name of the file that marks a directory as reprint's own: the file
-     * indexer never lists a directory containing it. The staging store
-     * writes it here; the same mark works for any directory reprint must
-     * leave alone, such as the reprint plugin's own directory. Must match
-     * the name reprint_dir_is_skipped() checks in export.php.
-     */
-    public const SKIP_FILE = '.reprint-skip';
-
     /** @var string */
     private $files_dir;
 
@@ -614,38 +605,21 @@ final class Site_Export_Staged_Artifacts {
         if (!$this->ensure_parent_dir($this->lock_path)) {
             return false;
         }
-        $this->mark_staging_dir(dirname($this->lock_path));
+        $this->ensure_web_guards(dirname($this->lock_path));
         return @fopen($this->lock_path, 'c+b');
     }
 
     /**
-     * Writes the three marker files every staging directory carries.
-     *
-     * The skip file tells every reprint indexer to leave this directory
-     * out, even when no configuration mentions it — a peer pulling from
-     * this site never scans another site's staging data. See
-     * reprint_dir_is_skipped() in export.php.
-     *
-     * The .htaccess and the blank index.php exist for staging directories
-     * inside the document root, and they are all we can do from here:
-     * Apache reads the .htaccess and refuses to serve the directory; nginx
-     * ignores both files and loses nothing by their presence. Do not keep
-     * the staging directory inside the document root unless the host offers
-     * nowhere else to write.
+     * Writes deny rules for staging directories inside the document root.
+     * They are all we can do from here: Apache reads the .htaccess and
+     * refuses to serve the directory; nginx ignores both files and loses
+     * nothing by their presence. Do not keep the staging directory inside
+     * the document root unless the host offers nowhere else to write.
      *
      * Write failures are ignored: the store works the same without the
-     * files, and the config-based index exclusion still applies.
+     * files, and the index exclusion of storage_path still applies.
      */
-    private function mark_staging_dir(string $dir): void {
-        $skip_file = $dir . '/' . self::SKIP_FILE;
-        if (!file_exists($skip_file)) {
-            @file_put_contents(
-                $skip_file,
-                "Reprint never lists a directory containing this file when it\n" .
-                "indexes a site. This directory holds Reprint's transfer state.\n"
-            );
-        }
-
+    private function ensure_web_guards(string $dir): void {
         $htaccess = $dir . '/.htaccess';
         if (!file_exists($htaccess)) {
             @file_put_contents(
