@@ -69,12 +69,12 @@ final class PushJournalTest extends TestCase
     public function testCaptureCreatesAndOverwritesTheBaseline(): void
     {
         $journal = $this->makeJournal();
-        $this->assertFalse($journal->has_local_files_baseline());
+        $this->assertFileDoesNotExist($journal->local_files_baseline_path());
 
         $journal->capture_local_files_baseline($this->writeIndex([
             'a.txt' => [100, 5, 'file'],
         ]));
-        $this->assertTrue($journal->has_local_files_baseline());
+        $this->assertFileExists($journal->local_files_baseline_path());
         $this->assertFileDoesNotExist($journal->local_files_baseline_path() . '.tmp');
 
         // A second capture replaces the first: diffing an index identical
@@ -100,11 +100,9 @@ final class PushJournalTest extends TestCase
         $journal->capture_local_files_baseline($this->writeIndex(['a' => [1, 1, 'file']]));
         $journal->capture_remote_files_baseline($this->writeIndex(['b' => [2, 2, 'file']]));
 
-        $this->assertTrue($journal->has_local_files_baseline());
-        $this->assertTrue($journal->has_remote_files_baseline());
         $this->assertNotSame($journal->local_files_baseline_path(), $journal->remote_files_baseline_path());
-        $this->assertSame(['a'], $this->indexPaths($journal->local_files_baseline_path()));
-        $this->assertSame(['b'], $this->indexPaths($journal->remote_files_baseline_path()));
+        $this->assertSame(['a'], $this->listPaths($journal->local_files_baseline_path()));
+        $this->assertSame(['b'], $this->listPaths($journal->remote_files_baseline_path()));
     }
 
     // ------------------------------------------------------------------
@@ -317,16 +315,6 @@ final class PushJournalTest extends TestCase
             $paths[] = base64_decode($data['path'], true);
         }
         return $paths;
-    }
-
-    /**
-     * Decode the paths from a baseline (full index lines).
-     *
-     * @return list<string>
-     */
-    private function indexPaths(string $file): array
-    {
-        return $this->listPaths($file);
     }
 
     private function recursiveDelete(string $dir): void

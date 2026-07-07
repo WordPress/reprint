@@ -92,11 +92,6 @@ class PushJournal
         return $slug === "" ? $hash : "{$slug}-{$hash}";
     }
 
-    public function site_dir(): string
-    {
-        return $this->site_dir;
-    }
-
     public function local_files_baseline_path(): string
     {
         return $this->site_dir . "/last-sync-local-files.jsonl";
@@ -105,16 +100,6 @@ class PushJournal
     public function remote_files_baseline_path(): string
     {
         return $this->site_dir . "/last-sync-remote-files.jsonl";
-    }
-
-    public function has_local_files_baseline(): bool
-    {
-        return is_file($this->local_files_baseline_path());
-    }
-
-    public function has_remote_files_baseline(): bool
-    {
-        return is_file($this->remote_files_baseline_path());
     }
 
     public function capture_local_files_baseline(string $index_file): void
@@ -162,12 +147,13 @@ class PushJournal
         if (!$current_handle) {
             throw new RuntimeException("Failed to open the current index: {$current_index_file}");
         }
+        $baseline_path = $this->local_files_baseline_path();
         $baseline_handle = null;
-        if ($this->has_local_files_baseline()) {
-            $baseline_handle = fopen($this->local_files_baseline_path(), "r");
+        if (is_file($baseline_path)) {
+            $baseline_handle = fopen($baseline_path, "r");
             if (!$baseline_handle) {
                 fclose($current_handle);
-                throw new RuntimeException("Failed to open the local baseline: {$this->local_files_baseline_path()}");
+                throw new RuntimeException("Failed to open the local baseline: {$baseline_path}");
             }
         }
 
