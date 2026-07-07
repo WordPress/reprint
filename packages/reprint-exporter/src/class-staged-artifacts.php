@@ -137,7 +137,8 @@ final class Site_Export_Staged_Artifacts {
      * bytes are already committed and the caller should skip forward in
      * its own source and continue from committed_bytes.
      *
-     * @param string $artifact_id Opaque artifact identifier.
+     * @param string $artifact_id The file's target-relative path, e.g.
+     *                            "wp-content/themes/foo/style.css".
      * @param int    $offset      Byte offset this buffer starts at.
      * @param string $bytes       The buffer to append.
      * @return array{status:string,reason:?string,detail:?string,committed_bytes:int}
