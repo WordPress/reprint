@@ -245,13 +245,13 @@ final class HmacServerTest extends TestCase
         );
     }
 
-    public function testEnvelopeRequiresTheSentinel(): void
+    public function testEnvelopeRequiresTheUnsignedPayloadHeader(): void
     {
         $headers = $this->buildHeadersForBody('{"command":"push"}');
         $server = new Site_Export_HMAC_Server(self::SECRET);
 
         $this->assertSame(
-            'Envelope verification requires the UNSIGNED-PAYLOAD content hash sentinel',
+            'Envelope verification requires the literal UNSIGNED-PAYLOAD content hash',
             $server->verify_envelope($headers, 'POST', '/?endpoint=push-append', 1700000001.0)
         );
     }

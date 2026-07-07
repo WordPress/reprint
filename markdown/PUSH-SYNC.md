@@ -96,8 +96,10 @@ the drift summary.
 ## The staging store
 
 The staging area is `Site_Export_Staged_Artifacts` as built: artifact bytes
-at plain target-relative paths under `files/`, a rename-atomic cursor in
-`state.json`, an append-only `verified.jsonl`, one `lock` file. The caller
+at plain target-relative paths under `files/`, a cursor in `state.json`
+(replaced by writing a temp file and renaming it, so readers never see a
+half-written record), one small verified marker per finished artifact under
+`verified/`, and one `lock` file. The caller
 drives the loop — one `append()` per buffer, individually committed, so the
 transfer can stop after any step and resume from `committed_bytes` in a new
 request. `finalize()` checks the assembled size against the size declared in
@@ -208,8 +210,9 @@ Files first, database second, each PR small and stacked in this order:
 
 1. **Design doc** — this file.
 2. **Envelope auth** — headers-only HMAC for data routes: the
-   UNSIGNED-PAYLOAD sentinel with method and request target bound into the
-   signature.
+   X-Auth-Content-Hash header carries the literal string UNSIGNED-PAYLOAD,
+   and the signature covers the method and request target instead of a
+   body hash.
 3. **Staged artifact store** — already built (PR #298); rebases here.
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
    the configured storage path; web guards for inside-docroot placement.

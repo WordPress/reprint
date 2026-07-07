@@ -45,8 +45,9 @@
 class Site_Export_HMAC_Client {
 
     /**
-     * Content-hash sentinel for requests whose payload is deliberately
-     * unsigned. Must match Site_Export_HMAC_Server::UNSIGNED_PAYLOAD.
+     * Value of the X-Auth-Content-Hash header when the request body is
+     * deliberately not signed: this literal string stands where a body hash
+     * would otherwise be. Must match Site_Export_HMAC_Server::UNSIGNED_PAYLOAD.
      */
     public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 
@@ -116,13 +117,14 @@ class Site_Export_HMAC_Client {
     }
 
     /**
-     * Returns X-Auth-* headers that sign only the request envelope.
+     * Returns X-Auth-* headers for a request whose body is not signed.
      *
-     * The signature binds the method and request target instead of a body
-     * digest, so a payload of any size streams through without buffering or
-     * hashing, and a captured envelope cannot be replayed against another
-     * route. Payload integrity belongs to TLS; over --force-http a tampered
-     * body is accepted — that is the flag's documented trade.
+     * The signature covers the method and the request target instead of a
+     * body hash, so a body of any size streams through without either side
+     * hashing it, and captured auth headers still cannot be reused for a
+     * different endpoint or method. Protecting the body from tampering is
+     * TLS's job — over --force-http a tampered body would be accepted,
+     * which is what that flag's help text warns about.
      *
      * Signature = HMAC-SHA256(nonce + timestamp + "UNSIGNED-PAYLOAD\n" + METHOD + "\n" + target, secret)
      *
