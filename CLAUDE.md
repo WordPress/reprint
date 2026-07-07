@@ -216,6 +216,8 @@ The exporter must scan both roots (document root + ABSPATH) without infinite loo
 ## Common Gotchas
 
 - **Cursor encoding**: Producers work with JSON strings. export.php handles base64 encoding for HTTP. Never pass base64 to producer constructors.
+- **Variable names**: Use full, descriptive names for domain values. Do not abbreviate to save characters (for example, prefer `$current_base64_path` over `$cur_b64`).
+- **JSON/JSONL parsing**: Parse JSON as JSON and validate semantic fields. Do not match prefixes, slice by fixed offsets, or depend on JSON field order or escaping.
 - **Memory limits**: Large dataset tests require at least 512MB PHP memory_limit
 - **Execution time**: LargeDatasetReentrancyTest processes 200,000+ rows and may take 30-60 seconds
 - **MySQL version**: Minimum MySQL 5.7 required (for JSON type support)

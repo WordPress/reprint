@@ -71,9 +71,13 @@ one. Each side is compared only against its own past:
 The local machine keeps one set of baselines **per remote site**, overwritten
 after each successful apply:
 
-    <state-dir>/push/<site>/last-sync-local-files.tsv
-    <state-dir>/push/<site>/last-sync-remote-files.tsv
-    <state-dir>/push/<site>/last-sync-local-rows.tsv   (phase two)
+    <state-dir>/push/<site>/last-sync-local-files.jsonl
+    <state-dir>/push/<site>/last-sync-remote-files.jsonl
+    <state-dir>/push/<site>/last-sync-local-rows.jsonl   (phase two)
+
+Each baseline is a copy of a file index in the `.import-index.jsonl` format
+the pull path already reads and writes — one JSON object per line, sorted by
+path.
 
 The remote baseline is captured by a scoped reindex that runs *after* apply —
 apply itself changes remote ctimes, and without this refresh the next push
