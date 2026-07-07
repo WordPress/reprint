@@ -2729,6 +2729,11 @@ function endpoint_file_index(
     // scratch files unless the client explicitly opts in. See
     // path_is_default_skipped() for the full deny-list and rationale.
     $include_caches = !empty($config["include_caches"]);
+    // Reprint's own storage (the push staging area and apply bookkeeping)
+    // must never appear in an index: it can sit inside the document root on
+    // hosts that allow writing nowhere else, and indexing it would sync or
+    // delete reprint's own records mid-transfer.
+    $storage_exclusions = reprint_storage_index_exclusions($config);
 
     // Find the starting point – either by parsing the cursor, or by
     // sourcing it from the filesystem.
@@ -3058,6 +3063,9 @@ function endpoint_file_index(
                 if (!$include_caches && path_is_default_skipped($path)) {
                     continue;
                 }
+                if (reprint_storage_covers_path($path, $storage_exclusions)) {
+                    continue;
+                }
                 clearstatcache(true, $path);
                 $stat = @lstat($path);
                 if ($stat === false) {
@@ -3145,6 +3153,12 @@ function endpoint_file_index(
                     $dir_real = realpath($path);
                     if ($dir_real !== false && should_skip_index_root($dir_real, $directories)) {
                         // Don't push — emit the entry but skip traversal
+                        continue;
+                    }
+                    if ($dir_real !== false && reprint_storage_covers_path($dir_real, $storage_exclusions)) {
+                        // A symlinked route into reprint's storage: the raw
+                        // path escaped the pre-stat check, so stop it here —
+                        // the boundary entry was emitted, its contents never are.
                         continue;
                     }
                     $stack[] = [
@@ -3561,6 +3575,53 @@ function path_head_looks_like_text(string $path): bool
  * opting in to a more aggressive filter can pass extra patterns; callers
  * who want everything can set include_caches=1 on the request.
  */
+/**
+ * True when $path is the reprint storage directory or lies inside it.
+ *
+ * $storage_paths comes from reprint_storage_index_exclusions(). Plain
+ * prefix comparison, no filesystem access — this runs per index entry.
+ */
+function reprint_storage_covers_path(string $path, array $storage_paths): bool
+{
+    foreach ($storage_paths as $storage_path) {
+        if ($path === $storage_path || strpos($path, $storage_path . "/") === 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * The raw and resolved forms of the configured reprint storage path, for
+ * index exclusion. Empty when no storage path is configured.
+ *
+ * The raw form keeps the per-entry check syscall-free (see the pre-stat
+ * exclusion in the traversal loop); the resolved form lets the descent
+ * check stop symlinked routes into the same directory.
+ *
+ * @return array<int,string> Absolute paths without a trailing slash.
+ */
+function reprint_storage_index_exclusions(array $config): array
+{
+    $configured = $config["storage_path"] ?? null;
+    if (!is_string($configured)) {
+        return [];
+    }
+    $configured = rtrim($configured, "/");
+    if ($configured === "") {
+        return [];
+    }
+
+    $paths = [$configured];
+    $real = realpath($configured);
+    if ($real !== false && $real !== $configured) {
+        $paths[] = $real;
+    }
+
+    return $paths;
+}
+
 function path_is_default_skipped(string $path): bool
 {
     // Sentinel slashes on each side make "starts-with" / "ends-with" /

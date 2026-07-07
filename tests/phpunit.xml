@@ -27,6 +27,7 @@
             <file>BuildPdoDsnTest.php</file>
             <file>ExportHttpServerTest.php</file>
             <file>FileIndexDedupTest.php</file>
+            <file>FileIndexSkipDefaultsTest.php</file>
             <file>HmacServerTest.php</file>
             <file>SiteExportSecretTest.php</file>
             <file>StagedArtifactsTest.php</file>

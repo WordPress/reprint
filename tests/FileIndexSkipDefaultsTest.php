@@ -58,6 +58,39 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertSame($expected, path_is_default_skipped($path), "classifier for '$path'");
     }
 
+    public function testReprintStorageExclusionsResolveRawAndRealForms(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+
+        $this->assertSame([], reprint_storage_index_exclusions([]));
+        $this->assertSame([], reprint_storage_index_exclusions(['storage_path' => '']));
+        $this->assertSame(
+            ['/srv/site/reprint-storage'],
+            reprint_storage_index_exclusions(['storage_path' => '/srv/site/reprint-storage/'])
+        );
+
+        // A symlinked storage path resolves to both its raw and real forms,
+        // so both routes into it are excluded.
+        mkdir($this->tempDir . '/real-storage');
+        symlink($this->tempDir . '/real-storage', $this->tempDir . '/storage-link');
+        $paths = reprint_storage_index_exclusions(['storage_path' => $this->tempDir . '/storage-link']);
+        $this->assertContains($this->tempDir . '/storage-link', $paths);
+        $this->assertContains(realpath($this->tempDir . '/real-storage'), $paths);
+    }
+
+    public function testReprintStorageCoversPathMatchesTheSubtreeOnly(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+        $storage = ['/var/www/site/reprint-storage'];
+
+        $this->assertTrue(reprint_storage_covers_path('/var/www/site/reprint-storage', $storage));
+        $this->assertTrue(reprint_storage_covers_path('/var/www/site/reprint-storage/files/a.php', $storage));
+        $this->assertFalse(reprint_storage_covers_path('/var/www/site/reprint-storage-2/a.php', $storage));
+        $this->assertFalse(reprint_storage_covers_path('/var/www/site/wp-content/a.php', $storage));
+        $this->assertFalse(reprint_storage_covers_path('/var/www/site', $storage));
+        $this->assertFalse(reprint_storage_covers_path('/var/www/site/reprint-storage/x', []));
+    }
+
     /**
      * @return list<array{0:string,1:bool}>
      */
