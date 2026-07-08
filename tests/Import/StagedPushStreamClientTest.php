@@ -615,10 +615,10 @@ class StagedPushStreamClientTest extends TestCase
         $local_paths_to_push = $this->writeLocalPathsToPush(['drift-grow.bin']);
         $resume_cursor = $this->pushFirstBytes($client, 'drift-grow.bin', $old_content, 4, $source_path);
 
-        // The file changes before the next session: longer and different.
+        // The file changes before the next session: longer and different —
+        // the size alone betrays it.
         $new_content = str_repeat('n', 16);
         file_put_contents($source_path, $new_content);
-        touch($source_path, ((int) $resume_cursor['source_mtime']) + 5);
         clearstatcache();
 
         $result = $this->pushAll($client, $local_paths_to_push, $resume_cursor);
@@ -635,10 +635,12 @@ class StagedPushStreamClientTest extends TestCase
         $local_paths_to_push = $this->writeLocalPathsToPush(['drift-edit.bin']);
         $resume_cursor = $this->pushFirstBytes($client, 'drift-edit.bin', $old_content, 4, $source_path);
 
-        // Same byte count, different bytes — only the mtime betrays the edit.
+        // Same byte count, different bytes — only the ctime betrays the
+        // edit, so the rewrite must land in a later timestamp second (ctime
+        // cannot be set the way touch() sets mtime).
+        usleep(1100000);
         $new_content = str_repeat('n', 12);
         file_put_contents($source_path, $new_content);
-        touch($source_path, ((int) $resume_cursor['source_mtime']) + 5);
         clearstatcache();
 
         $result = $this->pushAll($client, $local_paths_to_push, $resume_cursor);
@@ -659,7 +661,6 @@ class StagedPushStreamClientTest extends TestCase
         // would leave the target holding 8 stale bytes and this push lying.
         $new_content = str_repeat('n', 6);
         file_put_contents($source_path, $new_content);
-        touch($source_path, ((int) $resume_cursor['source_mtime']) + 5);
         clearstatcache();
 
         $result = $this->pushAll($client, $local_paths_to_push, $resume_cursor);
@@ -689,10 +690,10 @@ class StagedPushStreamClientTest extends TestCase
     /**
      * Session one: push the first $bytes_to_push bytes of $content, then
      * stop, returning the resume cursor the reference loop would persist —
-     * the server cursor plus the source token (size and mtime) it saves
+     * the server cursor plus the source token (size and ctime) it saves
      * alongside.
      *
-     * @return array{artifact_id:string,committed_bytes:int,total_bytes:int,source_mtime:int}
+     * @return array{artifact_id:string,committed_bytes:int,total_bytes:int,source_ctime:int}
      */
     private function pushFirstBytes(StagedPushStreamClient $client, string $artifact_id, string $content, int $bytes_to_push, string $source_path): array
     {
@@ -710,10 +711,64 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertSame('complete', $first_result['status'], (string) json_encode($first_result));
         $this->assertSame($bytes_to_push, $first_result['cursor']['committed_bytes']);
 
+        clearstatcache();
         return $first_result['cursor'] + [
             'total_bytes' => strlen($content),
-            'source_mtime' => (int) filemtime($source_path),
+            'source_ctime' => (int) stat($source_path)['ctime'],
         ];
+    }
+
+    public function testAStoreLockCollisionIsRetryableNotFatal(): void
+    {
+        $this->writeSource('locked.bin', str_repeat('l', 4));
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush(['locked.bin']);
+
+        // Create the store scaffolding, then hold its lock the way a
+        // concurrent writer would. The store's answer is its documented
+        // retry-until-free contract, not a push-ending failure.
+        (new Site_Export_Staged_Artifacts($this->staging_dir))->append('scaffold.bin', 0, 'x');
+        $lock_holder = fopen($this->staging_dir . '/lock', 'r+b');
+        $this->assertNotFalse($lock_holder);
+        $this->assertTrue(flock($lock_holder, LOCK_EX));
+
+        $held_result = $this->pushOnce($client, $local_paths_to_push, null);
+        $this->assertSame(['retry', 'busy'], [$held_result['status'], $held_result['reason']], (string) json_encode($held_result));
+
+        flock($lock_holder, LOCK_UN);
+        fclose($lock_holder);
+
+        $result = $this->pushAll($client, $local_paths_to_push);
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame(str_repeat('l', 4), file_get_contents($this->staging_dir . '/files/locked.bin'));
+    }
+
+    public function testAStaleCursorBeyondTheStoreFrontierRetriesFromTheStoreCursor(): void
+    {
+        $content = str_repeat('g', 8);
+        $source_path = $this->writeSource('gapped.bin', $content);
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush(['gapped.bin']);
+        clearstatcache();
+        $source_stat = stat($source_path);
+        $this->assertNotFalse($source_stat);
+
+        // The cursor claims 4 committed bytes and its source token matches
+        // the file, but the staging directory was wiped: the store holds
+        // nothing. The server answers offset_gap with its own cursor — the
+        // push must resume from that cursor, not die.
+        $stale_cursor = [
+            'artifact_id' => 'gapped.bin',
+            'committed_bytes' => 4,
+            'total_bytes' => 8,
+            'source_ctime' => (int) $source_stat['ctime'],
+        ];
+
+        $result = $this->pushAll($client, $local_paths_to_push, $stale_cursor);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame($content, file_get_contents($this->staging_dir . '/files/gapped.bin'));
+        $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen(), 'one gap rejection, one clean resume from the store cursor');
     }
 
     public function testBackToBackRequestsReuseTheConnection(): void
@@ -941,17 +996,20 @@ PHP_ROUTER);
             $this->assertNotFalse($source_handle);
             $source_stat = fstat($source_handle);
             $total_bytes = (int) $source_stat['size'];
-            $source_mtime = (int) $source_stat['mtime'];
+            $source_ctime = (int) $source_stat['ctime'];
 
             // The cursor's source token remembers the file the staged bytes
-            // came from. Any change — size or mtime — means those bytes are
-            // another version: restart the file at zero so the target
-            // re-stages it instead of appending one version behind another.
+            // came from. Any change — size or ctime, the same signals the
+            // journal's diff keys on — means those bytes are another version:
+            // restart the file at zero so the target re-stages it instead of
+            // appending one version behind another. A same-size edit within
+            // the same timestamp second escapes this token; the diff layer's
+            // own change detection is the deeper net.
             if (
                 $resuming_this_file
                 && (
                     (isset($cursor['total_bytes']) && (int) $cursor['total_bytes'] !== $total_bytes)
-                    || (isset($cursor['source_mtime']) && (int) $cursor['source_mtime'] !== $source_mtime)
+                    || (isset($cursor['source_ctime']) && (int) $cursor['source_ctime'] !== $source_ctime)
                 )
             ) {
                 $offset = 0;
@@ -980,7 +1038,7 @@ PHP_ROUTER);
                     if ($result['status'] !== 'complete') {
                         fclose($source_handle);
                         fclose($journal_handle);
-                        return $this->withSourceToken($result, $artifact_id, $total_bytes, $source_mtime);
+                        return $this->withSourceToken($result, $artifact_id, $total_bytes, $source_ctime);
                     }
                     if (false === $client->start_push_request()) {
                         fclose($source_handle);
@@ -1003,7 +1061,7 @@ PHP_ROUTER);
                 ])) {
                     fclose($source_handle);
                     fclose($journal_handle);
-                    return $this->withSourceToken($client->finish_request(), $artifact_id, $total_bytes, $source_mtime);
+                    return $this->withSourceToken($client->finish_request(), $artifact_id, $total_bytes, $source_ctime);
                 }
 
                 $offset += strlen($payload);
@@ -1028,19 +1086,19 @@ PHP_ROUTER);
                 'body_bytes_sent' => 0,
             ];
         }
-        return $this->withSourceToken($client->finish_request(), $artifact_id, $total_bytes, $source_mtime);
+        return $this->withSourceToken($client->finish_request(), $artifact_id, $total_bytes, $source_ctime);
     }
 
     /**
      * Attach the source token the reference loop persists alongside a server
-     * cursor: the size and mtime of the file whose bytes the cursor counts.
+     * cursor: the size and ctime of the file whose bytes the cursor counts.
      * A later resume compares them against the file on disk and restarts the
      * file when they differ.
      */
-    private function withSourceToken(array $result, string $artifact_id, int $total_bytes, int $source_mtime): array
+    private function withSourceToken(array $result, string $artifact_id, int $total_bytes, int $source_ctime): array
     {
         if (is_array($result['cursor'] ?? null) && ($result['cursor']['artifact_id'] ?? null) === $artifact_id) {
-            $result['cursor'] += ['total_bytes' => $total_bytes, 'source_mtime' => $source_mtime];
+            $result['cursor'] += ['total_bytes' => $total_bytes, 'source_ctime' => $source_ctime];
         }
         return $result;
     }

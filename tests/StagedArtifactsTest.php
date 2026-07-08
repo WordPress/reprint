@@ -557,9 +557,9 @@ final class StagedArtifactsTest extends TestCase
         flock($holder, LOCK_EX);
 
         $busy_append = $store->append('artifact-1', 5, 'second');
-        $this->assertSame(['busy', 5], [$busy_append['status'], $busy_append['committed_bytes']]);
+        $this->assertSame(['busy', 'busy', 5], [$busy_append['status'], $busy_append['reason'], $busy_append['committed_bytes']]);
         $busy_finalize = $store->finalize('artifact-1', 5);
-        $this->assertSame(['busy', 5], [$busy_finalize['status'], $busy_finalize['committed_bytes']]);
+        $this->assertSame(['busy', 'busy', 5], [$busy_finalize['status'], $busy_finalize['reason'], $busy_finalize['committed_bytes']]);
         $this->assertFalse($store->discard('artifact-1'));
 
         flock($holder, LOCK_UN);

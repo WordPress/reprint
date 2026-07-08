@@ -9,9 +9,12 @@
  * target skips replayed files it already verified and restarts partially
  * staged ones from zero, so a source file that changed between requests can
  * never end up half old version, half new. Callers persist the source token
- * (size and mtime) alongside each cursor and restart a file at offset 0 when
- * the file on disk no longer matches it — the reference loop in
- * StagedPushStreamClientTest::pushOnce() shows both halves.
+ * (size and ctime — the signals the push journal's own diff keys on)
+ * alongside each cursor and restart a file at offset 0 when the file on disk
+ * no longer matches it; a same-size edit within the same timestamp second
+ * escapes the token, and the diff layer's change detection is the deeper
+ * net. The reference loop in StagedPushStreamClientTest::pushOnce() shows
+ * both halves.
  *
  * The client is a pass-through wire. The caller reads a chunk of a file into
  * memory — at most next_chunk_body_bytes(), which is why a chunk is the one
@@ -652,9 +655,16 @@ class StagedPushStreamClient
         }
 
         if (($decoded["status"] ?? null) !== "complete") {
+            $reason = is_string($decoded["reason"] ?? null) ? $decoded["reason"] : "unexpected_response";
+            // The protocol designs these two as recoverable, not fatal:
+            // busy is the store's retry-until-free lock contract, and
+            // offset_gap arrives with the store's own cursor to resume
+            // from. Neither says anything about request size, so the
+            // sizer records nothing.
+            $retryable = $reason === "busy" || $reason === "offset_gap";
             return $this->result(
-                "failed",
-                is_string($decoded["reason"] ?? null) ? $decoded["reason"] : "unexpected_response",
+                $retryable ? "retry" : "failed",
+                $reason,
                 is_string($decoded["detail"] ?? null) ? $decoded["detail"] : ("HTTP " . $http_code),
                 $response_cursor,
                 (int) ($decoded["files_verified"] ?? 0)

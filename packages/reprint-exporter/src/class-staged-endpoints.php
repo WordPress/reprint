@@ -32,9 +32,11 @@ if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
  * out learns nothing about what landed, retries from its last cursor or
  * asks staged_status for the store's committed offset, and may later
  * resend with shifted boundaries. push_stream therefore compares the store's
- * committed offset with each frame first, absorbs already-committed ranges,
- * skips the committed prefix of a straddling frame, and reports offset_gap
- * with the cursor only when a frame starts beyond the frontier.
+ * committed offset with each frame first, skips the committed prefix of a
+ * straddling mid-file frame, restarts an artifact when the sender begins it
+ * again at offset 0 (the sender only does that when its source changed or
+ * it cannot vouch for the staged prefix), and reports offset_gap with the
+ * cursor only when a frame starts beyond the frontier.
  *
  * Rejections the chunk sizer must learn from are typed for it: a frame
  * over the frame cap is HTTP 413 with max_frame_bytes in the payload,

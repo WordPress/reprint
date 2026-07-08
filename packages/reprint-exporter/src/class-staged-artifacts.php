@@ -189,7 +189,7 @@ final class Site_Export_Staged_Artifacts {
             if (!flock($lock, LOCK_EX | LOCK_NB)) {
                 return [
                     'status' => 'busy',
-                    'reason' => null,
+                    'reason' => 'busy',
                     'detail' => null,
                     'committed_bytes' => $this->status($artifact_id)['committed_bytes'],
                 ];
@@ -362,7 +362,7 @@ final class Site_Export_Staged_Artifacts {
             if (!flock($lock, LOCK_EX | LOCK_NB)) {
                 return [
                     'status' => 'busy',
-                    'reason' => null,
+                    'reason' => 'busy',
                     'detail' => null,
                     'committed_bytes' => $this->status($artifact_id)['committed_bytes'],
                     'path' => null,
