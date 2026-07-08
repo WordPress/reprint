@@ -284,12 +284,19 @@ describe('Import: Follow Symlinks', () => {
 
     // ─── Intermediate symlinks ─────────────────────────────────
 
-    it('intermediate symlink /srv/e2e-via is blocked when target escapes root', () => {
+    it('intermediate symlink /srv/e2e-via is recreated pointing at the local mirror', () => {
+        // Its target (/srv/e2e-external) was followed and mirrored locally, so
+        // the link is repointed within fs-root — same treatment as regular
+        // symlink chunks. Unindexed escaping targets are still blocked.
         const viaPath = join(fsRoot(), '/srv/e2e-via');
         const stat = lstatIfExists(viaPath);
         assert.ok(
-            stat === null || !stat.isSymbolicLink(),
-            `Expected intermediate symlink to be blocked at ${viaPath}`,
+            stat !== null && stat.isSymbolicLink(),
+            `Expected intermediate symlink at ${viaPath}`,
+        );
+        assert.ok(
+            existsSync(join(viaPath, 'dir-target', 'alpha.txt')),
+            'via-link resolves to the mirrored external content',
         );
     });
 
