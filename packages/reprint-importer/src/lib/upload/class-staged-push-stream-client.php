@@ -13,6 +13,9 @@
  * thing that may be buffered — and send_chunk() sends it over the network
  * before returning:
  *
+ *     // Open the request only once the first chunk exists — an empty
+ *     // source should not cost a network exchange (the reference loop in
+ *     // StagedPushStreamClientTest::pushOnce() shows the lazy shape).
  *     $client->start_push_request();
  *     while (...) {
  *         if ($client->should_finish_request()) {
@@ -100,7 +103,14 @@ class StagedPushStreamClient
     /** @var resource|object|null curl easy handle for the open request */
     private $curl_handle = null;
 
-    /** @var resource|object|null curl multi handle driving the open request */
+    /**
+     * curl multi handle driving requests. Outlives individual requests on
+     * purpose: libcurl's connection cache lives on the multi handle, so
+     * back-to-back requests reuse the TCP/TLS connection instead of paying
+     * a fresh handshake per rotation.
+     *
+     * @var resource|object|null
+     */
     private $multi_handle = null;
 
     /**
@@ -270,8 +280,13 @@ class StagedPushStreamClient
         foreach ($request_headers as $header_name => $header_value) {
             $header_lines[] = $header_name . ": " . $header_value;
         }
-        // Suppress Expect: 100-continue; waiting for the interim response
-        // would stall the first chunk for nothing.
+        // Suppress Expect: 100-continue (older libcurls add it for chunked
+        // uploads). The 100-continue dance would spare a misconfigured push
+        // from uploading a body the target is about to refuse — but servers
+        // that never answer the interim 100 (php -S among them) cost a full
+        // Expect timeout stall on every request, while the wasted body is
+        // bounded by one request budget and happens once before the push
+        // stops with a pointed error.
         $header_lines[] = "Expect:";
 
         $this->curl_handle = curl_init($request_url);
@@ -338,13 +353,17 @@ class StagedPushStreamClient
             },
         ]);
 
-        // One curl_multi handle per request, holding a single transfer.
-        // Multi is not for concurrency here: unlike curl_exec(), which
-        // blocks until the whole exchange is over, curl_multi_exec()
-        // performs one small slice of work and returns. That is what lets
-        // send_chunk() feed a frame, pump until libcurl consumed it, and
-        // hand control back to the caller while the request stays open.
-        $this->multi_handle = curl_multi_init();
+        // One transfer at a time in one long-lived curl_multi handle. Multi
+        // is not for concurrency here: unlike curl_exec(), which blocks
+        // until the whole exchange is over, curl_multi_exec() performs one
+        // small slice of work and returns. That is what lets send_chunk()
+        // feed a frame, pump until libcurl consumed it, and hand control
+        // back to the caller while the request stays open. The handle
+        // itself lives as long as the client so requests reuse connections
+        // (see the property docblock).
+        if ($this->multi_handle === null) {
+            $this->multi_handle = curl_multi_init();
+        }
         curl_multi_add_handle($this->multi_handle, $this->curl_handle);
 
         // Drive the transfer until the head is out — libcurl asking for body
@@ -361,9 +380,7 @@ class StagedPushStreamClient
         if (!$this->curl_requested_body) {
             $this->last_error = $this->transfer_error ?? "The push stream request ended before the request head was sent.";
             curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
-            curl_multi_close($this->multi_handle);
             $this->curl_handle = null;
-            $this->multi_handle = null;
             return false;
         }
 
@@ -573,10 +590,10 @@ class StagedPushStreamClient
         $http_code = (int) curl_getinfo($this->curl_handle, CURLINFO_HTTP_CODE);
         $redirect_url = (string) curl_getinfo($this->curl_handle, CURLINFO_REDIRECT_URL);
         $response_body = (string) curl_multi_getcontent($this->curl_handle);
+        // The easy handle is done; the multi handle stays for the next
+        // request so its connection cache can hand the connection back.
         curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
-        curl_multi_close($this->multi_handle);
         $this->curl_handle = null;
-        $this->multi_handle = null;
 
         // A redirect is a configuration problem, not a transient failure or
         // a size signal: the usual case is an http:// base_url on a site
@@ -615,7 +632,7 @@ class StagedPushStreamClient
         }
 
         if ($http_code === 413 || ($decoded["reason"] ?? null) === "frame_too_large") {
-            $reported_limit_bytes = $decoded["max_frame_bytes"] ?? ($decoded["max_request_bytes"] ?? null);
+            $reported_limit_bytes = $decoded["max_frame_bytes"] ?? null;
             $decision = $this->request_sizer->record_too_large(
                 is_numeric($reported_limit_bytes) ? (int) $reported_limit_bytes : null
             );

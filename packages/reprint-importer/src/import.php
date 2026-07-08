@@ -69,7 +69,7 @@ if (!class_exists('Site_Export_Staged_Push_Stream_Protocol')) {
     }
 }
 
-// Adaptive sizing for bounded local-to-remote push stream frames
+// Adaptive sizing for staged push request bodies
 require_once __DIR__ . '/lib/upload/class-push-request-sizer.php';
 
 // One-request push streams into the target's staged artifact store

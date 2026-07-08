@@ -192,7 +192,7 @@ final class StagedEndpointsTest extends TestCase {
 
     public function testPushStreamBodyOverTheCapIs413WithMaxFrameBytes(): void
     {
-        $endpoints = $this->makeEndpoints(['max_request_bytes' => 64]);
+        $endpoints = $this->makeEndpoints(['max_frame_bytes' => 64]);
 
         $result = $this->push($endpoints, [
             ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => str_repeat('x', 100), 'total_bytes' => 100, 'final' => true],
@@ -368,7 +368,7 @@ final class StagedEndpointsTest extends TestCase {
 
     public function testClientParametersCannotChooseServerOptions(): void
     {
-        $endpoints = $this->makeEndpoints(['max_request_bytes' => 1024]);
+        $endpoints = $this->makeEndpoints(['max_frame_bytes' => 1024]);
         $evil_dir = $this->staging_dir . '-evil';
         $result = $this->push($endpoints, [
             ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => str_repeat('x', 100), 'total_bytes' => 100, 'final' => true],
@@ -376,7 +376,7 @@ final class StagedEndpointsTest extends TestCase {
             // Options are server-owned; parameters with the same names
             // must be ignored.
             'staging_dir' => $evil_dir,
-            'max_request_bytes' => 10,
+            'max_frame_bytes' => 10,
             'secret' => 'attacker-chosen',
         ]);
 

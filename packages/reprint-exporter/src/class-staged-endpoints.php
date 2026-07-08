@@ -37,7 +37,7 @@ if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
  * with the cursor only when a frame starts beyond the frontier.
  *
  * Rejections the chunk sizer must learn from are typed for it: a frame
- * over the request cap is HTTP 413 with max_frame_bytes in the payload,
+ * over the frame cap is HTTP 413 with max_frame_bytes in the payload,
  * exactly what record_too_large() consumes. The cap defaults to post_max_size
  * (falling back to the sizer's own 1 GiB hard cap when PHP reports none),
  * because a proxy or PHP itself would refuse larger bodies before this code
@@ -52,7 +52,7 @@ if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
 final class Site_Export_Staged_Endpoints {
 
     /** The chunk sizer never sends more than this, so accept up to it. */
-    private const DEFAULT_MAX_REQUEST_BYTES = 1073741824;
+    private const DEFAULT_MAX_FRAME_BYTES = 1073741824;
 
     /** One append() step per this many request-body bytes. */
     private const DEFAULT_APPEND_BUFFER_BYTES = 262144;
@@ -67,7 +67,7 @@ final class Site_Export_Staged_Endpoints {
     private $secret;
 
     /** @var int */
-    private $max_request_bytes;
+    private $max_frame_bytes;
 
     /** @var int */
     private $append_buffer_bytes;
@@ -81,7 +81,7 @@ final class Site_Export_Staged_Endpoints {
      *     Must live outside the web-served tree.
      *   - secret (?string): shared secret for push authentication.
      *     Null leaves pushes answering 503 until one is configured.
-     *   - max_request_bytes (int): push frame body cap; defaults to
+     *   - max_frame_bytes (int): single frame payload cap; defaults to
      *     post_max_size, or 1 GiB when PHP reports no limit.
      *   - append_buffer_bytes (int): request-to-store step size.
      *   - timestamp_tolerance (int): HMAC freshness window in seconds.
@@ -96,17 +96,17 @@ final class Site_Export_Staged_Endpoints {
         $secret = $options['secret'] ?? null;
         $this->secret = is_string($secret) && $secret !== '' ? $secret : null;
 
-        $max_request_bytes_option = $options['max_request_bytes'] ?? null;
-        if (!is_numeric($max_request_bytes_option) || (int) $max_request_bytes_option <= 0) {
+        $max_frame_bytes_option = $options['max_frame_bytes'] ?? null;
+        if (!is_numeric($max_frame_bytes_option) || (int) $max_frame_bytes_option <= 0) {
             $post_max_size = ini_get('post_max_size');
-            $max_request_bytes_option = is_string($post_max_size) && $post_max_size !== ''
+            $max_frame_bytes_option = is_string($post_max_size) && $post_max_size !== ''
                 ? parse_size($post_max_size)
                 : 0;
-            if ($max_request_bytes_option <= 0) {
-                $max_request_bytes_option = self::DEFAULT_MAX_REQUEST_BYTES;
+            if ($max_frame_bytes_option <= 0) {
+                $max_frame_bytes_option = self::DEFAULT_MAX_FRAME_BYTES;
             }
         }
-        $this->max_request_bytes = (int) $max_request_bytes_option;
+        $this->max_frame_bytes = (int) $max_frame_bytes_option;
 
         $append_buffer_bytes_option = $options['append_buffer_bytes'] ?? null;
         $this->append_buffer_bytes = is_numeric($append_buffer_bytes_option) && (int) $append_buffer_bytes_option > 0
@@ -193,9 +193,9 @@ final class Site_Export_Staged_Endpoints {
             // for arbitrary-byte paths.
             $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => $offset];
 
-            if ($bytes > $this->max_request_bytes) {
+            if ($bytes > $this->max_frame_bytes) {
                 $response = $this->stream_rejected(413, 'frame_too_large', null, $cursor, $files_verified);
-                $response['body']['max_frame_bytes'] = $this->max_request_bytes;
+                $response['body']['max_frame_bytes'] = $this->max_frame_bytes;
                 return $response;
             }
 

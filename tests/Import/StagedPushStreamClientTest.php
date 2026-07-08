@@ -285,7 +285,7 @@ class StagedPushStreamClientTest extends TestCase
     public function testFrameTooLargeShrinksTheBodyBudgetAndRetries(): void
     {
         $this->writeSource('large.bin', str_repeat('x', 20));
-        $this->configureEndpoint(['max_request_bytes' => 6]);
+        $this->configureEndpoint(['max_frame_bytes' => 6]);
         $sizer = new PushRequestSizer(['floor_bytes' => 4, 'start_bytes' => 12, 'max_bytes' => 12]);
         $client = $this->makeClient(['request_sizer' => $sizer, 'chunk_bytes' => 12]);
         $local_paths_to_push = $this->writeLocalPathsToPush(['large.bin']);
@@ -451,7 +451,7 @@ class StagedPushStreamClientTest extends TestCase
         // The target caps frames at 3 bytes; the sizer cannot shrink the
         // 4-byte body budget below its own floor, so the push must give up —
         // and the reason names the request-size dimension, not the chunk.
-        $this->configureEndpoint(['max_request_bytes' => 3]);
+        $this->configureEndpoint(['max_frame_bytes' => 3]);
         $client = $this->makeClient([
             'request_sizer' => new PushRequestSizer(['floor_bytes' => 4, 'start_bytes' => 4, 'max_bytes' => 4]),
         ]);
@@ -603,6 +603,53 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertStringContainsString('Use that address as the push base_url', (string) $result['detail']);
     }
 
+    public function testBackToBackRequestsReuseTheConnection(): void
+    {
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        $this->assertNotFalse($listener, (string) $errstr);
+        $listener_address = stream_socket_get_name($listener, false);
+
+        $client = new StagedPushStreamClient([
+            'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'chunk_bytes' => 4,
+        ]);
+        $keep_alive_response = static function (): string {
+            $response_body = json_encode(['status' => 'complete', 'cursor' => null, 'files_verified' => 1]);
+            return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($response_body) . "\r\n\r\n" . $response_body;
+        };
+
+        $this->assertTrue($client->start_push_request());
+        $connection = stream_socket_accept($listener, 5);
+        $this->assertNotFalse($connection);
+        $this->readAvailableBytes($connection);
+        $this->assertTrue($client->send_chunk([
+            'artifact_id' => 'reuse.bin',
+            'offset' => 0,
+            'total_bytes' => 4,
+            'final' => true,
+            'payload' => 'rrrr',
+        ]));
+        $this->readAvailableBytes($connection);
+        fwrite($connection, $keep_alive_response());
+        $this->assertSame('complete', $client->finish_request()['status']);
+
+        // The second request must ride the connection libcurl cached on the
+        // client's long-lived multi handle, not open a new one.
+        $this->assertTrue($client->start_push_request());
+        $pending_connections = [$listener];
+        $write_sockets = null;
+        $except_sockets = null;
+        $this->assertSame(0, stream_select($pending_connections, $write_sockets, $except_sockets, 0, 200000), 'the second request must not open a new connection');
+        $second_request_head = $this->readAvailableBytes($connection);
+        $this->assertStringContainsString('POST /?reprint-api=1&endpoint=staged_push HTTP/1.1', $second_request_head, 'the second request head travels on the reused connection');
+
+        fwrite($connection, $keep_alive_response());
+        $this->assertSame('complete', $client->finish_request()['status']);
+        fclose($connection);
+        fclose($listener);
+    }
+
     public function testEmojiFileNameRoundTrips(): void
     {
         $emoji_artifact_id = "wp-content/uploads/\u{1F4F7} photo.bin";
@@ -675,7 +722,7 @@ file_put_contents(
     'staged' => [
         'staging_dir' => (string) \$config['staging_dir'],
         'secret' => (string) \$config['secret'],
-        'max_request_bytes' => (int) ( \$config['max_request_bytes'] ?? 1073741824 ),
+        'max_frame_bytes' => (int) ( \$config['max_frame_bytes'] ?? 1073741824 ),
     ],
 ]);
 \$server->handle_request();
@@ -688,7 +735,7 @@ PHP_ROUTER);
         file_put_contents(self::$config_path, json_encode(array_merge([
             'staging_dir' => $this->staging_dir,
             'secret' => self::SECRET,
-            'max_request_bytes' => 1073741824,
+            'max_frame_bytes' => 1073741824,
         ], $overrides)));
     }
 
@@ -740,8 +787,12 @@ PHP_ROUTER);
         if ($skipping_to_cursor) {
             $cursor_artifact_in_journal = false;
             while (($journal_line = fgets($journal_handle)) !== false) {
-                $decoded_line = json_decode(trim($journal_line), true);
-                if (is_array($decoded_line) && base64_decode((string) ($decoded_line['path'] ?? ''), true) === $cursor['artifact_id']) {
+                $journal_line = trim($journal_line);
+                if ($journal_line === '') {
+                    continue;
+                }
+                $decoded_line = json_decode($journal_line, true, 512, JSON_THROW_ON_ERROR);
+                if (base64_decode((string) ($decoded_line['path'] ?? ''), true) === $cursor['artifact_id']) {
                     $cursor_artifact_in_journal = true;
                     break;
                 }
