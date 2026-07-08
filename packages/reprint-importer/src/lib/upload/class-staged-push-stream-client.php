@@ -188,7 +188,7 @@ class StagedPushStreamClient
         $request_headers = $this->hmac_client !== null
             ? $this->hmac_client->get_envelope_auth_headers("POST", $request_url)
             : [];
-        $request_headers["Content-Type"] = Site_Export_Staged_Push_Stream_Protocol::CONTENT_TYPE;
+        $request_headers["Content-Type"] = $body->content_type();
         $request_headers["Transfer-Encoding"] = "chunked";
         $request_headers["Expect"] = "";
 
@@ -617,6 +617,14 @@ final class StagedPushRequestBody
     /** @var array<int,string> */
     private array $pending = [];
 
+    private string $boundary;
+
+    private StagedPushRequestBodyBuffer $writer_buffer;
+
+    private Site_Export_File_Chunk_Stream_Writer $writer;
+
+    private bool $closed = false;
+
     private int $file_index = 0;
 
     private int $offset = 0;
@@ -654,6 +662,9 @@ final class StagedPushRequestBody
         $this->initial_cursor = $cursor;
         $this->max_chunks = $max_chunks !== null ? max(1, $max_chunks) : null;
         $this->max_payload_bytes = $max_payload_bytes !== null ? max(1, $max_payload_bytes) : null;
+        $this->boundary = Site_Export_File_Chunk_Stream_Writer::random_boundary();
+        $this->writer_buffer = new StagedPushRequestBodyBuffer();
+        $this->writer = new Site_Export_File_Chunk_Stream_Writer($this->writer_buffer, $this->boundary);
         $this->apply_cursor($cursor);
     }
 
@@ -732,12 +743,20 @@ final class StagedPushRequestBody
 
                 if ($this->current_frame_remaining_bytes === 0) {
                     $this->close_source();
+                    $this->writer->finish_part();
+                    $this->pending[] = $this->writer_buffer->drain();
                 }
                 continue;
             }
 
             if ($this->stream_frame_index >= count($this->frames)) {
                 if ($this->finalized) {
+                    if (!$this->closed) {
+                        $this->writer->close();
+                        $this->pending[] = $this->writer_buffer->drain();
+                        $this->closed = true;
+                        continue;
+                    }
                     $this->finished = true;
                 }
                 break;
@@ -747,6 +766,11 @@ final class StagedPushRequestBody
             $this->stream_frame_index++;
         }
         return $out;
+    }
+
+    public function content_type(): string
+    {
+        return Site_Export_File_Chunk_Stream_Writer::content_type($this->boundary);
     }
 
     public function bytes_streamed(): int
@@ -821,6 +845,8 @@ final class StagedPushRequestBody
         ];
 
         if ($frame["bytes"] === 0) {
+            $this->writer->finish_part();
+            $this->pending[] = $this->writer_buffer->drain();
             return;
         }
 
@@ -855,18 +881,31 @@ final class StagedPushRequestBody
     /** @param array{artifact_id:string,source_path:string,total_bytes:int} $file */
     private function frame_header(array $file, int $offset, int $bytes, bool $final): string
     {
-        return Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header(
-            $file["artifact_id"],
-            $offset,
-            $bytes,
-            $file["total_bytes"],
-            $final
-        );
+        $this->writer->begin_file([
+            "path" => $file["artifact_id"],
+            "size" => $file["total_bytes"],
+            "offset" => $offset,
+            "chunk_size" => $bytes,
+            "is_first_chunk" => $offset === 0,
+            "is_last_chunk" => $final,
+        ], json_encode([
+            "artifact_id" => $file["artifact_id"],
+            "committed_bytes" => $offset + $bytes,
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        return $this->writer_buffer->drain();
     }
 
     private function read_exactly($source_handle, int $bytes): ?string
     {
-        return Site_Export_Staged_Push_Stream_Protocol::read_exactly($source_handle, $bytes);
+        $data = '';
+        while (strlen($data) < $bytes && !feof($source_handle)) {
+            $chunk = fread($source_handle, $bytes - strlen($data));
+            if ($chunk === false) {
+                return null;
+            }
+            $data .= $chunk;
+        }
+        return strlen($data) === $bytes ? $data : null;
     }
 
     private function close_source(): void
@@ -875,5 +914,27 @@ final class StagedPushRequestBody
             fclose($this->source_handle);
         }
         $this->source_handle = null;
+    }
+}
+
+
+final class StagedPushRequestBodyBuffer
+{
+    private string $body = '';
+
+    public function write(string $body): void
+    {
+        $this->body .= $body;
+    }
+
+    public function sync(): void
+    {
+    }
+
+    public function drain(): string
+    {
+        $body = $this->body;
+        $this->body = '';
+        return $body;
     }
 }

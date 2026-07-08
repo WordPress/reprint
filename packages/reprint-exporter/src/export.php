@@ -149,7 +149,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
      * Also, most chunks declare their Content-Length, so the client may skip the
      * boundary matching entirely and just consume that many bytes.
      */
-    $boundary = "boundary-" . bin2hex(random_bytes(16));
+    $boundary = Site_Export_File_Chunk_Stream_Writer::random_boundary();
     $can_send_headers = !headers_sent();
 
     if ($require_headers && !$can_send_headers) {
@@ -159,7 +159,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
     }
 
     if ($can_send_headers) {
-        @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
+        @header("Content-Type: " . Site_Export_File_Chunk_Stream_Writer::content_type($boundary));
     }
 
     $gz = new GzipOutputStream($can_send_headers && $gzip);

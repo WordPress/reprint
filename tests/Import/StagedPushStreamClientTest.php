@@ -260,16 +260,18 @@ class StagedPushStreamClientTest extends TestCase
 
     private static function writeRouter(): void
     {
-        $import_path = addslashes(realpath(__DIR__ . '/../../packages/reprint-importer/src/import.php'));
+        $exporter_src = addslashes(realpath(__DIR__ . '/../../packages/reprint-exporter/src'));
         $config_path = addslashes(self::$config_path);
         $request_log_path = addslashes(self::$request_log_path);
 
         file_put_contents(self::$router_path, <<<PHP_ROUTER
 <?php
-// PHP 8.1 emits the required CLI script's shebang; keep test HTTP responses clean.
-ob_start();
-require_once '{$import_path}';
-ob_end_clean();
+require_once '{$exporter_src}/utils.php';
+require_once '{$exporter_src}/class-hmac-server.php';
+require_once '{$exporter_src}/class-file-chunk-stream-reader.php';
+require_once '{$exporter_src}/class-staged-artifacts.php';
+require_once '{$exporter_src}/class-staged-endpoints.php';
+require_once '{$exporter_src}/class-http-server.php';
 
 if (parse_url(\$_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) === '/__ping') {
     echo 'ok';

@@ -17,6 +17,16 @@ final class Site_Export_File_Chunk_Stream_Writer
         $this->boundary = $boundary;
     }
 
+    public static function random_boundary(): string
+    {
+        return 'boundary-' . bin2hex(random_bytes(16));
+    }
+
+    public static function content_type(string $boundary): string
+    {
+        return 'multipart/mixed; boundary="' . $boundary . '"';
+    }
+
     public function write_progress(array $progress, string $cursor): void
     {
         $this->write_json_part('progress', $progress, [
@@ -84,13 +94,27 @@ final class Site_Export_File_Chunk_Stream_Writer
     public function write_file(array $chunk, string $cursor): void
     {
         $data = $chunk['data'];
+        $this->begin_file($chunk, $cursor);
+        if ($data !== '') {
+            $this->write_file_body($data);
+        }
+        $this->finish_part();
+    }
+
+    public function begin_file(array $chunk, string $cursor): void
+    {
+        $chunk_size = isset($chunk['chunk_size']) ? (int) $chunk['chunk_size'] : strlen((string) ($chunk['data'] ?? ''));
         $headers = [
             'X-Cursor' => base64_encode($cursor),
             'X-File-Path' => base64_encode($chunk['path']),
             'X-File-Size' => (string) $chunk['size'],
-            'X-File-Ctime' => (string) $chunk['ctime'],
+        ];
+        if (isset($chunk['ctime'])) {
+            $headers['X-File-Ctime'] = (string) $chunk['ctime'];
+        }
+        $headers += [
             'X-Chunk-Offset' => (string) $chunk['offset'],
-            'X-Chunk-Size' => (string) strlen($data),
+            'X-Chunk-Size' => (string) $chunk_size,
             'X-First-Chunk' => $chunk['is_first_chunk'] ? '1' : '0',
             'X-Last-Chunk' => $chunk['is_last_chunk'] ? '1' : '0',
         ];
@@ -103,7 +127,20 @@ final class Site_Export_File_Chunk_Stream_Writer
                 $headers['X-File-Change-Size'] = (string) $chunk['change_size'];
             }
         }
-        $this->write_part('file', 'application/octet-stream', $headers, $data);
+        $this->write_part_header('file', 'application/octet-stream', $headers, $chunk_size);
+    }
+
+    public function write_file_body(string $body): void
+    {
+        if ($body !== '') {
+            $this->stream->write($body);
+        }
+    }
+
+    public function finish_part(): void
+    {
+        $this->stream->write("\r\n");
+        $this->stream->sync();
     }
 
     public function write_completion(array $stats): void
@@ -117,6 +154,11 @@ final class Site_Export_File_Chunk_Stream_Writer
             'X-Memory-Limit' => (string) $stats['memory_limit'],
             'X-Time-Elapsed' => (string) $stats['time_elapsed'],
         ]);
+        $this->close();
+    }
+
+    public function close(): void
+    {
         $this->stream->write("--{$this->boundary}--\r\n");
     }
 
@@ -133,19 +175,23 @@ final class Site_Export_File_Chunk_Stream_Writer
 
     private function write_part(string $chunk_type, string $content_type, array $headers, string $body): void
     {
+        $this->write_part_header($chunk_type, $content_type, $headers, strlen($body));
+        if ($body !== '') {
+            $this->stream->write($body);
+        }
+        $this->finish_part();
+    }
+
+    private function write_part_header(string $chunk_type, string $content_type, array $headers, int $content_length): void
+    {
         $this->stream->write(
             "--{$this->boundary}\r\n" .
             "Content-Type: {$content_type}\r\n" .
-            "Content-Length: " . strlen($body) . "\r\n" .
+            "Content-Length: " . $content_length . "\r\n" .
             "X-Chunk-Type: {$chunk_type}\r\n" .
             $this->format_headers($headers) .
             "\r\n"
         );
-        if ($body !== '') {
-            $this->stream->write($body);
-        }
-        $this->stream->write("\r\n");
-        $this->stream->sync();
     }
 
     private function format_headers(array $headers): string

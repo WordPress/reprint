@@ -3,21 +3,21 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use MultipartStreamParser;
+use Site_Export_File_Chunk_Stream_Reader;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../packages/reprint-exporter/src/class-file-chunk-stream-reader.php';
 
 /**
- * Rigorous test suite for the MultipartStreamParser.
+ * Rigorous test suite for the file chunk stream reader.
  *
  * Tests cover: normal operation, byte-at-a-time feeding, boundary splitting,
  * mixed line endings, binary payloads, empty parts, header edge cases,
  * bodies that look like boundaries, and the 64MB buffer overflow guard.
  */
-class MultipartStreamParserTest extends TestCase
+class FileChunkStreamReaderTest extends TestCase
 {
     /**
-     * Collect all events emitted by the parser into an ArrayObject.
+     * Collect all events emitted by the reader into an ArrayObject.
      * Returns [$events, $handler] — pass $handler to the constructor,
      * read $events like an array after parsing.
      */
@@ -106,7 +106,7 @@ class MultipartStreamParserTest extends TestCase
     public function testSinglePartWithContentLength(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("BOUNDARY", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("BOUNDARY", $handler);
 
         $data = $this->build_multipart("BOUNDARY", [
             ["headers" => ["Content-Length" => "5"], "body" => "hello"],
@@ -120,7 +120,7 @@ class MultipartStreamParserTest extends TestCase
     public function testSinglePartWithoutContentLength(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("BOUNDARY", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("BOUNDARY", $handler);
 
         $data = $this->build_multipart("BOUNDARY", [
             ["headers" => ["X-Custom" => "yes"], "body" => "world"],
@@ -134,7 +134,7 @@ class MultipartStreamParserTest extends TestCase
     public function testMultipleParts(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("B", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("B", $handler);
 
         $data = $this->build_multipart("B", [
             ["headers" => ["Content-Length" => "1"], "body" => "A"],
@@ -152,7 +152,7 @@ class MultipartStreamParserTest extends TestCase
     public function testHeadersAreLowercased(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("B", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("B", $handler);
 
         $data = $this->build_multipart("B", [
             ["headers" => ["Content-Type" => "text/plain", "X-CUSTOM-HEADER" => "val"], "body" => "x"],
@@ -167,7 +167,7 @@ class MultipartStreamParserTest extends TestCase
     public function testHeaderValuePreservesTrailingSpaces(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("B", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("B", $handler);
 
         // Header value with trailing spaces — only leading whitespace is trimmed
         $raw = "--B\r\nX-Test:  value with trailing  \r\n\r\nbody\r\n--B--\r\n";
@@ -182,7 +182,7 @@ class MultipartStreamParserTest extends TestCase
     public function testByteAtATimeFeeding(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("XYZ", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("XYZ", $handler);
 
         $data = $this->build_multipart("XYZ", [
             ["headers" => ["Content-Length" => "3"], "body" => "abc"],
@@ -202,7 +202,7 @@ class MultipartStreamParserTest extends TestCase
     public function testByteAtATimeWithoutContentLength(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("XYZ", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("XYZ", $handler);
 
         $data = $this->build_multipart("XYZ", [
             ["headers" => [], "body" => "no-cl-here"],
@@ -221,7 +221,7 @@ class MultipartStreamParserTest extends TestCase
     public function testBoundarySplitAcrossTwoFeeds(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("SPLIT", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("SPLIT", $handler);
 
         $data = $this->build_multipart("SPLIT", [
             ["headers" => ["Content-Length" => "4"], "body" => "data"],
@@ -242,7 +242,7 @@ class MultipartStreamParserTest extends TestCase
     public function testRandomChunkSizes(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("RND", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("RND", $handler);
 
         $body1 = str_repeat("X", 1000);
         $body2 = str_repeat("Y", 500);
@@ -270,7 +270,7 @@ class MultipartStreamParserTest extends TestCase
     public function testLfOnlyLineEndings(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("B", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("B", $handler);
 
         // Build manually with \n only
         $data = $this->build_multipart("B", [
@@ -285,7 +285,7 @@ class MultipartStreamParserTest extends TestCase
     public function testMixedLineEndingsAcrossParts(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("MIX", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("MIX", $handler);
 
         // First part uses \r\n, second uses \n
         $data = "--MIX\r\nContent-Length: 1\r\n\r\na\r\n--MIX\nContent-Length: 1\n\nb\n--MIX--\n";
@@ -301,7 +301,7 @@ class MultipartStreamParserTest extends TestCase
     public function testBinaryBodyWithContentLength(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("BIN", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("BIN", $handler);
 
         // Body contains \r\n, \n, null bytes, and high bytes
         $binary = "\x00\x01\r\n\n\xff\xfe--BIN\r\nfake boundary inside body";
@@ -317,7 +317,7 @@ class MultipartStreamParserTest extends TestCase
     public function testBodyContainingBoundaryStringWithContentLength(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("TRAP", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("TRAP", $handler);
 
         // The body itself contains "--TRAP" — with Content-Length it must not
         // be interpreted as a boundary delimiter
@@ -334,7 +334,7 @@ class MultipartStreamParserTest extends TestCase
     public function testNullBytesInBody(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("NUL", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("NUL", $handler);
 
         $body = "\x00\x00\x00\x00\x00";
         $data = $this->build_multipart("NUL", [
@@ -351,7 +351,7 @@ class MultipartStreamParserTest extends TestCase
     public function testEmptyBodyWithContentLengthZero(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("EMPTY", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("EMPTY", $handler);
 
         $data = "--EMPTY\r\nContent-Length: 0\r\n\r\n\r\n--EMPTY--\r\n";
         $parser->feed($data);
@@ -363,7 +363,7 @@ class MultipartStreamParserTest extends TestCase
     public function testEmptyBodyWithoutContentLength(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("EMPTY2", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("EMPTY2", $handler);
 
         $data = "--EMPTY2\r\nX-Info: empty\r\n\r\n\r\n--EMPTY2--\r\n";
         $parser->feed($data);
@@ -375,7 +375,7 @@ class MultipartStreamParserTest extends TestCase
     public function testMultipleEmptyParts(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("E", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("E", $handler);
 
         $data = "--E\r\nContent-Length: 0\r\n\r\n\r\n--E\r\nContent-Length: 0\r\n\r\n\r\n--E\r\nContent-Length: 0\r\n\r\n\r\n--E--\r\n";
         $parser->feed($data);
@@ -388,7 +388,7 @@ class MultipartStreamParserTest extends TestCase
     public function testPartWithNoHeaders(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("NH", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("NH", $handler);
 
         // Boundary followed immediately by blank line (no headers), then body
         $data = "--NH\r\n\r\nbare body\r\n--NH--\r\n";
@@ -404,7 +404,7 @@ class MultipartStreamParserTest extends TestCase
     public function testHeaderWithColonInValue(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("HC", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("HC", $handler);
 
         $data = "--HC\r\nX-Url: http://example.com:8080/path\r\nContent-Length: 1\r\n\r\nx\r\n--HC--\r\n";
         $parser->feed($data);
@@ -416,7 +416,7 @@ class MultipartStreamParserTest extends TestCase
     public function testDuplicateHeaderLastWins(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("DH", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("DH", $handler);
 
         $data = "--DH\r\nX-Val: first\r\nX-Val: second\r\nContent-Length: 1\r\n\r\nx\r\n--DH--\r\n";
         $parser->feed($data);
@@ -428,7 +428,7 @@ class MultipartStreamParserTest extends TestCase
     public function testHeaderWithNoValue(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("NV", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("NV", $handler);
 
         // "X-Empty:" with nothing after the colon
         $data = "--NV\r\nX-Empty:\r\nContent-Length: 1\r\n\r\ny\r\n--NV--\r\n";
@@ -441,7 +441,7 @@ class MultipartStreamParserTest extends TestCase
     public function testMalformedHeaderLineWithoutColon(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("ML", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("ML", $handler);
 
         // A line without a colon should be silently ignored
         $data = "--ML\r\nNot-A-Header\r\nContent-Length: 2\r\n\r\nok\r\n--ML--\r\n";
@@ -458,7 +458,7 @@ class MultipartStreamParserTest extends TestCase
     public function testLargeBodyWithContentLength(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("LG", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("LG", $handler);
 
         // 1MB body, fed in 8KB chunks
         $body = str_repeat("A", 1024 * 1024);
@@ -480,7 +480,7 @@ class MultipartStreamParserTest extends TestCase
     public function testLargeBodyWithoutContentLength(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("LG2", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("LG2", $handler);
 
         $body = str_repeat("B", 256 * 1024);
         $data = $this->build_multipart("LG2", [
@@ -503,7 +503,7 @@ class MultipartStreamParserTest extends TestCase
     public function testPreambleBeforeFirstBoundary(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("PRE", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("PRE", $handler);
 
         // Per RFC 2046, anything before the first boundary is the preamble
         // and should be ignored
@@ -519,7 +519,7 @@ class MultipartStreamParserTest extends TestCase
     public function testDataAfterClosingBoundaryIsIgnored(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("CLOSE", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("CLOSE", $handler);
 
         $data = "--CLOSE\r\nContent-Length: 2\r\n\r\nhi\r\n--CLOSE--\r\ntrailing garbage\r\n--CLOSE\r\nContent-Length: 1\r\n\r\nx\r\n--CLOSE--\r\n";
         $parser->feed($data);
@@ -534,7 +534,7 @@ class MultipartStreamParserTest extends TestCase
     public function testIncompleteResponseNoCrash(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("INC", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("INC", $handler);
 
         // Feed just the boundary and headers but cut off mid-body
         $data = "--INC\r\nContent-Length: 1000\r\n\r\nonly a few bytes";
@@ -547,7 +547,7 @@ class MultipartStreamParserTest extends TestCase
     public function testIncompleteHeaders(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("IH", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("IH", $handler);
 
         // Boundary found, but headers are cut off mid-line
         $parser->feed("--IH\r\nContent-Len");
@@ -565,7 +565,7 @@ class MultipartStreamParserTest extends TestCase
     public function testBufferOverflowThrows(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("OVF", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("OVF", $handler);
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage("64MB");
@@ -581,7 +581,7 @@ class MultipartStreamParserTest extends TestCase
     public function testBoundarySubstringInBodyWithoutContentLength(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("AB", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("AB", $handler);
 
         // Body contains "--A" which is a prefix of "--AB" but not the full boundary.
         // Without Content-Length, the parser must not mistake it for the boundary.
@@ -598,7 +598,7 @@ class MultipartStreamParserTest extends TestCase
     {
         $boundary = str_repeat("x", 70); // RFC allows up to 70 chars
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser($boundary, $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader($boundary, $handler);
 
         $data = $this->build_multipart($boundary, [
             ["headers" => ["Content-Length" => "4"], "body" => "test"],
@@ -621,7 +621,7 @@ class MultipartStreamParserTest extends TestCase
     public function testZeroContentLengthFollowedByNonEmptyPart(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("ZC", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("ZC", $handler);
 
         $data = "--ZC\r\nContent-Length: 0\r\n\r\n\r\n--ZC\r\nContent-Length: 5\r\n\r\nhello\r\n--ZC--\r\n";
         $parser->feed($data);
@@ -636,7 +636,7 @@ class MultipartStreamParserTest extends TestCase
     public function testAllByteValuesInBody(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("ALL", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("ALL", $handler);
 
         $body = "";
         for ($i = 0; $i < 256; $i++) {
@@ -657,7 +657,7 @@ class MultipartStreamParserTest extends TestCase
     public function testFeedingExactlyOnePartPerCall(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("SEQ", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("SEQ", $handler);
 
         $parser->feed("--SEQ\r\nContent-Length: 1\r\n\r\na\r\n");
         $this->assertSame(1, $this->count_completed_parts($events));
@@ -682,7 +682,7 @@ class MultipartStreamParserTest extends TestCase
                 $body_chunks[] = $event["data"];
             }
         };
-        $parser = new MultipartStreamParser("STR", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("STR", $handler);
 
         // Feed headers + start of body
         $parser->feed("--STR\r\nContent-Length: 10\r\n\r\n");
@@ -703,7 +703,7 @@ class MultipartStreamParserTest extends TestCase
     {
         $boundary = "----=_Part_123_456.789";
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser($boundary, $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader($boundary, $handler);
 
         $data = $this->build_multipart($boundary, [
             ["headers" => ["Content-Length" => "7"], "body" => "payload"],
@@ -719,7 +719,7 @@ class MultipartStreamParserTest extends TestCase
     public function testEmptyFeedDoesNotBreakState(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("EF", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("EF", $handler);
 
         $parser->feed("");
         $parser->feed("");
@@ -736,7 +736,7 @@ class MultipartStreamParserTest extends TestCase
     public function testPartialClosingBoundaryAtBufferEdge(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("EDGE", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("EDGE", $handler);
 
         // Feed body, then closing boundary split so "--EDGE" arrives but
         // the "--" suffix is in the next feed. The parser must wait for
@@ -758,7 +758,7 @@ class MultipartStreamParserTest extends TestCase
     public function testBodyEndingWithCrLfBeforeBoundary(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("CRLF", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("CRLF", $handler);
 
         // Body is exactly "line1\r\nline2" — the \r\n before the next
         // boundary is a transport delimiter, not part of the body.
@@ -777,7 +777,7 @@ class MultipartStreamParserTest extends TestCase
     public function testOneHundredParts(): void
     {
         [$events, $handler] = $this->make_collector();
-        $parser = new MultipartStreamParser("MANY", $handler);
+        $parser = new Site_Export_File_Chunk_Stream_Reader("MANY", $handler);
 
         $parts = [];
         for ($i = 0; $i < 100; $i++) {
