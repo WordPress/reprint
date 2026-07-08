@@ -570,6 +570,7 @@ if (getenv('SITE_EXPORT_TEST_MODE')) {
 
 require_once __DIR__ . "/class-mysql-dump-producer.php";
 require_once __DIR__ . "/class-file-tree-producer.php";
+require_once __DIR__ . "/class-file-chunk-stream-writer.php";
 
 /**
  * Prepares the PHP environment for streaming by disabling output buffering,
@@ -2198,6 +2199,7 @@ function stream_file_producer(
     $aborted = false;
     $abort_payload = null;
     $last_cursor = "";
+    $writer = new Site_Export_File_Chunk_Stream_Writer($gz, $boundary);
 
     // -- Stream chunks from the producer --
     // The producer yields file data, directories, symlinks, index entries,
@@ -2206,19 +2208,9 @@ function stream_file_producer(
     // until the producer is exhausted or the resource budget runs out.
     try {
         $initial_progress = $producer->get_progress();
-        $initial_progress_json = json_encode_or_throw($initial_progress);
         $initial_cursor = $producer->get_reentrancy_cursor();
         $last_cursor = $initial_cursor;
-        $gz->write(
-            "--{$boundary}\r\n" .
-            "Content-Type: application/json\r\n" .
-            "Content-Length: " . strlen($initial_progress_json) . "\r\n" .
-            "X-Chunk-Type: progress\r\n" .
-            "X-Cursor: " . base64_encode($initial_cursor) . "\r\n" .
-            "\r\n" .
-            $initial_progress_json . "\r\n",
-        );
-        $gz->sync();
+        $writer->write_progress($initial_progress, $initial_cursor);
         while (true) {
             if (
                 !$budget->has_remaining()
@@ -2236,21 +2228,7 @@ function stream_file_producer(
 
             if (!$metadata_sent && $progress["phase"] === "streaming") {
                 $filesystem_root = $producer->get_filesystem_root();
-                $metadata = [
-                    "filesystem_root" => base64_encode($filesystem_root ?? ""),
-                ];
-                $metadata_json = json_encode_or_throw($metadata);
-
-                $gz->write(
-                    "--{$boundary}\r\n" .
-                    "Content-Type: application/json\r\n" .
-                    "Content-Length: " . strlen($metadata_json) . "\r\n" .
-                    "X-Chunk-Type: metadata\r\n" .
-                    "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n" .
-                    "\r\n" .
-                    $metadata_json . "\r\n",
-                );
-                $gz->sync();
+                $writer->write_metadata($filesystem_root);
 
                 $metadata_sent = true;
             }
@@ -2258,20 +2236,10 @@ function stream_file_producer(
             if ($chunk === null) {
                 $now = microtime(true);
                 if ($iterations === 1 || $now - $last_progress_output >= 3.0) {
-                    $progress_json = json_encode_or_throw($progress);
                     $cursor = $producer->get_reentrancy_cursor();
                     $last_cursor = $cursor;
 
-                    $gz->write(
-                        "--{$boundary}\r\n" .
-                        "Content-Type: application/json\r\n" .
-                        "Content-Length: " . strlen($progress_json) . "\r\n" .
-                        "X-Chunk-Type: progress\r\n" .
-                        "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                        "\r\n" .
-                        $progress_json . "\r\n",
-                    );
-                    $gz->sync();
+                    $writer->write_progress($progress, $cursor);
 
                     $last_progress_output = $now;
                 }
@@ -2284,55 +2252,13 @@ function stream_file_producer(
             $last_cursor = $cursor;
 
             if ($chunk_type === "directory") {
-                $part =
-                    "--{$boundary}\r\n" .
-                    "Content-Type: application/octet-stream\r\n" .
-                    "Content-Length: 0\r\n" .
-                    "X-Chunk-Type: directory\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                    "X-Directory-Path: " . base64_encode($chunk["path"]) . "\r\n";
-                if (isset($chunk["ctime"])) {
-                    $part .= "X-Directory-Ctime: " . $chunk["ctime"] . "\r\n";
-                }
-                $gz->write($part . "\r\n\r\n");
-                $gz->sync();
+                $writer->write_directory($chunk, $cursor);
             } elseif ($chunk_type === "symlink") {
-                $gz->write(
-                    "--{$boundary}\r\n" .
-                    "Content-Type: application/octet-stream\r\n" .
-                    "Content-Length: 0\r\n" .
-                    "X-Chunk-Type: symlink\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                    "X-Symlink-Path: " . base64_encode($chunk["path"]) . "\r\n" .
-                    "X-Symlink-Target: " . base64_encode($chunk["target"]) . "\r\n" .
-                    "X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n" .
-                    "\r\n\r\n",
-                );
-                $gz->sync();
+                $writer->write_symlink($chunk, $cursor);
             } elseif ($chunk_type === "index") {
-                $gz->write(
-                    "--{$boundary}\r\n" .
-                    "Content-Type: application/octet-stream\r\n" .
-                    "Content-Length: 0\r\n" .
-                    "X-Chunk-Type: index\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                    "X-Index-Path: " . base64_encode($chunk["path"]) . "\r\n" .
-                    "X-File-Ctime: " . $chunk["ctime"] . "\r\n" .
-                    "X-File-Size: " . $chunk["size"] . "\r\n" .
-                    "\r\n\r\n",
-                );
-                $gz->sync();
+                $writer->write_index($chunk, $cursor);
             } elseif ($chunk_type === "missing") {
-                $gz->write(
-                    "--{$boundary}\r\n" .
-                    "Content-Type: application/octet-stream\r\n" .
-                    "Content-Length: 0\r\n" .
-                    "X-Chunk-Type: missing\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                    "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n" .
-                    "\r\n\r\n",
-                );
-                $gz->sync();
+                $writer->write_missing($chunk, $cursor);
             } elseif ($chunk_type === "error") {
                 $payload = [
                     "error_type" => $chunk["error_type"] ?? "unknown",
@@ -2345,17 +2271,7 @@ function stream_file_producer(
                 if (isset($chunk["actual_ctime"])) {
                     $payload["actual_ctime"] = $chunk["actual_ctime"];
                 }
-                $json = json_encode_or_throw($payload);
-                $gz->write(
-                    "--{$boundary}\r\n" .
-                    "Content-Type: application/json\r\n" .
-                    "Content-Length: " . strlen($json) . "\r\n" .
-                    "X-Chunk-Type: error\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                    "\r\n" .
-                    $json . "\r\n",
-                );
-                $gz->sync();
+                $writer->write_error($payload, $cursor);
             } else {
                 // E2E test hook: before file chunk is emitted
                 if (getenv('SITE_EXPORT_TEST_MODE')) {
@@ -2371,34 +2287,7 @@ function stream_file_producer(
                     $files_completed++;
                 }
 
-                $data = $chunk["data"];
-
-                $headers =
-                    "--{$boundary}\r\n" .
-                    "Content-Type: application/octet-stream\r\n" .
-                    "Content-Length: " . strlen($data) . "\r\n" .
-                    "X-Chunk-Type: file\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                    "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n" .
-                    "X-File-Size: " . $chunk["size"] . "\r\n" .
-                    "X-File-Ctime: " . $chunk["ctime"] . "\r\n" .
-                    "X-Chunk-Offset: " . $chunk["offset"] . "\r\n" .
-                    "X-Chunk-Size: " . strlen($data) . "\r\n" .
-                    "X-First-Chunk: " . ($chunk["is_first_chunk"] ? "1" : "0") . "\r\n" .
-                    "X-Last-Chunk: " . ($chunk["is_last_chunk"] ? "1" : "0") . "\r\n";
-                if (!empty($chunk["file_changed"])) {
-                    $headers .= "X-File-Changed: 1\r\n";
-                    if ($chunk["change_ctime"] !== null) {
-                        $headers .= "X-File-Change-Ctime: " . $chunk["change_ctime"] . "\r\n";
-                    }
-                    if ($chunk["change_size"] !== null) {
-                        $headers .= "X-File-Change-Size: " . $chunk["change_size"] . "\r\n";
-                    }
-                }
-                $gz->write($headers . "\r\n");
-                $gz->write($data);
-                $gz->write("\r\n");
-                $gz->sync();
+                $writer->write_file($chunk, $cursor);
             }
         }
     } catch (Throwable $e) {
@@ -2418,17 +2307,7 @@ function stream_file_producer(
         //        chunk as data. We should try and backfill the output up to the
         //        previous content-length value if possible.
         if ($abort_payload !== null) {
-            $json = json_encode_or_throw($abort_payload);
-            $gz->write(
-                "--{$boundary}\r\n" .
-                "Content-Type: application/json\r\n" .
-                "Content-Length: " . strlen($json) . "\r\n" .
-                "X-Chunk-Type: error\r\n" .
-                "X-Cursor: " . base64_encode($last_cursor) . "\r\n" .
-                "\r\n" .
-                $json . "\r\n",
-            );
-            $gz->sync();
+            $writer->write_error($abort_payload, $last_cursor);
         }
 
         $progress = $producer->get_progress();
@@ -2446,22 +2325,15 @@ function stream_file_producer(
                 "chunks={$chunks_processed}, files={$files_completed}, bytes={$bytes_processed}",
         );
 
-        $gz->write(
-            "--{$boundary}\r\n" .
-            "Content-Type: application/octet-stream\r\n" .
-            "Content-Length: 0\r\n" .
-            "X-Chunk-Type: completion\r\n" .
-            "X-Status: {$status}\r\n" .
-            "X-Chunks-Processed: {$chunks_processed}\r\n" .
-            "X-Files-Completed: {$files_completed}\r\n" .
-            "X-Bytes-Processed: {$bytes_processed}\r\n" .
-            "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
-            "X-Memory-Limit: " . $budget->max_memory . "\r\n" .
-            "X-Time-Elapsed: " . (microtime(true) - $budget->start_time) . "\r\n" .
-            "\r\n" .
-            "\r\n" .
-            "--{$boundary}--\r\n",
-        );
+        $writer->write_completion([
+            "status" => $status,
+            "chunks_processed" => $chunks_processed,
+            "files_completed" => $files_completed,
+            "bytes_processed" => $bytes_processed,
+            "memory_used" => memory_get_peak_usage(true),
+            "memory_limit" => $budget->max_memory,
+            "time_elapsed" => microtime(true) - $budget->start_time,
+        ]);
         $gz->finish();
     } catch (\Throwable $e) {
         error_log("Export: failed to write completion chunk: " . $e->getMessage());
