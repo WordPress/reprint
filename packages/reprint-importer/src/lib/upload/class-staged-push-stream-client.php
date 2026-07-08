@@ -9,7 +9,7 @@
  * target absorbing duplicate/verified frames.
  *
  * The client is a pass-through wire. The caller reads a chunk of a file into
- * memory — at most max_chunk_bytes(), which is why a chunk is the one thing
+ * memory — at most next_chunk_bytes(), which is why a chunk is the one thing
  * that may be buffered — and send_chunk() writes the frame header and the
  * payload straight to the request socket before returning:
  *
@@ -19,7 +19,7 @@
  *             $result = $client->finish_request();   // persist $result['cursor']
  *             $client->start_push_request();
  *         }
- *         $payload = fread($source_handle, min($client->capacity_bytes(), $client->max_chunk_bytes()));
+ *         $payload = fread($source_handle, $client->next_chunk_bytes());
  *         $client->send_chunk([
  *             'artifact_id' => $artifact_id,
  *             'offset'      => $offset,
@@ -31,13 +31,14 @@
  *     $result = $client->finish_request();
  *
  * Two sizes govern the loop, and they are different dimensions. The chunk
- * (max_chunk_bytes()) is the small fixed in-memory unit of one fread. The
- * request body budget (capacity_bytes()) is what hosts and proxies actually
- * limit — post_max_size, client_max_body_size and friends measure the entity
- * body after chunked transfer-encoding removal, and nothing compresses
- * request bodies, so the bytes we write are the bytes that get measured.
- * That budget is learned per host by PushRequestSizer and counts frame
- * header lines alongside payloads.
+ * is the small fixed in-memory unit of one fread. The request body budget
+ * is what hosts and proxies actually limit — post_max_size,
+ * client_max_body_size and friends measure the entity body after chunked
+ * transfer-encoding removal, and nothing compresses request bodies, so the
+ * bytes we write are the bytes that get measured. That budget is learned
+ * per host by PushRequestSizer and counts frame header lines alongside
+ * payloads. next_chunk_bytes() folds both into the one number a caller's
+ * fread needs.
  */
 class StagedPushStreamClient
 {
@@ -245,25 +246,21 @@ class StagedPushStreamClient
     }
 
     /**
-     * Body bytes the current request still accepts, frame headers included.
+     * How many bytes the caller's next fread should ask for.
      *
-     * This is the host-learned request body budget draining toward zero. It
-     * is soft: the caller sizes payloads by it, and the frame header that
-     * rides along may overshoot it by one header line. The sizer's safety
-     * margin absorbs that.
+     * The fixed chunk size — the in-memory unit — bounded by what remains of
+     * the host-learned request body budget, which counts as-sent body bytes,
+     * frame headers included. Returns 0 when the request is full;
+     * should_finish_request() is already true then. Near the end of a file
+     * fread simply returns fewer bytes and the smaller frame is correct, so
+     * callers need no min() of their own. The budget is soft: the frame
+     * header riding along with the last chunk may overshoot it by one header
+     * line, which the sizer's safety margin absorbs.
      */
-    public function capacity_bytes(): int
+    public function next_chunk_bytes(): int
     {
-        return max(0, $this->request_sizer->request_body_bytes() - $this->body_bytes_sent);
-    }
-
-    /**
-     * The in-memory unit: how many bytes one caller fread may hold. Much
-     * smaller than the request body a stream carries across many chunks.
-     */
-    public function max_chunk_bytes(): int
-    {
-        return $this->chunk_bytes;
+        $remaining_body_budget = max(0, $this->request_sizer->request_body_bytes() - $this->body_bytes_sent);
+        return min($this->chunk_bytes, $remaining_body_budget);
     }
 
     /**
@@ -277,7 +274,7 @@ class StagedPushStreamClient
         }
         return $this->transport_error !== null
             || $this->target_replied_early
-            || $this->capacity_bytes() === 0
+            || $this->next_chunk_bytes() === 0
             || (microtime(true) - $this->request_started_at) > $this->max_request_seconds;
     }
 

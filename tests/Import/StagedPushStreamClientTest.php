@@ -175,8 +175,24 @@ class StagedPushStreamClientTest extends TestCase
     public function testBodyBudgetCountsFrameHeadersWhenRotatingRequests(): void
     {
         $this->writeSource('budget.bin', str_repeat('y', 10));
+        $first_frame_header = json_encode([
+            'type' => 'chunk',
+            'artifact_id' => 'budget.bin',
+            'offset' => 0,
+            'bytes' => 4,
+            'total_bytes' => 10,
+            'final' => false,
+        ], JSON_UNESCAPED_SLASHES) . "\n";
+        // Budget for one full frame plus 3 spare bytes, so the value of
+        // next_chunk_bytes() after the first chunk reveals whether the frame
+        // header was charged against the budget alongside the payload.
+        $request_body_budget = strlen($first_frame_header) + 4 + 3;
         $client = $this->makeClient([
-            'request_sizer' => new PushRequestSizer(['floor_bytes' => 4, 'start_bytes' => 150, 'max_bytes' => 150]),
+            'request_sizer' => new PushRequestSizer([
+                'floor_bytes' => 4,
+                'start_bytes' => $request_body_budget,
+                'max_bytes' => $request_body_budget,
+            ]),
         ]);
         $local_paths_to_push = $this->writeLocalPathsToPush(['budget.bin']);
 
@@ -189,19 +205,7 @@ class StagedPushStreamClientTest extends TestCase
             'payload' => 'yyyy',
         ]));
 
-        $sent_frame_header = json_encode([
-            'type' => 'chunk',
-            'artifact_id' => 'budget.bin',
-            'offset' => 0,
-            'bytes' => 4,
-            'total_bytes' => 10,
-            'final' => false,
-        ], JSON_UNESCAPED_SLASHES) . "\n";
-        $this->assertSame(
-            150 - strlen($sent_frame_header) - 4,
-            $client->capacity_bytes(),
-            'capacity accounts for the frame header, not only the payload'
-        );
+        $this->assertSame(3, $client->next_chunk_bytes(), 'the frame header was charged against the budget, not only the payload');
         $this->assertFalse($client->should_finish_request());
 
         $this->assertTrue($client->send_chunk([
@@ -209,13 +213,14 @@ class StagedPushStreamClientTest extends TestCase
             'offset' => 4,
             'total_bytes' => 10,
             'final' => false,
-            'payload' => 'yyyy',
+            'payload' => 'yyy',
         ]));
-        $this->assertSame(0, $client->capacity_bytes(), 'the second frame header spends the rest of the budget');
+        $this->assertSame(0, $client->next_chunk_bytes(), 'the second frame header spends the rest of the budget');
         $this->assertTrue($client->should_finish_request());
 
         $rotation_result = $client->finish_request();
         $this->assertSame('complete', $rotation_result['status'], (string) json_encode($rotation_result));
+        $this->assertSame(['artifact_id' => 'budget.bin', 'committed_bytes' => 7], $rotation_result['cursor']);
 
         $result = $this->pushAll($client, $local_paths_to_push, $rotation_result['cursor']);
 
@@ -483,8 +488,7 @@ PHP_ROUTER);
     /**
      * One pass over the journal from $cursor: the caller loop the client is
      * designed for. Streams journal lines, reads each file in pieces sized by
-     * capacity_bytes()/max_chunk_bytes(), and rotates requests when the
-     * client says to.
+     * next_chunk_bytes(), and rotates requests when the client says to.
      *
      * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int}
      */
@@ -540,7 +544,7 @@ PHP_ROUTER);
 
                 $payload = $total_bytes === 0
                     ? ''
-                    : (string) fread($source_handle, min($total_bytes - $offset, $client->capacity_bytes(), $client->max_chunk_bytes()));
+                    : (string) fread($source_handle, $client->next_chunk_bytes());
                 $final = $offset + strlen($payload) >= $total_bytes;
 
                 if (!$client->send_chunk([
