@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+AGENTS.md holds the working rules distilled from code review in this repo — what to do and what not to do. Read it before writing code; its rules override default instincts.
+
 ## Project Overview
 
 This is a WordPress site export/import system that enables resumable, cursor-based synchronization of both database content and filesystem data over HTTP. The system is designed to work on resource-constrained shared hosting environments by carefully managing memory and execution time.
