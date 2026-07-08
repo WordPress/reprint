@@ -12,9 +12,10 @@
  * This class owns the request-body-size decision:
  *
  * - Remote-reported request limits (post_max_size, upload_max_filesize, and
- *   similar) establish the session ceiling, minus a safety margin for headers
- *   and frame metadata. A reverse proxy or CDN may still reject earlier, so
- *   the ceiling is an upper bound, not a guarantee.
+ *   similar) establish the session ceiling, minus a safety margin for host
+ *   quirks and the frame that may straddle the budget edge. A reverse proxy
+ *   or CDN may still reject earlier, so the ceiling is an upper bound, not a
+ *   guarantee.
  * - Without a useful reported limit, request bodies start at a conservative
  *   32 MiB.
  * - A hard cap (default 1 GiB) bounds every request even when the host

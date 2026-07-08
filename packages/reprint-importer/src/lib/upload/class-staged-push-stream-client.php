@@ -9,7 +9,7 @@
  * target absorbing duplicate/verified frames.
  *
  * The client is a pass-through wire. The caller reads a chunk of a file into
- * memory — at most next_chunk_bytes(), which is why a chunk is the one thing
+ * memory — at most next_chunk_body_bytes(), which is why a chunk is the one thing
  * that may be buffered — and send_chunk() writes the frame header and the
  * payload straight to the request socket before returning:
  *
@@ -19,7 +19,7 @@
  *             $result = $client->finish_request();   // persist $result['cursor']
  *             $client->start_push_request();
  *         }
- *         $payload = fread($source_handle, $client->next_chunk_bytes());
+ *         $payload = fread($source_handle, $client->next_chunk_body_bytes());
  *         $client->send_chunk([
  *             'artifact_id' => $artifact_id,
  *             'offset'      => $offset,
@@ -33,12 +33,12 @@
  * Two sizes govern the loop, and they are different dimensions. The chunk
  * is the small fixed in-memory unit of one fread. The request body budget
  * is what hosts and proxies actually limit — post_max_size,
- * client_max_body_size and friends measure the entity body after chunked
- * transfer-encoding removal, and nothing compresses request bodies, so the
- * bytes we write are the bytes that get measured. That budget is learned
- * per host by PushRequestSizer and counts frame header lines alongside
- * payloads. next_chunk_bytes() folds both into the one number a caller's
- * fread needs.
+ * client_max_body_size and friends measure the entity body, and nothing
+ * compresses request bodies, so the bytes we write are the bytes that get
+ * measured. That budget is learned per host by PushRequestSizer and charges
+ * everything the body carries: frame header lines, payloads, and the
+ * chunked transfer-encoding framing around them. next_chunk_body_bytes()
+ * folds both sizes into the one number a caller's fread needs.
  */
 class StagedPushStreamClient
 {
@@ -233,14 +233,19 @@ class StagedPushStreamClient
         }
         $frame_header .= "\n";
 
-        if (!$this->write_to_socket($this->encode_body_chunk($frame_header))) {
+        // Account the encoded wire bytes — frame header, payload, and the
+        // chunked transfer-encoding size lines and CRLFs around each — so
+        // body_bytes_sent equals what the request body actually carries.
+        $encoded_frame_header = $this->encode_body_chunk($frame_header);
+        if (!$this->write_to_socket($encoded_frame_header)) {
             return false;
         }
-        if ($payload !== "" && !$this->write_to_socket($this->encode_body_chunk($payload))) {
+        $encoded_payload = $payload === "" ? "" : $this->encode_body_chunk($payload);
+        if ($encoded_payload !== "" && !$this->write_to_socket($encoded_payload)) {
             return false;
         }
 
-        $this->body_bytes_sent += strlen($frame_header) + strlen($payload);
+        $this->body_bytes_sent += strlen($encoded_frame_header) + strlen($encoded_payload);
         $this->chunks_sent++;
         return true;
     }
@@ -249,15 +254,17 @@ class StagedPushStreamClient
      * How many bytes the caller's next fread should ask for.
      *
      * The fixed chunk size — the in-memory unit — bounded by what remains of
-     * the host-learned request body budget, which counts as-sent body bytes,
-     * frame headers included. Returns 0 when the request is full;
-     * should_finish_request() is already true then. Near the end of a file
-     * fread simply returns fewer bytes and the smaller frame is correct, so
-     * callers need no min() of their own. The budget is soft: the frame
-     * header riding along with the last chunk may overshoot it by one header
-     * line, which the sizer's safety margin absorbs.
+     * the host-learned request body budget. That budget counts every byte
+     * the request body carries: frame header lines, payloads, and the
+     * chunked transfer-encoding size lines and CRLFs around them — hence
+     * "body bytes", not just payload bytes. Returns 0 when the request is
+     * full; should_finish_request() is already true then. Near the end of a
+     * file fread simply returns fewer bytes and the smaller frame is
+     * correct, so callers need no min() of their own. The budget is soft:
+     * the header and framing riding along with the last chunk may overshoot
+     * it by one frame's overhead, which the sizer's safety margin absorbs.
      */
-    public function next_chunk_bytes(): int
+    public function next_chunk_body_bytes(): int
     {
         $remaining_body_budget = max(0, $this->request_sizer->request_body_bytes() - $this->body_bytes_sent);
         return min($this->chunk_bytes, $remaining_body_budget);
@@ -274,7 +281,7 @@ class StagedPushStreamClient
         }
         return $this->transport_error !== null
             || $this->target_replied_early
-            || $this->next_chunk_bytes() === 0
+            || $this->next_chunk_body_bytes() === 0
             || (microtime(true) - $this->request_started_at) > $this->max_request_seconds;
     }
 
