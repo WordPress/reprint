@@ -130,6 +130,20 @@ final class Site_Export_Staged_Endpoints {
      * a commit, the next request may replay from the last sender cursor or from
      * the beginning; verified artifacts and duplicate ranges are absorbed.
      *
+     * Behavior steps:
+     * 1. Read one JSON header line and validate the frame before reading its
+     *    payload bytes.
+     * 2. Reject frames larger than this endpoint accepts, before consuming the
+     *    oversized payload.
+     * 3. If the artifact is already verified, consume the frame payload only to
+     *    keep the stream aligned with the next JSON header.
+     * 4. If the artifact is partially committed, discard any replayed prefix
+     *    bytes that the store already has and append only the missing suffix.
+     * 5. Append the remaining payload in bounded pieces so one frame cannot
+     *    force the endpoint to hold the full chunk in memory.
+     * 6. Finalize only when the frame marks the artifact final, then report the
+     *    latest cursor for the sender to resume from after failures.
+     *
      * @param array $config Request parameters.
      * @param array $headers Request headers/server vars ($_SERVER shape).
      * @param resource|null $input Request body stream (php://input).
@@ -184,6 +198,16 @@ final class Site_Export_Staged_Endpoints {
             }
 
             $status = $this->store->status($artifact_id);
+
+            /**
+             * Already-verified artifact case.
+             *
+             * The sender may replay a request body from the beginning after a
+             * previous request committed and finalized this artifact. The store
+             * must not append or finalize it again, but the frame payload is
+             * still present in the request body. Read and discard those bytes so
+             * the next loop iteration starts at the following JSON header.
+             */
             if ($status['verified']) {
                 if ($status['committed_bytes'] !== $total_bytes) {
                     return $this->stream_rejected(409, 'size_mismatch', null, [
@@ -206,6 +230,16 @@ final class Site_Export_Staged_Endpoints {
                 $append_offset = $offset;
 
                 $committed_bytes = (int) $status['committed_bytes'];
+
+                /**
+                 * Partially-committed replay case.
+                 *
+                 * The sender can retry a frame whose prefix was accepted before
+                 * the earlier request failed. Consume the bytes already stored,
+                 * advance the append offset to the first missing byte, and keep
+                 * the cursor at the remote committed position so the sender can
+                 * resume from that boundary if this request fails too.
+                 */
                 if ($committed_bytes > $offset) {
                     $already_committed_bytes = min($bytes, $committed_bytes - $offset);
                     if (!Site_Export_Staged_Push_Stream_Protocol::discard_exactly($input, $already_committed_bytes, self::READ_BUFFER_BYTES)) {
@@ -225,6 +259,16 @@ final class Site_Export_Staged_Endpoints {
                     $remaining_frame_bytes -= $payload_piece_bytes;
 
                     while ($payload_piece !== '') {
+                        /**
+                         * Append/reconcile case.
+                         *
+                         * A bounded payload piece normally appends once. If the
+                         * store reports that part of this piece was already
+                         * committed, trim that prefix and retry only the suffix;
+                         * this keeps a resumed request moving forward without
+                         * asking the sender to open another request for the same
+                         * frame.
+                         */
                         $append_result = $this->store->append($artifact_id, $append_offset, $payload_piece);
                         if ($append_result['status'] === 'accepted' || $append_result['status'] === 'duplicate') {
                             $append_offset = max($append_offset + strlen($payload_piece), (int) $append_result['committed_bytes']);
@@ -254,6 +298,13 @@ final class Site_Export_Staged_Endpoints {
                 }
             }
 
+            /**
+             * Final frame case.
+             *
+             * Payload bytes are durable before this branch runs. Only frames
+             * marked final ask the store to compare committed bytes with
+             * total_bytes and mark the artifact verified.
+             */
             if ($final) {
                 $finalize_result = $this->store->finalize($artifact_id, $total_bytes);
                 unset($finalize_result['path']);
