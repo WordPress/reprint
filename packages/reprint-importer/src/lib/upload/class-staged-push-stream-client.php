@@ -6,9 +6,9 @@
  * framed file chunks. The target commits each frame into
  * Site_Export_Staged_Artifacts as it is read, so a broken connection can be
  * retried from the last cursor the sender has, or from the beginning with the
- * target absorbing duplicate/verified frames. This class does not expose a
- * per-file request API: callers pass a staged push stream processor, and
- * the client streams its chunks through one request.
+ * target absorbing duplicate/verified frames. This class exposes request-level
+ * control rather than a per-file request API: callers decide how many frames go
+ * into one request, finalize it, and resume the next request from the cursor.
  */
 class StagedPushStreamClient
 {
@@ -49,29 +49,43 @@ class StagedPushStreamClient
     }
 
     /**
-     * Send one staged_push request and return the request-level result.
+     * Create one staged_push request that the caller can fill chunk by chunk.
      *
-     * The caller owns the loop. A successful request may still leave more local
-     * chunks to send; use StagedPushStreamProcessor::is_finished_at() on the
-     * returned cursor to decide whether to call this again.
+     * The caller owns the nested loop: first start a request, then call
+     * StagedPushStreamRequest::next_chunk() until the request budget or the
+     * caller's own budget says to stop, then finalize and send the request.
      *
      * @param array{max_chunks?:int|null,max_payload_bytes?:int|null} $limits
      * @param array{artifact_id?:string,committed_bytes?:int}|null $cursor
+     */
+    public function create_request(StagedPushStreamProcessor $processor, ?array $cursor = null, array $limits = []): StagedPushStreamRequest
+    {
+        $request_start_cursor = $cursor ?? $processor->cursor();
+        return new StagedPushStreamRequest(
+            $processor->create_request_body(
+                $this->frame_sizer->chunk_bytes(),
+                $request_start_cursor,
+                $limits["max_chunks"] ?? null,
+                $limits["max_payload_bytes"] ?? null
+            ),
+            $request_start_cursor
+        );
+    }
+
+    /**
+     * Send one finalized staged_push request and return the request-level result.
+     *
      * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,bytes_streamed:int,chunks_streamed:int}
      */
-    public function push_next_request(StagedPushStreamProcessor $processor, ?array $cursor = null, array $limits = []): array
+    public function push_request(StagedPushStreamRequest $request): array
     {
-        if (!$processor->has_files()) {
-            return $this->result("complete", null, null, null, 0, 0, 0);
+        $request->finalize();
+        if (!$request->has_chunks()) {
+            return $this->result("request_complete", null, null, $request->cursor(), 0, 0, 0);
         }
 
-        $request_start_cursor = $cursor ?? $processor->cursor();
-        $body = $processor->create_request_body(
-            $this->frame_sizer->chunk_bytes(),
-            $request_start_cursor,
-            $limits["max_chunks"] ?? null,
-            $limits["max_payload_bytes"] ?? null
-        );
+        $body = $request->body();
+        $request_start_cursor = $request->start_cursor();
         $response = $this->send_stream_request($body);
 
         if ($response["error"] !== null) {
@@ -139,6 +153,29 @@ class StagedPushStreamClient
             $body->bytes_streamed(),
             $body->chunks_streamed()
         );
+    }
+
+    /**
+     * Convenience wrapper that fills and sends one request.
+     *
+     * Prefer create_request()/push_request() when the caller needs to pause
+     * inside a request after a caller-chosen number of chunks.
+     *
+     * @param array{max_chunks?:int|null,max_payload_bytes?:int|null} $limits
+     * @param array{artifact_id?:string,committed_bytes?:int}|null $cursor
+     * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,bytes_streamed:int,chunks_streamed:int}
+     */
+    public function push_next_request(StagedPushStreamProcessor $processor, ?array $cursor = null, array $limits = []): array
+    {
+        if (!$processor->has_files()) {
+            return $this->result("complete", null, null, null, 0, 0, 0);
+        }
+
+        $request = $this->create_request($processor, $cursor, $limits);
+        while ($request->next_chunk()) {
+            // Fill this request up to the configured request budget.
+        }
+        return $this->push_request($request);
     }
 
     /** @return array{http_code:int,body:string,error:?string} */
@@ -212,11 +249,81 @@ class StagedPushStreamClient
 }
 
 /**
+ * Caller-controlled request builder for one staged push stream request.
+ */
+final class StagedPushStreamRequest
+{
+    private StagedPushRequestBody $body;
+
+    /** @var array{artifact_id?:string,committed_bytes?:int}|null */
+    private ?array $start_cursor;
+
+    private bool $finalized = false;
+
+    /**
+     * @param array{artifact_id?:string,committed_bytes?:int}|null $start_cursor
+     */
+    public function __construct(StagedPushRequestBody $body, ?array $start_cursor)
+    {
+        $this->body = $body;
+        $this->start_cursor = $start_cursor;
+    }
+
+    /**
+     * Add one more framed chunk to this request.
+     *
+     * @return bool Whether a chunk was added. False means the request is full
+     *              or the processor has no more chunks to send.
+     */
+    public function next_chunk(): bool
+    {
+        if ($this->finalized) {
+            return false;
+        }
+        return $this->body->next_chunk();
+    }
+
+    public function finalize(): void
+    {
+        $this->finalized = true;
+        $this->body->finalize();
+    }
+
+    public function is_finalized(): bool
+    {
+        return $this->finalized;
+    }
+
+    public function has_chunks(): bool
+    {
+        return $this->body->chunks_planned() > 0;
+    }
+
+    /** @return array{artifact_id?:string,committed_bytes?:int}|null */
+    public function start_cursor(): ?array
+    {
+        return $this->start_cursor;
+    }
+
+    /** @return array{artifact_id?:string,committed_bytes?:int}|null */
+    public function cursor(): ?array
+    {
+        return $this->body->cursor();
+    }
+
+    public function body(): StagedPushRequestBody
+    {
+        return $this->body;
+    }
+}
+
+/**
  * Cursor-style driver for staged push streams.
  *
- * This mirrors processor and async-client APIs: next_request() advances one
- * network request, get_result() exposes what happened, and the caller decides
- * whether to keep looping, persist the cursor, or pause the push.
+ * This mirrors processor and async-client APIs: next_request() opens one
+ * network request, the request advances chunk by chunk, finalize_request()
+ * sends it, and the caller decides whether to keep looping, persist the
+ * cursor, or pause the push.
  */
 final class StagedPushStreamPusher
 {
@@ -244,6 +351,8 @@ final class StagedPushStreamPusher
 
     /** @var array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,bytes_streamed:int,chunks_streamed:int}|null */
     private ?array $result = null;
+
+    private ?StagedPushStreamRequest $request = null;
 
     private int $request_failures = 0;
 
@@ -273,17 +382,39 @@ final class StagedPushStreamPusher
     }
 
     /**
-     * Advance the push by one staged_push request.
+     * Open the next staged_push request.
      *
-     * @return bool Whether a request-level result is available via get_result().
+     * @return bool Whether a request is available via get_request().
      */
     public function next_request(): bool
     {
-        if ($this->finished) {
+        if ($this->finished || $this->request !== null) {
             return false;
         }
 
-        $result = $this->client->push_next_request($this->processor, $this->cursor, $this->limits);
+        $this->request = $this->client->create_request($this->processor, $this->cursor, $this->limits);
+        $this->result = null;
+        return true;
+    }
+
+    public function get_request(): ?StagedPushStreamRequest
+    {
+        return $this->request;
+    }
+
+    /**
+     * Finalize and send the current request.
+     *
+     * @return bool Whether a request-level result is available via get_result().
+     */
+    public function finalize_request(): bool
+    {
+        if ($this->request === null) {
+            return false;
+        }
+
+        $result = $this->client->push_request($this->request);
+        $this->request = null;
         $this->result = $result;
 
         if ($result["status"] === "request_complete") {
@@ -480,6 +611,9 @@ final class StagedPushRequestBody
     /** @var array{artifact_id?:string,committed_bytes?:int}|null */
     private ?array $initial_cursor;
 
+    /** @var array<int,array{file_index:int,offset:int,bytes:int,final:bool,header:string}> */
+    private array $frames = [];
+
     /** @var array<int,string> */
     private array $pending = [];
 
@@ -487,14 +621,20 @@ final class StagedPushRequestBody
 
     private int $offset = 0;
 
+    private int $stream_frame_index = 0;
+
     /** @var resource|null */
     private $source_handle = null;
 
     private int $current_frame_remaining_bytes = 0;
 
-    private bool $current_frame_final = false;
+    private int $current_frame_file_index = 0;
 
     private bool $finished = false;
+
+    private bool $finalized = false;
+
+    private int $payload_bytes_planned = 0;
 
     private int $bytes_streamed = 0;
 
@@ -517,6 +657,49 @@ final class StagedPushRequestBody
         $this->apply_cursor($cursor);
     }
 
+    /**
+     * Plan one more frame for this request body.
+     *
+     * The request still streams from disk through curl later. Planning a frame
+     * only records its header, source path, and byte range so the caller can
+     * decide where a request boundary belongs before the HTTP request starts.
+     */
+    public function next_chunk(): bool
+    {
+        if ($this->finalized || $this->file_index >= count($this->files) || $this->request_limit_reached()) {
+            return false;
+        }
+
+        $file = $this->files[$this->file_index];
+        if ($file["total_bytes"] === 0) {
+            $this->frames[] = $this->frame($this->file_index, 0, 0, true);
+            $this->cursor = ["artifact_id" => $file["artifact_id"], "committed_bytes" => 0];
+            $this->file_index++;
+            return true;
+        }
+
+        $bytes = min($this->frame_bytes, $file["total_bytes"] - $this->offset, $this->remaining_payload_bytes());
+        $final = $this->offset + $bytes >= $file["total_bytes"];
+        $this->frames[] = $this->frame($this->file_index, $this->offset, $bytes, $final);
+        $this->payload_bytes_planned += $bytes;
+        $this->offset += $bytes;
+        $this->cursor = [
+            "artifact_id" => $file["artifact_id"],
+            "committed_bytes" => $this->offset,
+        ];
+
+        if ($final) {
+            $this->file_index++;
+            $this->offset = 0;
+        }
+        return true;
+    }
+
+    public function finalize(): void
+    {
+        $this->finalized = true;
+    }
+
     public function read(int $length): string
     {
         $out = "";
@@ -537,27 +720,31 @@ final class StagedPushRequestBody
                 $piece_bytes = min($remaining_output_bytes, $this->current_frame_remaining_bytes);
                 $piece = $this->read_exactly($this->source_handle, $piece_bytes);
                 if ($piece === null) {
-                    throw new RuntimeException("Source file ended before declared size: " . $this->files[$this->file_index]["source_path"]);
+                    throw new RuntimeException("Source file ended before declared size: " . $this->files[$this->current_frame_file_index]["source_path"]);
                 }
                 $out .= $piece;
                 $this->bytes_streamed += strlen($piece);
-                $this->offset += strlen($piece);
                 $this->current_frame_remaining_bytes -= strlen($piece);
                 $this->cursor = [
-                    "artifact_id" => $this->files[$this->file_index]["artifact_id"],
-                    "committed_bytes" => $this->offset,
+                    "artifact_id" => $this->files[$this->current_frame_file_index]["artifact_id"],
+                    "committed_bytes" => $this->frames[$this->stream_frame_index - 1]["offset"] + $this->frames[$this->stream_frame_index - 1]["bytes"] - $this->current_frame_remaining_bytes,
                 ];
 
-                if ($this->current_frame_remaining_bytes === 0 && $this->current_frame_final) {
+                if ($this->current_frame_remaining_bytes === 0) {
                     $this->close_source();
-                    $this->file_index++;
-                    $this->offset = 0;
-                    $this->current_frame_final = false;
                 }
                 continue;
             }
 
-            $this->begin_next_frame();
+            if ($this->stream_frame_index >= count($this->frames)) {
+                if ($this->finalized) {
+                    $this->finished = true;
+                }
+                break;
+            }
+
+            $this->begin_streaming_frame($this->frames[$this->stream_frame_index]);
+            $this->stream_frame_index++;
         }
         return $out;
     }
@@ -570,6 +757,11 @@ final class StagedPushRequestBody
     public function chunks_streamed(): int
     {
         return $this->chunks_streamed;
+    }
+
+    public function chunks_planned(): int
+    {
+        return count($this->frames);
     }
 
     public function cursor(): ?array
@@ -605,48 +797,51 @@ final class StagedPushRequestBody
         return ["file_index" => 0, "offset" => 0];
     }
 
-    private function begin_next_frame(): void
+    /** @return array{file_index:int,offset:int,bytes:int,final:bool,header:string} */
+    private function frame(int $file_index, int $offset, int $bytes, bool $final): array
     {
-        if ($this->file_index >= count($this->files) || $this->request_limit_reached()) {
+        return [
+            "file_index" => $file_index,
+            "offset" => $offset,
+            "bytes" => $bytes,
+            "final" => $final,
+            "header" => $this->frame_header($this->files[$file_index], $offset, $bytes, $final),
+        ];
+    }
+
+    /** @param array{file_index:int,offset:int,bytes:int,final:bool,header:string} $frame */
+    private function begin_streaming_frame(array $frame): void
+    {
+        $this->pending[] = $frame["header"];
+        $this->chunks_streamed++;
+        $this->current_frame_file_index = $frame["file_index"];
+        $this->cursor = [
+            "artifact_id" => $this->files[$frame["file_index"]]["artifact_id"],
+            "committed_bytes" => $frame["offset"],
+        ];
+
+        if ($frame["bytes"] === 0) {
+            return;
+        }
+
+        $file = $this->files[$frame["file_index"]];
+        $this->source_handle = @fopen($file["source_path"], "rb");
+        if ($this->source_handle === false) {
+            throw new RuntimeException("Source file is unreadable: " . $file["source_path"]);
+        }
+        if (fseek($this->source_handle, $frame["offset"]) !== 0) {
             $this->close_source();
-            $this->finished = true;
-            return;
-        }
-
-        $file = $this->files[$this->file_index];
-        if ($this->source_handle === null && $file["total_bytes"] > 0) {
-            $this->source_handle = @fopen($file["source_path"], "rb");
-            if ($this->source_handle === false) {
-                throw new RuntimeException("Source file is unreadable: " . $file["source_path"]);
-            }
-        }
-
-        if ($file["total_bytes"] === 0) {
-            $this->pending[] = $this->frame_header($file, 0, 0, true);
-            $this->chunks_streamed++;
-            $this->cursor = ["artifact_id" => $file["artifact_id"], "committed_bytes" => 0];
-            $this->file_index++;
-            return;
-        }
-
-        $bytes = min($this->frame_bytes, $file["total_bytes"] - $this->offset, $this->remaining_payload_bytes());
-        if (fseek($this->source_handle, $this->offset) !== 0) {
             throw new RuntimeException("Could not seek source file: " . $file["source_path"]);
         }
-
-        $final = $this->offset + $bytes >= $file["total_bytes"];
-        $this->pending[] = $this->frame_header($file, $this->offset, $bytes, $final);
-        $this->chunks_streamed++;
-        $this->current_frame_remaining_bytes = $bytes;
-        $this->current_frame_final = $final;
+        $this->current_frame_remaining_bytes = $frame["bytes"];
     }
 
     private function request_limit_reached(): bool
     {
-        if ($this->max_chunks !== null && $this->chunks_streamed >= $this->max_chunks) {
+        if ($this->max_chunks !== null && count($this->frames) >= $this->max_chunks) {
             return true;
         }
-        return $this->max_payload_bytes !== null && $this->bytes_streamed >= $this->max_payload_bytes;
+        return $this->max_payload_bytes !== null && $this->payload_bytes_planned >= $this->max_payload_bytes;
     }
 
     private function remaining_payload_bytes(): int
@@ -654,7 +849,7 @@ final class StagedPushRequestBody
         if ($this->max_payload_bytes === null) {
             return PHP_INT_MAX;
         }
-        return max(1, $this->max_payload_bytes - $this->bytes_streamed);
+        return max(1, $this->max_payload_bytes - $this->payload_bytes_planned);
     }
 
     /** @param array{artifact_id:string,source_path:string,total_bytes:int} $file */

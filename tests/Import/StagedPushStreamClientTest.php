@@ -154,13 +154,17 @@ class StagedPushStreamClientTest extends TestCase
         $local_paths_to_push = $this->writeLocalPathsToPush(['chunked.bin']);
         $processor = new StagedPushStreamProcessor($this->source_dir, $local_paths_to_push);
         $pusher = new StagedPushStreamPusher($client, $processor, [
-            'max_chunks_per_request' => 1,
             'sleeper' => function (int $microseconds): void {
                 $this->sleeps[] = $microseconds;
             },
         ]);
 
         $this->assertTrue($pusher->next_request());
+        $request = $pusher->get_request();
+        $this->assertNotNull($request);
+        $this->assertTrue($request->next_chunk());
+        $request->finalize();
+        $this->assertTrue($pusher->finalize_request());
         $first_result = $pusher->get_result();
 
         $this->assertSame('in_progress', $first_result['status'], var_export($first_result, true));
@@ -169,12 +173,17 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertSame(str_repeat('x', 4), file_get_contents($this->staging_dir . '/files/chunked.bin'));
 
         while ($pusher->next_request()) {
-            // Keep advancing one request at a time until the pusher reports completion.
+            $request = $pusher->get_request();
+            $this->assertNotNull($request);
+            while ($request->next_chunk()) {
+                // Keep filling the current request until its configured budget is exhausted.
+            }
+            $this->assertTrue($pusher->finalize_request());
         }
 
         $this->assertSame('complete', $pusher->get_result()['status'], var_export($pusher->get_result(), true));
         $this->assertSame(str_repeat('x', 12), file_get_contents($this->staging_dir . '/files/chunked.bin'));
-        $this->assertSame(['staged_push', 'staged_push', 'staged_push'], $this->endpointsSeen());
+        $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen());
     }
 
     public function testPayloadByteLimitStartsNewRequestsAsNeeded(): void
@@ -327,7 +336,12 @@ PHP_ROUTER);
             },
         ], $options));
         while ($pusher->next_request()) {
-            // The caller owns this loop and may break after any request.
+            $request = $pusher->get_request();
+            $this->assertNotNull($request);
+            while ($request->next_chunk()) {
+                // The caller owns this inner loop and may finalize after any chunk.
+            }
+            $this->assertTrue($pusher->finalize_request());
         }
         return $pusher->get_result() ?? [
             'status' => 'complete',
