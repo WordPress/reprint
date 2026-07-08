@@ -15,8 +15,8 @@
  * instead of mutating the live tree for the duration of the transfer.
  *
  * The first consumer is push: bounded frames from an outbound-only local
- * site, sized by PushFrameSizer on the importer side. The pull file
- * writer has the same needs whenever its target is a live site — today it
+ * site, sized by the push client's chunk reads on the importer side. The
+ * pull file writer has the same needs whenever its target is a live site — today it
  * streams downloads straight to their final paths, which is fine for a fresh
  * local directory but not for a web-served tree — so nothing here is
  * upload-specific: sequential offsets match pull's byte-offset resume model.

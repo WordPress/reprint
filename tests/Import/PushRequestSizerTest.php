@@ -3,11 +3,11 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use PushFrameSizer;
+use PushRequestSizer;
 
 require_once __DIR__ . '/../../importer/import.php';
 
-class PushFrameSizerTest extends TestCase
+class PushRequestSizerTest extends TestCase
 {
     private const MIB = 1024 * 1024;
 
@@ -17,44 +17,44 @@ class PushFrameSizerTest extends TestCase
 
     public function testStartsAtConservativeBootstrapSizeWithoutLimits(): void
     {
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
 
-        $this->assertSame(32 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(32 * self::MIB, $sizer->request_body_bytes());
     }
 
     public function testReportedLimitAboveChunkKeepsCurrentSize(): void
     {
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
 
         $decision = $sizer->apply_reported_limits([256 * self::MIB, null, 128 * self::MIB]);
 
         $this->assertSame('steady', $decision['action']);
-        $this->assertSame(32 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(32 * self::MIB, $sizer->request_body_bytes());
     }
 
     public function testSmallestReportedLimitClampsChunkWithSafetyMargin(): void
     {
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
 
         $decision = $sizer->apply_reported_limits([64 * self::MIB, 8 * self::MIB]);
 
         $this->assertSame('shrink', $decision['action']);
-        $this->assertSame((int) (8 * self::MIB * 0.9), $sizer->chunk_bytes());
+        $this->assertSame((int) (8 * self::MIB * 0.9), $sizer->request_body_bytes());
     }
 
     public function testUnknownLimitValuesAreIgnored(): void
     {
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
 
         $decision = $sizer->apply_reported_limits([null, 0, -1]);
 
         $this->assertSame('steady', $decision['action']);
-        $this->assertSame(32 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(32 * self::MIB, $sizer->request_body_bytes());
     }
 
     public function testLaterHigherReportedLimitDoesNotRaiseTheCeiling(): void
     {
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
         $sizer->apply_reported_limits([8 * self::MIB]);
 
         // A re-preflight reporting a raised limit must not undo what the
@@ -64,12 +64,12 @@ class PushFrameSizerTest extends TestCase
             $sizer->record_success();
         }
 
-        $this->assertSame((int) (8 * self::MIB * 0.9), $sizer->chunk_bytes());
+        $this->assertSame((int) (8 * self::MIB * 0.9), $sizer->request_body_bytes());
     }
 
     public function testReportedLimitBelowFloorGivesUp(): void
     {
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
 
         $decision = $sizer->apply_reported_limits([512 * 1024]);
 
@@ -83,41 +83,40 @@ class PushFrameSizerTest extends TestCase
     public function testSuccessDoublesTowardReportedLimit(): void
     {
         // A host reporting 256M must not stay capped at the 32 MiB bootstrap.
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
         $sizer->apply_reported_limits([256 * self::MIB]);
 
         $this->assertSame('grow', $sizer->record_success()['action']);
-        $this->assertSame(64 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(64 * self::MIB, $sizer->request_body_bytes());
 
         $sizer->record_success();
         $sizer->record_success();
 
-        // The 128 MiB hard cap binds before the reported 256M * 0.9 ceiling:
-        // one whole chunk is buffered in sender memory, so growth stops there.
-        $this->assertSame(128 * self::MIB, $sizer->chunk_bytes());
+        $ceiling = (int) (256 * self::MIB * 0.9);
+        $this->assertSame($ceiling, $sizer->request_body_bytes());
         $this->assertSame('steady', $sizer->record_success()['action']);
-        $this->assertSame(128 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame($ceiling, $sizer->request_body_bytes());
     }
 
     public function testGrowthWithoutLimitsStopsAtConfiguredMax(): void
     {
-        $sizer = new PushFrameSizer(["max_bytes" => 64 * self::MIB]);
+        $sizer = new PushRequestSizer(["max_bytes" => 64 * self::MIB]);
 
         $sizer->record_success();
-        $this->assertSame(64 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(64 * self::MIB, $sizer->request_body_bytes());
         $this->assertSame('steady', $sizer->record_success()['action']);
     }
 
     public function testHardCapAppliesEvenWhenHostReportsALargerLimit(): void
     {
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
         $sizer->apply_reported_limits([4 * 1024 * self::MIB]);
 
         for ($i = 0; $i < 10; $i++) {
             $sizer->record_success();
         }
 
-        $this->assertSame(128 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(1024 * self::MIB, $sizer->request_body_bytes());
     }
 
     // ---------------------------------------------------------------
@@ -126,39 +125,39 @@ class PushFrameSizerTest extends TestCase
 
     public function testTooLargeWithServerReportedLimitDropsBelowIt(): void
     {
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
 
         $decision = $sizer->record_too_large(16 * self::MIB);
 
         $this->assertSame('shrink', $decision['action']);
-        $this->assertSame((int) (16 * self::MIB * 0.9), $sizer->chunk_bytes());
+        $this->assertSame((int) (16 * self::MIB * 0.9), $sizer->request_body_bytes());
     }
 
-    public function testTooLargeWithReportedLimitAboveCurrentChunkStillShrinks(): void
+    public function testTooLargeWithReportedLimitAboveCurrentSizeStillShrinks(): void
     {
         // A proxy can reject at a lower bound than the limit PHP reports, so
         // a rejected size must never be retried unchanged.
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
 
         $decision = $sizer->record_too_large(512 * self::MIB);
 
         $this->assertSame('shrink', $decision['action']);
-        $this->assertSame(16 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(16 * self::MIB, $sizer->request_body_bytes());
     }
 
     public function testTooLargeWithoutReportedLimitHalves(): void
     {
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
 
         $decision = $sizer->record_too_large();
 
         $this->assertSame('shrink', $decision['action']);
-        $this->assertSame(16 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(16 * self::MIB, $sizer->request_body_bytes());
     }
 
     public function testGrowthNeverRetriesARefusedSize(): void
     {
-        $sizer = new PushFrameSizer(["growth_holdoff_successes" => 1]);
+        $sizer = new PushRequestSizer(["growth_holdoff_successes" => 1]);
         $sizer->record_too_large(); // 32 MiB refused, ceiling capped at 16 MiB
 
         $sizer->record_success(); // absorbs the holdoff
@@ -166,27 +165,27 @@ class PushFrameSizerTest extends TestCase
             $sizer->record_success();
         }
 
-        $this->assertSame(16 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(16 * self::MIB, $sizer->request_body_bytes());
     }
 
     public function testTooLargeBetweenFloorAndTwiceFloorStillTriesTheFloor(): void
     {
-        $sizer = new PushFrameSizer(["start_bytes" => 3 * 512 * 1024]); // 1.5 MiB
+        $sizer = new PushRequestSizer(["start_bytes" => 3 * 512 * 1024]); // 1.5 MiB
 
         $decision = $sizer->record_too_large();
 
         $this->assertSame('shrink', $decision['action']);
-        $this->assertSame(self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(self::MIB, $sizer->request_body_bytes());
     }
 
     public function testTooLargeAtFloorGivesUp(): void
     {
-        $sizer = new PushFrameSizer(["start_bytes" => self::MIB]);
+        $sizer = new PushRequestSizer(["start_bytes" => self::MIB]);
 
         $decision = $sizer->record_too_large();
 
         $this->assertSame('give_up', $decision['action']);
-        $this->assertSame(self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(self::MIB, $sizer->request_body_bytes());
     }
 
     // ---------------------------------------------------------------
@@ -195,11 +194,11 @@ class PushFrameSizerTest extends TestCase
 
     public function testRequestFailureHalvesWithoutCappingTheCeiling(): void
     {
-        $sizer = new PushFrameSizer(["growth_holdoff_successes" => 2]);
+        $sizer = new PushRequestSizer(["growth_holdoff_successes" => 2]);
 
         $decision = $sizer->record_request_failure();
         $this->assertSame('shrink', $decision['action']);
-        $this->assertSame(16 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(16 * self::MIB, $sizer->request_body_bytes());
 
         // Two successes absorb the holdoff, then growth resumes past the
         // failed size — a transient timeout must not clamp the session.
@@ -207,12 +206,12 @@ class PushFrameSizerTest extends TestCase
         $this->assertSame('steady', $sizer->record_success()['action']);
         $this->assertSame('grow', $sizer->record_success()['action']);
         $sizer->record_success();
-        $this->assertSame(64 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(64 * self::MIB, $sizer->request_body_bytes());
     }
 
     public function testRequestFailureAtFloorGivesUp(): void
     {
-        $sizer = new PushFrameSizer(["start_bytes" => self::MIB]);
+        $sizer = new PushRequestSizer(["start_bytes" => self::MIB]);
 
         $this->assertSame('give_up', $sizer->record_request_failure()['action']);
     }
@@ -223,30 +222,30 @@ class PushFrameSizerTest extends TestCase
 
     public function testStateSurvivesRoundTrip(): void
     {
-        $sizer = new PushFrameSizer();
+        $sizer = new PushRequestSizer();
         $sizer->apply_reported_limits([64 * self::MIB]);
         $sizer->record_too_large();
 
-        $resumed = new PushFrameSizer([], $sizer->get_state());
+        $resumed = new PushRequestSizer([], $sizer->get_state());
 
-        $this->assertSame($sizer->chunk_bytes(), $resumed->chunk_bytes());
+        $this->assertSame($sizer->request_body_bytes(), $resumed->request_body_bytes());
         $this->assertSame($sizer->get_state(), $resumed->get_state());
 
         // The learned ceiling still constrains growth after the resume.
         for ($i = 0; $i < 8; $i++) {
             $resumed->record_success();
         }
-        $this->assertSame(16 * self::MIB, $resumed->chunk_bytes());
+        $this->assertSame(16 * self::MIB, $resumed->request_body_bytes());
     }
 
     public function testRestoredStateIsClampedToConfiguredBounds(): void
     {
-        $sizer = new PushFrameSizer(
+        $sizer = new PushRequestSizer(
             ["max_bytes" => 64 * self::MIB],
-            ["chunk_bytes" => PHP_INT_MAX, "ceiling_bytes" => -5, "growth_holdoff_remaining" => -2],
+            ["request_body_bytes" => PHP_INT_MAX, "ceiling_bytes" => -5, "growth_holdoff_remaining" => -2],
         );
 
-        $this->assertSame(64 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(64 * self::MIB, $sizer->request_body_bytes());
         $state = $sizer->get_state();
         $this->assertNull($state['ceiling_bytes']);
         $this->assertSame(0, $state['growth_holdoff_remaining']);

@@ -30,11 +30,14 @@
  *     }
  *     $result = $client->finish_request();
  *
- * Budgets count as-sent body bytes. Request-size limits (post_max_size,
- * client_max_body_size and friends) measure the entity body after chunked
- * transfer-encoding removal, and nothing compresses request bodies, so the
- * bytes we write are the bytes that get measured — frame header lines count
- * toward capacity_bytes(), not only payloads.
+ * Two sizes govern the loop, and they are different dimensions. The chunk
+ * (max_chunk_bytes()) is the small fixed in-memory unit of one fread. The
+ * request body budget (capacity_bytes()) is what hosts and proxies actually
+ * limit — post_max_size, client_max_body_size and friends measure the entity
+ * body after chunked transfer-encoding removal, and nothing compresses
+ * request bodies, so the bytes we write are the bytes that get measured.
+ * That budget is learned per host by PushRequestSizer and counts frame
+ * header lines alongside payloads.
  */
 class StagedPushStreamClient
 {
@@ -45,14 +48,15 @@ class StagedPushStreamClient
 
     private ?Site_Export_HMAC_Client $hmac_client;
 
-    private PushFrameSizer $frame_sizer;
+    private PushRequestSizer $request_sizer;
 
     private int $request_timeout;
 
     /** @var int|float Wall-clock budget per request, in seconds. */
     private $max_request_seconds;
 
-    private ?int $max_request_body_bytes;
+    /** @var int In-memory unit of one caller fread, in bytes. */
+    private int $chunk_bytes;
 
     /** @var resource|null */
     private $socket = null;
@@ -84,18 +88,17 @@ class StagedPushStreamClient
      *   - base_url (string, required): the export API URL; endpoint is appended
      *     to its query string.
      *   - hmac_client (?Site_Export_HMAC_Client): envelope request signer.
-     *   - frame_sizer (?PushFrameSizer): chunk-size decisions; defaults to a
-     *     fresh frame sizer. Pass one restored from persisted state to keep
-     *     learned limits.
+     *   - request_sizer (?PushRequestSizer): request-body-size decisions;
+     *     defaults to a fresh sizer. Pass one restored from persisted state
+     *     to keep learned limits.
+     *   - chunk_bytes (int): in-memory unit of one caller fread; unrelated
+     *     to the request body budget. Default 4 MiB.
      *   - request_timeout (int): seconds without socket progress (one write,
      *     or the response read) before the request fails. Default 120.
      *   - max_request_seconds (int|float): wall-clock budget per request;
      *     should_finish_request() turns true once a request is older than
      *     this. Soft — checked between chunks — so set it with margin below
      *     the host's execution/proxy limits. Default 30.
-     *   - max_request_body_bytes (?int): body bytes per request, frame
-     *     headers included, after which should_finish_request() turns true.
-     *     Null means requests rotate on time alone.
      */
     public function __construct(array $options)
     {
@@ -105,15 +108,13 @@ class StagedPushStreamClient
         }
         $this->base_url = $base_url;
         $this->hmac_client = $options["hmac_client"] ?? null;
-        $this->frame_sizer = $options["frame_sizer"] ?? new PushFrameSizer();
+        $this->request_sizer = $options["request_sizer"] ?? new PushRequestSizer();
+        $chunk_bytes = $options["chunk_bytes"] ?? null;
+        $this->chunk_bytes = is_numeric($chunk_bytes) && (int) $chunk_bytes > 0 ? (int) $chunk_bytes : 4 * 1024 * 1024;
         $timeout = $options["request_timeout"] ?? null;
         $this->request_timeout = is_numeric($timeout) && (int) $timeout > 0 ? (int) $timeout : 120;
         $max_request_seconds = $options["max_request_seconds"] ?? null;
         $this->max_request_seconds = is_numeric($max_request_seconds) && $max_request_seconds > 0 ? $max_request_seconds : 30;
-        $max_request_body_bytes = $options["max_request_body_bytes"] ?? null;
-        $this->max_request_body_bytes = is_numeric($max_request_body_bytes) && (int) $max_request_body_bytes > 0
-            ? (int) $max_request_body_bytes
-            : null;
     }
 
     /**
@@ -246,25 +247,23 @@ class StagedPushStreamClient
     /**
      * Body bytes the current request still accepts, frame headers included.
      *
-     * The budget is soft: the caller sizes payloads by it, and the frame
-     * header that rides along may overshoot it by one header line. The frame
-     * sizer's safety margin absorbs that.
+     * This is the host-learned request body budget draining toward zero. It
+     * is soft: the caller sizes payloads by it, and the frame header that
+     * rides along may overshoot it by one header line. The sizer's safety
+     * margin absorbs that.
      */
     public function capacity_bytes(): int
     {
-        if ($this->max_request_body_bytes === null) {
-            return PHP_INT_MAX;
-        }
-        return max(0, $this->max_request_body_bytes - $this->body_bytes_sent);
+        return max(0, $this->request_sizer->request_body_bytes() - $this->body_bytes_sent);
     }
 
     /**
-     * Largest single chunk the learned frame ceiling allows. This bounds the
-     * caller's fread, so it is also the most memory one chunk may occupy.
+     * The in-memory unit: how many bytes one caller fread may hold. Much
+     * smaller than the request body a stream carries across many chunks.
      */
     public function max_chunk_bytes(): int
     {
-        return $this->frame_sizer->chunk_bytes();
+        return $this->chunk_bytes;
     }
 
     /**
@@ -320,7 +319,7 @@ class StagedPushStreamClient
         $this->socket = null;
 
         if ($response === null) {
-            $decision = $this->frame_sizer->record_request_failure();
+            $decision = $this->request_sizer->record_request_failure();
             return $this->result(
                 $decision["action"] === "give_up" ? "failed" : "retry",
                 "request_failed",
@@ -330,7 +329,7 @@ class StagedPushStreamClient
 
         $decoded = json_decode($response["body"], true);
         if (!is_array($decoded)) {
-            $decision = $this->frame_sizer->record_request_failure();
+            $decision = $this->request_sizer->record_request_failure();
             return $this->result(
                 $decision["action"] === "give_up" ? "failed" : "retry",
                 "request_failed",
@@ -342,7 +341,7 @@ class StagedPushStreamClient
 
         if ($response["http_code"] === 413 || ($decoded["reason"] ?? null) === "frame_too_large") {
             $reported_max_frame_bytes = $decoded["max_frame_bytes"] ?? ($decoded["max_request_bytes"] ?? null);
-            $decision = $this->frame_sizer->record_too_large(
+            $decision = $this->request_sizer->record_too_large(
                 is_numeric($reported_max_frame_bytes) ? (int) $reported_max_frame_bytes : null
             );
             return $this->result(
@@ -363,7 +362,7 @@ class StagedPushStreamClient
             );
         }
 
-        $this->frame_sizer->record_success();
+        $this->request_sizer->record_success();
         return $this->result("complete", null, null, $response_cursor, (int) ($decoded["files_verified"] ?? 0));
     }
 

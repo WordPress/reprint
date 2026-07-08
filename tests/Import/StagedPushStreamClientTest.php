@@ -7,7 +7,7 @@ use PHPUnit\Framework\TestCase;
 use Site_Export_HMAC_Client;
 use Site_Export_Staged_Artifacts;
 use StagedPushStreamClient;
-use PushFrameSizer;
+use PushRequestSizer;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -175,7 +175,9 @@ class StagedPushStreamClientTest extends TestCase
     public function testBodyBudgetCountsFrameHeadersWhenRotatingRequests(): void
     {
         $this->writeSource('budget.bin', str_repeat('y', 10));
-        $client = $this->makeClient(['max_request_body_bytes' => 150]);
+        $client = $this->makeClient([
+            'request_sizer' => new PushRequestSizer(['floor_bytes' => 4, 'start_bytes' => 150, 'max_bytes' => 150]),
+        ]);
         $local_paths_to_push = $this->writeLocalPathsToPush(['budget.bin']);
 
         $this->assertTrue($client->start_push_request());
@@ -258,7 +260,7 @@ class StagedPushStreamClientTest extends TestCase
         $store->finalize('first.bin', 8);
         $store->append('second.bin', 0, str_repeat('b', 4));
         $client = $this->makeClient([
-            'frame_sizer' => new PushFrameSizer(['floor_bytes' => 4, 'start_bytes' => 8, 'max_bytes' => 8]),
+            'chunk_bytes' => 8,
         ]);
         $local_paths_to_push = $this->writeLocalPathsToPush([
             'first.bin',
@@ -273,20 +275,23 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertSame(['staged_push'], $this->endpointsSeen());
     }
 
-    public function testFrameTooLargeShrinksAndRetriesTheStream(): void
+    public function testFrameTooLargeShrinksTheBodyBudgetAndRetries(): void
     {
         $this->writeSource('large.bin', str_repeat('x', 20));
         $this->configureEndpoint(['max_request_bytes' => 6]);
-        $sizer = new PushFrameSizer(['floor_bytes' => 4, 'start_bytes' => 12, 'max_bytes' => 12]);
-        $client = $this->makeClient(['frame_sizer' => $sizer]);
+        $sizer = new PushRequestSizer(['floor_bytes' => 4, 'start_bytes' => 12, 'max_bytes' => 12]);
+        $client = $this->makeClient(['request_sizer' => $sizer, 'chunk_bytes' => 12]);
         $local_paths_to_push = $this->writeLocalPathsToPush(['large.bin']);
 
         $result = $this->pushAll($client, $local_paths_to_push);
 
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertSame(str_repeat('x', 20), file_get_contents($this->staging_dir . '/files/large.bin'));
-        $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen());
-        $this->assertLessThanOrEqual(5, $sizer->chunk_bytes());
+        // The 413 caps the body budget at the reported 6 * 0.9 = 5 bytes, so
+        // after the rejected first request the remaining 20 bytes travel as
+        // four one-frame requests, chunks sized down to the capacity.
+        $this->assertSame(array_fill(0, 5, 'staged_push'), $this->endpointsSeen());
+        $this->assertLessThanOrEqual(5, $sizer->request_body_bytes());
     }
 
     public function testWrongSecretFailsBeforeReadingTheBody(): void
@@ -314,7 +319,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $client = new StagedPushStreamClient([
             'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
-            'frame_sizer' => new PushFrameSizer(['floor_bytes' => 2, 'start_bytes' => 4, 'max_bytes' => 4]),
+            'chunk_bytes' => 4,
         ]);
 
         $pending_connections = [$listener];
@@ -452,7 +457,7 @@ PHP_ROUTER);
         return new StagedPushStreamClient(array_merge([
             'base_url' => self::$base_url,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
-            'frame_sizer' => new PushFrameSizer(['floor_bytes' => 4, 'start_bytes' => 4, 'max_bytes' => 4]),
+            'chunk_bytes' => 4,
         ], $overrides));
     }
 
