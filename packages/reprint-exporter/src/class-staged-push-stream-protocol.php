@@ -13,24 +13,6 @@ final class Site_Export_Staged_Push_Stream_Protocol {
     public const CONTENT_TYPE = 'application/x-reprint-staged-push-stream';
 
     /**
-     * @return string JSON header line terminated by "\n".
-     */
-    public static function encode_chunk_header(string $artifact_id, int $offset, int $bytes, int $total_bytes, bool $final): string {
-        $line = json_encode([
-            'type' => 'chunk',
-            'artifact_id' => $artifact_id,
-            'offset' => $offset,
-            'bytes' => $bytes,
-            'total_bytes' => $total_bytes,
-            'final' => $final,
-        ], JSON_UNESCAPED_SLASHES);
-        if ($line === false) {
-            throw new RuntimeException('Could not encode staged push stream frame header.');
-        }
-        return $line . "\n";
-    }
-
-    /**
      * Read the next frame header line from a stream.
      *
      * @param resource $input

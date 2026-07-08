@@ -61,14 +61,18 @@ final class StagedEndpointsTest extends TestCase {
     {
         $body = '';
         foreach ($frames as $frame) {
-            $body .= Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header(
-                $frame['artifact_id'],
-                $frame['offset'],
-                strlen($frame['bytes']),
-                $frame['total_bytes'],
-                $frame['final']
-            );
-            $body .= $frame['bytes'];
+            $header = json_encode([
+                'type' => 'chunk',
+                'artifact_id' => $frame['artifact_id'],
+                'offset' => $frame['offset'],
+                'bytes' => strlen($frame['bytes']),
+                'total_bytes' => $frame['total_bytes'],
+                'final' => $frame['final'],
+            ], JSON_UNESCAPED_SLASHES);
+            if ($header === false) {
+                throw new RuntimeException('Could not encode staged push stream frame header.');
+            }
+            $body .= $header . "\n" . $frame['bytes'];
         }
         return $body;
     }

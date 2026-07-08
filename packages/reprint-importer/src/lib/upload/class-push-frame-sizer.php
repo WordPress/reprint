@@ -93,8 +93,11 @@ class PushFrameSizer
         // through the current floor, ceiling, and hard cap before resuming.
         $ceiling = $state["ceiling_bytes"] ?? null;
         $this->ceiling_bytes = is_numeric($ceiling) && (int) $ceiling > 0 ? (int) $ceiling : null;
-        $this->chunk_bytes = $this->clamp_chunk(
-            (int) ($state["chunk_bytes"] ?? $config["start_bytes"]),
+        $state_chunk_bytes = (int) ($state["chunk_bytes"] ?? $config["start_bytes"]);
+        $effective_ceiling = min($this->ceiling_bytes ?? PHP_INT_MAX, $config["max_bytes"]);
+        $this->chunk_bytes = max(
+            $config["floor_bytes"],
+            min(max($effective_ceiling, $config["floor_bytes"]), $state_chunk_bytes),
         );
         $this->growth_holdoff_remaining = max(0, (int) ($state["growth_holdoff_remaining"] ?? 0));
     }
@@ -132,7 +135,7 @@ class PushFrameSizer
         }
 
         if ($smallest === null) {
-            return $this->decision("steady");
+            return ["action" => "steady", "chunk_bytes" => $this->chunk_bytes];
         }
 
         // Limits only lower the ceiling; a later, higher preflight value
@@ -150,16 +153,16 @@ class PushFrameSizer
     {
         if ($this->growth_holdoff_remaining > 0) {
             $this->growth_holdoff_remaining--;
-            return $this->decision("steady");
+            return ["action" => "steady", "chunk_bytes" => $this->chunk_bytes];
         }
 
-        $grown = min($this->chunk_bytes * 2, $this->effective_ceiling());
+        $grown = min($this->chunk_bytes * 2, min($this->ceiling_bytes ?? PHP_INT_MAX, $this->config["max_bytes"]));
         if ($grown <= $this->chunk_bytes) {
-            return $this->decision("steady");
+            return ["action" => "steady", "chunk_bytes" => $this->chunk_bytes];
         }
 
         $this->chunk_bytes = $grown;
-        return $this->decision("grow");
+        return ["action" => "grow", "chunk_bytes" => $this->chunk_bytes];
     }
 
     /**
@@ -188,7 +191,7 @@ class PushFrameSizer
         }
 
         if ($this->chunk_bytes <= $this->config["floor_bytes"]) {
-            return $this->decision("give_up");
+            return ["action" => "give_up", "chunk_bytes" => $this->chunk_bytes];
         }
 
         return $this->lower_ceiling(max($this->config["floor_bytes"], intdiv($this->chunk_bytes, 2)));
@@ -209,11 +212,11 @@ class PushFrameSizer
         $this->growth_holdoff_remaining = $this->config["growth_holdoff_successes"];
 
         if ($this->chunk_bytes <= $this->config["floor_bytes"]) {
-            return $this->decision("give_up");
+            return ["action" => "give_up", "chunk_bytes" => $this->chunk_bytes];
         }
 
         $this->chunk_bytes = max($this->config["floor_bytes"], intdiv($this->chunk_bytes, 2));
-        return $this->decision("shrink");
+        return ["action" => "shrink", "chunk_bytes" => $this->chunk_bytes];
     }
 
     /**
@@ -242,45 +245,15 @@ class PushFrameSizer
 
         if ($this->ceiling_bytes < $this->config["floor_bytes"]) {
             $this->chunk_bytes = $this->config["floor_bytes"];
-            return $this->decision("give_up");
+            return ["action" => "give_up", "chunk_bytes" => $this->chunk_bytes];
         }
 
         if ($this->chunk_bytes <= $this->ceiling_bytes) {
-            return $this->decision("steady");
+            return ["action" => "steady", "chunk_bytes" => $this->chunk_bytes];
         }
 
         $this->chunk_bytes = $this->ceiling_bytes;
-        return $this->decision("shrink");
+        return ["action" => "shrink", "chunk_bytes" => $this->chunk_bytes];
     }
 
-    /**
-     * Returns the active ceiling after applying the unconditional hard cap.
-     */
-    private function effective_ceiling(): int
-    {
-        return min($this->ceiling_bytes ?? PHP_INT_MAX, $this->config["max_bytes"]);
-    }
-
-    /**
-     * Normalizes restored state without converting an already-impossible
-     * ceiling into an invalid chunk size.
-     */
-    private function clamp_chunk(int $chunk_bytes): int
-    {
-        return max(
-            $this->config["floor_bytes"],
-            min(max($this->effective_ceiling(), $this->config["floor_bytes"]), $chunk_bytes),
-        );
-    }
-
-    /**
-     * @return array{action:string,chunk_bytes:int}
-     */
-    private function decision(string $action): array
-    {
-        return [
-            "action" => $action,
-            "chunk_bytes" => $this->chunk_bytes,
-        ];
-    }
 }

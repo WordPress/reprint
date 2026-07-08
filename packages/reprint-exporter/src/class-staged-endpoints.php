@@ -160,10 +160,11 @@ final class Site_Export_Staged_Endpoints {
         $files_verified = 0;
         $cursor = null;
         while (!feof($input)) {
-            $line = Site_Export_Staged_Push_Stream_Protocol::read_header_line($input);
-            if ($line === null) {
+            $line = fgets($input);
+            if ($line === false) {
                 break;
             }
+            $line = rtrim($line, "\r\n");
             try {
                 $frame = Site_Export_Staged_Push_Stream_Protocol::decode_chunk_header($line);
             } catch (InvalidArgumentException $e) {
@@ -379,27 +380,25 @@ final class Site_Export_Staged_Endpoints {
                 $code = 423;
                 break;
             default:
-                $code = $this->code_for_reason( (string) $result['reason']);
+                switch ((string) $result['reason']) {
+                    case 'io_error':
+                        $code = 500;
+                        break;
+                    case 'offset_gap':
+                    case 'already_verified':
+                    case 'size_mismatch':
+                    case 'missing':
+                        $code = 409;
+                        break;
+                    default:
+                        $code = 400;
+                }
         }
 
         return [
             'http_code' => $code,
             'body' => $result,
         ];
-    }
-
-    private function code_for_reason(string $reason): int {
-        switch ($reason) {
-            case 'io_error':
-                return 500;
-            case 'offset_gap':
-            case 'already_verified':
-            case 'size_mismatch':
-            case 'missing':
-                return 409;
-            default:
-                return 400;
-        }
     }
 
     /**

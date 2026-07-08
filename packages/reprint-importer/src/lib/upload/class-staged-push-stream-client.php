@@ -167,8 +167,8 @@ class StagedPushStreamClient
      */
     public function push_next_request(StagedPushStreamProcessor $processor, ?array $cursor = null, array $limits = []): array
     {
-        if (!$processor->has_files()) {
-            return $this->result("complete", null, null, null, 0, 0, 0);
+        if ($processor->is_finished_at($cursor ?? $processor->cursor())) {
+            return $this->result("complete", null, null, $cursor ?? $processor->cursor(), 0, 0, 0);
         }
 
         $request = $this->create_request($processor, $cursor, $limits);
@@ -289,11 +289,6 @@ final class StagedPushStreamRequest
         $this->body->finalize();
     }
 
-    public function is_finalized(): bool
-    {
-        return $this->finalized;
-    }
-
     public function has_chunks(): bool
     {
         return $this->body->chunks_planned() > 0;
@@ -370,15 +365,17 @@ final class StagedPushStreamPusher
     {
         $this->client = $client;
         $this->processor = $processor;
+        $max_chunks = $options["max_chunks_per_request"] ?? null;
+        $max_payload_bytes = $options["max_payload_bytes_per_request"] ?? null;
         $this->limits = [
-            "max_chunks" => $this->positive_int_or_null($options["max_chunks_per_request"] ?? null),
-            "max_payload_bytes" => $this->positive_int_or_null($options["max_payload_bytes_per_request"] ?? null),
+            "max_chunks" => is_numeric($max_chunks) && (int) $max_chunks > 0 ? (int) $max_chunks : null,
+            "max_payload_bytes" => is_numeric($max_payload_bytes) && (int) $max_payload_bytes > 0 ? (int) $max_payload_bytes : null,
         ];
         $this->sleeper = $options["sleeper"] ?? static function (int $microseconds): void {
             usleep($microseconds);
         };
         $this->cursor = $processor->cursor();
-        $this->finished = !$processor->has_files() || $processor->is_finished_at($this->cursor);
+        $this->finished = $processor->is_finished_at($this->cursor);
     }
 
     /**
@@ -436,7 +433,8 @@ final class StagedPushStreamPusher
                 $this->result["status"] = "failed";
                 $this->finished = true;
             } else {
-                $this->backoff($this->request_failures);
+                $delay = min(self::MAX_BACKOFF_USEC, self::RETRY_BACKOFF_USEC * (2 ** max(0, $this->request_failures - 1)));
+                call_user_func($this->sleeper, (int) $delay);
             }
             return true;
         }
@@ -463,16 +461,6 @@ final class StagedPushStreamPusher
         return $this->finished;
     }
 
-    private function backoff(int $attempt): void
-    {
-        $delay = min(self::MAX_BACKOFF_USEC, self::RETRY_BACKOFF_USEC * (2 ** max(0, $attempt - 1)));
-        call_user_func($this->sleeper, (int) $delay);
-    }
-
-    private function positive_int_or_null($value): ?int
-    {
-        return is_numeric($value) && (int) $value > 0 ? (int) $value : null;
-    }
 }
 
 /**
@@ -503,11 +491,6 @@ final class StagedPushStreamProcessor
         $this->local_files_root_path = rtrim($local_files_root_path, "/");
         $this->local_paths_to_push_path = $local_paths_to_push_path;
         $this->cursor = $cursor;
-    }
-
-    public function has_files(): bool
-    {
-        return $this->files() !== [];
     }
 
     /** @return array{artifact_id?:string,committed_bytes?:int}|null */
@@ -654,7 +637,9 @@ final class StagedPushRequestBody
         $this->initial_cursor = $cursor;
         $this->max_chunks = $max_chunks !== null ? max(1, $max_chunks) : null;
         $this->max_payload_bytes = $max_payload_bytes !== null ? max(1, $max_payload_bytes) : null;
-        $this->apply_cursor($cursor);
+        $start = $this->cursor_start();
+        $this->file_index = $start["file_index"];
+        $this->offset = $start["offset"];
     }
 
     /**
@@ -666,23 +651,47 @@ final class StagedPushRequestBody
      */
     public function next_chunk(): bool
     {
-        if ($this->finalized || $this->file_index >= count($this->files) || $this->request_limit_reached()) {
+        if ($this->finalized || $this->file_index >= count($this->files)) {
+            return false;
+        }
+        if ($this->max_chunks !== null && count($this->frames) >= $this->max_chunks) {
+            return false;
+        }
+        if ($this->max_payload_bytes !== null && $this->payload_bytes_planned >= $this->max_payload_bytes) {
             return false;
         }
 
         $file = $this->files[$this->file_index];
-        if ($file["total_bytes"] === 0) {
-            $this->frames[] = $this->frame($this->file_index, 0, 0, true);
-            $this->cursor = ["artifact_id" => $file["artifact_id"], "committed_bytes" => 0];
-            $this->file_index++;
-            return true;
+        $offset = $this->offset;
+        $remaining_payload_bytes = $this->max_payload_bytes === null
+            ? PHP_INT_MAX
+            : max(1, $this->max_payload_bytes - $this->payload_bytes_planned);
+        $bytes = $file["total_bytes"] === 0
+            ? 0
+            : min($this->frame_bytes, $file["total_bytes"] - $offset, $remaining_payload_bytes);
+        $final = $offset + $bytes >= $file["total_bytes"];
+
+        $header = json_encode([
+            "type" => "chunk",
+            "artifact_id" => $file["artifact_id"],
+            "offset" => $offset,
+            "bytes" => $bytes,
+            "total_bytes" => $file["total_bytes"],
+            "final" => $final,
+        ], JSON_UNESCAPED_SLASHES);
+        if ($header === false) {
+            throw new RuntimeException("Could not encode staged push stream frame header.");
         }
 
-        $bytes = min($this->frame_bytes, $file["total_bytes"] - $this->offset, $this->remaining_payload_bytes());
-        $final = $this->offset + $bytes >= $file["total_bytes"];
-        $this->frames[] = $this->frame($this->file_index, $this->offset, $bytes, $final);
+        $this->frames[] = [
+            "file_index" => $this->file_index,
+            "offset" => $offset,
+            "bytes" => $bytes,
+            "final" => $final,
+            "header" => $header . "\n",
+        ];
         $this->payload_bytes_planned += $bytes;
-        $this->offset += $bytes;
+        $this->offset = $offset + $bytes;
         $this->cursor = [
             "artifact_id" => $file["artifact_id"],
             "committed_bytes" => $this->offset,
@@ -718,7 +727,7 @@ final class StagedPushRequestBody
 
             if ($this->current_frame_remaining_bytes > 0) {
                 $piece_bytes = min($remaining_output_bytes, $this->current_frame_remaining_bytes);
-                $piece = $this->read_exactly($this->source_handle, $piece_bytes);
+                $piece = Site_Export_Staged_Push_Stream_Protocol::read_exactly($this->source_handle, $piece_bytes);
                 if ($piece === null) {
                     throw new RuntimeException("Source file ended before declared size: " . $this->files[$this->current_frame_file_index]["source_path"]);
                 }
@@ -769,13 +778,6 @@ final class StagedPushRequestBody
         return $this->cursor;
     }
 
-    private function apply_cursor(?array $cursor): void
-    {
-        $start = $this->cursor_start();
-        $this->file_index = $start["file_index"];
-        $this->offset = $start["offset"];
-    }
-
     /** @return array{file_index:int,offset:int} */
     private function cursor_start(): array
     {
@@ -795,18 +797,6 @@ final class StagedPushRequestBody
             }
         }
         return ["file_index" => 0, "offset" => 0];
-    }
-
-    /** @return array{file_index:int,offset:int,bytes:int,final:bool,header:string} */
-    private function frame(int $file_index, int $offset, int $bytes, bool $final): array
-    {
-        return [
-            "file_index" => $file_index,
-            "offset" => $offset,
-            "bytes" => $bytes,
-            "final" => $final,
-            "header" => $this->frame_header($this->files[$file_index], $offset, $bytes, $final),
-        ];
     }
 
     /** @param array{file_index:int,offset:int,bytes:int,final:bool,header:string} $frame */
@@ -834,39 +824,6 @@ final class StagedPushRequestBody
             throw new RuntimeException("Could not seek source file: " . $file["source_path"]);
         }
         $this->current_frame_remaining_bytes = $frame["bytes"];
-    }
-
-    private function request_limit_reached(): bool
-    {
-        if ($this->max_chunks !== null && count($this->frames) >= $this->max_chunks) {
-            return true;
-        }
-        return $this->max_payload_bytes !== null && $this->payload_bytes_planned >= $this->max_payload_bytes;
-    }
-
-    private function remaining_payload_bytes(): int
-    {
-        if ($this->max_payload_bytes === null) {
-            return PHP_INT_MAX;
-        }
-        return max(1, $this->max_payload_bytes - $this->payload_bytes_planned);
-    }
-
-    /** @param array{artifact_id:string,source_path:string,total_bytes:int} $file */
-    private function frame_header(array $file, int $offset, int $bytes, bool $final): string
-    {
-        return Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header(
-            $file["artifact_id"],
-            $offset,
-            $bytes,
-            $file["total_bytes"],
-            $final
-        );
-    }
-
-    private function read_exactly($source_handle, int $bytes): ?string
-    {
-        return Site_Export_Staged_Push_Stream_Protocol::read_exactly($source_handle, $bytes);
     }
 
     private function close_source(): void

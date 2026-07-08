@@ -4,15 +4,16 @@ use PHPUnit\Framework\TestCase;
 
 final class StagedPushStreamProtocolTest extends TestCase
 {
-    public function testChunkHeadersRoundTripThroughTheSharedCodec(): void
+    public function testChunkHeadersDecodeFromJsonLines(): void
     {
-        $line = Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header(
-            'wp-content/uploads/photo.jpg',
-            10,
-            5,
-            20,
-            false
-        );
+        $line = json_encode([
+            'type' => 'chunk',
+            'artifact_id' => 'wp-content/uploads/photo.jpg',
+            'offset' => 10,
+            'bytes' => 5,
+            'total_bytes' => 20,
+            'final' => false,
+        ], JSON_UNESCAPED_SLASHES);
 
         $this->assertSame([
             'artifact_id' => 'wp-content/uploads/photo.jpg',
@@ -20,7 +21,7 @@ final class StagedPushStreamProtocolTest extends TestCase
             'bytes' => 5,
             'total_bytes' => 20,
             'final' => false,
-        ], Site_Export_Staged_Push_Stream_Protocol::decode_chunk_header(rtrim($line, "\n")));
+        ], Site_Export_Staged_Push_Stream_Protocol::decode_chunk_header($line));
     }
 
     public function testChunkHeaderValidationRejectsRangesOutsideTheDeclaredFile(): void
@@ -81,7 +82,7 @@ final class StagedPushStreamProtocolTest extends TestCase
         fwrite($stream, "abc\ndefghijk");
         rewind($stream);
 
-        $this->assertSame('abc', Site_Export_Staged_Push_Stream_Protocol::read_header_line($stream));
+        $this->assertSame("abc\n", fgets($stream));
         $this->assertSame('def', Site_Export_Staged_Push_Stream_Protocol::read_exactly($stream, 3));
         $this->assertTrue(Site_Export_Staged_Push_Stream_Protocol::discard_exactly($stream, 3, 2));
         $this->assertSame('jk', Site_Export_Staged_Push_Stream_Protocol::read_exactly($stream, 2));
