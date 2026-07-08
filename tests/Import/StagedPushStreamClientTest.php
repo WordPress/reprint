@@ -243,6 +243,53 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertLessThanOrEqual(5, $sizer->chunk_bytes());
     }
 
+    public function testNextChunkWritesBytesToTheNetworkBeforeTheRequestIsFinalized(): void
+    {
+        // A raw TCP listener instead of the shared endpoint server, so the
+        // test can observe exactly when request bytes reach the network.
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        $this->assertNotFalse($listener, (string) $errstr);
+        $listener_address = stream_socket_get_name($listener, false);
+
+        $this->writeSource('streamed.bin', str_repeat('s', 8));
+        $client = new StagedPushStreamClient([
+            'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
+            'frame_sizer' => new PushFrameSizer(['floor_bytes' => 2, 'start_bytes' => 4, 'max_bytes' => 4]),
+        ]);
+        $processor = new StagedPushStreamProcessor($this->source_dir, $this->writeLocalPathsToPush(['streamed.bin']));
+        $request = $client->create_request($processor);
+
+        $pending_connections = [$listener];
+        $write_sockets = null;
+        $except_sockets = null;
+        $this->assertSame(0, stream_select($pending_connections, $write_sockets, $except_sockets, 0, 0), 'creating a request must not open a connection');
+
+        $this->assertTrue($request->next_chunk());
+        $connection = stream_socket_accept($listener, 5);
+        $this->assertNotFalse($connection);
+        $received = $this->readAvailableBytes($connection);
+
+        $this->assertStringContainsString('POST /?reprint-api=1&endpoint=staged_push HTTP/1.1', $received);
+        $this->assertStringContainsString('"artifact_id":"streamed.bin","offset":0,"bytes":4', $received);
+        $this->assertStringContainsString('ssss', $received, 'the first frame payload is on the wire before the request is finalized');
+        $this->assertStringNotContainsString("0\r\n\r\n", $received, 'the request body is still open');
+
+        $this->assertTrue($request->next_chunk());
+        $received .= $this->readAvailableBytes($connection);
+        $this->assertStringContainsString('"artifact_id":"streamed.bin","offset":4,"bytes":4', $received);
+        $this->assertSame(2, substr_count($received, 'ssss'), 'the second frame payload followed without finalizing');
+
+        // Drop the connection without responding: the failure must surface as
+        // a retryable request-level result, not an exception.
+        fclose($connection);
+        fclose($listener);
+        $result = $client->push_request($request);
+
+        $this->assertSame(['retry', 'request_failed'], [$result['status'], $result['reason']], (string) json_encode($result));
+        $this->assertSame(2, $result['chunks_streamed']);
+        $this->assertSame(8, $result['bytes_streamed']);
+    }
+
     public function testWrongSecretFailsBeforeReadingTheBody(): void
     {
         $this->writeSource('secret.bin', 'secret');
@@ -352,6 +399,31 @@ PHP_ROUTER);
             'bytes_streamed' => 0,
             'chunks_streamed' => 0,
         ];
+    }
+
+    /**
+     * Read whatever bytes have already arrived on the connection, allowing a
+     * brief settle so kernel-buffered writes from the client become visible.
+     */
+    private function readAvailableBytes($connection): string
+    {
+        stream_set_blocking($connection, false);
+        $received = '';
+        $last_data_at = microtime(true);
+        $deadline = microtime(true) + 2.0;
+        while (microtime(true) < $deadline) {
+            $piece = fread($connection, 65536);
+            if (is_string($piece) && $piece !== '') {
+                $received .= $piece;
+                $last_data_at = microtime(true);
+                continue;
+            }
+            if ($received !== '' && microtime(true) - $last_data_at > 0.1) {
+                break;
+            }
+            usleep(5000);
+        }
+        return $received;
     }
 
     private function writeSource(string $name, string $body): string
