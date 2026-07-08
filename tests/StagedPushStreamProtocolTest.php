@@ -26,7 +26,7 @@ final class StagedPushStreamProtocolTest extends TestCase
     public function testChunkHeaderValidationRejectsRangesOutsideTheDeclaredFile(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('range_exceeds_total');
+        $this->expectExceptionMessage('offset 8 and 4 payload bytes, which exceeds total_bytes 10');
 
         Site_Export_Staged_Push_Stream_Protocol::decode_chunk_header(json_encode([
             'type' => 'chunk',
@@ -36,6 +36,43 @@ final class StagedPushStreamProtocolTest extends TestCase
             'total_bytes' => 10,
             'final' => true,
         ], JSON_UNESCAPED_SLASHES));
+    }
+
+    /**
+     * @dataProvider invalidChunkHeaderProvider
+     */
+    public function testChunkHeaderValidationNamesTheExactInvalidField(array $header, string $expected_message): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage($expected_message);
+
+        Site_Export_Staged_Push_Stream_Protocol::decode_chunk_header(json_encode($header, JSON_UNESCAPED_SLASHES));
+    }
+
+    public static function invalidChunkHeaderProvider(): array
+    {
+        return [
+            'missing type' => [
+                ['artifact_id' => 'file.txt', 'offset' => 0, 'bytes' => 1, 'total_bytes' => 1, 'final' => false],
+                'Missing staged push stream frame field "type".',
+            ],
+            'empty artifact id' => [
+                ['type' => 'chunk', 'artifact_id' => '', 'offset' => 0, 'bytes' => 1, 'total_bytes' => 1, 'final' => false],
+                'Expected staged push stream frame field "artifact_id" to be a non-empty string; received an empty string.',
+            ],
+            'negative offset' => [
+                ['type' => 'chunk', 'artifact_id' => 'file.txt', 'offset' => -1, 'bytes' => 1, 'total_bytes' => 1, 'final' => false],
+                'Expected staged push stream frame field "offset" to be a non-negative integer; received integer -1.',
+            ],
+            'string byte count' => [
+                ['type' => 'chunk', 'artifact_id' => 'file.txt', 'offset' => 0, 'bytes' => '1', 'total_bytes' => 1, 'final' => false],
+                'Expected staged push stream frame field "bytes" to be a non-negative integer; received string "1".',
+            ],
+            'missing final flag' => [
+                ['type' => 'chunk', 'artifact_id' => 'file.txt', 'offset' => 0, 'bytes' => 1, 'total_bytes' => 1],
+                'Missing staged push stream frame field "final".',
+            ],
+        ];
     }
 
     public function testReadAndDiscardUseTheSameBoundedStreamHelpers(): void

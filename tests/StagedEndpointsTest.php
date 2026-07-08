@@ -232,7 +232,7 @@ final class StagedEndpointsTest extends TestCase {
 
         $this->assertSame(400, $result['http_code']);
         $this->assertSame('invalid_frame', $result['body']['reason']);
-        $this->assertSame('range_exceeds_total', $result['body']['detail']);
+        $this->assertStringContainsString('offset 5 and 1 payload bytes, which exceeds total_bytes 3', $result['body']['detail']);
     }
 
     // ---------------------------------------------------------------

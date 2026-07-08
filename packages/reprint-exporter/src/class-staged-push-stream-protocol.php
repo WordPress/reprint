@@ -51,40 +51,66 @@ final class Site_Export_Staged_Push_Stream_Protocol {
     public static function decode_chunk_header(string $line): array {
         $frame = json_decode($line, true);
         if (!is_array($frame)) {
-            throw new InvalidArgumentException('header_json');
+            throw new InvalidArgumentException('Expected staged push stream frame header to be a JSON object.');
         }
 
-        $artifact_id = $frame['artifact_id'] ?? null;
-        $offset = $frame['offset'] ?? null;
-        $bytes = $frame['bytes'] ?? null;
-        $total_bytes = $frame['total_bytes'] ?? null;
-        if (
-            ($frame['type'] ?? null) !== 'chunk'
-            || !is_string($artifact_id)
-            || $artifact_id === ''
-            || !is_numeric($offset)
-            || (int) $offset < 0
-            || !is_numeric($bytes)
-            || (int) $bytes < 0
-            || !is_numeric($total_bytes)
-            || (int) $total_bytes < 0
-        ) {
-            throw new InvalidArgumentException('fields');
+        if (!array_key_exists('type', $frame)) {
+            throw new InvalidArgumentException('Missing staged push stream frame field "type".');
+        }
+        if ($frame['type'] !== 'chunk') {
+            throw new InvalidArgumentException(
+                'Expected staged push stream frame field "type" to be "chunk"; received ' .
+                self::describe_value($frame['type']) .
+                '.'
+            );
         }
 
-        $offset = (int) $offset;
-        $bytes = (int) $bytes;
-        $total_bytes = (int) $total_bytes;
+        if (!array_key_exists('artifact_id', $frame)) {
+            throw new InvalidArgumentException('Missing staged push stream frame field "artifact_id".');
+        }
+        if (!is_string($frame['artifact_id'])) {
+            throw new InvalidArgumentException(
+                'Expected staged push stream frame field "artifact_id" to be a non-empty string; received ' .
+                self::describe_value($frame['artifact_id']) .
+                '.'
+            );
+        }
+        if ($frame['artifact_id'] === '') {
+            throw new InvalidArgumentException('Expected staged push stream frame field "artifact_id" to be a non-empty string; received an empty string.');
+        }
+
+        $offset = self::require_non_negative_integer_field($frame, 'offset');
+        $bytes = self::require_non_negative_integer_field($frame, 'bytes');
+        $total_bytes = self::require_non_negative_integer_field($frame, 'total_bytes');
+
+        if (!array_key_exists('final', $frame)) {
+            throw new InvalidArgumentException('Missing staged push stream frame field "final".');
+        }
+        if (!is_bool($frame['final'])) {
+            throw new InvalidArgumentException(
+                'Expected staged push stream frame field "final" to be a boolean; received ' .
+                self::describe_value($frame['final']) .
+                '.'
+            );
+        }
+
         if ($offset + $bytes > $total_bytes) {
-            throw new InvalidArgumentException('range_exceeds_total');
+            throw new InvalidArgumentException(
+                sprintf(
+                    'Staged push stream frame declares offset %d and %d payload bytes, which exceeds total_bytes %d.',
+                    $offset,
+                    $bytes,
+                    $total_bytes
+                )
+            );
         }
 
         return [
-            'artifact_id' => $artifact_id,
+            'artifact_id' => $frame['artifact_id'],
             'offset' => $offset,
             'bytes' => $bytes,
             'total_bytes' => $total_bytes,
-            'final' => !empty($frame['final']),
+            'final' => $frame['final'],
         ];
     }
 
@@ -116,5 +142,41 @@ final class Site_Export_Staged_Push_Stream_Protocol {
             $remaining -= strlen($piece);
         }
         return true;
+    }
+
+    private static function require_non_negative_integer_field(array $frame, string $field): int {
+        if (!array_key_exists($field, $frame)) {
+            throw new InvalidArgumentException('Missing staged push stream frame field "' . $field . '".');
+        }
+        if (!is_int($frame[$field]) || $frame[$field] < 0) {
+            throw new InvalidArgumentException(
+                'Expected staged push stream frame field "' . $field . '" to be a non-negative integer; received ' .
+                self::describe_value($frame[$field]) .
+                '.'
+            );
+        }
+        return $frame[$field];
+    }
+
+    private static function describe_value($value): string {
+        if (is_string($value)) {
+            return 'string "' . $value . '"';
+        }
+        if (is_int($value)) {
+            return 'integer ' . $value;
+        }
+        if (is_float($value)) {
+            return 'float ' . $value;
+        }
+        if (is_bool($value)) {
+            return $value ? 'boolean true' : 'boolean false';
+        }
+        if ($value === null) {
+            return 'null';
+        }
+        if (is_array($value)) {
+            return 'array';
+        }
+        return gettype($value);
     }
 }
