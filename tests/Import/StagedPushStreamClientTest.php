@@ -290,9 +290,11 @@ class StagedPushStreamClientTest extends TestCase
         $client = $this->makeClient(['request_sizer' => $sizer, 'chunk_bytes' => 12]);
         $local_paths_to_push = $this->writeLocalPathsToPush(['large.bin']);
 
+        $push_started_at = microtime(true);
         $result = $this->pushAll($client, $local_paths_to_push);
 
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertGreaterThan(0.25, microtime(true) - $push_started_at, 'the retry after the 413 backed off before re-hitting the host');
         $this->assertSame(str_repeat('x', 20), file_get_contents($this->staging_dir . '/files/large.bin'));
         // The 413 caps the body budget at the reported 6 * 0.9 = 5 bytes, so
         // after the rejected first request the remaining 20 bytes travel as
@@ -758,6 +760,11 @@ PHP_ROUTER);
     {
         $result = null;
         for ($attempt = 0; $attempt < 5; $attempt++) {
+            if ($attempt > 0) {
+                // Back off before retrying — the command must too; a
+                // struggling host should not be re-hit at full speed.
+                usleep(min(5000000, 250000 * (2 ** ($attempt - 1))));
+            }
             $result = $this->pushOnce($client, $local_paths_to_push, $cursor);
             if ($result['status'] !== 'retry') {
                 return $result;

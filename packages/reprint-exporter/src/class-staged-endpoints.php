@@ -344,8 +344,8 @@ final class Site_Export_Staged_Endpoints {
             return $method_error;
         }
 
-        $artifact_id = $config['artifact_id'] ?? null;
-        if (!is_string($artifact_id) || $artifact_id === '') {
+        $artifact_id = $this->decode_artifact_id_param($config);
+        if ($artifact_id === null) {
             return $this->rejected(400, 'invalid_artifact_id');
         }
         $total_bytes = $config['total_bytes'] ?? null;
@@ -365,8 +365,8 @@ final class Site_Export_Staged_Endpoints {
      * @return array{http_code:int,body:array}
      */
     public function status(array $config): array {
-        $artifact_id = $config['artifact_id'] ?? null;
-        if (!is_string($artifact_id) || $artifact_id === '') {
+        $artifact_id = $this->decode_artifact_id_param($config);
+        if ($artifact_id === null) {
             return $this->rejected(400, 'invalid_artifact_id');
         }
 
@@ -387,8 +387,8 @@ final class Site_Export_Staged_Endpoints {
             return $method_error;
         }
 
-        $artifact_id = $config['artifact_id'] ?? null;
-        if (!is_string($artifact_id) || $artifact_id === '') {
+        $artifact_id = $this->decode_artifact_id_param($config);
+        if ($artifact_id === null) {
             return $this->rejected(400, 'invalid_artifact_id');
         }
 
@@ -404,6 +404,20 @@ final class Site_Export_Staged_Endpoints {
             'http_code' => 200,
             'body' => ['discarded' => true],
         ];
+    }
+
+    /**
+     * Read a control-plane artifact id parameter: base64 in the request —
+     * file paths are arbitrary bytes, the same convention the push stream
+     * frames use — raw path out. Null when missing or not decodable.
+     */
+    private function decode_artifact_id_param(array $config): ?string {
+        $artifact_id = $config['artifact_id'] ?? null;
+        if (!is_string($artifact_id) || $artifact_id === '') {
+            return null;
+        }
+        $artifact_id = base64_decode($artifact_id, true);
+        return $artifact_id === false || $artifact_id === '' ? null : $artifact_id;
     }
 
     /**

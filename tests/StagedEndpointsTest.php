@@ -259,7 +259,7 @@ final class StagedEndpointsTest extends TestCase {
     private function finalize(Site_Export_Staged_Endpoints $endpoints, string $artifact_id, int $total): array
     {
         return $endpoints->finalize(
-            ['artifact_id' => $artifact_id, 'total_bytes' => $total],
+            ['artifact_id' => base64_encode($artifact_id), 'total_bytes' => $total],
             ['REQUEST_METHOD' => 'POST']
         );
     }
@@ -289,7 +289,7 @@ final class StagedEndpointsTest extends TestCase {
     {
         $endpoints = $this->makeEndpoints();
 
-        $unknown = $endpoints->status(['artifact_id' => 'artifact-1']);
+        $unknown = $endpoints->status(['artifact_id' => base64_encode('artifact-1')]);
         $this->assertSame(200, $unknown['http_code']);
         $this->assertSame(
             ['exists' => false, 'committed_bytes' => 0, 'verified' => false],
@@ -299,7 +299,7 @@ final class StagedEndpointsTest extends TestCase {
         $this->push($endpoints, [
             ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'abcde', 'total_bytes' => 10, 'final' => false],
         ]);
-        $known = $endpoints->status(['artifact_id' => 'artifact-1']);
+        $known = $endpoints->status(['artifact_id' => base64_encode('artifact-1')]);
         $this->assertSame(
             ['exists' => true, 'committed_bytes' => 5, 'verified' => false],
             $known['body']
@@ -316,7 +316,7 @@ final class StagedEndpointsTest extends TestCase {
         $holder = fopen($this->staging_dir . '/lock', 'r+b');
         flock($holder, LOCK_EX);
         $busy = $endpoints->discard(
-            ['artifact_id' => 'artifact-1'],
+            ['artifact_id' => base64_encode('artifact-1')],
             ['REQUEST_METHOD' => 'POST']
         );
         flock($holder, LOCK_UN);
@@ -326,7 +326,7 @@ final class StagedEndpointsTest extends TestCase {
         $this->assertSame(['discarded' => false], $busy['body']);
 
         $done = $endpoints->discard(
-            ['artifact_id' => 'artifact-1'],
+            ['artifact_id' => base64_encode('artifact-1')],
             ['REQUEST_METHOD' => 'POST']
         );
         $this->assertSame(200, $done['http_code']);
@@ -359,11 +359,16 @@ final class StagedEndpointsTest extends TestCase {
         $endpoints = $this->makeEndpoints();
         $post = ['REQUEST_METHOD' => 'POST'];
 
-        $bad_total = $endpoints->finalize(['artifact_id' => 'a', 'total_bytes' => 'many'], $post);
+        $bad_total = $endpoints->finalize(['artifact_id' => base64_encode('a'), 'total_bytes' => 'many'], $post);
         $this->assertSame('invalid_total', $bad_total['body']['reason']);
 
         $bad_status_id = $endpoints->status(['artifact_id' => '']);
         $this->assertSame(400, $bad_status_id['http_code']);
+
+        // Control-plane ids travel base64, like push stream frames.
+        $undecodable_status_id = $endpoints->status(['artifact_id' => '!!!not-base64!!!']);
+        $this->assertSame(400, $undecodable_status_id['http_code']);
+        $this->assertSame('invalid_artifact_id', $undecodable_status_id['body']['reason']);
     }
 
     public function testClientParametersCannotChooseServerOptions(): void
@@ -397,7 +402,7 @@ final class StagedEndpointsTest extends TestCase {
 
         ob_start();
         $server->handle_request([
-            'get' => ['endpoint' => 'staged_status', 'artifact_id' => 'artifact-1'],
+            'get' => ['endpoint' => 'staged_status', 'artifact_id' => base64_encode('artifact-1')],
             'server' => ['REQUEST_METHOD' => 'GET'],
             'body' => '',
         ]);
