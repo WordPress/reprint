@@ -61,7 +61,23 @@ class StagedPushStreamClient
 
     private PushRequestSizer $request_sizer;
 
-    private int $request_timeout;
+    /** Seconds to establish the connection and get the request head out. */
+    private int $connect_timeout;
+
+    /**
+     * Seconds without a single byte moving before the transfer is declared
+     * dead. Only stalls trip this — a slow connection that keeps moving
+     * bytes never does, no matter how long the request takes.
+     */
+    private int $stall_timeout;
+
+    /**
+     * Seconds to wait for the response after the body is finished. A
+     * separate phase with no progress signal: request-buffering stacks do
+     * all their frame processing here, so this needs room proportional to
+     * how much one request carries.
+     */
+    private int $response_timeout;
 
     /** @var int|float Wall-clock budget per request, in seconds. */
     private $max_request_seconds;
@@ -90,6 +106,14 @@ class StagedPushStreamClient
      */
     private bool $curl_requested_body = false;
 
+    /**
+     * Total bytes libcurl has consumed from the read callback; the progress
+     * signal the stall timeout watches. libcurl only asks for more after
+     * writing the previous piece toward the socket, so consumption tracks
+     * actual transmission at upload-buffer granularity.
+     */
+    private int $outbound_consumed_bytes = 0;
+
     private bool $transfer_finished = false;
 
     private ?string $transfer_error = null;
@@ -112,9 +136,16 @@ class StagedPushStreamClient
      *     to keep learned limits.
      *   - chunk_bytes (int): in-memory unit of one caller fread; unrelated
      *     to the request body budget. Default 4 MiB.
-     *   - request_timeout (int): seconds without transfer progress (opening
-     *     the request, handing one chunk to libcurl, or the response read)
-     *     before the request fails. Default 120.
+     *   - connect_timeout (int): seconds to establish the connection and
+     *     send the request head. Default 30.
+     *   - stall_timeout (int): seconds without a single byte moving while
+     *     sending before the request fails. Slow connections that keep
+     *     moving bytes never trip this; there is deliberately no total
+     *     transfer timeout, so a large request over a slow link runs as
+     *     long as it keeps progressing. Default 60.
+     *   - response_timeout (int): seconds to wait for the response after
+     *     the body is finished — the phase where request-buffering hosts
+     *     process every frame at once. Default 300.
      *   - max_request_seconds (int|float): wall-clock budget per request;
      *     should_finish_request() turns true once a request is older than
      *     this. Soft — checked between chunks — so set it with margin below
@@ -144,8 +175,12 @@ class StagedPushStreamClient
         $this->request_sizer = $options["request_sizer"] ?? new PushRequestSizer();
         $chunk_bytes = $options["chunk_bytes"] ?? null;
         $this->chunk_bytes = is_numeric($chunk_bytes) && (int) $chunk_bytes > 0 ? (int) $chunk_bytes : 4 * 1024 * 1024;
-        $timeout = $options["request_timeout"] ?? null;
-        $this->request_timeout = is_numeric($timeout) && (int) $timeout > 0 ? (int) $timeout : 120;
+        $connect_timeout = $options["connect_timeout"] ?? null;
+        $this->connect_timeout = is_numeric($connect_timeout) && (int) $connect_timeout > 0 ? (int) $connect_timeout : 30;
+        $stall_timeout = $options["stall_timeout"] ?? null;
+        $this->stall_timeout = is_numeric($stall_timeout) && (int) $stall_timeout > 0 ? (int) $stall_timeout : 60;
+        $response_timeout = $options["response_timeout"] ?? null;
+        $this->response_timeout = is_numeric($response_timeout) && (int) $response_timeout > 0 ? (int) $response_timeout : 300;
         $max_request_seconds = $options["max_request_seconds"] ?? null;
         $this->max_request_seconds = is_numeric($max_request_seconds) && $max_request_seconds > 0 ? $max_request_seconds : 30;
     }
@@ -166,6 +201,7 @@ class StagedPushStreamClient
 
         $this->outbound_bytes = "";
         $this->outbound_offset = 0;
+        $this->outbound_consumed_bytes = 0;
         $this->body_complete = false;
         $this->curl_requested_body = false;
         $this->transfer_finished = false;
@@ -205,15 +241,17 @@ class StagedPushStreamClient
             CURLOPT_HTTPHEADER => $header_lines,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_CONNECTTIMEOUT => $this->request_timeout,
-            // Total lifetime of one request, including caller time between
-            // chunks; keep it above max_request_seconds plus response time.
-            CURLOPT_TIMEOUT => $this->request_timeout,
+            CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
+            // Deliberately no CURLOPT_TIMEOUT: a total-transfer cap kills
+            // healthy-but-slow bulk uploads. Each phase has its own bound —
+            // connect_timeout, the stall watch in send_chunk(), and
+            // response_timeout in finish_request().
             CURLOPT_READFUNCTION => function ($curl_handle, $stream, int $length) {
                 $this->curl_requested_body = true;
                 if ($this->outbound_offset < strlen($this->outbound_bytes)) {
                     $piece = substr($this->outbound_bytes, $this->outbound_offset, $length);
                     $this->outbound_offset += strlen($piece);
+                    $this->outbound_consumed_bytes += strlen($piece);
                     if ($this->outbound_offset >= strlen($this->outbound_bytes)) {
                         $this->outbound_bytes = "";
                         $this->outbound_offset = 0;
@@ -233,10 +271,10 @@ class StagedPushStreamClient
         // Drive the transfer until the head is out — libcurl asking for body
         // bytes proves it — so connection and TLS failures surface here, not
         // in the middle of the caller's chunk loop.
-        $deadline = microtime(true) + $this->request_timeout;
+        $deadline = microtime(true) + $this->connect_timeout;
         while (!$this->curl_requested_body && !$this->transfer_finished) {
             if (microtime(true) > $deadline) {
-                $this->transfer_error = "Timed out after " . $this->request_timeout . "s opening the push stream request.";
+                $this->transfer_error = "Timed out after " . $this->connect_timeout . "s opening the push stream request.";
                 break;
             }
             $this->pump_transfer();
@@ -333,10 +371,18 @@ class StagedPushStreamClient
         $this->outbound_bytes = $frame_header . $payload;
         $this->outbound_offset = 0;
         curl_pause($this->curl_handle, CURLPAUSE_CONT);
-        $deadline = microtime(true) + $this->request_timeout;
+
+        // The stall watch fails only on zero progress: every byte libcurl
+        // consumes resets the clock, so a slow connection that keeps moving
+        // can take as long as it needs.
+        $consumed_at_last_progress = $this->outbound_consumed_bytes;
+        $last_progress_at = microtime(true);
         while ($this->outbound_bytes !== "" && !$this->transfer_finished) {
-            if (microtime(true) > $deadline) {
-                $this->transfer_error = "Timed out after " . $this->request_timeout . "s sending push stream bytes.";
+            if ($this->outbound_consumed_bytes !== $consumed_at_last_progress) {
+                $consumed_at_last_progress = $this->outbound_consumed_bytes;
+                $last_progress_at = microtime(true);
+            } elseif (microtime(true) - $last_progress_at > $this->stall_timeout) {
+                $this->transfer_error = "The push stream stalled: no bytes moved for " . $this->stall_timeout . "s while sending a chunk of \"" . $artifact_id . "\".";
                 $this->transfer_finished = true;
                 break;
             }
@@ -415,10 +461,10 @@ class StagedPushStreamClient
         if (!$this->transfer_finished) {
             $this->body_complete = true;
             curl_pause($this->curl_handle, CURLPAUSE_CONT);
-            $deadline = microtime(true) + $this->request_timeout;
+            $deadline = microtime(true) + $this->response_timeout;
             while (!$this->transfer_finished) {
                 if (microtime(true) > $deadline) {
-                    $this->transfer_error = "Timed out after " . $this->request_timeout . "s waiting for the push stream response.";
+                    $this->transfer_error = "No response arrived within " . $this->response_timeout . "s of finishing the push stream body.";
                     break;
                 }
                 $this->pump_transfer();

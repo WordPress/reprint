@@ -374,6 +374,47 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertGreaterThan(8, $result['body_bytes_sent'], 'body accounting includes the frame headers');
     }
 
+    public function testStalledConnectionFailsAfterStallTimeoutWhileSlowProgressDoesNot(): void
+    {
+        // A listener that accepts the connection and then never reads: the
+        // kernel and libcurl buffers absorb a few hundred KiB, after which
+        // zero bytes move. The stall watch must fail the request; a total
+        // timeout would instead have killed any slow-but-healthy transfer.
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        $this->assertNotFalse($listener, (string) $errstr);
+        $listener_address = stream_socket_get_name($listener, false);
+
+        $client = new StagedPushStreamClient([
+            'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
+            'chunk_bytes' => 8 * 1024 * 1024,
+            'stall_timeout' => 1,
+        ]);
+
+        $this->assertTrue($client->start_push_request());
+        $connection = stream_socket_accept($listener, 5);
+        $this->assertNotFalse($connection);
+        // Do not read from $connection: the pipe backs up and stalls.
+
+        $stalled_send_started_at = microtime(true);
+        $sent = $client->send_chunk([
+            'artifact_id' => 'stalled.bin',
+            'offset' => 0,
+            'total_bytes' => 8 * 1024 * 1024,
+            'final' => true,
+            'payload' => str_repeat('s', 8 * 1024 * 1024),
+        ]);
+
+        $this->assertFalse($sent, 'a stalled connection must fail the chunk');
+        $this->assertGreaterThan(1.0, microtime(true) - $stalled_send_started_at, 'the stall watch waited out its window first');
+
+        $result = $client->finish_request();
+        fclose($connection);
+        fclose($listener);
+
+        $this->assertSame(['retry', 'request_failed'], [$result['status'], $result['reason']], (string) json_encode($result));
+        $this->assertStringContainsString('no bytes moved for 1s', (string) $result['detail']);
+    }
+
     public function testInvalidChunksThrowSpecificErrors(): void
     {
         $client = $this->makeClient();
