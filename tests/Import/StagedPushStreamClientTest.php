@@ -177,7 +177,7 @@ class StagedPushStreamClientTest extends TestCase
         $this->writeSource('budget.bin', str_repeat('y', 10));
         $first_frame_header = json_encode([
             'type' => 'chunk',
-            'artifact_id' => 'budget.bin',
+            'artifact_id' => base64_encode('budget.bin'),
             'offset' => 0,
             'bytes' => 4,
             'total_bytes' => 10,
@@ -349,7 +349,7 @@ class StagedPushStreamClientTest extends TestCase
             'payload' => 'ssss',
         ]));
         $received .= $this->readAvailableBytes($connection);
-        $this->assertStringContainsString('"artifact_id":"streamed.bin","offset":0,"bytes":4', $received);
+        $this->assertStringContainsString('"artifact_id":"c3RyZWFtZWQuYmlu","offset":0,"bytes":4', $received);
         $this->assertStringContainsString('ssss', $received, 'the first frame payload is on the wire before the request is finalized');
         $this->assertStringNotContainsString("0\r\n\r\n", $received, 'the request body is still open');
 
@@ -361,7 +361,7 @@ class StagedPushStreamClientTest extends TestCase
             'payload' => 'ssss',
         ]));
         $received .= $this->readAvailableBytes($connection);
-        $this->assertStringContainsString('"artifact_id":"streamed.bin","offset":4,"bytes":4', $received);
+        $this->assertStringContainsString('"artifact_id":"c3RyZWFtZWQuYmlu","offset":4,"bytes":4', $received);
         $this->assertSame(2, substr_count($received, 'ssss'), 'the second frame payload followed without finalizing');
 
         // Drop the connection without responding: the failure must surface as
@@ -540,6 +540,101 @@ class StagedPushStreamClientTest extends TestCase
         }
     }
 
+    public function testResumeCursorForADeletedFileReplaysFromTheTop(): void
+    {
+        $this->writeSource('kept-one.bin', str_repeat('k', 6));
+        $this->writeSource('kept-two.bin', str_repeat('K', 6));
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush(['kept-one.bin', 'kept-two.bin']);
+
+        // The cursor points at a file that was deleted locally after the
+        // last push, so a rebuilt journal no longer lists it. The push must
+        // replay from the top, not skim past everything and report success.
+        $result = $this->pushAll($client, $local_paths_to_push, ['artifact_id' => 'deleted-since.bin', 'committed_bytes' => 4]);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame(2, $result['files_verified']);
+        $this->assertSame(str_repeat('k', 6), file_get_contents($this->staging_dir . '/files/kept-one.bin'));
+        $this->assertSame(str_repeat('K', 6), file_get_contents($this->staging_dir . '/files/kept-two.bin'));
+    }
+
+    public function testEmptyJournalPushesNothingWithoutANetworkRequest(): void
+    {
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush([]);
+
+        $result = $this->pushAll($client, $local_paths_to_push);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame(0, $result['chunks_sent']);
+        $this->assertSame([], $this->endpointsSeen(), 'an empty journal must not cost a network exchange');
+    }
+
+    public function testRedirectResponseNamesTheTargetInsteadOfRetrying(): void
+    {
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        $this->assertNotFalse($listener, (string) $errstr);
+        $listener_address = stream_socket_get_name($listener, false);
+
+        $client = new StagedPushStreamClient([
+            'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'chunk_bytes' => 4,
+        ]);
+
+        $this->assertTrue($client->start_push_request());
+        $connection = stream_socket_accept($listener, 5);
+        $this->assertNotFalse($connection);
+        // The usual misconfiguration: an http:// base_url on a site that
+        // forces https. Answer like such a site would.
+        fwrite(
+            $connection,
+            "HTTP/1.1 301 Moved Permanently\r\n"
+            . "Location: https://example.com/?reprint-api=1&endpoint=staged_push\r\n"
+            . "Content-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        fclose($connection);
+        fclose($listener);
+
+        $result = $client->finish_request();
+
+        $this->assertSame(['failed', 'redirected'], [$result['status'], $result['reason']], (string) json_encode($result));
+        $this->assertStringContainsString('https://example.com/?reprint-api=1&endpoint=staged_push', (string) $result['detail']);
+        $this->assertStringContainsString('Use that address as the push base_url', (string) $result['detail']);
+    }
+
+    public function testEmojiFileNameRoundTrips(): void
+    {
+        $emoji_artifact_id = "wp-content/uploads/\u{1F4F7} photo.bin";
+        $this->writeSource($emoji_artifact_id, str_repeat('e', 10));
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush([$emoji_artifact_id]);
+
+        $result = $this->pushAll($client, $local_paths_to_push);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame(1, $result['files_verified']);
+        $this->assertSame(str_repeat('e', 10), file_get_contents($this->staging_dir . '/files/' . $emoji_artifact_id));
+    }
+
+    public function testNonUtf8FileNameRoundTrips(): void
+    {
+        // Latin-1 "café" plus a stray 0xFF: bytes json_encode cannot carry
+        // raw, which is why artifact ids travel base64 on the wire.
+        $non_utf8_artifact_id = "caf\xE9-\xFF.bin";
+        if (@file_put_contents($this->source_dir . '/' . $non_utf8_artifact_id, str_repeat('n', 6)) === false) {
+            $this->markTestSkipped('This filesystem rejects non-UTF-8 file names (APFS does; ext4 allows them).');
+        }
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush([$non_utf8_artifact_id]);
+
+        $result = $this->pushAll($client, $local_paths_to_push);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame(1, $result['files_verified']);
+        $this->assertSame(str_repeat('n', 6), file_get_contents($this->staging_dir . '/files/' . $non_utf8_artifact_id));
+    }
+
     private static function writeRouter(): void
     {
         $import_path = addslashes(realpath(__DIR__ . '/../../packages/reprint-importer/src/import.php'));
@@ -636,12 +731,26 @@ PHP_ROUTER);
     {
         $journal_handle = fopen($local_paths_to_push, 'r');
         $this->assertNotFalse($journal_handle);
-        if (false === $client->start_push_request()) {
-            fclose($journal_handle);
-            return $this->startFailureResult($client, $cursor);
+
+        // A journal rebuilt since the cursor was saved may no longer contain
+        // the cursor's file (deleted locally). Skimming for a line that never
+        // comes would push nothing and report success, so check first —
+        // replaying from the top is safe, the target absorbs committed frames.
+        $skipping_to_cursor = is_array($cursor) && isset($cursor['artifact_id']);
+        if ($skipping_to_cursor) {
+            $cursor_artifact_in_journal = false;
+            while (($journal_line = fgets($journal_handle)) !== false) {
+                $decoded_line = json_decode(trim($journal_line), true);
+                if (is_array($decoded_line) && base64_decode((string) ($decoded_line['path'] ?? ''), true) === $cursor['artifact_id']) {
+                    $cursor_artifact_in_journal = true;
+                    break;
+                }
+            }
+            rewind($journal_handle);
+            $skipping_to_cursor = $cursor_artifact_in_journal;
         }
 
-        $skipping_to_cursor = is_array($cursor) && isset($cursor['artifact_id']);
+        $request_open = false;
         while (($journal_line = fgets($journal_handle)) !== false) {
             $journal_line = trim($journal_line);
             if ($journal_line === '') {
@@ -668,7 +777,16 @@ PHP_ROUTER);
             }
 
             while (true) {
-                if ($client->should_finish_request()) {
+                // Open the request only once there is a chunk to push, so an
+                // empty journal never costs a network exchange.
+                if (!$request_open) {
+                    if (false === $client->start_push_request()) {
+                        fclose($source_handle);
+                        fclose($journal_handle);
+                        return $this->startFailureResult($client, $cursor);
+                    }
+                    $request_open = true;
+                } elseif ($client->should_finish_request()) {
                     $result = $client->finish_request();
                     if ($result['status'] !== 'complete') {
                         fclose($source_handle);
@@ -708,6 +826,19 @@ PHP_ROUTER);
         }
         fclose($journal_handle);
 
+        if (!$request_open) {
+            // Nothing needed pushing; report completion without having
+            // touched the network.
+            return [
+                'status' => 'complete',
+                'reason' => null,
+                'detail' => null,
+                'cursor' => $cursor,
+                'files_verified' => 0,
+                'chunks_sent' => 0,
+                'body_bytes_sent' => 0,
+            ];
+        }
         return $client->finish_request();
     }
 

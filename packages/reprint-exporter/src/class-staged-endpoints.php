@@ -124,7 +124,7 @@ final class Site_Export_Staged_Endpoints {
      *
      * Each frame is one JSON line followed by exactly "bytes" raw bytes:
      *
-     * {"type":"chunk","artifact_id":"path","offset":0,"bytes":123,"total_bytes":456,"final":false}\n
+     * {"type":"chunk","artifact_id":"<base64 of path>","offset":0,"bytes":123,"total_bytes":456,"final":false}\n
      *
      * A frame commits before the next frame is read. If the request dies after
      * a commit, the next request may replay from the last sender cursor or from
@@ -189,7 +189,9 @@ final class Site_Export_Staged_Endpoints {
             $bytes = $frame['bytes'];
             $total_bytes = $frame['total_bytes'];
             $final = $frame['final'];
-            $cursor = ['artifact_id' => $artifact_id, 'committed_bytes' => $offset];
+            // Response cursors re-encode the id so responses stay valid JSON
+            // for arbitrary-byte paths.
+            $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => $offset];
 
             if ($bytes > $this->max_request_bytes) {
                 $response = $this->stream_rejected(413, 'frame_too_large', null, $cursor, $files_verified);
@@ -211,14 +213,14 @@ final class Site_Export_Staged_Endpoints {
             if ($status['verified']) {
                 if ($status['committed_bytes'] !== $total_bytes) {
                     return $this->stream_rejected(409, 'size_mismatch', null, [
-                        'artifact_id' => $artifact_id,
+                        'artifact_id' => base64_encode($artifact_id),
                         'committed_bytes' => $status['committed_bytes'],
                     ], $files_verified);
                 }
                 if (!Site_Export_Staged_Push_Stream_Protocol::discard_exactly($input, $bytes, self::READ_BUFFER_BYTES)) {
                     return $this->stream_rejected(400, 'body_read_failed', null, $cursor, $files_verified);
                 }
-                $cursor = ['artifact_id' => $artifact_id, 'committed_bytes' => $status['committed_bytes']];
+                $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => $status['committed_bytes']];
                 if ($final) {
                     $files_verified++;
                 }
@@ -247,7 +249,7 @@ final class Site_Export_Staged_Endpoints {
                     }
                     $remaining_frame_bytes -= $already_committed_bytes;
                     $append_offset += $already_committed_bytes;
-                    $cursor = ['artifact_id' => $artifact_id, 'committed_bytes' => $committed_bytes];
+                    $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => $committed_bytes];
                 }
 
                 while ($remaining_frame_bytes > 0) {
@@ -272,7 +274,7 @@ final class Site_Export_Staged_Endpoints {
                         $append_result = $this->store->append($artifact_id, $append_offset, $payload_piece);
                         if ($append_result['status'] === 'accepted' || $append_result['status'] === 'duplicate') {
                             $append_offset = max($append_offset + strlen($payload_piece), (int) $append_result['committed_bytes']);
-                            $cursor = ['artifact_id' => $artifact_id, 'committed_bytes' => (int) $append_result['committed_bytes']];
+                            $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => (int) $append_result['committed_bytes']];
                             break;
                         }
 
@@ -289,7 +291,7 @@ final class Site_Export_Staged_Endpoints {
 
                         $response = $this->from_store_result($append_result);
                         $response['body']['cursor'] = [
-                            'artifact_id' => $artifact_id,
+                            'artifact_id' => base64_encode($artifact_id),
                             'committed_bytes' => $committed_bytes,
                         ];
                         $response['body']['files_verified'] = $files_verified;
@@ -315,7 +317,7 @@ final class Site_Export_Staged_Endpoints {
                     return $response;
                 }
                 $files_verified++;
-                $cursor = ['artifact_id' => $artifact_id, 'committed_bytes' => (int) $finalize_result['committed_bytes']];
+                $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => (int) $finalize_result['committed_bytes']];
             }
         }
 

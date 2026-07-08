@@ -63,7 +63,7 @@ final class StagedEndpointsTest extends TestCase {
         foreach ($frames as $frame) {
             $header = json_encode([
                 'type' => 'chunk',
-                'artifact_id' => $frame['artifact_id'],
+                'artifact_id' => base64_encode($frame['artifact_id']),
                 'offset' => $frame['offset'],
                 'bytes' => strlen($frame['bytes']),
                 'total_bytes' => $frame['total_bytes'],
@@ -110,7 +110,7 @@ final class StagedEndpointsTest extends TestCase {
 
         $this->assertSame(200, $result['http_code']);
         $this->assertSame('complete', $result['body']['status']);
-        $this->assertSame(['artifact_id' => 'a/b/dump.sql', 'committed_bytes' => strlen($body)], $result['body']['cursor']);
+        $this->assertSame(['artifact_id' => base64_encode('a/b/dump.sql'), 'committed_bytes' => strlen($body)], $result['body']['cursor']);
         $this->assertSame(1, $result['body']['files_verified']);
         $this->assertSame($body, file_get_contents($this->staging_dir . '/files/a/b/dump.sql'));
     }
@@ -126,7 +126,7 @@ final class StagedEndpointsTest extends TestCase {
 
         $this->assertSame(200, $retry['http_code']);
         $this->assertSame('complete', $retry['body']['status']);
-        $this->assertSame(['artifact_id' => 'artifact-1', 'committed_bytes' => 10], $retry['body']['cursor']);
+        $this->assertSame(['artifact_id' => base64_encode('artifact-1'), 'committed_bytes' => 10], $retry['body']['cursor']);
         $this->assertSame(1, $retry['body']['files_verified']);
         $this->assertSame('abcdefghij', file_get_contents($this->staging_dir . '/files/artifact-1'));
     }
@@ -145,7 +145,7 @@ final class StagedEndpointsTest extends TestCase {
         ]);
 
         $this->assertSame(200, $result['http_code']);
-        $this->assertSame(['artifact_id' => 'artifact-1', 'committed_bytes' => 15], $result['body']['cursor']);
+        $this->assertSame(['artifact_id' => base64_encode('artifact-1'), 'committed_bytes' => 15], $result['body']['cursor']);
         $this->assertSame('abcdefghijKLMNO', file_get_contents($this->staging_dir . '/files/artifact-1'));
     }
 
@@ -162,7 +162,7 @@ final class StagedEndpointsTest extends TestCase {
 
         $this->assertSame(409, $result['http_code']);
         $this->assertSame('offset_gap', $result['body']['reason']);
-        $this->assertSame(['artifact_id' => 'artifact-1', 'committed_bytes' => 5], $result['body']['cursor']);
+        $this->assertSame(['artifact_id' => base64_encode('artifact-1'), 'committed_bytes' => 5], $result['body']['cursor']);
     }
 
     public function testPushStreamRejectsWrongSecretBeforeTheStore(): void
@@ -221,13 +221,13 @@ final class StagedEndpointsTest extends TestCase {
 
         $this->assertSame(423, $result['http_code']);
         $this->assertSame('busy', $result['body']['status']);
-        $this->assertSame(['artifact_id' => 'artifact-1', 'committed_bytes' => 5], $result['body']['cursor']);
+        $this->assertSame(['artifact_id' => base64_encode('artifact-1'), 'committed_bytes' => 5], $result['body']['cursor']);
     }
 
     public function testMalformedPushFrameIsRejected(): void
     {
         $endpoints = $this->makeEndpoints();
-        $stream = $this->bodyStream(json_encode(['type' => 'chunk', 'artifact_id' => 'a', 'offset' => 5, 'bytes' => 1, 'total_bytes' => 3, 'final' => false]) . "\nX");
+        $stream = $this->bodyStream(json_encode(['type' => 'chunk', 'artifact_id' => base64_encode('a'), 'offset' => 5, 'bytes' => 1, 'total_bytes' => 3, 'final' => false]) . "\nX");
         try {
             $result = $endpoints->push_stream([], $this->pushHeaders(), $stream);
         } finally {

@@ -34,9 +34,9 @@
  * request stays open between chunks: send_chunk() hands the frame to curl's
  * read callback and pumps the transfer until libcurl has consumed every
  * byte. libcurl writes to the socket as it consumes, so when send_chunk()
- * returns true the frame has left for the network — at most libcurl's
- * upload buffer (64 KiB) sits between this process and the socket, never a
- * request body. Between chunks the read callback returns
+ * returns true the frame has left for the network — what trails behind is
+ * libcurl's upload buffer (64 KiB) and the kernel's socket send buffer,
+ * never a request body. Between chunks the read callback returns
  * CURL_READFUNC_PAUSE, which PHP's curl extension only supports since
  * PHP 8.1 — on 7.4/8.0 that return is misread as end-of-body and the upload
  * silently truncates, so the constructor refuses to run there. The full
@@ -379,10 +379,13 @@ class StagedPushStreamClient
      * libcurl's read callback and the transfer is pumped until libcurl has
      * consumed every byte and written it toward the socket. When this
      * returns true the frame is on the network, not queued in this process;
-     * at most libcurl's 64 KiB upload buffer trails behind.
+     * libcurl's 64 KiB upload buffer and the kernel's socket send buffer
+     * trail behind — buffers, never a request body.
      *
      * The payload's length is the frame's byte count; there is no separate
-     * declaration to reconcile. Invalid descriptors throw with the exact
+     * declaration to reconcile. The artifact_id may be arbitrary bytes —
+     * file names are not guaranteed UTF-8 — and travels base64-encoded
+     * inside the JSON frame header. Invalid descriptors throw with the exact
      * violated condition. Remote conditions do not throw: false means the
      * transfer ended early — dead connection or the target already
      * responded — and finish_request() reports which.
@@ -442,7 +445,11 @@ class StagedPushStreamClient
 
         $frame_header = json_encode([
             "type" => "chunk",
-            "artifact_id" => $artifact_id,
+            // File paths are arbitrary bytes and JSON strings must be UTF-8,
+            // so the id travels base64-encoded — the same convention the
+            // journal and the pull cursors use. json_encode would return
+            // false on a raw non-UTF-8 name.
+            "artifact_id" => base64_encode($artifact_id),
             "offset" => $offset,
             "bytes" => strlen($payload),
             "total_bytes" => $total_bytes,
@@ -564,11 +571,26 @@ class StagedPushStreamClient
         }
 
         $http_code = (int) curl_getinfo($this->curl_handle, CURLINFO_HTTP_CODE);
+        $redirect_url = (string) curl_getinfo($this->curl_handle, CURLINFO_REDIRECT_URL);
         $response_body = (string) curl_multi_getcontent($this->curl_handle);
         curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
         curl_multi_close($this->multi_handle);
         $this->curl_handle = null;
         $this->multi_handle = null;
+
+        // A redirect is a configuration problem, not a transient failure or
+        // a size signal: the usual case is an http:// base_url on a site
+        // that forces https. Name the target instead of retrying into it —
+        // the request cannot replay its streamed body through a redirect.
+        if (in_array($http_code, [301, 302, 303, 307, 308], true)) {
+            return $this->result(
+                "failed",
+                "redirected",
+                $redirect_url !== ""
+                    ? "The target redirected to \"" . $redirect_url . "\". Use that address as the push base_url."
+                    : "The target answered HTTP " . $http_code . " without a Location header."
+            );
+        }
 
         $decoded = json_decode($response_body, true);
         if (!is_array($decoded)) {
@@ -582,6 +604,15 @@ class StagedPushStreamClient
         }
 
         $response_cursor = is_array($decoded["cursor"] ?? null) ? $decoded["cursor"] : null;
+        if ($response_cursor !== null) {
+            // The wire carries the id base64-encoded (see send_chunk); hand
+            // callers the raw path back. A cursor that does not decode is as
+            // useless as none — callers fall back to their persisted cursor.
+            $decoded_artifact_id = base64_decode((string) ($response_cursor["artifact_id"] ?? ""), true);
+            $response_cursor = $decoded_artifact_id !== false && $decoded_artifact_id !== ""
+                ? ["artifact_id" => $decoded_artifact_id, "committed_bytes" => (int) ($response_cursor["committed_bytes"] ?? 0)]
+                : null;
+        }
 
         if ($http_code === 413 || ($decoded["reason"] ?? null) === "frame_too_large") {
             $reported_limit_bytes = $decoded["max_frame_bytes"] ?? ($decoded["max_request_bytes"] ?? null);

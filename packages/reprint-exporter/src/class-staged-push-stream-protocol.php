@@ -28,6 +28,11 @@ final class Site_Export_Staged_Push_Stream_Protocol {
     /**
      * Decode and validate one chunk frame header.
      *
+     * The artifact_id in the wire frame is base64: file paths are arbitrary
+     * bytes and JSON strings must be UTF-8, so ids travel encoded — the same
+     * convention the pull cursors and the local journal use for paths. The
+     * returned artifact_id is the decoded raw path.
+     *
      * @return array{artifact_id:string,offset:int,bytes:int,total_bytes:int,final:bool}
      */
     public static function decode_chunk_header(string $line): array {
@@ -50,15 +55,20 @@ final class Site_Export_Staged_Push_Stream_Protocol {
         if (!array_key_exists('artifact_id', $frame)) {
             throw new InvalidArgumentException('Missing staged push stream frame field "artifact_id".');
         }
-        if (!is_string($frame['artifact_id'])) {
+        if (!is_string($frame['artifact_id']) || $frame['artifact_id'] === '') {
             throw new InvalidArgumentException(
-                'Expected staged push stream frame field "artifact_id" to be a non-empty string; received ' .
+                'Expected staged push stream frame field "artifact_id" to be base64 of a non-empty path; received ' .
                 self::describe_value($frame['artifact_id']) .
                 '.'
             );
         }
-        if ($frame['artifact_id'] === '') {
-            throw new InvalidArgumentException('Expected staged push stream frame field "artifact_id" to be a non-empty string; received an empty string.');
+        $artifact_id = base64_decode($frame['artifact_id'], true);
+        if ($artifact_id === false || $artifact_id === '') {
+            throw new InvalidArgumentException(
+                'Expected staged push stream frame field "artifact_id" to be base64 of a non-empty path; received ' .
+                self::describe_value($frame['artifact_id']) .
+                '.'
+            );
         }
 
         $offset = self::require_non_negative_integer_field($frame, 'offset');
@@ -88,7 +98,7 @@ final class Site_Export_Staged_Push_Stream_Protocol {
         }
 
         return [
-            'artifact_id' => $frame['artifact_id'],
+            'artifact_id' => $artifact_id,
             'offset' => $offset,
             'bytes' => $bytes,
             'total_bytes' => $total_bytes,

@@ -38,10 +38,11 @@
  * - When even the floor size is rejected, decisions report "give_up" so the
  *   caller can stop with a clear error instead of retrying forever.
  *
- * Callers should retry transient HTTP request errors at the same size first
- * and record a failure only once a size is considered rejected. The decision
- * state survives get_state()/constructor round-trips so a resumed session
- * keeps the learned safe request size.
+ * The push client records a request failure immediately when a transfer
+ * breaks — the halve-and-hold-off response above is sized for exactly that:
+ * one blip costs one halving that growth undoes after the holdoff. The
+ * decision state survives get_state()/constructor round-trips so a resumed
+ * session keeps the learned safe request size.
  *
  * This is a sibling of AdaptiveTuner, not an extension of it: AdaptiveTuner
  * tunes how much work a pull request asks for so the exporter fits its time

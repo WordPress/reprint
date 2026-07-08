@@ -8,13 +8,15 @@ final class StagedPushStreamProtocolTest extends TestCase
     {
         $line = json_encode([
             'type' => 'chunk',
-            'artifact_id' => 'wp-content/uploads/photo.jpg',
+            'artifact_id' => base64_encode('wp-content/uploads/photo.jpg'),
             'offset' => 10,
             'bytes' => 5,
             'total_bytes' => 20,
             'final' => false,
         ], JSON_UNESCAPED_SLASHES);
 
+        // The wire carries the id base64-encoded; decoding hands back the
+        // raw path.
         $this->assertSame([
             'artifact_id' => 'wp-content/uploads/photo.jpg',
             'offset' => 10,
@@ -31,7 +33,7 @@ final class StagedPushStreamProtocolTest extends TestCase
 
         Site_Export_Staged_Push_Stream_Protocol::decode_chunk_header(json_encode([
             'type' => 'chunk',
-            'artifact_id' => 'file.txt',
+            'artifact_id' => base64_encode('file.txt'),
             'offset' => 8,
             'bytes' => 4,
             'total_bytes' => 10,
@@ -54,23 +56,27 @@ final class StagedPushStreamProtocolTest extends TestCase
     {
         return [
             'missing type' => [
-                ['artifact_id' => 'file.txt', 'offset' => 0, 'bytes' => 1, 'total_bytes' => 1, 'final' => false],
+                ['artifact_id' => base64_encode('file.txt'), 'offset' => 0, 'bytes' => 1, 'total_bytes' => 1, 'final' => false],
                 'Missing staged push stream frame field "type".',
             ],
             'empty artifact id' => [
                 ['type' => 'chunk', 'artifact_id' => '', 'offset' => 0, 'bytes' => 1, 'total_bytes' => 1, 'final' => false],
-                'Expected staged push stream frame field "artifact_id" to be a non-empty string; received an empty string.',
+                'Expected staged push stream frame field "artifact_id" to be base64 of a non-empty path; received string "".',
+            ],
+            'artifact id that is not base64' => [
+                ['type' => 'chunk', 'artifact_id' => '!!!not-base64!!!', 'offset' => 0, 'bytes' => 1, 'total_bytes' => 1, 'final' => false],
+                'Expected staged push stream frame field "artifact_id" to be base64 of a non-empty path; received string "!!!not-base64!!!".',
             ],
             'negative offset' => [
-                ['type' => 'chunk', 'artifact_id' => 'file.txt', 'offset' => -1, 'bytes' => 1, 'total_bytes' => 1, 'final' => false],
+                ['type' => 'chunk', 'artifact_id' => base64_encode('file.txt'), 'offset' => -1, 'bytes' => 1, 'total_bytes' => 1, 'final' => false],
                 'Expected staged push stream frame field "offset" to be a non-negative integer; received integer -1.',
             ],
             'string byte count' => [
-                ['type' => 'chunk', 'artifact_id' => 'file.txt', 'offset' => 0, 'bytes' => '1', 'total_bytes' => 1, 'final' => false],
+                ['type' => 'chunk', 'artifact_id' => base64_encode('file.txt'), 'offset' => 0, 'bytes' => '1', 'total_bytes' => 1, 'final' => false],
                 'Expected staged push stream frame field "bytes" to be a non-negative integer; received string "1".',
             ],
             'missing final flag' => [
-                ['type' => 'chunk', 'artifact_id' => 'file.txt', 'offset' => 0, 'bytes' => 1, 'total_bytes' => 1],
+                ['type' => 'chunk', 'artifact_id' => base64_encode('file.txt'), 'offset' => 0, 'bytes' => 1, 'total_bytes' => 1],
                 'Missing staged push stream frame field "final".',
             ],
         ];
