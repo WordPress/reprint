@@ -92,10 +92,11 @@ class PushFrameSizerTest extends TestCase
         $sizer->record_success();
         $sizer->record_success();
 
-        $ceiling = (int) (256 * self::MIB * 0.9);
-        $this->assertSame($ceiling, $sizer->chunk_bytes());
+        // The 128 MiB hard cap binds before the reported 256M * 0.9 ceiling:
+        // one whole chunk is buffered in sender memory, so growth stops there.
+        $this->assertSame(128 * self::MIB, $sizer->chunk_bytes());
         $this->assertSame('steady', $sizer->record_success()['action']);
-        $this->assertSame($ceiling, $sizer->chunk_bytes());
+        $this->assertSame(128 * self::MIB, $sizer->chunk_bytes());
     }
 
     public function testGrowthWithoutLimitsStopsAtConfiguredMax(): void
@@ -116,7 +117,7 @@ class PushFrameSizerTest extends TestCase
             $sizer->record_success();
         }
 
-        $this->assertSame(1024 * self::MIB, $sizer->chunk_bytes());
+        $this->assertSame(128 * self::MIB, $sizer->chunk_bytes());
     }
 
     // ---------------------------------------------------------------

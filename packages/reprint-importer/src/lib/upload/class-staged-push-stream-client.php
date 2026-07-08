@@ -8,15 +8,39 @@
  * retried from the last cursor the sender has, or from the beginning with the
  * target absorbing duplicate/verified frames.
  *
- * Bytes are written to the network as the caller advances the request: each
- * StagedPushStreamRequest::next_chunk() call reads the next file range from
- * disk and writes it straight to the request socket before returning. Nothing
- * accumulates a request body in memory — at most one 64 KiB disk read is in
- * flight. Callers decide how many frames go into one request, finalize it,
- * and resume the next request from the cursor.
+ * The client is a pass-through wire. The caller reads a chunk of a file into
+ * memory — at most max_chunk_bytes(), which is why a chunk is the one thing
+ * that may be buffered — and send_chunk() writes the frame header and the
+ * payload straight to the request socket before returning:
+ *
+ *     $client->start_push_request();
+ *     while (...) {
+ *         if ($client->should_finish_request()) {
+ *             $result = $client->finish_request();   // persist $result['cursor']
+ *             $client->start_push_request();
+ *         }
+ *         $payload = fread($source_handle, min($client->capacity_bytes(), $client->max_chunk_bytes()));
+ *         $client->send_chunk([
+ *             'artifact_id' => $artifact_id,
+ *             'offset'      => $offset,
+ *             'total_bytes' => $total_bytes,
+ *             'final'       => $offset + strlen($payload) >= $total_bytes,
+ *             'payload'     => $payload,
+ *         ]);
+ *     }
+ *     $result = $client->finish_request();
+ *
+ * Budgets count as-sent body bytes. Request-size limits (post_max_size,
+ * client_max_body_size and friends) measure the entity body after chunked
+ * transfer-encoding removal, and nothing compresses request bodies, so the
+ * bytes we write are the bytes that get measured — frame header lines count
+ * toward capacity_bytes(), not only payloads.
  */
 class StagedPushStreamClient
 {
+    /** Largest slice handed to one fwrite; bounds the copy cost of partial writes. */
+    private const WRITE_SLICE_BYTES = 1048576;
+
     private string $base_url;
 
     private ?Site_Export_HMAC_Client $hmac_client;
@@ -25,239 +49,19 @@ class StagedPushStreamClient
 
     private int $request_timeout;
 
-    /**
-     * @param array $options
-     *   - base_url (string, required): the export API URL; endpoint is appended
-     *     to its query string.
-     *   - hmac_client (?Site_Export_HMAC_Client): envelope request signer.
-     *   - frame_sizer (?PushFrameSizer): frame-size decisions; defaults to a
-     *     fresh frame sizer. Pass one restored from persisted state to keep
-     *     learned limits.
-     *   - request_timeout (int): seconds without socket progress (one write,
-     *     or the response read) before the request fails.
-     */
-    public function __construct(array $options)
-    {
-        $base_url = $options["base_url"] ?? null;
-        if (!is_string($base_url) || $base_url === "") {
-            throw new InvalidArgumentException("StagedPushStreamClient requires a base_url option.");
-        }
-        $this->base_url = $base_url;
-        $this->hmac_client = $options["hmac_client"] ?? null;
-        $this->frame_sizer = $options["frame_sizer"] ?? new PushFrameSizer();
-        $timeout = $options["request_timeout"] ?? null;
-        $this->request_timeout = is_numeric($timeout) && (int) $timeout > 0 ? (int) $timeout : 120;
-    }
+    /** @var int|float Wall-clock budget per request, in seconds. */
+    private $max_request_seconds;
 
-    /**
-     * Create one staged_push request that the caller advances chunk by chunk.
-     *
-     * The caller owns the nested loop: call StagedPushStreamRequest::next_chunk()
-     * until the request budget or the caller's own budget says to stop, then
-     * hand the request to push_request(). Each next_chunk() call writes that
-     * frame to the network; the connection opens on the first one.
-     *
-     * @param array{max_chunks?:int|null,max_payload_bytes?:int|null} $limits
-     * @param array{artifact_id?:string,committed_bytes?:int}|null $cursor
-     */
-    public function create_request(StagedPushStreamProcessor $processor, ?array $cursor = null, array $limits = []): StagedPushStreamRequest
-    {
-        $request_url = $this->base_url
-            . (strpos($this->base_url, "?") === false ? "?" : "&")
-            . http_build_query(["endpoint" => "staged_push"]);
-
-        $request_headers = $this->hmac_client !== null
-            ? $this->hmac_client->get_envelope_auth_headers("POST", $request_url)
-            : [];
-        $request_headers["Content-Type"] = Site_Export_Staged_Push_Stream_Protocol::CONTENT_TYPE;
-        $request_headers["Transfer-Encoding"] = "chunked";
-        $request_headers["Connection"] = "close";
-
-        return new StagedPushStreamRequest(
-            $request_url,
-            $request_headers,
-            $this->request_timeout,
-            $processor->files(),
-            $this->frame_sizer->chunk_bytes(),
-            $cursor ?? $processor->cursor(),
-            $limits["max_chunks"] ?? null,
-            $limits["max_payload_bytes"] ?? null
-        );
-    }
-
-    /**
-     * Finish one staged_push request and return the request-level result.
-     *
-     * The frames themselves were already written to the network by
-     * next_chunk(); this ends the request body, reads the target's response,
-     * and folds it into the retry/cursor decision.
-     *
-     * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,bytes_streamed:int,chunks_streamed:int}
-     */
-    public function push_request(StagedPushStreamRequest $request): array
-    {
-        $request->finalize();
-        $response = $request->finish();
-        $request_start_cursor = $request->start_cursor();
-
-        if ($response["http_code"] === 0 && $response["error"] === null) {
-            // No frame was ever written, so no network exchange happened.
-            return $this->result("request_complete", null, null, $request->cursor(), 0, 0, 0);
-        }
-
-        if ($response["error"] !== null) {
-            $decision = $this->frame_sizer->record_request_failure();
-            return $this->result(
-                $decision["action"] === "give_up" ? "failed" : "retry",
-                "request_failed",
-                $response["error"],
-                $request_start_cursor,
-                0,
-                $request->bytes_streamed(),
-                $request->chunks_streamed()
-            );
-        }
-
-        $decoded = json_decode((string) $response["body"], true);
-        if (!is_array($decoded)) {
-            $decision = $this->frame_sizer->record_request_failure();
-            return $this->result(
-                $decision["action"] === "give_up" ? "failed" : "retry",
-                "request_failed",
-                "invalid JSON response (HTTP " . (int) $response["http_code"] . "): " . substr((string) $response["body"], 0, 120),
-                $request_start_cursor,
-                0,
-                $request->bytes_streamed(),
-                $request->chunks_streamed()
-            );
-        }
-
-        if ((int) $response["http_code"] === 413 || ($decoded["reason"] ?? null) === "frame_too_large") {
-            $reported_max_frame_bytes = $decoded["max_frame_bytes"] ?? ($decoded["max_request_bytes"] ?? null);
-            $decision = $this->frame_sizer->record_too_large(
-                is_numeric($reported_max_frame_bytes) ? (int) $reported_max_frame_bytes : null
-            );
-            return $this->result(
-                $decision["action"] === "give_up" ? "failed" : "retry",
-                $decision["action"] === "give_up" ? "chunk_size_exhausted" : "frame_too_large",
-                null,
-                is_array($decoded["cursor"] ?? null) ? $decoded["cursor"] : $request_start_cursor,
-                0,
-                $request->bytes_streamed(),
-                $request->chunks_streamed()
-            );
-        }
-
-        if (($decoded["status"] ?? null) !== "complete") {
-            return $this->result(
-                "failed",
-                is_string($decoded["reason"] ?? null) ? $decoded["reason"] : "unexpected_response",
-                is_string($decoded["detail"] ?? null) ? $decoded["detail"] : ("HTTP " . (int) $response["http_code"]),
-                is_array($decoded["cursor"] ?? null) ? $decoded["cursor"] : $request->cursor(),
-                (int) ($decoded["files_verified"] ?? 0),
-                $request->bytes_streamed(),
-                $request->chunks_streamed()
-            );
-        }
-
-        $this->frame_sizer->record_success();
-        return $this->result(
-            "request_complete",
-            null,
-            null,
-            is_array($decoded["cursor"] ?? null) ? $decoded["cursor"] : null,
-            (int) ($decoded["files_verified"] ?? 0),
-            $request->bytes_streamed(),
-            $request->chunks_streamed()
-        );
-    }
-
-    /**
-     * Convenience wrapper that fills and sends one request.
-     *
-     * Prefer create_request()/push_request() when the caller needs to pause
-     * inside a request after a caller-chosen number of chunks.
-     *
-     * @param array{max_chunks?:int|null,max_payload_bytes?:int|null} $limits
-     * @param array{artifact_id?:string,committed_bytes?:int}|null $cursor
-     * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,bytes_streamed:int,chunks_streamed:int}
-     */
-    public function push_next_request(StagedPushStreamProcessor $processor, ?array $cursor = null, array $limits = []): array
-    {
-        if ($processor->is_finished_at($cursor ?? $processor->cursor())) {
-            return $this->result("complete", null, null, $cursor ?? $processor->cursor(), 0, 0, 0);
-        }
-
-        $request = $this->create_request($processor, $cursor, $limits);
-        while ($request->next_chunk()) {
-            // Fill this request up to the configured request budget.
-        }
-        return $this->push_request($request);
-    }
-
-    /** @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,bytes_streamed:int,chunks_streamed:int} */
-    private function result(string $status, ?string $reason, ?string $detail, ?array $cursor, int $files_verified, int $bytes_streamed, int $chunks_streamed): array
-    {
-        return [
-            "status" => $status,
-            "reason" => $reason,
-            "detail" => $detail,
-            "cursor" => $cursor,
-            "files_verified" => $files_verified,
-            "bytes_streamed" => $bytes_streamed,
-            "chunks_streamed" => $chunks_streamed,
-        ];
-    }
-}
-
-/**
- * One live staged_push request.
- *
- * next_chunk() writes the next frame — header line plus the file's byte
- * range — straight to the request socket and only then returns. The socket
- * opens lazily on the first frame, so a request that never pushes a chunk
- * never touches the network. finish() ends the chunked request body and
- * reads the target's response.
- */
-final class StagedPushStreamRequest
-{
-    /** Largest single disk read; also the largest write handed to the socket. */
-    private const DISK_READ_BYTES = 65536;
-
-    private string $request_url;
-
-    /** @var array<string,string> */
-    private array $request_headers;
-
-    private int $request_timeout;
-
-    /** @var array<int,array{artifact_id:string,source_path:string,total_bytes:int}> */
-    private array $files;
-
-    private int $frame_bytes;
-
-    /** @var array{artifact_id?:string,committed_bytes?:int}|null */
-    private ?array $start_cursor;
-
-    private ?int $max_chunks;
-
-    private ?int $max_payload_bytes;
-
-    private int $file_index = 0;
-
-    private int $offset = 0;
-
-    /** @var array{artifact_id?:string,committed_bytes?:int}|null */
-    private ?array $cursor = null;
-
-    private int $chunks_streamed = 0;
-
-    private int $payload_bytes_streamed = 0;
-
-    private bool $finalized = false;
+    private ?int $max_request_body_bytes;
 
     /** @var resource|null */
     private $socket = null;
+
+    private float $request_started_at = 0.0;
+
+    private int $body_bytes_sent = 0;
+
+    private int $chunks_sent = 0;
 
     private ?string $transport_error = null;
 
@@ -273,190 +77,237 @@ final class StagedPushStreamRequest
      */
     private string $early_reply_buffer = "";
 
-    /** @var array{http_code:int,body:string,error:?string}|null */
-    private ?array $final_response = null;
+    private ?string $last_error = null;
 
     /**
-     * @param array<string,string> $request_headers
-     * @param array<int,array{artifact_id:string,source_path:string,total_bytes:int}> $files
-     * @param array{artifact_id?:string,committed_bytes?:int}|null $start_cursor
+     * @param array $options
+     *   - base_url (string, required): the export API URL; endpoint is appended
+     *     to its query string.
+     *   - hmac_client (?Site_Export_HMAC_Client): envelope request signer.
+     *   - frame_sizer (?PushFrameSizer): chunk-size decisions; defaults to a
+     *     fresh frame sizer. Pass one restored from persisted state to keep
+     *     learned limits.
+     *   - request_timeout (int): seconds without socket progress (one write,
+     *     or the response read) before the request fails. Default 120.
+     *   - max_request_seconds (int|float): wall-clock budget per request;
+     *     should_finish_request() turns true once a request is older than
+     *     this. Soft — checked between chunks — so set it with margin below
+     *     the host's execution/proxy limits. Default 30.
+     *   - max_request_body_bytes (?int): body bytes per request, frame
+     *     headers included, after which should_finish_request() turns true.
+     *     Null means requests rotate on time alone.
      */
-    public function __construct(
-        string $request_url,
-        array $request_headers,
-        int $request_timeout,
-        array $files,
-        int $frame_bytes,
-        ?array $start_cursor,
-        ?int $max_chunks = null,
-        ?int $max_payload_bytes = null
-    ) {
-        $this->request_url = $request_url;
-        $this->request_headers = $request_headers;
-        $this->request_timeout = $request_timeout;
-        $this->files = $files;
-        $this->frame_bytes = max(1, $frame_bytes);
-        $this->start_cursor = $start_cursor;
-        $this->max_chunks = $max_chunks !== null ? max(1, $max_chunks) : null;
-        $this->max_payload_bytes = $max_payload_bytes !== null ? max(1, $max_payload_bytes) : null;
-
-        if ($start_cursor !== null && is_string($start_cursor["artifact_id"] ?? null)) {
-            foreach ($files as $index => $file) {
-                if ($file["artifact_id"] !== $start_cursor["artifact_id"]) {
-                    continue;
-                }
-                $committed_bytes = min(max(0, (int) ($start_cursor["committed_bytes"] ?? 0)), $file["total_bytes"]);
-                if ($committed_bytes >= $file["total_bytes"]) {
-                    $this->file_index = $index + 1;
-                } else {
-                    $this->file_index = $index;
-                    $this->offset = $committed_bytes;
-                }
-                break;
-            }
+    public function __construct(array $options)
+    {
+        $base_url = $options["base_url"] ?? null;
+        if (!is_string($base_url) || $base_url === "") {
+            throw new InvalidArgumentException("StagedPushStreamClient requires a base_url option.");
         }
+        $this->base_url = $base_url;
+        $this->hmac_client = $options["hmac_client"] ?? null;
+        $this->frame_sizer = $options["frame_sizer"] ?? new PushFrameSizer();
+        $timeout = $options["request_timeout"] ?? null;
+        $this->request_timeout = is_numeric($timeout) && (int) $timeout > 0 ? (int) $timeout : 120;
+        $max_request_seconds = $options["max_request_seconds"] ?? null;
+        $this->max_request_seconds = is_numeric($max_request_seconds) && $max_request_seconds > 0 ? $max_request_seconds : 30;
+        $max_request_body_bytes = $options["max_request_body_bytes"] ?? null;
+        $this->max_request_body_bytes = is_numeric($max_request_body_bytes) && (int) $max_request_body_bytes > 0
+            ? (int) $max_request_body_bytes
+            : null;
     }
 
     /**
-     * Push one more framed chunk onto the network.
+     * Open a staged_push request: connect, negotiate TLS for https, and write
+     * the signed request head. The request body starts empty; send_chunk()
+     * fills it.
      *
-     * Opens the connection on the first call, then writes the frame header
-     * and the file's byte range for this frame, reading from disk in 64 KiB
-     * pieces. When this returns true, the frame's bytes have been handed to
-     * the socket.
-     *
-     * @return bool Whether a chunk was pushed. False means the request is
-     *              full, the processor has no more chunks, or the exchange
-     *              already ended (transport failure or an early response);
-     *              finish() reports which.
+     * @return bool False when the connection could not be opened;
+     *              get_last_error() says why.
      */
-    public function next_chunk(): bool
+    public function start_push_request(): bool
     {
-        if (
-            $this->finalized
-            || $this->transport_error !== null
-            || $this->target_replied_early
-            || $this->file_index >= count($this->files)
-        ) {
-            return false;
-        }
-        if ($this->max_chunks !== null && $this->chunks_streamed >= $this->max_chunks) {
-            return false;
-        }
-        if ($this->max_payload_bytes !== null && $this->payload_bytes_streamed >= $this->max_payload_bytes) {
-            return false;
+        if ($this->socket !== null) {
+            throw new RuntimeException("A push request is already open; call finish_request() before starting another.");
         }
 
-        if ($this->socket === null && !$this->open_connection()) {
-            return false;
-        }
+        $this->body_bytes_sent = 0;
+        $this->chunks_sent = 0;
+        $this->transport_error = null;
+        $this->target_replied_early = false;
+        $this->early_reply_buffer = "";
+        $this->last_error = null;
 
-        $file = $this->files[$this->file_index];
-        $offset = $this->offset;
-        $remaining_payload_budget = $this->max_payload_bytes === null
-            ? PHP_INT_MAX
-            : max(1, $this->max_payload_bytes - $this->payload_bytes_streamed);
-        $frame_payload_bytes = $file["total_bytes"] === 0
-            ? 0
-            : min($this->frame_bytes, $file["total_bytes"] - $offset, $remaining_payload_budget);
-        $final = $offset + $frame_payload_bytes >= $file["total_bytes"];
+        $request_url = $this->base_url
+            . (strpos($this->base_url, "?") === false ? "?" : "&")
+            . http_build_query(["endpoint" => "staged_push"]);
+        $request_headers = $this->hmac_client !== null
+            ? $this->hmac_client->get_envelope_auth_headers("POST", $request_url)
+            : [];
+        $request_headers["Content-Type"] = Site_Export_Staged_Push_Stream_Protocol::CONTENT_TYPE;
+        $request_headers["Transfer-Encoding"] = "chunked";
+        $request_headers["Connection"] = "close";
 
-        $frame_header = json_encode([
-            "type" => "chunk",
-            "artifact_id" => $file["artifact_id"],
-            "offset" => $offset,
-            "bytes" => $frame_payload_bytes,
-            "total_bytes" => $file["total_bytes"],
-            "final" => $final,
-        ], JSON_UNESCAPED_SLASHES);
-        if ($frame_header === false) {
-            throw new RuntimeException("Could not encode staged push stream frame header.");
-        }
-
-        if (!$this->write_to_socket($this->encode_body_chunk($frame_header . "\n"))) {
-            return false;
-        }
-
-        if ($frame_payload_bytes > 0) {
-            $source_handle = @fopen($file["source_path"], "rb");
-            if ($source_handle === false) {
-                throw new RuntimeException("Source file is unreadable: " . $file["source_path"]);
+        if (!$this->open_connection($request_url, $request_headers)) {
+            if (is_resource($this->socket)) {
+                fclose($this->socket);
             }
-            if (fseek($source_handle, $offset) !== 0) {
-                fclose($source_handle);
-                throw new RuntimeException("Could not seek source file: " . $file["source_path"]);
-            }
-            $frame_bytes_remaining = $frame_payload_bytes;
-            while ($frame_bytes_remaining > 0) {
-                $piece = fread($source_handle, min(self::DISK_READ_BYTES, $frame_bytes_remaining));
-                if ($piece === false || $piece === "") {
-                    fclose($source_handle);
-                    throw new RuntimeException("Source file ended before its declared size: " . $file["source_path"]);
-                }
-                if (!$this->write_to_socket($this->encode_body_chunk($piece))) {
-                    fclose($source_handle);
-                    return false;
-                }
-                $this->payload_bytes_streamed += strlen($piece);
-                $frame_bytes_remaining -= strlen($piece);
-            }
-            fclose($source_handle);
+            $this->socket = null;
+            $this->last_error = $this->transport_error;
+            $this->transport_error = null;
+            return false;
         }
 
-        $this->chunks_streamed++;
-        $this->offset = $offset + $frame_payload_bytes;
-        $this->cursor = [
-            "artifact_id" => $file["artifact_id"],
-            "committed_bytes" => $this->offset,
-        ];
-        if ($final) {
-            $this->file_index++;
-            $this->offset = 0;
-        }
+        $this->request_started_at = microtime(true);
         return true;
     }
 
     /**
-     * No more chunks will be pushed into this request.
+     * Write one framed chunk — header line, then the payload — straight to
+     * the request socket.
+     *
+     * The payload's length is the frame's byte count; there is no separate
+     * declaration to reconcile. Invalid descriptors throw with the exact
+     * violated condition. Remote conditions do not throw: false means the
+     * wire died or the target replied early, and finish_request() reports
+     * which.
+     *
+     * @param array{artifact_id:string,offset:int,total_bytes:int,final:bool,payload:string} $chunk
      */
-    public function finalize(): void
+    public function send_chunk(array $chunk): bool
     {
-        $this->finalized = true;
+        $artifact_id = $chunk["artifact_id"] ?? null;
+        if (!is_string($artifact_id) || $artifact_id === "") {
+            throw new InvalidArgumentException("Expected chunk field \"artifact_id\" to be a non-empty string.");
+        }
+        $offset = $chunk["offset"] ?? null;
+        if (!is_int($offset) || $offset < 0) {
+            throw new InvalidArgumentException("Expected chunk field \"offset\" to be a non-negative integer for \"" . $artifact_id . "\".");
+        }
+        $total_bytes = $chunk["total_bytes"] ?? null;
+        if (!is_int($total_bytes) || $total_bytes < 0) {
+            throw new InvalidArgumentException("Expected chunk field \"total_bytes\" to be a non-negative integer for \"" . $artifact_id . "\".");
+        }
+        $final = $chunk["final"] ?? null;
+        if (!is_bool($final)) {
+            throw new InvalidArgumentException("Expected chunk field \"final\" to be a boolean for \"" . $artifact_id . "\".");
+        }
+        $payload = $chunk["payload"] ?? null;
+        if (!is_string($payload)) {
+            throw new InvalidArgumentException("Expected chunk field \"payload\" to be a string for \"" . $artifact_id . "\".");
+        }
+        if ($offset + strlen($payload) > $total_bytes) {
+            throw new InvalidArgumentException(
+                "Chunk for \"" . $artifact_id . "\" spans bytes " . $offset . "-" . ($offset + strlen($payload)) . ", which exceeds total_bytes " . $total_bytes . "."
+            );
+        }
+        if ($payload === "" && !$final && $total_bytes > 0) {
+            throw new InvalidArgumentException(
+                "Refusing a zero-byte non-final chunk for \"" . $artifact_id . "\" — the source file is shorter than its declared total_bytes " . $total_bytes . "."
+            );
+        }
+        if ($final && $offset + strlen($payload) !== $total_bytes) {
+            throw new InvalidArgumentException(
+                "Chunk for \"" . $artifact_id . "\" is marked final at byte " . ($offset + strlen($payload)) . " but total_bytes is " . $total_bytes . "."
+            );
+        }
+
+        if ($this->socket === null) {
+            throw new RuntimeException("No push request is open; call start_push_request() before send_chunk().");
+        }
+        if ($this->transport_error !== null || $this->target_replied_early) {
+            return false;
+        }
+
+        $frame_header = json_encode([
+            "type" => "chunk",
+            "artifact_id" => $artifact_id,
+            "offset" => $offset,
+            "bytes" => strlen($payload),
+            "total_bytes" => $total_bytes,
+            "final" => $final,
+        ], JSON_UNESCAPED_SLASHES);
+        if ($frame_header === false) {
+            throw new RuntimeException("Could not encode the staged push stream frame header for \"" . $artifact_id . "\".");
+        }
+        $frame_header .= "\n";
+
+        if (!$this->write_to_socket($this->encode_body_chunk($frame_header))) {
+            return false;
+        }
+        if ($payload !== "" && !$this->write_to_socket($this->encode_body_chunk($payload))) {
+            return false;
+        }
+
+        $this->body_bytes_sent += strlen($frame_header) + strlen($payload);
+        $this->chunks_sent++;
+        return true;
     }
 
     /**
-     * End the request body and read the target's response.
+     * Body bytes the current request still accepts, frame headers included.
+     *
+     * The budget is soft: the caller sizes payloads by it, and the frame
+     * header that rides along may overshoot it by one header line. The frame
+     * sizer's safety margin absorbs that.
+     */
+    public function capacity_bytes(): int
+    {
+        if ($this->max_request_body_bytes === null) {
+            return PHP_INT_MAX;
+        }
+        return max(0, $this->max_request_body_bytes - $this->body_bytes_sent);
+    }
+
+    /**
+     * Largest single chunk the learned frame ceiling allows. This bounds the
+     * caller's fread, so it is also the most memory one chunk may occupy.
+     */
+    public function max_chunk_bytes(): int
+    {
+        return $this->frame_sizer->chunk_bytes();
+    }
+
+    /**
+     * Whether the current request should end now: its byte or time budget is
+     * spent, or the exchange already ended (dead wire or an early response).
+     */
+    public function should_finish_request(): bool
+    {
+        if ($this->socket === null) {
+            throw new RuntimeException("No push request is open; call start_push_request() before should_finish_request().");
+        }
+        return $this->transport_error !== null
+            || $this->target_replied_early
+            || $this->capacity_bytes() === 0
+            || (microtime(true) - $this->request_started_at) > $this->max_request_seconds;
+    }
+
+    /**
+     * End the request body, read the target's response, and fold it into the
+     * retry/cursor decision.
      *
      * Behavior by how the exchange went:
      *
-     * 1. No frame was ever written: returns http_code 0 with no error — no
-     *    network exchange happened.
-     * 2. Normal end: writes the terminating zero-length chunk so the target
+     * 1. Normal end: writes the terminating zero-length chunk so the target
      *    sees a complete body, then reads the response.
-     * 3. The target replied early: skips the terminator (the target already
+     * 2. The target replied early: skips the terminator (the target already
      *    decided) and reads the response that is waiting.
-     * 4. A transport failure interrupted the stream: still tries to read a
+     * 3. A transport failure interrupted the stream: still tries to read a
      *    response — a target that rejected mid-stream (413 from a proxy, auth
      *    failure) breaks our writes but its response carries the reason and a
-     *    resume cursor. Falls back to the original write error when no
-     *    parseable response arrives.
+     *    resume cursor. Falls back to the write error when no parseable
+     *    response arrives.
      *
-     * @return array{http_code:int,body:string,error:?string}
+     * The returned cursor is the server-confirmed one from the response, or
+     * null when no response arrived — resume from the last persisted cursor
+     * or ask staged_status.
+     *
+     * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int}
      */
-    public function finish(): array
+    public function finish_request(): array
     {
-        if ($this->final_response !== null) {
-            return $this->final_response;
-        }
-        $this->finalized = true;
-
         if ($this->socket === null) {
-            $this->final_response = [
-                "http_code" => 0,
-                "body" => "",
-                "error" => $this->transport_error,
-            ];
-            return $this->final_response;
+            throw new RuntimeException("No push request is open; call start_push_request() before finish_request().");
         }
 
         if ($this->transport_error === null && !$this->target_replied_early) {
@@ -468,49 +319,90 @@ final class StagedPushStreamRequest
         fclose($this->socket);
         $this->socket = null;
 
-        $this->final_response = $response ?? [
-            "http_code" => 0,
-            "body" => "",
-            "error" => $write_error ?? $this->transport_error,
+        if ($response === null) {
+            $decision = $this->frame_sizer->record_request_failure();
+            return $this->result(
+                $decision["action"] === "give_up" ? "failed" : "retry",
+                "request_failed",
+                $write_error ?? $this->transport_error
+            );
+        }
+
+        $decoded = json_decode($response["body"], true);
+        if (!is_array($decoded)) {
+            $decision = $this->frame_sizer->record_request_failure();
+            return $this->result(
+                $decision["action"] === "give_up" ? "failed" : "retry",
+                "request_failed",
+                "invalid JSON response (HTTP " . $response["http_code"] . "): " . substr($response["body"], 0, 120)
+            );
+        }
+
+        $response_cursor = is_array($decoded["cursor"] ?? null) ? $decoded["cursor"] : null;
+
+        if ($response["http_code"] === 413 || ($decoded["reason"] ?? null) === "frame_too_large") {
+            $reported_max_frame_bytes = $decoded["max_frame_bytes"] ?? ($decoded["max_request_bytes"] ?? null);
+            $decision = $this->frame_sizer->record_too_large(
+                is_numeric($reported_max_frame_bytes) ? (int) $reported_max_frame_bytes : null
+            );
+            return $this->result(
+                $decision["action"] === "give_up" ? "failed" : "retry",
+                $decision["action"] === "give_up" ? "chunk_size_exhausted" : "frame_too_large",
+                null,
+                $response_cursor
+            );
+        }
+
+        if (($decoded["status"] ?? null) !== "complete") {
+            return $this->result(
+                "failed",
+                is_string($decoded["reason"] ?? null) ? $decoded["reason"] : "unexpected_response",
+                is_string($decoded["detail"] ?? null) ? $decoded["detail"] : ("HTTP " . $response["http_code"]),
+                $response_cursor,
+                (int) ($decoded["files_verified"] ?? 0)
+            );
+        }
+
+        $this->frame_sizer->record_success();
+        return $this->result("complete", null, null, $response_cursor, (int) ($decoded["files_verified"] ?? 0));
+    }
+
+    /**
+     * Why the last start_push_request() returned false.
+     */
+    public function get_last_error(): ?string
+    {
+        return $this->last_error;
+    }
+
+    /** @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int} */
+    private function result(string $status, ?string $reason, ?string $detail, ?array $cursor = null, int $files_verified = 0): array
+    {
+        return [
+            "status" => $status,
+            "reason" => $reason,
+            "detail" => $detail,
+            "cursor" => $cursor,
+            "files_verified" => $files_verified,
+            "chunks_sent" => $this->chunks_sent,
+            "body_bytes_sent" => $this->body_bytes_sent,
         ];
-        return $this->final_response;
-    }
-
-    /** @return array{artifact_id?:string,committed_bytes?:int}|null */
-    public function start_cursor(): ?array
-    {
-        return $this->start_cursor;
-    }
-
-    /** @return array{artifact_id?:string,committed_bytes?:int}|null */
-    public function cursor(): ?array
-    {
-        return $this->cursor;
-    }
-
-    public function bytes_streamed(): int
-    {
-        return $this->payload_bytes_streamed;
-    }
-
-    public function chunks_streamed(): int
-    {
-        return $this->chunks_streamed;
     }
 
     /**
      * Connect, negotiate TLS for https, and write the request head.
      *
-     * On failure records a transport error and returns false; the connection
-     * error surfaces through finish() like any other request failure.
+     * On failure records a transport error and returns false.
+     *
+     * @param array<string,string> $request_headers
      */
-    private function open_connection(): bool
+    private function open_connection(string $request_url, array $request_headers): bool
     {
-        $url_parts = parse_url($this->request_url);
+        $url_parts = parse_url($request_url);
         $scheme = $url_parts["scheme"] ?? "";
         $host = $url_parts["host"] ?? "";
         if (!in_array($scheme, ["http", "https"], true) || $host === "") {
-            throw new InvalidArgumentException("Staged push requires an http:// or https:// base_url; received " . $this->request_url);
+            throw new InvalidArgumentException("Staged push requires an http:// or https:// base_url; received " . $request_url);
         }
         $is_tls = $scheme === "https";
         $port = isset($url_parts["port"]) ? (int) $url_parts["port"] : ($is_tls ? 443 : 80);
@@ -560,7 +452,7 @@ final class StagedPushStreamRequest
         $default_port = $is_tls ? 443 : 80;
         $head = "POST " . $request_target . " HTTP/1.1\r\n"
             . "Host: " . $host . ($port === $default_port ? "" : ":" . $port) . "\r\n";
-        foreach ($this->request_headers as $header_name => $header_value) {
+        foreach ($request_headers as $header_name => $header_value) {
             $head .= $header_name . ": " . $header_value . "\r\n";
         }
         $head .= "\r\n";
@@ -582,7 +474,7 @@ final class StagedPushStreamRequest
      * Watches for readability in the same select: the target speaking (or
      * closing) before our stream ends means its response decides this request,
      * so sending stops. Returns false on early reply, timeout, or a dead
-     * socket; the specific transport error is recorded for finish().
+     * socket; the specific transport error is recorded for finish_request().
      */
     private function write_to_socket(string $bytes): bool
     {
@@ -614,29 +506,27 @@ final class StagedPushStreamRequest
             if ($ready === 0) {
                 continue;
             }
-            if ($read_sockets !== []) {
-                // Probe whether this is application data. TLS also wakes the
-                // socket for protocol-internal records (e.g. TLS 1.3 session
-                // tickets); reading those yields no bytes and no EOF, and
-                // sending must continue.
-                $probed = fread($this->socket, 1);
-                if ($probed !== false && $probed !== "") {
-                    $this->early_reply_buffer .= $probed;
-                    $this->target_replied_early = true;
-                    return false;
-                }
-                if (feof($this->socket)) {
-                    $this->target_replied_early = true;
-                    return false;
-                }
-                continue;
+
+            // The socket fired; probe for an early reply before writing. Any
+            // buffered application byte means the target's response decides
+            // this request now. TLS also wakes the read side for protocol-
+            // internal records (e.g. TLS 1.3 session tickets); those yield no
+            // bytes and no EOF, and sending continues.
+            $probed = fread($this->socket, 1);
+            if (is_string($probed) && $probed !== "") {
+                $this->early_reply_buffer .= $probed;
+                $this->target_replied_early = true;
+                return false;
+            }
+            if (feof($this->socket)) {
+                $this->target_replied_early = true;
+                return false;
             }
 
-            // @phpstan-ignore deadCode.unreachable (stream_select() empties $read_sockets by reference)
-            $written = @fwrite($this->socket, $unwritten_offset === 0 ? $bytes : substr($bytes, $unwritten_offset));
+            $written = @fwrite($this->socket, substr($bytes, $unwritten_offset, self::WRITE_SLICE_BYTES));
             if ($written === false || $written === 0) {
                 if (feof($this->socket)) {
-                    $this->transport_error = "Connection closed while sending the push stream after " . $this->payload_bytes_streamed . " payload bytes.";
+                    $this->transport_error = "Connection closed while sending the push stream after " . $this->body_bytes_sent . " body bytes.";
                     return false;
                 }
                 // A writable-but-zero write happens during TLS renegotiation;
@@ -652,7 +542,7 @@ final class StagedPushStreamRequest
      * Read and parse the HTTP response. Returns null and records a transport
      * error when no complete response arrives in time.
      *
-     * @return array{http_code:int,body:string,error:?string}|null
+     * @return array{http_code:int,body:string}|null
      */
     private function read_response(): ?array
     {
@@ -716,7 +606,7 @@ final class StagedPushStreamRequest
                 }
                 $body .= substr($chunk, 0, $chunk_size);
             }
-            return ["http_code" => $http_code, "body" => $body, "error" => null];
+            return ["http_code" => $http_code, "body" => $body];
         }
 
         if (isset($response_headers["content-length"])) {
@@ -724,7 +614,7 @@ final class StagedPushStreamRequest
             if ($body === null) {
                 return null;
             }
-            return ["http_code" => $http_code, "body" => $body, "error" => null];
+            return ["http_code" => $http_code, "body" => $body];
         }
 
         // Connection: close without a length — the body ends when the target
@@ -734,7 +624,7 @@ final class StagedPushStreamRequest
             $this->transport_error = "Timed out after " . $this->request_timeout . "s reading the push stream response body.";
             return null;
         }
-        return ["http_code" => $http_code, "body" => $body, "error" => null];
+        return ["http_code" => $http_code, "body" => $body];
     }
 
     /**
@@ -754,270 +644,5 @@ final class StagedPushStreamRequest
             $buffer .= $piece;
         }
         return $buffer;
-    }
-}
-
-/**
- * Cursor-style driver for staged push streams.
- *
- * This mirrors processor and async-client APIs: next_request() opens one
- * network request, the request advances chunk by chunk, finalize_request()
- * sends it, and the caller decides whether to keep looping, persist the
- * cursor, or pause the push.
- */
-final class StagedPushStreamPusher
-{
-    /** Consecutive failed stream requests before the push is abandoned. */
-    private const MAX_REQUEST_RETRIES = 5;
-
-    /** Base backoff between retries, in microseconds. */
-    private const RETRY_BACKOFF_USEC = 250000;
-
-    /** Longest single backoff, in microseconds. */
-    private const MAX_BACKOFF_USEC = 5000000;
-
-    private StagedPushStreamClient $client;
-
-    private StagedPushStreamProcessor $processor;
-
-    /** @var array{max_chunks?:int|null,max_payload_bytes?:int|null} */
-    private array $limits;
-
-    /** @var callable(int):void */
-    private $sleeper;
-
-    /** @var array{artifact_id?:string,committed_bytes?:int}|null */
-    private ?array $cursor;
-
-    /** @var array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,bytes_streamed:int,chunks_streamed:int}|null */
-    private ?array $result = null;
-
-    private ?StagedPushStreamRequest $request = null;
-
-    private int $request_failures = 0;
-
-    private bool $finished = false;
-
-    /**
-     * @param array $options
-     *   - max_chunks_per_request (?int): stop each request after this many
-     *     framed chunks.
-     *   - max_payload_bytes_per_request (?int): stop each request after this
-     *     many local file bytes, excluding frame headers.
-     *   - sleeper (?callable): fn(int $microseconds), for tests.
-     */
-    public function __construct(StagedPushStreamClient $client, StagedPushStreamProcessor $processor, array $options = [])
-    {
-        $this->client = $client;
-        $this->processor = $processor;
-        $max_chunks = $options["max_chunks_per_request"] ?? null;
-        $max_payload_bytes = $options["max_payload_bytes_per_request"] ?? null;
-        $this->limits = [
-            "max_chunks" => is_numeric($max_chunks) && (int) $max_chunks > 0 ? (int) $max_chunks : null,
-            "max_payload_bytes" => is_numeric($max_payload_bytes) && (int) $max_payload_bytes > 0 ? (int) $max_payload_bytes : null,
-        ];
-        $this->sleeper = $options["sleeper"] ?? static function (int $microseconds): void {
-            usleep($microseconds);
-        };
-        $this->cursor = $processor->cursor();
-        $this->finished = $processor->is_finished_at($this->cursor);
-    }
-
-    /**
-     * Open the next staged_push request.
-     *
-     * @return bool Whether a request is available via get_request().
-     */
-    public function next_request(): bool
-    {
-        if ($this->finished || $this->request !== null) {
-            return false;
-        }
-
-        $this->request = $this->client->create_request($this->processor, $this->cursor, $this->limits);
-        $this->result = null;
-        return true;
-    }
-
-    public function get_request(): ?StagedPushStreamRequest
-    {
-        return $this->request;
-    }
-
-    /**
-     * Finalize and send the current request.
-     *
-     * @return bool Whether a request-level result is available via get_result().
-     */
-    public function finalize_request(): bool
-    {
-        if ($this->request === null) {
-            return false;
-        }
-
-        $result = $this->client->push_request($this->request);
-        $this->request = null;
-        $this->result = $result;
-
-        if ($result["status"] === "request_complete") {
-            $this->request_failures = 0;
-            $this->cursor = is_array($result["cursor"] ?? null) ? $result["cursor"] : $this->cursor;
-            if ($this->processor->is_finished_at($this->cursor)) {
-                $this->result["status"] = "complete";
-                $this->finished = true;
-            } else {
-                $this->result["status"] = "in_progress";
-            }
-            return true;
-        }
-
-        if ($result["status"] === "retry") {
-            $this->request_failures++;
-            $this->cursor = is_array($result["cursor"] ?? null) ? $result["cursor"] : $this->cursor;
-            if ($this->request_failures > self::MAX_REQUEST_RETRIES) {
-                $this->result["status"] = "failed";
-                $this->finished = true;
-            } else {
-                $delay = min(self::MAX_BACKOFF_USEC, self::RETRY_BACKOFF_USEC * (2 ** max(0, $this->request_failures - 1)));
-                call_user_func($this->sleeper, (int) $delay);
-            }
-            return true;
-        }
-
-        $this->cursor = is_array($result["cursor"] ?? null) ? $result["cursor"] : $this->cursor;
-        $this->finished = true;
-        return true;
-    }
-
-    /** @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,bytes_streamed:int,chunks_streamed:int}|null */
-    public function get_result(): ?array
-    {
-        return $this->result;
-    }
-
-    /** @return array{artifact_id?:string,committed_bytes?:int}|null */
-    public function get_cursor(): ?array
-    {
-        return $this->cursor;
-    }
-
-    public function is_finished(): bool
-    {
-        return $this->finished;
-    }
-
-}
-
-/**
- * Processor-style source for staged push streams.
- *
- * Callers construct this with the local filesystem root, the JSONL list of
- * local paths to push, and the last cursor returned by the target. The client
- * owns HTTP retries and frame sizing; the processor owns local file identity
- * and where a request should start.
- */
-final class StagedPushStreamProcessor
-{
-    private string $local_files_root_path;
-
-    private string $local_paths_to_push_path;
-
-    /** @var array{artifact_id?:string,committed_bytes?:int}|null */
-    private ?array $cursor;
-
-    /** @var array<int,array{artifact_id:string,source_path:string,total_bytes:int}>|null */
-    private ?array $files = null;
-
-    /**
-     * @param array{artifact_id?:string,committed_bytes?:int}|null $cursor
-     */
-    public function __construct(string $local_files_root_path, string $local_paths_to_push_path, ?array $cursor = null)
-    {
-        $this->local_files_root_path = rtrim($local_files_root_path, "/");
-        $this->local_paths_to_push_path = $local_paths_to_push_path;
-        $this->cursor = $cursor;
-    }
-
-    /** @return array{artifact_id?:string,committed_bytes?:int}|null */
-    public function cursor(): ?array
-    {
-        return $this->cursor;
-    }
-
-    /**
-     * @param array{artifact_id?:string,committed_bytes?:int}|null $cursor
-     */
-    public function is_finished_at(?array $cursor): bool
-    {
-        $files = $this->files();
-        if ($files === []) {
-            return true;
-        }
-        if (!is_string($cursor["artifact_id"] ?? null)) {
-            return false;
-        }
-        $last_file = $files[count($files) - 1];
-        return $cursor["artifact_id"] === $last_file["artifact_id"]
-            && (int) ($cursor["committed_bytes"] ?? -1) >= $last_file["total_bytes"];
-    }
-
-    /**
-     * The resolved local files to push, in push order.
-     *
-     * @return array<int,array{artifact_id:string,source_path:string,total_bytes:int}>
-     */
-    public function files(): array
-    {
-        if ($this->files !== null) {
-            return $this->files;
-        }
-        if (!is_file($this->local_paths_to_push_path)) {
-            throw new RuntimeException("Cannot open local paths to push: " . $this->local_paths_to_push_path);
-        }
-        $handle = fopen($this->local_paths_to_push_path, "r");
-        if (!$handle) {
-            throw new RuntimeException("Cannot open local paths to push: " . $this->local_paths_to_push_path);
-        }
-
-        $files = [];
-        while (($raw_line = fgets($handle)) !== false) {
-            $raw_line = trim($raw_line);
-            if ($raw_line === "") {
-                continue;
-            }
-            $artifact_id = $this->decode_artifact_id($raw_line);
-            $source_path = $this->local_files_root_path . "/" . $artifact_id;
-            $size = @filesize($source_path);
-            if ($size === false) {
-                fclose($handle);
-                throw new RuntimeException("Source file is unreadable: " . $source_path);
-            }
-            $files[] = [
-                "artifact_id" => $artifact_id,
-                "source_path" => $source_path,
-                "total_bytes" => (int) $size,
-            ];
-        }
-        fclose($handle);
-
-        $this->files = $files;
-        return $this->files;
-    }
-
-    private function decode_artifact_id(string $raw_line): string
-    {
-        try {
-            $decoded_line = json_decode($raw_line, true, 512, JSON_THROW_ON_ERROR);
-        } catch (JsonException $exception) {
-            throw new RuntimeException("Unexpected local path line, it is not valid JSON: " . substr($raw_line, 0, 120), 0, $exception);
-        }
-        if (!is_array($decoded_line) || !array_key_exists("path", $decoded_line) || !is_string($decoded_line["path"])) {
-            throw new RuntimeException("Invalid local path line: " . substr($raw_line, 0, 120));
-        }
-        $artifact_id = base64_decode($decoded_line["path"], true);
-        if ($artifact_id === false || $artifact_id === "") {
-            throw new RuntimeException("Invalid local path line: " . substr($raw_line, 0, 120));
-        }
-        return $artifact_id;
     }
 }

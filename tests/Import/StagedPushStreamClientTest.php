@@ -2,19 +2,21 @@
 
 namespace ImportTests;
 
+use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 use Site_Export_HMAC_Client;
 use Site_Export_Staged_Artifacts;
 use StagedPushStreamClient;
-use StagedPushStreamProcessor;
-use StagedPushStreamPusher;
 use PushFrameSizer;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
 /**
- * Drives the push stream client over curl against a local PHP server that
- * dispatches the real staged endpoint routes.
+ * Drives the push stream client against a local PHP server that dispatches
+ * the real staged endpoint routes. The pushAll()/pushOnce() helpers are the
+ * reference caller loop: stream the local-paths journal line by line, read
+ * each file in budget-sized pieces, rotate requests when the client says so,
+ * and retry from the server-confirmed cursor.
  */
 class StagedPushStreamClientTest extends TestCase
 {
@@ -31,9 +33,6 @@ class StagedPushStreamClientTest extends TestCase
 
     private string $staging_dir;
     private string $source_dir;
-
-    /** @var int[] */
-    private array $sleeps = [];
 
     public static function setUpBeforeClass(): void
     {
@@ -97,7 +96,6 @@ class StagedPushStreamClientTest extends TestCase
         $this->staging_dir = sys_get_temp_dir() . '/staged-push-stream-' . $suffix;
         $this->source_dir = sys_get_temp_dir() . '/staged-push-source-' . $suffix;
         mkdir($this->source_dir, 0700, true);
-        $this->sleeps = [];
         @unlink(self::$request_log_path);
         $this->configureEndpoint();
     }
@@ -118,9 +116,9 @@ class StagedPushStreamClientTest extends TestCase
             'wp-content/uploads/second.bin',
         ]);
 
-        $result = $this->runPusher($client, new StagedPushStreamProcessor($this->source_dir, $local_paths_to_push));
+        $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame('complete', $result['status'], var_export($result, true));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertSame(2, $result['files_verified']);
         $this->assertSame(str_repeat('a', 10), file_get_contents($this->staging_dir . '/files/wp-content/uploads/first.bin'));
         $this->assertSame(str_repeat('bc', 7), file_get_contents($this->staging_dir . '/files/wp-content/uploads/second.bin'));
@@ -137,11 +135,10 @@ class StagedPushStreamClientTest extends TestCase
             'first.bin',
             'second.bin',
         ]);
-        $cursor = ['artifact_id' => 'second.bin', 'committed_bytes' => 4];
 
-        $result = $this->runPusher($client, new StagedPushStreamProcessor($this->source_dir, $local_paths_to_push, $cursor));
+        $result = $this->pushAll($client, $local_paths_to_push, ['artifact_id' => 'second.bin', 'committed_bytes' => 4]);
 
-        $this->assertSame('complete', $result['status'], var_export($result, true));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertFileDoesNotExist($this->staging_dir . '/files/first.bin', 'cursor skips files before the resumed artifact');
         $this->assertSame(str_repeat('b', 12), file_get_contents($this->staging_dir . '/files/second.bin'));
         $this->assertSame(['staged_push'], $this->endpointsSeen());
@@ -152,54 +149,103 @@ class StagedPushStreamClientTest extends TestCase
         $this->writeSource('chunked.bin', str_repeat('x', 12));
         $client = $this->makeClient();
         $local_paths_to_push = $this->writeLocalPathsToPush(['chunked.bin']);
-        $processor = new StagedPushStreamProcessor($this->source_dir, $local_paths_to_push);
-        $pusher = new StagedPushStreamPusher($client, $processor, [
-            'sleeper' => function (int $microseconds): void {
-                $this->sleeps[] = $microseconds;
-            },
-        ]);
 
-        $this->assertTrue($pusher->next_request());
-        $request = $pusher->get_request();
-        $this->assertNotNull($request);
-        $this->assertTrue($request->next_chunk());
-        $request->finalize();
-        $this->assertTrue($pusher->finalize_request());
-        $first_result = $pusher->get_result();
+        $this->assertTrue($client->start_push_request());
+        $this->assertTrue($client->send_chunk([
+            'artifact_id' => 'chunked.bin',
+            'offset' => 0,
+            'total_bytes' => 12,
+            'final' => false,
+            'payload' => str_repeat('x', 4),
+        ]));
+        $first_result = $client->finish_request();
 
-        $this->assertSame('in_progress', $first_result['status'], var_export($first_result, true));
-        $this->assertSame(1, $first_result['chunks_streamed']);
-        $this->assertSame(['artifact_id' => 'chunked.bin', 'committed_bytes' => 4], $pusher->get_cursor());
+        $this->assertSame('complete', $first_result['status'], (string) json_encode($first_result));
+        $this->assertSame(1, $first_result['chunks_sent']);
+        $this->assertSame(['artifact_id' => 'chunked.bin', 'committed_bytes' => 4], $first_result['cursor']);
         $this->assertSame(str_repeat('x', 4), file_get_contents($this->staging_dir . '/files/chunked.bin'));
 
-        while ($pusher->next_request()) {
-            $request = $pusher->get_request();
-            $this->assertNotNull($request);
-            while ($request->next_chunk()) {
-                // Keep filling the current request until its configured budget is exhausted.
-            }
-            $this->assertTrue($pusher->finalize_request());
-        }
+        $result = $this->pushAll($client, $local_paths_to_push, $first_result['cursor']);
 
-        $this->assertSame('complete', $pusher->get_result()['status'], var_export($pusher->get_result(), true));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertSame(str_repeat('x', 12), file_get_contents($this->staging_dir . '/files/chunked.bin'));
         $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen());
     }
 
-    public function testPayloadByteLimitStartsNewRequestsAsNeeded(): void
+    public function testBodyBudgetCountsFrameHeadersWhenRotatingRequests(): void
     {
-        $this->writeSource('byte-budget.bin', str_repeat('y', 10));
-        $client = $this->makeClient();
-        $local_paths_to_push = $this->writeLocalPathsToPush(['byte-budget.bin']);
+        $this->writeSource('budget.bin', str_repeat('y', 10));
+        $client = $this->makeClient(['max_request_body_bytes' => 150]);
+        $local_paths_to_push = $this->writeLocalPathsToPush(['budget.bin']);
 
-        $result = $this->runPusher(
-            $client,
-            new StagedPushStreamProcessor($this->source_dir, $local_paths_to_push),
-            ['max_payload_bytes_per_request' => 5]
+        $this->assertTrue($client->start_push_request());
+        $this->assertTrue($client->send_chunk([
+            'artifact_id' => 'budget.bin',
+            'offset' => 0,
+            'total_bytes' => 10,
+            'final' => false,
+            'payload' => 'yyyy',
+        ]));
+
+        $sent_frame_header = json_encode([
+            'type' => 'chunk',
+            'artifact_id' => 'budget.bin',
+            'offset' => 0,
+            'bytes' => 4,
+            'total_bytes' => 10,
+            'final' => false,
+        ], JSON_UNESCAPED_SLASHES) . "\n";
+        $this->assertSame(
+            150 - strlen($sent_frame_header) - 4,
+            $client->capacity_bytes(),
+            'capacity accounts for the frame header, not only the payload'
         );
+        $this->assertFalse($client->should_finish_request());
 
-        $this->assertSame('complete', $result['status'], var_export($result, true));
-        $this->assertSame(str_repeat('y', 10), file_get_contents($this->staging_dir . '/files/byte-budget.bin'));
+        $this->assertTrue($client->send_chunk([
+            'artifact_id' => 'budget.bin',
+            'offset' => 4,
+            'total_bytes' => 10,
+            'final' => false,
+            'payload' => 'yyyy',
+        ]));
+        $this->assertSame(0, $client->capacity_bytes(), 'the second frame header spends the rest of the budget');
+        $this->assertTrue($client->should_finish_request());
+
+        $rotation_result = $client->finish_request();
+        $this->assertSame('complete', $rotation_result['status'], (string) json_encode($rotation_result));
+
+        $result = $this->pushAll($client, $local_paths_to_push, $rotation_result['cursor']);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame(str_repeat('y', 10), file_get_contents($this->staging_dir . '/files/budget.bin'));
+        $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen());
+    }
+
+    public function testTimeBudgetRotatesRequests(): void
+    {
+        $this->writeSource('timed.bin', str_repeat('t', 8));
+        $client = $this->makeClient(['max_request_seconds' => 0.05]);
+        $local_paths_to_push = $this->writeLocalPathsToPush(['timed.bin']);
+
+        $this->assertTrue($client->start_push_request());
+        $this->assertTrue($client->send_chunk([
+            'artifact_id' => 'timed.bin',
+            'offset' => 0,
+            'total_bytes' => 8,
+            'final' => false,
+            'payload' => 'tttt',
+        ]));
+        usleep(80000);
+        $this->assertTrue($client->should_finish_request(), 'an open request older than max_request_seconds asks to be finished');
+
+        $rotation_result = $client->finish_request();
+        $this->assertSame('complete', $rotation_result['status'], (string) json_encode($rotation_result));
+
+        $result = $this->pushAll($client, $local_paths_to_push, $rotation_result['cursor']);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame(str_repeat('t', 8), file_get_contents($this->staging_dir . '/files/timed.bin'));
         $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen());
     }
 
@@ -219,9 +265,9 @@ class StagedPushStreamClientTest extends TestCase
             'second.bin',
         ]);
 
-        $result = $this->runPusher($client, new StagedPushStreamProcessor($this->source_dir, $local_paths_to_push));
+        $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame('complete', $result['status'], var_export($result, true));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertSame(str_repeat('a', 8), file_get_contents($this->staging_dir . '/files/first.bin'));
         $this->assertSame(str_repeat('b', 8), file_get_contents($this->staging_dir . '/files/second.bin'));
         $this->assertSame(['staged_push'], $this->endpointsSeen());
@@ -235,59 +281,12 @@ class StagedPushStreamClientTest extends TestCase
         $client = $this->makeClient(['frame_sizer' => $sizer]);
         $local_paths_to_push = $this->writeLocalPathsToPush(['large.bin']);
 
-        $result = $this->runPusher($client, new StagedPushStreamProcessor($this->source_dir, $local_paths_to_push));
+        $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame('complete', $result['status'], var_export($result, true));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertSame(str_repeat('x', 20), file_get_contents($this->staging_dir . '/files/large.bin'));
         $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen());
         $this->assertLessThanOrEqual(5, $sizer->chunk_bytes());
-    }
-
-    public function testNextChunkWritesBytesToTheNetworkBeforeTheRequestIsFinalized(): void
-    {
-        // A raw TCP listener instead of the shared endpoint server, so the
-        // test can observe exactly when request bytes reach the network.
-        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
-        $this->assertNotFalse($listener, (string) $errstr);
-        $listener_address = stream_socket_get_name($listener, false);
-
-        $this->writeSource('streamed.bin', str_repeat('s', 8));
-        $client = new StagedPushStreamClient([
-            'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
-            'frame_sizer' => new PushFrameSizer(['floor_bytes' => 2, 'start_bytes' => 4, 'max_bytes' => 4]),
-        ]);
-        $processor = new StagedPushStreamProcessor($this->source_dir, $this->writeLocalPathsToPush(['streamed.bin']));
-        $request = $client->create_request($processor);
-
-        $pending_connections = [$listener];
-        $write_sockets = null;
-        $except_sockets = null;
-        $this->assertSame(0, stream_select($pending_connections, $write_sockets, $except_sockets, 0, 0), 'creating a request must not open a connection');
-
-        $this->assertTrue($request->next_chunk());
-        $connection = stream_socket_accept($listener, 5);
-        $this->assertNotFalse($connection);
-        $received = $this->readAvailableBytes($connection);
-
-        $this->assertStringContainsString('POST /?reprint-api=1&endpoint=staged_push HTTP/1.1', $received);
-        $this->assertStringContainsString('"artifact_id":"streamed.bin","offset":0,"bytes":4', $received);
-        $this->assertStringContainsString('ssss', $received, 'the first frame payload is on the wire before the request is finalized');
-        $this->assertStringNotContainsString("0\r\n\r\n", $received, 'the request body is still open');
-
-        $this->assertTrue($request->next_chunk());
-        $received .= $this->readAvailableBytes($connection);
-        $this->assertStringContainsString('"artifact_id":"streamed.bin","offset":4,"bytes":4', $received);
-        $this->assertSame(2, substr_count($received, 'ssss'), 'the second frame payload followed without finalizing');
-
-        // Drop the connection without responding: the failure must surface as
-        // a retryable request-level result, not an exception.
-        fclose($connection);
-        fclose($listener);
-        $result = $client->push_request($request);
-
-        $this->assertSame(['retry', 'request_failed'], [$result['status'], $result['reason']], (string) json_encode($result));
-        $this->assertSame(2, $result['chunks_streamed']);
-        $this->assertSame(8, $result['bytes_streamed']);
     }
 
     public function testWrongSecretFailsBeforeReadingTheBody(): void
@@ -298,11 +297,97 @@ class StagedPushStreamClientTest extends TestCase
         ]);
         $local_paths_to_push = $this->writeLocalPathsToPush(['secret.bin']);
 
-        $result = $this->runPusher($client, new StagedPushStreamProcessor($this->source_dir, $local_paths_to_push));
+        $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame(['failed', 'auth_failed'], [$result['status'], $result['reason']], var_export($result, true));
+        $this->assertSame(['failed', 'auth_failed'], [$result['status'], $result['reason']], (string) json_encode($result));
         $this->assertFileDoesNotExist($this->staging_dir . '/files/secret.bin');
         $this->assertSame(['staged_push'], $this->endpointsSeen());
+    }
+
+    public function testSendChunkWritesBytesToTheNetworkBeforeTheRequestIsFinalized(): void
+    {
+        // A raw TCP listener instead of the shared endpoint server, so the
+        // test can observe exactly when request bytes reach the network.
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        $this->assertNotFalse($listener, (string) $errstr);
+        $listener_address = stream_socket_get_name($listener, false);
+
+        $client = new StagedPushStreamClient([
+            'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
+            'frame_sizer' => new PushFrameSizer(['floor_bytes' => 2, 'start_bytes' => 4, 'max_bytes' => 4]),
+        ]);
+
+        $pending_connections = [$listener];
+        $write_sockets = null;
+        $except_sockets = null;
+        $this->assertSame(0, stream_select($pending_connections, $write_sockets, $except_sockets, 0, 0), 'constructing a client must not open a connection');
+
+        $this->assertTrue($client->start_push_request());
+        $connection = stream_socket_accept($listener, 5);
+        $this->assertNotFalse($connection);
+        $received = $this->readAvailableBytes($connection);
+        $this->assertStringContainsString('POST /?reprint-api=1&endpoint=staged_push HTTP/1.1', $received, 'the request head is on the wire right after start_push_request()');
+
+        $this->assertTrue($client->send_chunk([
+            'artifact_id' => 'streamed.bin',
+            'offset' => 0,
+            'total_bytes' => 8,
+            'final' => false,
+            'payload' => 'ssss',
+        ]));
+        $received .= $this->readAvailableBytes($connection);
+        $this->assertStringContainsString('"artifact_id":"streamed.bin","offset":0,"bytes":4', $received);
+        $this->assertStringContainsString('ssss', $received, 'the first frame payload is on the wire before the request is finalized');
+        $this->assertStringNotContainsString("0\r\n\r\n", $received, 'the request body is still open');
+
+        $this->assertTrue($client->send_chunk([
+            'artifact_id' => 'streamed.bin',
+            'offset' => 4,
+            'total_bytes' => 8,
+            'final' => true,
+            'payload' => 'ssss',
+        ]));
+        $received .= $this->readAvailableBytes($connection);
+        $this->assertStringContainsString('"artifact_id":"streamed.bin","offset":4,"bytes":4', $received);
+        $this->assertSame(2, substr_count($received, 'ssss'), 'the second frame payload followed without finalizing');
+
+        // Drop the connection without responding: the failure must surface as
+        // a retryable request-level result, not an exception.
+        fclose($connection);
+        fclose($listener);
+        $result = $client->finish_request();
+
+        $this->assertSame(['retry', 'request_failed'], [$result['status'], $result['reason']], (string) json_encode($result));
+        $this->assertSame(2, $result['chunks_sent']);
+        $this->assertGreaterThan(8, $result['body_bytes_sent'], 'body accounting includes the frame headers');
+    }
+
+    public function testInvalidChunksThrowSpecificErrors(): void
+    {
+        $client = $this->makeClient();
+        $invalid_chunks = [
+            [
+                ['artifact_id' => 'a.bin', 'offset' => 8, 'total_bytes' => 10, 'final' => false, 'payload' => 'zzzz'],
+                'Chunk for "a.bin" spans bytes 8-12, which exceeds total_bytes 10.',
+            ],
+            [
+                ['artifact_id' => 'a.bin', 'offset' => 4, 'total_bytes' => 10, 'final' => false, 'payload' => ''],
+                'Refusing a zero-byte non-final chunk for "a.bin" — the source file is shorter than its declared total_bytes 10.',
+            ],
+            [
+                ['artifact_id' => 'a.bin', 'offset' => 4, 'total_bytes' => 10, 'final' => true, 'payload' => 'zz'],
+                'Chunk for "a.bin" is marked final at byte 6 but total_bytes is 10.',
+            ],
+        ];
+
+        foreach ($invalid_chunks as [$chunk, $expected_message]) {
+            try {
+                $client->send_chunk($chunk);
+                $this->fail('Expected an InvalidArgumentException for: ' . (string) json_encode($chunk));
+            } catch (InvalidArgumentException $exception) {
+                $this->assertSame($expected_message, $exception->getMessage());
+            }
+        }
     }
 
     private static function writeRouter(): void
@@ -372,32 +457,122 @@ PHP_ROUTER);
     }
 
     /**
-     * @param array{max_chunks_per_request?:int,max_payload_bytes_per_request?:int} $options
-     * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,bytes_streamed:int,chunks_streamed:int}
+     * Push everything, retrying failed requests from the server-confirmed
+     * cursor the way the push command will.
+     *
+     * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int}
      */
-    private function runPusher(StagedPushStreamClient $client, StagedPushStreamProcessor $processor, array $options = []): array
+    private function pushAll(StagedPushStreamClient $client, string $local_paths_to_push, ?array $cursor = null): array
     {
-        $pusher = new StagedPushStreamPusher($client, $processor, array_merge([
-            'sleeper' => function (int $microseconds): void {
-                $this->sleeps[] = $microseconds;
-            },
-        ], $options));
-        while ($pusher->next_request()) {
-            $request = $pusher->get_request();
-            $this->assertNotNull($request);
-            while ($request->next_chunk()) {
-                // The caller owns this inner loop and may finalize after any chunk.
+        $result = null;
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $result = $this->pushOnce($client, $local_paths_to_push, $cursor);
+            if ($result['status'] !== 'retry') {
+                return $result;
             }
-            $this->assertTrue($pusher->finalize_request());
+            $cursor = $result['cursor'];
         }
-        return $pusher->get_result() ?? [
-            'status' => 'complete',
-            'reason' => null,
-            'detail' => null,
-            'cursor' => null,
+        return $result;
+    }
+
+    /**
+     * One pass over the journal from $cursor: the caller loop the client is
+     * designed for. Streams journal lines, reads each file in pieces sized by
+     * capacity_bytes()/max_chunk_bytes(), and rotates requests when the
+     * client says to.
+     *
+     * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int}
+     */
+    private function pushOnce(StagedPushStreamClient $client, string $local_paths_to_push, ?array $cursor): array
+    {
+        $journal_handle = fopen($local_paths_to_push, 'r');
+        $this->assertNotFalse($journal_handle);
+        if (false === $client->start_push_request()) {
+            fclose($journal_handle);
+            return $this->startFailureResult($client, $cursor);
+        }
+
+        $skipping_to_cursor = is_array($cursor) && isset($cursor['artifact_id']);
+        while (($journal_line = fgets($journal_handle)) !== false) {
+            $journal_line = trim($journal_line);
+            if ($journal_line === '') {
+                continue;
+            }
+            $decoded_line = json_decode($journal_line, true, 512, JSON_THROW_ON_ERROR);
+            $artifact_id = (string) base64_decode((string) $decoded_line['path'], true);
+
+            if ($skipping_to_cursor && $artifact_id !== $cursor['artifact_id']) {
+                continue;
+            }
+            $offset = $skipping_to_cursor ? (int) $cursor['committed_bytes'] : 0;
+            $skipping_to_cursor = false;
+
+            $source_handle = fopen($this->source_dir . '/' . $artifact_id, 'rb');
+            $this->assertNotFalse($source_handle);
+            $total_bytes = fstat($source_handle)['size'];
+            if ($total_bytes > 0 && $offset >= $total_bytes) {
+                fclose($source_handle);
+                continue;
+            }
+            if ($offset > 0) {
+                fseek($source_handle, $offset);
+            }
+
+            while (true) {
+                if ($client->should_finish_request()) {
+                    $result = $client->finish_request();
+                    if ($result['status'] !== 'complete') {
+                        fclose($source_handle);
+                        fclose($journal_handle);
+                        return $result;
+                    }
+                    if (false === $client->start_push_request()) {
+                        fclose($source_handle);
+                        fclose($journal_handle);
+                        return $this->startFailureResult($client, $result['cursor']);
+                    }
+                }
+
+                $payload = $total_bytes === 0
+                    ? ''
+                    : (string) fread($source_handle, min($total_bytes - $offset, $client->capacity_bytes(), $client->max_chunk_bytes()));
+                $final = $offset + strlen($payload) >= $total_bytes;
+
+                if (!$client->send_chunk([
+                    'artifact_id' => $artifact_id,
+                    'offset' => $offset,
+                    'total_bytes' => $total_bytes,
+                    'final' => $final,
+                    'payload' => $payload,
+                ])) {
+                    fclose($source_handle);
+                    fclose($journal_handle);
+                    return $client->finish_request();
+                }
+
+                $offset += strlen($payload);
+                if ($final) {
+                    break;
+                }
+            }
+            fclose($source_handle);
+        }
+        fclose($journal_handle);
+
+        return $client->finish_request();
+    }
+
+    /** @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int} */
+    private function startFailureResult(StagedPushStreamClient $client, ?array $cursor): array
+    {
+        return [
+            'status' => 'retry',
+            'reason' => 'request_failed',
+            'detail' => $client->get_last_error(),
+            'cursor' => $cursor,
             'files_verified' => 0,
-            'bytes_streamed' => 0,
-            'chunks_streamed' => 0,
+            'chunks_sent' => 0,
+            'body_bytes_sent' => 0,
         ];
     }
 

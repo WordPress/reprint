@@ -15,8 +15,10 @@
  *   and frame metadata. A reverse proxy or CDN may still reject earlier, so
  *   the ceiling is an upper bound, not a guarantee.
  * - Without a useful reported limit, frames start at a conservative 32 MiB.
- * - A hard cap (default 1 GiB) bounds every chunk even when the host reports
- *   a larger limit.
+ * - A hard cap (default 128 MiB) bounds every chunk even when the host
+ *   reports a larger limit. The sender reads a whole chunk into memory
+ *   before writing it, so the cap is a memory promise, not just a network
+ *   one.
  * - Accepted chunks double the size toward the ceiling.
  * - The two rejection kinds back off differently because they carry different
  *   evidence. A rejection known to be size-related — HTTP 413 or a structured
@@ -69,8 +71,9 @@ class PushFrameSizer
             // Conservative bootstrap size used until limits teach us more.
             "start_bytes" => 32 * 1024 * 1024,
             // Hard cap: no chunk may exceed this, even when the host reports
-            // a larger limit.
-            "max_bytes" => 1024 * 1024 * 1024,
+            // a larger limit. The sender buffers one whole chunk in memory,
+            // so this is also its memory ceiling.
+            "max_bytes" => 128 * 1024 * 1024,
             // Fraction of a reported limit usable for the chunk payload; the
             // rest absorbs headers, frame metadata, and host quirks.
             "limit_safety_ratio" => 0.9,
