@@ -185,12 +185,10 @@ class StagedPushStreamClientTest extends TestCase
         ], JSON_UNESCAPED_SLASHES) . "\n";
         // Budget for one full frame plus 3 spare bytes, so the value of
         // next_chunk_body_bytes() after the first chunk reveals whether the
-        // frame header and the chunked transfer-encoding framing were charged
-        // against the budget alongside the payload. Each write travels as one
-        // transfer-encoding chunk: hex size line, CRLF, bytes, CRLF.
-        $first_frame_wire_bytes = strlen(dechex(strlen($first_frame_header))) + 2 + strlen($first_frame_header) + 2;
-        $first_payload_wire_bytes = strlen(dechex(4)) + 2 + 4 + 2;
-        $request_body_budget = $first_frame_wire_bytes + $first_payload_wire_bytes + 3;
+        // frame header was charged against the budget alongside the payload.
+        // The budget is denominated in entity-body bytes; the transfer
+        // framing around them is libcurl's business.
+        $request_body_budget = strlen($first_frame_header) + 4 + 3;
         $client = $this->makeClient([
             'request_sizer' => new PushRequestSizer([
                 'floor_bytes' => 4,
@@ -209,7 +207,7 @@ class StagedPushStreamClientTest extends TestCase
             'payload' => 'yyyy',
         ]));
 
-        $this->assertSame(3, $client->next_chunk_body_bytes(), 'the frame header and transfer-encoding framing were charged against the budget, not only the payload');
+        $this->assertSame(3, $client->next_chunk_body_bytes(), 'the frame header was charged against the budget, not only the payload');
         $this->assertFalse($client->should_finish_request());
 
         $this->assertTrue($client->send_chunk([
@@ -373,7 +371,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $this->assertSame(['retry', 'request_failed'], [$result['status'], $result['reason']], (string) json_encode($result));
         $this->assertSame(2, $result['chunks_sent']);
-        $this->assertGreaterThan(8, $result['body_bytes_sent'], 'body accounting includes the frame headers and transfer-encoding framing');
+        $this->assertGreaterThan(8, $result['body_bytes_sent'], 'body accounting includes the frame headers');
     }
 
     public function testInvalidChunksThrowSpecificErrors(): void
