@@ -50,7 +50,7 @@ final class Site_Export_HTTP_Server {
             $endpoint = (string) ( $get['endpoint'] ?? $post['endpoint'] ?? '' );
             // Data-plane staged routes carry raw bytes and must only be read
             // by their handlers. Other JSON requests still feed config parsing.
-            $body = !in_array($endpoint, ['staged_upload', 'staged_push'], true) && $this->is_json_content_type($server)
+            $body = $endpoint !== 'staged_push' && $this->is_json_content_type($server)
                 ? call_user_func($this->body_reader)
                 : '';
         }
@@ -318,18 +318,6 @@ final class Site_Export_HTTP_Server {
                 try {
                     self::emit_json_response(
                         $endpoints->push_stream($config, $_SERVER, $input === false ? null : $input)
-                    );
-                } finally {
-                    if (is_resource($input)) {
-                        fclose($input);
-                    }
-                }
-            },
-            'staged_upload' => static function (array $config) use ($endpoints): void {
-                $input = @fopen('php://input', 'rb');
-                try {
-                    self::emit_json_response(
-                        $endpoints->upload($config, $_SERVER, $input === false ? null : $input)
                     );
                 } finally {
                     if (is_resource($input)) {
