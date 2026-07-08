@@ -337,6 +337,57 @@ final class StagedEndpointsTest extends TestCase {
     // Request validation and server-owned options
     // ---------------------------------------------------------------
 
+    public function testOversizedFrameCursorReportsOnlyStoreCommittedBytes(): void
+    {
+        $endpoints = $this->makeEndpoints(['max_frame_bytes' => 6]);
+
+        $result = $this->push($endpoints, [
+            ['artifact_id' => 'claimed.bin', 'offset' => 4, 'bytes' => str_repeat('x', 10), 'total_bytes' => 20, 'final' => false],
+        ]);
+
+        $this->assertSame(413, $result['http_code']);
+        $this->assertSame(
+            ['artifact_id' => base64_encode('claimed.bin'), 'committed_bytes' => 0],
+            $result['body']['cursor'],
+            'a rejection cursor must report what the store confirmed, not what the sender claimed'
+        );
+    }
+
+    public function testOffsetZeroFrameRestartsAnUnverifiedArtifact(): void
+    {
+        $endpoints = $this->makeEndpoints();
+        (new Site_Export_Staged_Artifacts($this->staging_dir))->append('restarted.bin', 0, 'AAAA');
+
+        // A frame starting at byte 0 means the sender is pushing the file
+        // over — it cannot vouch for the staged prefix. The old bytes must
+        // not survive underneath the new ones.
+        $result = $this->push($endpoints, [
+            ['artifact_id' => 'restarted.bin', 'offset' => 0, 'bytes' => 'BBBBBBBB', 'total_bytes' => 8, 'final' => true],
+        ]);
+
+        $this->assertSame(200, $result['http_code'], (string) json_encode($result['body']));
+        $this->assertSame(1, $result['body']['files_verified']);
+        $this->assertSame('BBBBBBBB', file_get_contents($this->staging_dir . '/files/restarted.bin'));
+    }
+
+    public function testOffsetZeroFrameWithANewTotalRestartsAVerifiedArtifact(): void
+    {
+        $endpoints = $this->makeEndpoints();
+        $store = new Site_Export_Staged_Artifacts($this->staging_dir);
+        $store->append('reverified.bin', 0, str_repeat('A', 8));
+        $store->finalize('reverified.bin', 8);
+
+        // The source changed after verification; the sender restarts the
+        // file with its new size. Refusing forever would deadlock the push.
+        $result = $this->push($endpoints, [
+            ['artifact_id' => 'reverified.bin', 'offset' => 0, 'bytes' => 'CCCCCC', 'total_bytes' => 6, 'final' => true],
+        ]);
+
+        $this->assertSame(200, $result['http_code'], (string) json_encode($result['body']));
+        $this->assertSame(1, $result['body']['files_verified']);
+        $this->assertSame('CCCCCC', file_get_contents($this->staging_dir . '/files/reverified.bin'));
+    }
+
     public function testMutatingRoutesRequirePost(): void
     {
         $endpoints = $this->makeEndpoints();

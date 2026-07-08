@@ -258,8 +258,10 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen());
     }
 
-    public function testRetryFromTheBeginningSkipsAlreadyVerifiedFilesAndDuplicateBytes(): void
+    public function testRetryFromTheBeginningSkipsVerifiedFilesAndRestartsPartialOnes(): void
     {
+        // first.bin is verified and gets skipped on replay; second.bin holds
+        // 4 unvouched-for bytes, so the replay restarts it from zero.
         $this->writeSource('first.bin', str_repeat('a', 8));
         $this->writeSource('second.bin', str_repeat('b', 8));
         $store = new Site_Export_Staged_Artifacts($this->staging_dir);
@@ -605,6 +607,115 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertStringContainsString('Use that address as the push base_url', (string) $result['detail']);
     }
 
+    public function testResumeAfterTheSourceGrewRestartsTheFile(): void
+    {
+        $old_content = str_repeat('o', 12);
+        $source_path = $this->writeSource('drift-grow.bin', $old_content);
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush(['drift-grow.bin']);
+        $resume_cursor = $this->pushFirstBytes($client, 'drift-grow.bin', $old_content, 4, $source_path);
+
+        // The file changes before the next session: longer and different.
+        $new_content = str_repeat('n', 16);
+        file_put_contents($source_path, $new_content);
+        touch($source_path, ((int) $resume_cursor['source_mtime']) + 5);
+        clearstatcache();
+
+        $result = $this->pushAll($client, $local_paths_to_push, $resume_cursor);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame($new_content, file_get_contents($this->staging_dir . '/files/drift-grow.bin'), 'no byte of the old version may survive under the new one');
+    }
+
+    public function testResumeAfterASameSizeEditRestartsTheFile(): void
+    {
+        $old_content = str_repeat('o', 12);
+        $source_path = $this->writeSource('drift-edit.bin', $old_content);
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush(['drift-edit.bin']);
+        $resume_cursor = $this->pushFirstBytes($client, 'drift-edit.bin', $old_content, 4, $source_path);
+
+        // Same byte count, different bytes — only the mtime betrays the edit.
+        $new_content = str_repeat('n', 12);
+        file_put_contents($source_path, $new_content);
+        touch($source_path, ((int) $resume_cursor['source_mtime']) + 5);
+        clearstatcache();
+
+        $result = $this->pushAll($client, $local_paths_to_push, $resume_cursor);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame($new_content, file_get_contents($this->staging_dir . '/files/drift-edit.bin'), 'no byte of the old version may survive under the new one');
+    }
+
+    public function testResumeCursorBeyondAShrunkenFileRestartsTheFile(): void
+    {
+        $old_content = str_repeat('o', 12);
+        $source_path = $this->writeSource('drift-shrink.bin', $old_content);
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush(['drift-shrink.bin']);
+        $resume_cursor = $this->pushFirstBytes($client, 'drift-shrink.bin', $old_content, 8, $source_path);
+
+        // The file shrank below the committed offset. Skipping it as "done"
+        // would leave the target holding 8 stale bytes and this push lying.
+        $new_content = str_repeat('n', 6);
+        file_put_contents($source_path, $new_content);
+        touch($source_path, ((int) $resume_cursor['source_mtime']) + 5);
+        clearstatcache();
+
+        $result = $this->pushAll($client, $local_paths_to_push, $resume_cursor);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame(1, $result['files_verified']);
+        $this->assertSame($new_content, file_get_contents($this->staging_dir . '/files/drift-shrink.bin'));
+    }
+
+    public function testFullReplayAfterAPartialCommitRewritesChangedBytes(): void
+    {
+        // 4 bytes of an earlier version are staged; the retry has no cursor
+        // (a transport failure lost it) and replays from the top with the
+        // file's current content. The staged prefix must not survive.
+        (new Site_Export_Staged_Artifacts($this->staging_dir))->append('replayed.bin', 0, 'OOOO');
+        $new_content = 'NNNN' . str_repeat('n', 8);
+        $this->writeSource('replayed.bin', $new_content);
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush(['replayed.bin']);
+
+        $result = $this->pushAll($client, $local_paths_to_push);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame($new_content, file_get_contents($this->staging_dir . '/files/replayed.bin'));
+    }
+
+    /**
+     * Session one: push the first $bytes_to_push bytes of $content, then
+     * stop, returning the resume cursor the reference loop would persist —
+     * the server cursor plus the source token (size and mtime) it saves
+     * alongside.
+     *
+     * @return array{artifact_id:string,committed_bytes:int,total_bytes:int,source_mtime:int}
+     */
+    private function pushFirstBytes(StagedPushStreamClient $client, string $artifact_id, string $content, int $bytes_to_push, string $source_path): array
+    {
+        $this->assertTrue($client->start_push_request());
+        for ($offset = 0; $offset < $bytes_to_push; $offset += 4) {
+            $this->assertTrue($client->send_chunk([
+                'artifact_id' => $artifact_id,
+                'offset' => $offset,
+                'total_bytes' => strlen($content),
+                'final' => false,
+                'payload' => substr($content, $offset, 4),
+            ]));
+        }
+        $first_result = $client->finish_request();
+        $this->assertSame('complete', $first_result['status'], (string) json_encode($first_result));
+        $this->assertSame($bytes_to_push, $first_result['cursor']['committed_bytes']);
+
+        return $first_result['cursor'] + [
+            'total_bytes' => strlen($content),
+            'source_mtime' => (int) filemtime($source_path),
+        ];
+    }
+
     public function testBackToBackRequestsReuseTheConnection(): void
     {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
@@ -777,7 +888,9 @@ PHP_ROUTER);
     /**
      * One pass over the journal from $cursor: the caller loop the client is
      * designed for. Streams journal lines, reads each file in pieces sized by
-     * next_chunk_body_bytes(), and rotates requests when the client says to.
+     * next_chunk_body_bytes(), rotates requests when the client says to, and
+     * persists a source token (size and mtime) with every cursor so a resume
+     * restarts any file that changed since its bytes were staged.
      *
      * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int}
      */
@@ -820,12 +933,30 @@ PHP_ROUTER);
             if ($skipping_to_cursor && $artifact_id !== $cursor['artifact_id']) {
                 continue;
             }
-            $offset = $skipping_to_cursor ? (int) $cursor['committed_bytes'] : 0;
+            $resuming_this_file = $skipping_to_cursor;
+            $offset = $resuming_this_file ? (int) $cursor['committed_bytes'] : 0;
             $skipping_to_cursor = false;
 
             $source_handle = fopen($this->source_dir . '/' . $artifact_id, 'rb');
             $this->assertNotFalse($source_handle);
-            $total_bytes = fstat($source_handle)['size'];
+            $source_stat = fstat($source_handle);
+            $total_bytes = (int) $source_stat['size'];
+            $source_mtime = (int) $source_stat['mtime'];
+
+            // The cursor's source token remembers the file the staged bytes
+            // came from. Any change — size or mtime — means those bytes are
+            // another version: restart the file at zero so the target
+            // re-stages it instead of appending one version behind another.
+            if (
+                $resuming_this_file
+                && (
+                    (isset($cursor['total_bytes']) && (int) $cursor['total_bytes'] !== $total_bytes)
+                    || (isset($cursor['source_mtime']) && (int) $cursor['source_mtime'] !== $source_mtime)
+                )
+            ) {
+                $offset = 0;
+            }
+
             if ($total_bytes > 0 && $offset >= $total_bytes) {
                 fclose($source_handle);
                 continue;
@@ -849,7 +980,7 @@ PHP_ROUTER);
                     if ($result['status'] !== 'complete') {
                         fclose($source_handle);
                         fclose($journal_handle);
-                        return $result;
+                        return $this->withSourceToken($result, $artifact_id, $total_bytes, $source_mtime);
                     }
                     if (false === $client->start_push_request()) {
                         fclose($source_handle);
@@ -872,7 +1003,7 @@ PHP_ROUTER);
                 ])) {
                     fclose($source_handle);
                     fclose($journal_handle);
-                    return $client->finish_request();
+                    return $this->withSourceToken($client->finish_request(), $artifact_id, $total_bytes, $source_mtime);
                 }
 
                 $offset += strlen($payload);
@@ -897,7 +1028,21 @@ PHP_ROUTER);
                 'body_bytes_sent' => 0,
             ];
         }
-        return $client->finish_request();
+        return $this->withSourceToken($client->finish_request(), $artifact_id, $total_bytes, $source_mtime);
+    }
+
+    /**
+     * Attach the source token the reference loop persists alongside a server
+     * cursor: the size and mtime of the file whose bytes the cursor counts.
+     * A later resume compares them against the file on disk and restarts the
+     * file when they differ.
+     */
+    private function withSourceToken(array $result, string $artifact_id, int $total_bytes, int $source_mtime): array
+    {
+        if (is_array($result['cursor'] ?? null) && ($result['cursor']['artifact_id'] ?? null) === $artifact_id) {
+            $result['cursor'] += ['total_bytes' => $total_bytes, 'source_mtime' => $source_mtime];
+        }
+        return $result;
     }
 
     /** @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int} */

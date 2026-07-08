@@ -128,19 +128,27 @@ final class Site_Export_Staged_Endpoints {
      *
      * A frame commits before the next frame is read. If the request dies after
      * a commit, the next request may replay from the last sender cursor or from
-     * the beginning; verified artifacts and duplicate ranges are absorbed.
+     * the beginning: verified artifacts replayed at their verified size are
+     * skipped, and an offset-0 frame for anything else that holds bytes
+     * restarts the artifact from zero — the sender only starts a file over
+     * when its source changed or it cannot vouch for the staged prefix, and
+     * appending one version behind another would corrupt the artifact.
      *
      * Behavior steps:
      * 1. Read one JSON header line and validate the frame before reading its
      *    payload bytes.
      * 2. Reject frames larger than this endpoint accepts, before consuming the
-     *    oversized payload.
-     * 3. If the artifact is already verified, consume the frame payload only to
-     *    keep the stream aligned with the next JSON header.
-     * 4. If the artifact is partially committed, discard any replayed prefix
-     *    bytes that the store already has and append only the missing suffix.
-     * 5. Append the remaining payload in bounded pieces so one frame cannot
-     *    force the endpoint to hold the full chunk in memory.
+     *    oversized payload. Every rejection cursor reports the store's
+     *    committed count, never the offset the sender claimed.
+     * 3. If the artifact is verified and the frame declares its verified size,
+     *    consume the frame payload only to keep the stream aligned with the
+     *    next JSON header.
+     * 4. If the frame starts at byte 0 and the artifact holds anything else,
+     *    discard the staged bytes and stage this frame fresh.
+     * 5. If the artifact is partially committed and the frame starts mid-file,
+     *    discard any replayed prefix bytes the store already has and append
+     *    only the missing suffix, in bounded pieces so one frame cannot force
+     *    the endpoint to hold the full chunk in memory.
      * 6. Finalize only when the frame marks the artifact final, then report the
      *    latest cursor for the sender to resume from after failures.
      *
@@ -189,9 +197,14 @@ final class Site_Export_Staged_Endpoints {
             $bytes = $frame['bytes'];
             $total_bytes = $frame['total_bytes'];
             $final = $frame['final'];
+
             // Response cursors re-encode the id so responses stay valid JSON
-            // for arbitrary-byte paths.
-            $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => $offset];
+            // for arbitrary-byte paths, and they report only what the store
+            // has confirmed — never the offset the sender claims. A rejection
+            // echoing a claimed offset would send the retry to a position the
+            // store never reached.
+            $status = $this->store->status($artifact_id);
+            $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => (int) $status['committed_bytes']];
 
             if ($bytes > $this->max_frame_bytes) {
                 $response = $this->stream_rejected(413, 'frame_too_large', null, $cursor, $files_verified);
@@ -199,32 +212,47 @@ final class Site_Export_Staged_Endpoints {
                 return $response;
             }
 
-            $status = $this->store->status($artifact_id);
-
             /**
-             * Already-verified artifact case.
+             * Already-verified replay case.
              *
              * The sender may replay a request body from the beginning after a
-             * previous request committed and finalized this artifact. The store
-             * must not append or finalize it again, but the frame payload is
-             * still present in the request body. Read and discard those bytes so
-             * the next loop iteration starts at the following JSON header.
+             * previous request committed and finalized this artifact. When the
+             * declared size still matches, the store must not append or
+             * finalize again, but the frame payload is still present in the
+             * request body: read and discard those bytes so the next loop
+             * iteration starts at the following JSON header.
              */
-            if ($status['verified']) {
-                if ($status['committed_bytes'] !== $total_bytes) {
-                    return $this->stream_rejected(409, 'size_mismatch', null, [
-                        'artifact_id' => base64_encode($artifact_id),
-                        'committed_bytes' => $status['committed_bytes'],
-                    ], $files_verified);
-                }
+            if ($status['verified'] && $status['committed_bytes'] === $total_bytes) {
                 if (!Site_Export_Staged_Push_Stream_Protocol::discard_exactly($input, $bytes, self::READ_BUFFER_BYTES)) {
                     return $this->stream_rejected(400, 'body_read_failed', null, $cursor, $files_verified);
                 }
-                $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => $status['committed_bytes']];
                 if ($final) {
                     $files_verified++;
                 }
                 continue;
+            }
+
+            /**
+             * Restart case.
+             *
+             * An offset-0 frame for an artifact that already holds bytes means
+             * the sender is pushing the file over: its source changed since
+             * those bytes were staged, or it is replaying after a failure and
+             * cannot vouch for the staged prefix. Drop the staged bytes and
+             * stage this frame fresh — appending a new version behind an old
+             * prefix would build a file no version of the source ever was.
+             */
+            if ($offset === 0 && ($status['verified'] || (int) $status['committed_bytes'] > 0)) {
+                if (!$this->store->discard($artifact_id)) {
+                    return $this->stream_rejected(423, 'busy', null, $cursor, $files_verified);
+                }
+                $status = $this->store->status($artifact_id);
+                $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => 0];
+            } elseif ($status['verified']) {
+                // A mid-file frame into a verified artifact of another size:
+                // the source changed but the sender did not restart. Refuse
+                // rather than mix versions; the sender restarts from zero.
+                return $this->stream_rejected(409, 'size_mismatch', null, $cursor, $files_verified);
             }
 
             if ($bytes > 0) {

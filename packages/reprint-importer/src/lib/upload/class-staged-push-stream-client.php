@@ -5,8 +5,13 @@
  * A push stream is one authenticated HTTP request whose body is a sequence of
  * framed file chunks. The target commits each frame into
  * Site_Export_Staged_Artifacts as it is read, so a broken connection can be
- * retried from the last cursor the sender has, or from the beginning with the
- * target absorbing duplicate/verified frames.
+ * retried from the last cursor the sender has, or from the beginning: the
+ * target skips replayed files it already verified and restarts partially
+ * staged ones from zero, so a source file that changed between requests can
+ * never end up half old version, half new. Callers persist the source token
+ * (size and mtime) alongside each cursor and restart a file at offset 0 when
+ * the file on disk no longer matches it — the reference loop in
+ * StagedPushStreamClientTest::pushOnce() shows both halves.
  *
  * The client is a pass-through wire. The caller reads a chunk of a file into
  * memory — at most next_chunk_body_bytes(), which is why a chunk is the one
@@ -238,7 +243,9 @@ class StagedPushStreamClient
         if ($max_request_seconds !== null && (!is_numeric($max_request_seconds) || $max_request_seconds <= 0)) {
             throw new InvalidArgumentException("Expected option \"max_request_seconds\" to be a positive number; received " . json_encode($max_request_seconds) . ".");
         }
-        $this->max_request_seconds = $max_request_seconds ?? 30;
+        // The + cast turns numeric strings (CLI flags, state files) into the
+        // int|float the property declares.
+        $this->max_request_seconds = $max_request_seconds !== null ? +$max_request_seconds : 30;
     }
 
     /**
