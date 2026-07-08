@@ -57,7 +57,7 @@ class StagedPushStreamClient
 {
     private string $base_url;
 
-    private ?Site_Export_HMAC_Client $hmac_client;
+    private Site_Export_HMAC_Client $hmac_client;
 
     private PushRequestSizer $request_sizer;
 
@@ -91,11 +91,20 @@ class StagedPushStreamClient
     /** @var resource|object|null curl multi handle driving the open request */
     private $multi_handle = null;
 
-    /** Bytes handed to send_chunk() that libcurl has not consumed yet. */
-    private string $outbound_bytes = "";
+    /**
+     * The current frame, waiting for libcurl to consume it. Held as two
+     * fields instead of one concatenated string on purpose: PHP string
+     * assignment is copy-on-write, so taking the caller's payload here
+     * allocates nothing — the only real copies are the substr() pieces the
+     * read callback returns, which is the smallest handoff PHP's callback
+     * API allows.
+     */
+    private string $outbound_frame_header = "";
 
-    /** How far into $outbound_bytes libcurl's read callback has consumed. */
-    private int $outbound_offset = 0;
+    private string $outbound_payload = "";
+
+    /** How far into $outbound_payload libcurl's read callback has consumed. */
+    private int $outbound_payload_offset = 0;
 
     /** The read callback signals end-of-body when this is true. */
     private bool $body_complete = false;
@@ -130,7 +139,9 @@ class StagedPushStreamClient
      * @param array $options
      *   - base_url (string, required): the export API URL; endpoint is appended
      *     to its query string.
-     *   - hmac_client (?Site_Export_HMAC_Client): envelope request signer.
+     *   - hmac_client (Site_Export_HMAC_Client, required): signs every
+     *     request; the staged endpoints reject unsigned requests before
+     *     reading the body, so there is no unauthenticated push.
      *   - request_sizer (?PushRequestSizer): request-body-size decisions;
      *     defaults to a fresh sizer. Pass one restored from persisted state
      *     to keep learned limits.
@@ -171,7 +182,11 @@ class StagedPushStreamClient
             throw new InvalidArgumentException("StagedPushStreamClient requires a base_url option.");
         }
         $this->base_url = $base_url;
-        $this->hmac_client = $options["hmac_client"] ?? null;
+        $hmac_client = $options["hmac_client"] ?? null;
+        if (!$hmac_client instanceof Site_Export_HMAC_Client) {
+            throw new InvalidArgumentException("StagedPushStreamClient requires an hmac_client option; the staged endpoints reject unsigned requests.");
+        }
+        $this->hmac_client = $hmac_client;
         $this->request_sizer = $options["request_sizer"] ?? new PushRequestSizer();
         $chunk_bytes = $options["chunk_bytes"] ?? null;
         $this->chunk_bytes = is_numeric($chunk_bytes) && (int) $chunk_bytes > 0 ? (int) $chunk_bytes : 4 * 1024 * 1024;
@@ -199,8 +214,9 @@ class StagedPushStreamClient
             throw new RuntimeException("A push request is already open; call finish_request() before starting another.");
         }
 
-        $this->outbound_bytes = "";
-        $this->outbound_offset = 0;
+        $this->outbound_frame_header = "";
+        $this->outbound_payload = "";
+        $this->outbound_payload_offset = 0;
         $this->outbound_consumed_bytes = 0;
         $this->body_complete = false;
         $this->curl_requested_body = false;
@@ -210,12 +226,13 @@ class StagedPushStreamClient
         $this->chunks_sent = 0;
         $this->last_error = null;
 
+        // Signing covers the method and the URL (path + query), so it can
+        // happen before the body exists — the body itself is not signed;
+        // the X-Auth-Content-Hash header says so explicitly.
         $request_url = $this->base_url
             . (strpos($this->base_url, "?") === false ? "?" : "&")
             . http_build_query(["endpoint" => "staged_push"]);
-        $request_headers = $this->hmac_client !== null
-            ? $this->hmac_client->get_envelope_auth_headers("POST", $request_url)
-            : [];
+        $request_headers = $this->hmac_client->get_envelope_auth_headers("POST", $request_url);
         $request_headers["Content-Type"] = Site_Export_Staged_Push_Stream_Protocol::CONTENT_TYPE;
 
         $header_lines = [];
@@ -227,6 +244,12 @@ class StagedPushStreamClient
         $header_lines[] = "Expect:";
 
         $this->curl_handle = curl_init($request_url);
+        // Same environment knobs as every pull request: ALL_PROXY routes
+        // the transfer through a proxy even on hosts that strip the process
+        // environment libcurl would otherwise read it from, and the CA
+        // helper covers Playground's WASM curl, which cannot see
+        // openssl.cafile. Both are documented where they are defined, in
+        // import.php.
         if (function_exists("reprint_apply_curl_proxy_from_env")) {
             reprint_apply_curl_proxy_from_env($this->curl_handle);
         }
@@ -235,7 +258,8 @@ class StagedPushStreamClient
         }
         curl_setopt_array($this->curl_handle, [
             // Upload with no declared size: libcurl picks the transfer
-            // framing (chunked on HTTP/1.1, DATA frames on HTTP/2).
+            // framing (chunked on HTTP/1.1, DATA frames on HTTP/2). UPLOAD
+            // defaults the verb to PUT; the export API routes POST.
             CURLOPT_UPLOAD => true,
             CURLOPT_CUSTOMREQUEST => "POST",
             CURLOPT_HTTPHEADER => $header_lines,
@@ -246,15 +270,33 @@ class StagedPushStreamClient
             // healthy-but-slow bulk uploads. Each phase has its own bound —
             // connect_timeout, the stall watch in send_chunk(), and
             // response_timeout in finish_request().
+            //
+            // libcurl drives the upload by asking: whenever the socket can
+            // take more data, it calls this function for up to $length bytes
+            // ($length is libcurl's upload buffer, typically 64 KiB). Three
+            // possible answers:
+            //   - a piece of the current frame: the header line first, then
+            //     the payload, sliced to $length;
+            //   - "": the body is complete, libcurl ends the request;
+            //   - CURL_READFUNC_PAUSE: nothing to send right now, but the
+            //     body is not over — libcurl parks the upload until
+            //     send_chunk() supplies the next frame and unpauses. This
+            //     constant is why push needs PHP 8.1+ (class docblock).
             CURLOPT_READFUNCTION => function ($curl_handle, $stream, int $length) {
                 $this->curl_requested_body = true;
-                if ($this->outbound_offset < strlen($this->outbound_bytes)) {
-                    $piece = substr($this->outbound_bytes, $this->outbound_offset, $length);
-                    $this->outbound_offset += strlen($piece);
+                if ($this->outbound_frame_header !== "") {
+                    $piece = substr($this->outbound_frame_header, 0, $length);
+                    $this->outbound_frame_header = (string) substr($this->outbound_frame_header, strlen($piece));
                     $this->outbound_consumed_bytes += strlen($piece);
-                    if ($this->outbound_offset >= strlen($this->outbound_bytes)) {
-                        $this->outbound_bytes = "";
-                        $this->outbound_offset = 0;
+                    return $piece;
+                }
+                if ($this->outbound_payload_offset < strlen($this->outbound_payload)) {
+                    $piece = substr($this->outbound_payload, $this->outbound_payload_offset, $length);
+                    $this->outbound_payload_offset += strlen($piece);
+                    $this->outbound_consumed_bytes += strlen($piece);
+                    if ($this->outbound_payload_offset >= strlen($this->outbound_payload)) {
+                        $this->outbound_payload = "";
+                        $this->outbound_payload_offset = 0;
                     }
                     return $piece;
                 }
@@ -265,6 +307,12 @@ class StagedPushStreamClient
             },
         ]);
 
+        // One curl_multi handle per request, holding a single transfer.
+        // Multi is not for concurrency here: unlike curl_exec(), which
+        // blocks until the whole exchange is over, curl_multi_exec()
+        // performs one small slice of work and returns. That is what lets
+        // send_chunk() feed a frame, pump until libcurl consumed it, and
+        // hand control back to the caller while the request stays open.
         $this->multi_handle = curl_multi_init();
         curl_multi_add_handle($this->multi_handle, $this->curl_handle);
 
@@ -312,6 +360,12 @@ class StagedPushStreamClient
      */
     public function send_chunk(array $chunk): bool
     {
+        // This mirrors the target's own frame validation, so a bad
+        // descriptor fails here — naming the exact field — instead of after
+        // uploading it. The last two checks are protocol invariants no type
+        // system covers: a zero-byte non-final frame means the source file
+        // shrank under the caller, and a final frame must land exactly on
+        // total_bytes or the target will 409 after staging the bytes.
         $artifact_id = $chunk["artifact_id"] ?? null;
         if (!is_string($artifact_id) || $artifact_id === "") {
             throw new InvalidArgumentException("Expected chunk field \"artifact_id\" to be a non-empty string.");
@@ -368,8 +422,11 @@ class StagedPushStreamClient
         }
         $frame_header .= "\n";
 
-        $this->outbound_bytes = $frame_header . $payload;
-        $this->outbound_offset = 0;
+        // Copy-on-write assignments: neither line copies the payload bytes.
+        // Unpausing tells libcurl to start calling the read callback again.
+        $this->outbound_frame_header = $frame_header;
+        $this->outbound_payload = $payload;
+        $this->outbound_payload_offset = 0;
         curl_pause($this->curl_handle, CURLPAUSE_CONT);
 
         // The stall watch fails only on zero progress: every byte libcurl
@@ -377,7 +434,7 @@ class StagedPushStreamClient
         // can take as long as it needs.
         $consumed_at_last_progress = $this->outbound_consumed_bytes;
         $last_progress_at = microtime(true);
-        while ($this->outbound_bytes !== "" && !$this->transfer_finished) {
+        while (($this->outbound_frame_header !== "" || $this->outbound_payload !== "") && !$this->transfer_finished) {
             if ($this->outbound_consumed_bytes !== $consumed_at_last_progress) {
                 $consumed_at_last_progress = $this->outbound_consumed_bytes;
                 $last_progress_at = microtime(true);
@@ -388,11 +445,12 @@ class StagedPushStreamClient
             }
             $this->pump_transfer();
         }
-        if ($this->outbound_bytes !== "") {
+        if ($this->outbound_frame_header !== "" || $this->outbound_payload !== "") {
             // The transfer ended mid-frame; drop the leftover so the read
             // callback cannot leak stale bytes into a later pump.
-            $this->outbound_bytes = "";
-            $this->outbound_offset = 0;
+            $this->outbound_frame_header = "";
+            $this->outbound_payload = "";
+            $this->outbound_payload_offset = 0;
             return false;
         }
 
@@ -527,8 +585,14 @@ class StagedPushStreamClient
     }
 
     /**
-     * One curl_multi step: perform pending transfer work, harvest the
-     * completion message, and wait briefly for socket activity.
+     * One curl_multi step. curl_multi_exec() performs whatever transfer
+     * work the socket allows right now — writing queued upload bytes,
+     * reading response bytes — and returns without blocking. When the
+     * transfer ends, curl_multi_info_read() delivers exactly one DONE
+     * message carrying the result code; that is the only place libcurl
+     * reports how the transfer ended, so it is harvested here into
+     * $transfer_finished/$transfer_error. The select waits up to 50 ms for
+     * socket readiness so callers can loop on this without busy-spinning.
      */
     private function pump_transfer(): void
     {

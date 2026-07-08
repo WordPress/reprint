@@ -326,6 +326,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $client = new StagedPushStreamClient([
             'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4,
         ]);
 
@@ -386,6 +387,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $client = new StagedPushStreamClient([
             'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 8 * 1024 * 1024,
             'stall_timeout' => 1,
         ]);
