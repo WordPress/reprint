@@ -445,6 +445,101 @@ class StagedPushStreamClientTest extends TestCase
         }
     }
 
+    public function testGivingUpOnRequestSizeReportsRequestSizeExhausted(): void
+    {
+        $this->writeSource('giveup.bin', str_repeat('g', 8));
+        // The target caps frames at 3 bytes; the sizer cannot shrink the
+        // 4-byte body budget below its own floor, so the push must give up —
+        // and the reason names the request-size dimension, not the chunk.
+        $this->configureEndpoint(['max_request_bytes' => 3]);
+        $client = $this->makeClient([
+            'request_sizer' => new PushRequestSizer(['floor_bytes' => 4, 'start_bytes' => 4, 'max_bytes' => 4]),
+        ]);
+        $local_paths_to_push = $this->writeLocalPathsToPush(['giveup.bin']);
+
+        $result = $this->pushAll($client, $local_paths_to_push);
+
+        $this->assertSame(['failed', 'request_size_exhausted'], [$result['status'], $result['reason']], (string) json_encode($result));
+    }
+
+    public function testEmptyRequestsDoNotGrowTheBodyBudget(): void
+    {
+        $sizer = new PushRequestSizer([
+            'floor_bytes' => 4,
+            'start_bytes' => 8,
+            'max_bytes' => 32,
+            'growth_holdoff_successes' => 0,
+        ]);
+        $client = $this->makeClient(['request_sizer' => $sizer]);
+
+        // Requests that carried nothing teach the sizer nothing.
+        $this->assertTrue($client->start_push_request());
+        $this->assertSame('complete', $client->finish_request()['status']);
+        $this->assertTrue($client->start_push_request());
+        $this->assertSame('complete', $client->finish_request()['status']);
+        $this->assertSame(8, $sizer->request_body_bytes(), 'accepting an empty body is no evidence the size is safe to grow');
+
+        // A request that carried bytes grows the budget as before.
+        $this->writeSource('grow.bin', 'gggg');
+        $this->assertTrue($client->start_push_request());
+        $this->assertTrue($client->send_chunk([
+            'artifact_id' => 'grow.bin',
+            'offset' => 0,
+            'total_bytes' => 4,
+            'final' => true,
+            'payload' => 'gggg',
+        ]));
+        $this->assertSame('complete', $client->finish_request()['status']);
+        $this->assertSame(16, $sizer->request_body_bytes());
+    }
+
+    public function testInvalidOptionsThrowSpecificErrors(): void
+    {
+        $invalid_options = [
+            [['chunk_bytes' => 0], 'Expected option "chunk_bytes" to be a positive integer; received 0.'],
+            [['stall_timeout' => 'soon'], 'Expected option "stall_timeout" to be a positive integer; received "soon".'],
+            [['max_request_seconds' => -1], 'Expected option "max_request_seconds" to be a positive number; received -1.'],
+        ];
+
+        foreach ($invalid_options as [$options, $expected_message]) {
+            try {
+                $this->makeClient($options);
+                $this->fail('Expected an InvalidArgumentException for: ' . (string) json_encode($options));
+            } catch (InvalidArgumentException $exception) {
+                $this->assertSame($expected_message, $exception->getMessage());
+            }
+        }
+    }
+
+    public function testEveryRequestMethodThrowsWithoutAnOpenRequest(): void
+    {
+        $client = $this->makeClient();
+        $method_calls = [
+            'next_chunk_body_bytes' => static fn (StagedPushStreamClient $client) => $client->next_chunk_body_bytes(),
+            'should_finish_request' => static fn (StagedPushStreamClient $client) => $client->should_finish_request(),
+            'finish_request' => static fn (StagedPushStreamClient $client) => $client->finish_request(),
+            'send_chunk' => static fn (StagedPushStreamClient $client) => $client->send_chunk([
+                'artifact_id' => 'a.bin',
+                'offset' => 0,
+                'total_bytes' => 4,
+                'final' => true,
+                'payload' => 'aaaa',
+            ]),
+        ];
+
+        foreach ($method_calls as $method_name => $method_call) {
+            try {
+                $method_call($client);
+                $this->fail('Expected a RuntimeException from ' . $method_name . '() without an open request');
+            } catch (\RuntimeException $exception) {
+                $this->assertSame(
+                    'No push request is open; call start_push_request() before ' . $method_name . '().',
+                    $exception->getMessage()
+                );
+            }
+        }
+    }
+
     private static function writeRouter(): void
     {
         $import_path = addslashes(realpath(__DIR__ . '/../../packages/reprint-importer/src/import.php'));

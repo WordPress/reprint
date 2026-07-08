@@ -42,6 +42,12 @@
  * silently truncates, so the constructor refuses to run there. The full
  * story: https://github.com/WordPress/reprint/issues/327
  *
+ * That 8.1 requirement is runtime-only on purpose: import.php requires this
+ * file for every command, including pull on PHP 7.4, so the file itself must
+ * stay parseable by 7.4 — no 8.x syntax (which is also why
+ * $max_request_seconds is untyped: int|float property types are PHP 8.0).
+ * PushClientPhpCompatibilityTest enforces this.
+ *
  * Two sizes govern the loop, and they are different dimensions. The chunk
  * is the small fixed in-memory unit of one fread. The request body budget
  * is what hosts and proxies actually limit — post_max_size,
@@ -79,7 +85,13 @@ class StagedPushStreamClient
      */
     private int $response_timeout;
 
-    /** @var int|float Wall-clock budget per request, in seconds. */
+    /**
+     * Wall-clock budget per request, in seconds. Untyped because this file
+     * must stay PHP 7.4-parseable (class docblock) and int|float property
+     * types are PHP 8.0 syntax.
+     *
+     * @var int|float
+     */
     private $max_request_seconds;
 
     /** @var int In-memory unit of one caller fread, in bytes. */
@@ -188,16 +200,35 @@ class StagedPushStreamClient
         }
         $this->hmac_client = $hmac_client;
         $this->request_sizer = $options["request_sizer"] ?? new PushRequestSizer();
+
+        // Absent options get defaults; present-but-invalid options throw —
+        // silently substituting a default would hide the caller's mistake
+        // until it surfaces as puzzling runtime behavior.
         $chunk_bytes = $options["chunk_bytes"] ?? null;
-        $this->chunk_bytes = is_numeric($chunk_bytes) && (int) $chunk_bytes > 0 ? (int) $chunk_bytes : 4 * 1024 * 1024;
+        if ($chunk_bytes !== null && (!is_numeric($chunk_bytes) || (int) $chunk_bytes <= 0)) {
+            throw new InvalidArgumentException("Expected option \"chunk_bytes\" to be a positive integer; received " . json_encode($chunk_bytes) . ".");
+        }
+        $this->chunk_bytes = $chunk_bytes !== null ? (int) $chunk_bytes : 4 * 1024 * 1024;
         $connect_timeout = $options["connect_timeout"] ?? null;
-        $this->connect_timeout = is_numeric($connect_timeout) && (int) $connect_timeout > 0 ? (int) $connect_timeout : 30;
+        if ($connect_timeout !== null && (!is_numeric($connect_timeout) || (int) $connect_timeout <= 0)) {
+            throw new InvalidArgumentException("Expected option \"connect_timeout\" to be a positive integer; received " . json_encode($connect_timeout) . ".");
+        }
+        $this->connect_timeout = $connect_timeout !== null ? (int) $connect_timeout : 30;
         $stall_timeout = $options["stall_timeout"] ?? null;
-        $this->stall_timeout = is_numeric($stall_timeout) && (int) $stall_timeout > 0 ? (int) $stall_timeout : 60;
+        if ($stall_timeout !== null && (!is_numeric($stall_timeout) || (int) $stall_timeout <= 0)) {
+            throw new InvalidArgumentException("Expected option \"stall_timeout\" to be a positive integer; received " . json_encode($stall_timeout) . ".");
+        }
+        $this->stall_timeout = $stall_timeout !== null ? (int) $stall_timeout : 60;
         $response_timeout = $options["response_timeout"] ?? null;
-        $this->response_timeout = is_numeric($response_timeout) && (int) $response_timeout > 0 ? (int) $response_timeout : 300;
+        if ($response_timeout !== null && (!is_numeric($response_timeout) || (int) $response_timeout <= 0)) {
+            throw new InvalidArgumentException("Expected option \"response_timeout\" to be a positive integer; received " . json_encode($response_timeout) . ".");
+        }
+        $this->response_timeout = $response_timeout !== null ? (int) $response_timeout : 300;
         $max_request_seconds = $options["max_request_seconds"] ?? null;
-        $this->max_request_seconds = is_numeric($max_request_seconds) && $max_request_seconds > 0 ? $max_request_seconds : 30;
+        if ($max_request_seconds !== null && (!is_numeric($max_request_seconds) || $max_request_seconds <= 0)) {
+            throw new InvalidArgumentException("Expected option \"max_request_seconds\" to be a positive number; received " . json_encode($max_request_seconds) . ".");
+        }
+        $this->max_request_seconds = $max_request_seconds ?? 30;
     }
 
     /**
@@ -474,6 +505,9 @@ class StagedPushStreamClient
      */
     public function next_chunk_body_bytes(): int
     {
+        if ($this->curl_handle === null) {
+            throw new RuntimeException("No push request is open; call start_push_request() before next_chunk_body_bytes().");
+        }
         $remaining_body_budget = max(0, $this->request_sizer->request_body_bytes() - $this->body_bytes_sent);
         return min($this->chunk_bytes, $remaining_body_budget);
     }
@@ -550,13 +584,13 @@ class StagedPushStreamClient
         $response_cursor = is_array($decoded["cursor"] ?? null) ? $decoded["cursor"] : null;
 
         if ($http_code === 413 || ($decoded["reason"] ?? null) === "frame_too_large") {
-            $reported_max_frame_bytes = $decoded["max_frame_bytes"] ?? ($decoded["max_request_bytes"] ?? null);
+            $reported_limit_bytes = $decoded["max_frame_bytes"] ?? ($decoded["max_request_bytes"] ?? null);
             $decision = $this->request_sizer->record_too_large(
-                is_numeric($reported_max_frame_bytes) ? (int) $reported_max_frame_bytes : null
+                is_numeric($reported_limit_bytes) ? (int) $reported_limit_bytes : null
             );
             return $this->result(
                 $decision["action"] === "give_up" ? "failed" : "retry",
-                $decision["action"] === "give_up" ? "chunk_size_exhausted" : "frame_too_large",
+                $decision["action"] === "give_up" ? "request_size_exhausted" : "frame_too_large",
                 null,
                 $response_cursor
             );
@@ -572,7 +606,12 @@ class StagedPushStreamClient
             );
         }
 
-        $this->request_sizer->record_success();
+        // A success only teaches the sizer something when the request
+        // carried bytes: "the host accepted an empty body" is no evidence
+        // that the current size is safe to grow from.
+        if ($this->chunks_sent > 0) {
+            $this->request_sizer->record_success();
+        }
         return $this->result("complete", null, null, $response_cursor, (int) ($decoded["files_verified"] ?? 0));
     }
 
