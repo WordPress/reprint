@@ -83,6 +83,17 @@ travel as a deletion manifest — itself a staged artifact, uploaded through
 the same store as file bytes — and the apply step executes the unlinks inside
 the same window as the moves.
 
+The manifest is staged at one reserved artifact id, `.reprint/deletions.jsonl`,
+whose content is the `local-paths-to-delete.jsonl` the journal produces. To
+keep that namespace trustworthy, the exporter refuses any sender-named
+artifact under the top-level `.reprint/` segment except that one id — on the
+push stream and on the `finalize`/`status`/`discard` control routes alike
+(`reserved_artifact_id`, HTTP 400). So a site that happens to hold a
+`.reprint/` file cannot overwrite the manifest, and apply can trust that
+everything under `.reprint/` is reprint's own. The staging code that actually
+writes the manifest lands with the push command; this reservation is in place
+ahead of it so the namespace is clean from the first push.
+
 ## The staging store
 
 The staging area is `Site_Export_Staged_Artifacts` as built: artifact bytes

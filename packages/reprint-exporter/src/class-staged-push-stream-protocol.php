@@ -13,6 +13,38 @@ final class Site_Export_Staged_Push_Stream_Protocol {
     public const CONTENT_TYPE = 'application/x-reprint-staged-push-stream';
 
     /**
+     * Top-level path segment reprint reserves for its own staged bookkeeping.
+     * A sender's file artifacts may never land here — see
+     * is_reserved_sender_artifact_id() — so the apply step can trust that
+     * everything under it is reprint's own, not pushed site content.
+     */
+    public const RESERVED_NAMESPACE_SEGMENT = '.reprint';
+
+    /**
+     * The one artifact id inside the reserved namespace a sender is allowed
+     * to write: the list of paths deleted locally since the last push, staged
+     * like any other artifact so apply can unlink them in its window. Content
+     * is the local-paths-to-delete.jsonl the push journal produces.
+     */
+    public const DELETION_MANIFEST_ARTIFACT_ID = '.reprint/deletions.jsonl';
+
+    /**
+     * Whether a sender-named artifact id intrudes on reprint's reserved
+     * namespace. True for the bare reserved segment and anything beneath it,
+     * except the one deletion-manifest id a sender may legitimately write.
+     *
+     * The check is on the first path segment, not a raw string prefix, so
+     * a real site file like ".reprintfoo" or "wp-content/.reprint/x" is not
+     * caught — only the top-level ".reprint" namespace is.
+     */
+    public static function is_reserved_sender_artifact_id(string $artifact_id): bool {
+        if ($artifact_id === self::DELETION_MANIFEST_ARTIFACT_ID) {
+            return false;
+        }
+        return explode('/', $artifact_id, 2)[0] === self::RESERVED_NAMESPACE_SEGMENT;
+    }
+
+    /**
      * Read the next frame header line from a stream.
      *
      * @param resource $input

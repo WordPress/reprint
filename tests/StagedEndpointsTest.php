@@ -239,6 +239,57 @@ final class StagedEndpointsTest extends TestCase {
         $this->assertStringContainsString('offset 5 and 1 payload bytes, which exceeds total_bytes 3', $result['body']['detail']);
     }
 
+    public function testPushStreamRejectsAReservedNamespaceFrameBeforeTheStore(): void
+    {
+        $endpoints = $this->makeEndpoints();
+
+        $result = $this->push($endpoints, [
+            ['artifact_id' => '.reprint/evil.txt', 'offset' => 0, 'bytes' => 'x', 'total_bytes' => 1, 'final' => true],
+        ]);
+
+        $this->assertSame(400, $result['http_code']);
+        $this->assertSame('reserved_artifact_id', $result['body']['reason']);
+        $this->assertStringContainsString('.reprint/', $result['body']['detail']);
+        // The store never saw it: nothing was written under files/.reprint/.
+        $this->assertFileDoesNotExist($this->staging_dir . '/files/.reprint/evil.txt');
+        $this->assertSame(['artifact_id' => base64_encode('.reprint/evil.txt'), 'committed_bytes' => 0], $result['body']['cursor']);
+    }
+
+    public function testPushStreamAcceptsTheDeletionManifestId(): void
+    {
+        $endpoints = $this->makeEndpoints();
+        $manifest = json_encode(['path' => base64_encode('wp-content/gone.txt')]) . "\n";
+
+        $result = $this->push($endpoints, [
+            ['artifact_id' => '.reprint/deletions.jsonl', 'offset' => 0, 'bytes' => $manifest, 'total_bytes' => strlen($manifest), 'final' => true],
+        ]);
+
+        // The one reserved id a sender may write stages like any artifact.
+        $this->assertSame(200, $result['http_code'], (string) json_encode($result['body']));
+        $this->assertSame('complete', $result['body']['status']);
+        $this->assertSame(1, $result['body']['files_verified']);
+        $this->assertSame($manifest, file_get_contents($this->staging_dir . '/files/.reprint/deletions.jsonl'));
+    }
+
+    public function testControlPlaneRoutesRefuseTheReservedNamespace(): void
+    {
+        $endpoints = $this->makeEndpoints();
+        $reserved = base64_encode('.reprint/evil.txt');
+
+        $finalize = $endpoints->finalize(['artifact_id' => $reserved, 'total_bytes' => 1], ['REQUEST_METHOD' => 'POST']);
+        $status = $endpoints->status(['artifact_id' => $reserved]);
+        $discard = $endpoints->discard(['artifact_id' => $reserved], ['REQUEST_METHOD' => 'POST']);
+
+        foreach (['finalize' => $finalize, 'status' => $status, 'discard' => $discard] as $route => $result) {
+            $this->assertSame(400, $result['http_code'], $route);
+            $this->assertSame('reserved_artifact_id', $result['body']['reason'], $route);
+        }
+
+        // The manifest id passes the gate on the control plane too.
+        $manifest_status = $endpoints->status(['artifact_id' => base64_encode('.reprint/deletions.jsonl')]);
+        $this->assertSame(200, $manifest_status['http_code']);
+    }
+
     // ---------------------------------------------------------------
     // Control plane: finalize, status, discard
     // ---------------------------------------------------------------

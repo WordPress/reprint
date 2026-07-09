@@ -26,6 +26,30 @@ final class StagedPushStreamProtocolTest extends TestCase
         ], Site_Export_Staged_Push_Stream_Protocol::decode_chunk_header($line));
     }
 
+    /**
+     * @dataProvider reservedArtifactIdProvider
+     */
+    public function testReservedNamespaceGuardsEveryReprintIdButTheManifest(string $artifact_id, bool $forbidden): void
+    {
+        $this->assertSame(
+            $forbidden,
+            Site_Export_Staged_Push_Stream_Protocol::is_reserved_sender_artifact_id($artifact_id)
+        );
+    }
+
+    public static function reservedArtifactIdProvider(): array
+    {
+        return [
+            'the deletion manifest is the one allowed reserved id' => ['.reprint/deletions.jsonl', false],
+            'a sibling in the namespace is forbidden' => ['.reprint/evil.jsonl', true],
+            'a nested path in the namespace is forbidden' => ['.reprint/sub/dir/file', true],
+            'the bare namespace segment is forbidden' => ['.reprint', true],
+            'a real file that merely starts with the segment is allowed' => ['.reprintfoo', false],
+            'a nested .reprint below a real dir is allowed' => ['wp-content/.reprint/x', false],
+            'an ordinary site file is allowed' => ['wp-content/uploads/photo.jpg', false],
+        ];
+    }
+
     public function testChunkHeaderValidationRejectsRangesOutsideTheDeclaredFile(): void
     {
         $this->expectException(InvalidArgumentException::class);

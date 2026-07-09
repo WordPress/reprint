@@ -62,6 +62,9 @@ final class Site_Export_Staged_Endpoints {
     /** Request-body read size while discarding already-committed bytes. */
     private const READ_BUFFER_BYTES = 65536;
 
+    /** Detail returned when a control-plane call names the reserved namespace. */
+    private const RESERVED_NAMESPACE_MESSAGE = 'This artifact id is in reprint\'s reserved ".reprint/" namespace; only the deletion manifest may be written there.';
+
     /** @var Site_Export_Staged_Artifacts */
     private $store;
 
@@ -199,6 +202,21 @@ final class Site_Export_Staged_Endpoints {
             $bytes = $frame['bytes'];
             $total_bytes = $frame['total_bytes'];
             $final = $frame['final'];
+
+            // Refuse frames that name reprint's reserved namespace before the
+            // store is touched, so a pushed file can never overwrite the
+            // deletion manifest (or hide as another .reprint/ artifact apply
+            // would then trust). The one deletion-manifest id is allowed
+            // through and stages like any other artifact.
+            if (Site_Export_Staged_Push_Stream_Protocol::is_reserved_sender_artifact_id($artifact_id)) {
+                return $this->stream_rejected(
+                    400,
+                    'reserved_artifact_id',
+                    'The artifact id "' . $artifact_id . '" is in reprint\'s reserved ".reprint/" namespace; only the deletion manifest may be written there.',
+                    ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => 0],
+                    $files_verified
+                );
+            }
 
             // Response cursors re-encode the id so responses stay valid JSON
             // for arbitrary-byte paths, and they report only what the store
@@ -378,6 +396,9 @@ final class Site_Export_Staged_Endpoints {
         if ($artifact_id === null) {
             return $this->rejected(400, 'invalid_artifact_id');
         }
+        if (Site_Export_Staged_Push_Stream_Protocol::is_reserved_sender_artifact_id($artifact_id)) {
+            return $this->rejected(400, 'reserved_artifact_id', self::RESERVED_NAMESPACE_MESSAGE);
+        }
         $total_bytes = $config['total_bytes'] ?? null;
         if (!is_numeric($total_bytes) || (int) $total_bytes < 0) {
             return $this->rejected(400, 'invalid_total');
@@ -398,6 +419,9 @@ final class Site_Export_Staged_Endpoints {
         $artifact_id = $this->decode_artifact_id_param($config);
         if ($artifact_id === null) {
             return $this->rejected(400, 'invalid_artifact_id');
+        }
+        if (Site_Export_Staged_Push_Stream_Protocol::is_reserved_sender_artifact_id($artifact_id)) {
+            return $this->rejected(400, 'reserved_artifact_id', self::RESERVED_NAMESPACE_MESSAGE);
         }
 
         return [
@@ -420,6 +444,9 @@ final class Site_Export_Staged_Endpoints {
         $artifact_id = $this->decode_artifact_id_param($config);
         if ($artifact_id === null) {
             return $this->rejected(400, 'invalid_artifact_id');
+        }
+        if (Site_Export_Staged_Push_Stream_Protocol::is_reserved_sender_artifact_id($artifact_id)) {
+            return $this->rejected(400, 'reserved_artifact_id', self::RESERVED_NAMESPACE_MESSAGE);
         }
 
         if (!$this->store->discard($artifact_id)) {
