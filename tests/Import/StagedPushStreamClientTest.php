@@ -118,7 +118,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(2, $result['files_verified']);
         $this->assertSame(str_repeat('a', 10), file_get_contents($this->staging_dir . '/files/wp-content/uploads/first.bin'));
         $this->assertSame(str_repeat('bc', 7), file_get_contents($this->staging_dir . '/files/wp-content/uploads/second.bin'));
@@ -138,7 +138,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push, ['artifact_id' => 'second.bin', 'committed_bytes' => 4]);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertFileDoesNotExist($this->staging_dir . '/files/first.bin', 'cursor skips files before the resumed artifact');
         $this->assertSame(str_repeat('b', 12), file_get_contents($this->staging_dir . '/files/second.bin'));
         $this->assertSame(['staged_push'], $this->endpointsSeen());
@@ -160,14 +160,14 @@ class StagedPushStreamClientTest extends TestCase
         ]));
         $first_result = $client->finish_request();
 
-        $this->assertSame('complete', $first_result['status'], (string) json_encode($first_result));
+        $this->assertSame('complete', $first_result['status'], (string) json_encode($first_result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(1, $first_result['chunks_sent']);
         $this->assertSame(['artifact_id' => 'chunked.bin', 'committed_bytes' => 4], $first_result['cursor']);
         $this->assertSame(str_repeat('x', 4), file_get_contents($this->staging_dir . '/files/chunked.bin'));
 
         $result = $this->pushAll($client, $local_paths_to_push, $first_result['cursor']);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(str_repeat('x', 12), file_get_contents($this->staging_dir . '/files/chunked.bin'));
         $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen());
     }
@@ -221,12 +221,12 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertTrue($client->should_finish_request());
 
         $rotation_result = $client->finish_request();
-        $this->assertSame('complete', $rotation_result['status'], (string) json_encode($rotation_result));
+        $this->assertSame('complete', $rotation_result['status'], (string) json_encode($rotation_result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(['artifact_id' => 'budget.bin', 'committed_bytes' => 7], $rotation_result['cursor']);
 
         $result = $this->pushAll($client, $local_paths_to_push, $rotation_result['cursor']);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(str_repeat('y', 10), file_get_contents($this->staging_dir . '/files/budget.bin'));
         $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen());
     }
@@ -249,11 +249,11 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertTrue($client->should_finish_request(), 'an open request older than max_request_seconds asks to be finished');
 
         $rotation_result = $client->finish_request();
-        $this->assertSame('complete', $rotation_result['status'], (string) json_encode($rotation_result));
+        $this->assertSame('complete', $rotation_result['status'], (string) json_encode($rotation_result, JSON_INVALID_UTF8_SUBSTITUTE));
 
         $result = $this->pushAll($client, $local_paths_to_push, $rotation_result['cursor']);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(str_repeat('t', 8), file_get_contents($this->staging_dir . '/files/timed.bin'));
         $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen());
     }
@@ -278,7 +278,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(str_repeat('a', 8), file_get_contents($this->staging_dir . '/files/first.bin'));
         $this->assertSame(str_repeat('b', 8), file_get_contents($this->staging_dir . '/files/second.bin'));
         $this->assertSame(['staged_push'], $this->endpointsSeen());
@@ -295,7 +295,7 @@ class StagedPushStreamClientTest extends TestCase
         $push_started_at = microtime(true);
         $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertGreaterThan(0.25, microtime(true) - $push_started_at, 'the retry after the 413 backed off before re-hitting the host');
         $this->assertSame(str_repeat('x', 20), file_get_contents($this->staging_dir . '/files/large.bin'));
         // The 413 caps the body budget at the reported 6 * 0.9 = 5 bytes, so
@@ -315,7 +315,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame(['failed', 'auth_failed'], [$result['status'], $result['reason']], (string) json_encode($result));
+        $this->assertSame(['failed', 'auth_failed'], [$result['status'], $result['reason']], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertFileDoesNotExist($this->staging_dir . '/files/secret.bin');
         $this->assertSame(['staged_push'], $this->endpointsSeen());
     }
@@ -374,7 +374,7 @@ class StagedPushStreamClientTest extends TestCase
         fclose($listener);
         $result = $client->finish_request();
 
-        $this->assertSame(['retry', 'request_failed'], [$result['status'], $result['reason']], (string) json_encode($result));
+        $this->assertSame(['retry', 'request_failed'], [$result['status'], $result['reason']], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(2, $result['chunks_sent']);
         $this->assertGreaterThan(8, $result['body_bytes_sent'], 'body accounting includes the frame headers');
     }
@@ -417,7 +417,7 @@ class StagedPushStreamClientTest extends TestCase
         fclose($connection);
         fclose($listener);
 
-        $this->assertSame(['retry', 'request_failed'], [$result['status'], $result['reason']], (string) json_encode($result));
+        $this->assertSame(['retry', 'request_failed'], [$result['status'], $result['reason']], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertStringContainsString('no bytes moved for 1s', (string) $result['detail']);
     }
 
@@ -463,7 +463,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame(['failed', 'request_size_exhausted'], [$result['status'], $result['reason']], (string) json_encode($result));
+        $this->assertSame(['failed', 'request_size_exhausted'], [$result['status'], $result['reason']], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
     }
 
     public function testEmptyRequestsDoNotGrowTheBodyBudget(): void
@@ -556,7 +556,7 @@ class StagedPushStreamClientTest extends TestCase
         // replay from the top, not skim past everything and report success.
         $result = $this->pushAll($client, $local_paths_to_push, ['artifact_id' => 'deleted-since.bin', 'committed_bytes' => 4]);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(2, $result['files_verified']);
         $this->assertSame(str_repeat('k', 6), file_get_contents($this->staging_dir . '/files/kept-one.bin'));
         $this->assertSame(str_repeat('K', 6), file_get_contents($this->staging_dir . '/files/kept-two.bin'));
@@ -569,7 +569,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(0, $result['chunks_sent']);
         $this->assertSame([], $this->endpointsSeen(), 'an empty journal must not cost a network exchange');
     }
@@ -602,7 +602,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $client->finish_request();
 
-        $this->assertSame(['failed', 'redirected'], [$result['status'], $result['reason']], (string) json_encode($result));
+        $this->assertSame(['failed', 'redirected'], [$result['status'], $result['reason']], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertStringContainsString('https://example.com/?reprint-api=1&endpoint=staged_push', (string) $result['detail']);
         $this->assertStringContainsString('Use that address as the push base_url', (string) $result['detail']);
     }
@@ -623,7 +623,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push, $resume_cursor);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame($new_content, file_get_contents($this->staging_dir . '/files/drift-grow.bin'), 'no byte of the old version may survive under the new one');
     }
 
@@ -645,7 +645,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push, $resume_cursor);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame($new_content, file_get_contents($this->staging_dir . '/files/drift-edit.bin'), 'no byte of the old version may survive under the new one');
     }
 
@@ -665,7 +665,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push, $resume_cursor);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(1, $result['files_verified']);
         $this->assertSame($new_content, file_get_contents($this->staging_dir . '/files/drift-shrink.bin'));
     }
@@ -683,7 +683,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame($new_content, file_get_contents($this->staging_dir . '/files/replayed.bin'));
     }
 
@@ -708,7 +708,7 @@ class StagedPushStreamClientTest extends TestCase
             ]));
         }
         $first_result = $client->finish_request();
-        $this->assertSame('complete', $first_result['status'], (string) json_encode($first_result));
+        $this->assertSame('complete', $first_result['status'], (string) json_encode($first_result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame($bytes_to_push, $first_result['cursor']['committed_bytes']);
 
         clearstatcache();
@@ -733,13 +733,13 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertTrue(flock($lock_holder, LOCK_EX));
 
         $held_result = $this->pushOnce($client, $local_paths_to_push, null);
-        $this->assertSame(['retry', 'busy'], [$held_result['status'], $held_result['reason']], (string) json_encode($held_result));
+        $this->assertSame(['retry', 'busy'], [$held_result['status'], $held_result['reason']], (string) json_encode($held_result, JSON_INVALID_UTF8_SUBSTITUTE));
 
         flock($lock_holder, LOCK_UN);
         fclose($lock_holder);
 
         $result = $this->pushAll($client, $local_paths_to_push);
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(str_repeat('l', 4), file_get_contents($this->staging_dir . '/files/locked.bin'));
     }
 
@@ -766,7 +766,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push, $stale_cursor);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame($content, file_get_contents($this->staging_dir . '/files/gapped.bin'));
         $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen(), 'one gap rejection, one clean resume from the store cursor');
     }
@@ -827,7 +827,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(1, $result['files_verified']);
         $this->assertSame(str_repeat('e', 10), file_get_contents($this->staging_dir . '/files/' . $emoji_artifact_id));
     }
@@ -845,7 +845,7 @@ class StagedPushStreamClientTest extends TestCase
 
         $result = $this->pushAll($client, $local_paths_to_push);
 
-        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
         $this->assertSame(1, $result['files_verified']);
         $this->assertSame(str_repeat('n', 6), file_get_contents($this->staging_dir . '/files/' . $non_utf8_artifact_id));
     }

@@ -669,10 +669,16 @@ final class Site_Export_Staged_Artifacts {
         if (!is_array($state) || !is_string($state['artifact_id'] ?? null)) {
             return $defaults;
         }
+        // Ids are stored base64 (see write_state); an undecodable record
+        // reads as no state, like any other malformed record.
+        $artifact_id = base64_decode($state['artifact_id'], true);
+        if ($artifact_id === false || $artifact_id === '') {
+            return $defaults;
+        }
 
         $committed_bytes = isset($state['committed_bytes']) ? (int) $state['committed_bytes'] : 0;
         return [
-            'artifact_id' => $state['artifact_id'],
+            'artifact_id' => $artifact_id,
             'committed_bytes' => max(0, $committed_bytes),
         ];
     }
@@ -682,8 +688,12 @@ final class Site_Export_Staged_Artifacts {
         // record or the new one, never a torn file. The temp file sits next
         // to the target so rename stays on the same filesystem.
         $tmp_path = $this->state_path . '.tmp';
+        // The id is stored base64: file names are arbitrary bytes, JSON
+        // strings must be UTF-8, and json_encode() returning false would
+        // otherwise slip through the strlen() comparison below as an empty
+        // record — committed_bytes would silently reset to 0 on every read.
         $json = json_encode([
-            'artifact_id' => $artifact_id,
+            'artifact_id' => $artifact_id !== null ? base64_encode($artifact_id) : null,
             'committed_bytes' => $committed_bytes,
         ]);
         // A short write (disk full) returns a byte count, not false — never

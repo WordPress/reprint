@@ -547,6 +547,22 @@ final class StagedArtifactsTest extends TestCase
     // Concurrency and lifecycle
     // ---------------------------------------------------------------
 
+    public function testStateFileRecordsArtifactIdsBase64(): void
+    {
+        $store = $this->makeStore();
+        $store->append('plain.bin', 0, 'abcd');
+
+        // File names are arbitrary bytes and JSON strings must be UTF-8 —
+        // a raw non-UTF-8 id would make json_encode() return false and the
+        // state record would silently become an empty file, resetting
+        // committed_bytes to 0 on every read. Ids travel base64 in the
+        // state file, like everywhere else on the wire and in the journal.
+        $state = json_decode((string) file_get_contents($this->staging_dir . '/state.json'), true);
+        $this->assertSame(base64_encode('plain.bin'), $state['artifact_id']);
+        $this->assertSame(4, $state['committed_bytes']);
+        $this->assertSame(4, $store->status('plain.bin')['committed_bytes'], 'the id round-trips back out of the state file');
+    }
+
     public function testConcurrentWriterGetsBusy(): void
     {
         $store = $this->makeStore();
