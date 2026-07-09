@@ -8745,7 +8745,11 @@ class ImportClient
      * Whether $path is selected by the active --only file path prefixes. With no
      * --only flag, every file path is selected (returns true) — this keeps
      * the diff's delete drains at their default behavior. When --only is set,
-     * true only when $path falls under one of those file path prefixes.
+     * true only when $path falls under one of those file path prefixes IF it is
+     * NOT the directory itself (when the path remainder is an empty string): an
+     * --only remote index lists what is inside each selected directory, never
+     * the directory itself, so to the diff the selected directories always
+     * appear deleted-on-remote even though they exist.
      */
     private function is_file_path_selected_by_pull_only_files(string $path): bool
     {
@@ -8754,7 +8758,11 @@ class ImportClient
         }
 
         foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
-            if (self::path_remainder_under($path, $prefix) !== null) {
+            $remainder = self::path_remainder_under($path, $prefix);
+            if ($remainder === "") {
+                return false;
+            }
+            if ($remainder !== null) {
                 return true;
             }
         }
