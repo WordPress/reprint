@@ -332,6 +332,7 @@ class StagedPushStreamClientTest extends TestCase
             'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4,
+            'allow_http' => true,
         ]);
 
         $pending_connections = [$listener];
@@ -394,6 +395,7 @@ class StagedPushStreamClientTest extends TestCase
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 8 * 1024 * 1024,
             'stall_timeout' => 1,
+            'allow_http' => true,
         ]);
 
         $this->assertTrue($client->start_push_request());
@@ -515,6 +517,58 @@ class StagedPushStreamClientTest extends TestCase
         }
     }
 
+    public function testPlainHttpBaseUrlIsRefusedUnlessAllowed(): void
+    {
+        // Constructing does not open a connection, so these assert the
+        // scheme gate alone.
+        try {
+            new StagedPushStreamClient([
+                'base_url' => 'http://example.com/?reprint-api=1',
+                'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            ]);
+            $this->fail('Expected an http:// base_url to be refused without allow_http.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('Refusing to push over plain HTTP', $exception->getMessage());
+            $this->assertStringContainsString('--force-http', $exception->getMessage());
+        }
+
+        // allow_http opts in; construction succeeds.
+        $this->assertInstanceOf(StagedPushStreamClient::class, new StagedPushStreamClient([
+            'base_url' => 'http://example.com/?reprint-api=1',
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'allow_http' => true,
+        ]));
+
+        // https needs no opt-in.
+        $this->assertInstanceOf(StagedPushStreamClient::class, new StagedPushStreamClient([
+            'base_url' => 'https://example.com/?reprint-api=1',
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+        ]));
+    }
+
+    public function testNonHttpSchemesAndBadAllowHttpAreRejected(): void
+    {
+        $rejections = [
+            [
+                ['base_url' => 'ftp://example.com/', 'hmac_client' => new Site_Export_HMAC_Client(self::SECRET)],
+                'Expected option "base_url" to be an http:// or https:// URL; received "ftp:\/\/example.com\/".',
+            ],
+            [
+                ['base_url' => 'https://example.com/', 'hmac_client' => new Site_Export_HMAC_Client(self::SECRET), 'allow_http' => 'yes'],
+                'Expected option "allow_http" to be a boolean; received "yes".',
+            ],
+        ];
+
+        foreach ($rejections as [$options, $expected_message]) {
+            try {
+                new StagedPushStreamClient($options);
+                $this->fail('Expected an InvalidArgumentException for: ' . (string) $options['base_url']);
+            } catch (InvalidArgumentException $exception) {
+                $this->assertSame($expected_message, $exception->getMessage());
+            }
+        }
+    }
+
     public function testEveryRequestMethodThrowsWithoutAnOpenRequest(): void
     {
         $client = $this->makeClient();
@@ -584,6 +638,7 @@ class StagedPushStreamClientTest extends TestCase
             'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4,
+            'allow_http' => true,
         ]);
 
         $this->assertTrue($client->start_push_request());
@@ -771,6 +826,52 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen(), 'one gap rejection, one clean resume from the store cursor');
     }
 
+    public function testExhaustedRetriesReportATerminalFailure(): void
+    {
+        $this->writeSource('never.bin', str_repeat('n', 4));
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush(['never.bin']);
+
+        // Hold the store lock for the whole push so every attempt gets a
+        // busy -> retry. After the retry budget is spent, the caller must
+        // hear a terminal 'failed', not a 'retry' it can no longer act on.
+        (new Site_Export_Staged_Artifacts($this->staging_dir))->append('scaffold.bin', 0, 'x');
+        $lock_holder = fopen($this->staging_dir . '/lock', 'r+b');
+        $this->assertNotFalse($lock_holder);
+        $this->assertTrue(flock($lock_holder, LOCK_EX));
+
+        $result = $this->pushAll($client, $local_paths_to_push);
+
+        flock($lock_holder, LOCK_UN);
+        fclose($lock_holder);
+
+        $this->assertSame('failed', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
+        $this->assertSame('busy', $result['reason'], 'the terminal failure keeps the reason that kept failing');
+    }
+
+    public function testFilesVerifiedSumsAcrossRequestRotations(): void
+    {
+        // Same-length names so each file's frame is the same size, 4 bytes
+        // each. A request-body budget of 4 is spent by one frame, so each
+        // file finalizes in its own request — three rotations, three
+        // verified files. finish_request() only ever reports the last
+        // request's count, so the loop must sum them.
+        foreach (['a1.bin', 'a2.bin', 'a3.bin'] as $name) {
+            $this->writeSource($name, str_repeat('z', 4));
+        }
+        $client = $this->makeClient([
+            'chunk_bytes' => 4,
+            'request_sizer' => new PushRequestSizer(['floor_bytes' => 4, 'start_bytes' => 4, 'max_bytes' => 4]),
+        ]);
+        $local_paths_to_push = $this->writeLocalPathsToPush(['a1.bin', 'a2.bin', 'a3.bin']);
+
+        $result = $this->pushAll($client, $local_paths_to_push);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
+        $this->assertSame(3, $result['files_verified'], 'every rotation\'s verified count is summed, not just the last request\'s');
+        $this->assertSame(['staged_push', 'staged_push', 'staged_push'], $this->endpointsSeen());
+    }
+
     public function testBackToBackRequestsReuseTheConnection(): void
     {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
@@ -781,6 +882,7 @@ class StagedPushStreamClientTest extends TestCase
             'base_url' => 'http://' . $listener_address . '/?reprint-api=1',
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4,
+            'allow_http' => true,
         ]);
         $keep_alive_response = static function (): string {
             $response_body = json_encode(['status' => 'complete', 'cursor' => null, 'files_verified' => 1]);
@@ -913,6 +1015,9 @@ PHP_ROUTER);
             'base_url' => self::$base_url,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4,
+            // The local test endpoint runs over plain HTTP — exactly the
+            // case allow_http exists for.
+            'allow_http' => true,
         ], $overrides));
     }
 
@@ -937,6 +1042,11 @@ PHP_ROUTER);
             }
             $cursor = $result['cursor'];
         }
+        // Retries exhausted — the loop only lands here when the last attempt
+        // was still 'retry'. "Retry" is an instruction the caller can no
+        // longer follow, so report a terminal 'failed' while keeping the
+        // reason and cursor for diagnosis.
+        $result['status'] = 'failed';
         return $result;
     }
 
@@ -944,8 +1054,9 @@ PHP_ROUTER);
      * One pass over the journal from $cursor: the caller loop the client is
      * designed for. Streams journal lines, reads each file in pieces sized by
      * next_chunk_body_bytes(), rotates requests when the client says to, and
-     * persists a source token (size and mtime) with every cursor so a resume
-     * restarts any file that changed since its bytes were staged.
+     * persists a source token (size and ctime) with every cursor so a resume
+     * restarts any file that changed since its bytes were staged. files_verified
+     * is per-request, so this pass sums it across rotations.
      *
      * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int}
      */
@@ -977,6 +1088,9 @@ PHP_ROUTER);
         }
 
         $request_open = false;
+        // finish_request() reports only the request it ends; a push that
+        // rotates requests between files must sum the verified counts itself.
+        $files_verified_total = 0;
         while (($journal_line = fgets($journal_handle)) !== false) {
             $journal_line = trim($journal_line);
             if ($journal_line === '') {
@@ -1038,8 +1152,10 @@ PHP_ROUTER);
                     if ($result['status'] !== 'complete') {
                         fclose($source_handle);
                         fclose($journal_handle);
+                        $result['files_verified'] += $files_verified_total;
                         return $this->withSourceToken($result, $artifact_id, $total_bytes, $source_ctime);
                     }
+                    $files_verified_total += $result['files_verified'];
                     if (false === $client->start_push_request()) {
                         fclose($source_handle);
                         fclose($journal_handle);
@@ -1061,7 +1177,9 @@ PHP_ROUTER);
                 ])) {
                     fclose($source_handle);
                     fclose($journal_handle);
-                    return $this->withSourceToken($client->finish_request(), $artifact_id, $total_bytes, $source_ctime);
+                    $send_failure_result = $client->finish_request();
+                    $send_failure_result['files_verified'] += $files_verified_total;
+                    return $this->withSourceToken($send_failure_result, $artifact_id, $total_bytes, $source_ctime);
                 }
 
                 $offset += strlen($payload);
@@ -1086,7 +1204,9 @@ PHP_ROUTER);
                 'body_bytes_sent' => 0,
             ];
         }
-        return $this->withSourceToken($client->finish_request(), $artifact_id, $total_bytes, $source_ctime);
+        $final_result = $client->finish_request();
+        $final_result['files_verified'] += $files_verified_total;
+        return $this->withSourceToken($final_result, $artifact_id, $total_bytes, $source_ctime);
     }
 
     /**
