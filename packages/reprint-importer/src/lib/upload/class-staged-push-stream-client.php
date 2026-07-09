@@ -168,7 +168,14 @@ class StagedPushStreamClient
     /**
      * @param array $options
      *   - base_url (string, required): the export API URL; endpoint is appended
-     *     to its query string.
+     *     to its query string. Must be https:// unless allow_http is set —
+     *     see the scheme gate below.
+     *   - allow_http (bool): permit an http:// base_url. Default false, so an
+     *     http:// URL throws. Over plain HTTP an active attacker can read and
+     *     modify the transferred bytes; the signature covers the method, URL,
+     *     timestamp, and nonce but never the body (TLS is the body's only
+     *     protection), so this flag keeps the shared secret off the wire and
+     *     limits replay and nothing more. The CLI surfaces it as --force-http.
      *   - hmac_client (Site_Export_HMAC_Client, required): signs every
      *     request; the staged endpoints reject unsigned requests before
      *     reading the body, so there is no unauthenticated push.
@@ -212,6 +219,28 @@ class StagedPushStreamClient
             throw new InvalidArgumentException("StagedPushStreamClient requires a base_url option.");
         }
         $this->base_url = $base_url;
+
+        // HTTPS is required by default: the request signature deliberately
+        // does not cover the body, so TLS is the only thing protecting the
+        // pushed bytes from an active attacker. allow_http opts out with
+        // eyes open — the CLI flag is --force-http.
+        $allow_http = $options["allow_http"] ?? false;
+        if (!is_bool($allow_http)) {
+            throw new InvalidArgumentException("Expected option \"allow_http\" to be a boolean; received " . json_encode($allow_http) . ".");
+        }
+        $scheme = strtolower((string) parse_url($base_url, PHP_URL_SCHEME));
+        if ($scheme !== "http" && $scheme !== "https") {
+            throw new InvalidArgumentException("Expected option \"base_url\" to be an http:// or https:// URL; received " . json_encode($base_url) . ".");
+        }
+        if ($scheme === "http" && !$allow_http) {
+            throw new InvalidArgumentException(
+                "Refusing to push over plain HTTP to " . json_encode($base_url) . "."
+                . " HTTPS is required so an active attacker cannot read or modify the transferred bytes."
+                . " Pass allow_http (the --force-http flag) to opt out: over plain HTTP the shared secret still"
+                . " stays off the wire and replay is limited, but nothing else about the transfer is protected."
+            );
+        }
+
         $hmac_client = $options["hmac_client"] ?? null;
         if (!$hmac_client instanceof Site_Export_HMAC_Client) {
             throw new InvalidArgumentException("StagedPushStreamClient requires an hmac_client option; the staged endpoints reject unsigned requests.");
