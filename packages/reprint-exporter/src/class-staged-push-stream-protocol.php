@@ -15,7 +15,7 @@ final class Site_Export_Staged_Push_Stream_Protocol {
     /**
      * Top-level path segment reprint reserves for its own staged bookkeeping.
      * A sender's file artifacts may never land here — see
-     * is_forbidden_sender_artifact_id() — so the apply step can trust that
+     * is_reserved_sender_artifact_id() — so the apply step can trust that
      * everything under it is reprint's own, not pushed site content.
      */
     public const RESERVED_NAMESPACE_SEGMENT = '.reprint';
@@ -37,7 +37,7 @@ final class Site_Export_Staged_Push_Stream_Protocol {
      * a real site file like ".reprintfoo" or "wp-content/.reprint/x" is not
      * caught — only the top-level ".reprint" namespace is.
      */
-    public static function is_forbidden_sender_artifact_id(string $artifact_id): bool {
+    public static function is_reserved_sender_artifact_id(string $artifact_id): bool {
         if ($artifact_id === self::DELETION_MANIFEST_ARTIFACT_ID) {
             return false;
         }

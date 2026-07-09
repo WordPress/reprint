@@ -33,7 +33,7 @@ final class StagedPushStreamProtocolTest extends TestCase
     {
         $this->assertSame(
             $forbidden,
-            Site_Export_Staged_Push_Stream_Protocol::is_forbidden_sender_artifact_id($artifact_id)
+            Site_Export_Staged_Push_Stream_Protocol::is_reserved_sender_artifact_id($artifact_id)
         );
     }
 
