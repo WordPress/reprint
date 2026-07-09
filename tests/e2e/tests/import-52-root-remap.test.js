@@ -1,13 +1,13 @@
 /**
- * Test 52: symlink bundle — --follow-symlinks=<dir> bundles escaping targets (ARC-1814).
+ * Test 52: root remap — --remap / places escaping followed targets (ARC-1814).
  *
  * Covers the {in-scope, escaping} x {relative, absolute} matrix of directory
- * symlinks under --only + --remap: escaping targets are consolidated into the
- * bundle (nested by source path, deduped), in-scope targets are left in place.
+ * symlinks under --only + --remap: escaping targets are placed under the
+ * dot directory (nested by source path, deduped), in-scope targets are left in place.
  * (Escaping *file* symlinks are a known limitation — not covered here.)
  *
  * Run: files-sync --only :wp-content: --remap :wp-content: :fs-root:/wp-content
- *                 --follow-symlinks=:fs-root:/.symlinks-bundle
+ *                 --follow-symlinks --remap / :fs-root:/.symlinks
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -22,12 +22,12 @@ import {
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-const SHARED_ROOT = '/tmp/e2e-symlink-bundle';
+const SHARED_ROOT = '/tmp/e2e-root-remap';
 const SHARED_DIR = join(SHARED_ROOT, 'pub', 'indice');
-const BUNDLED_STYLE = join('.symlinks-bundle', SHARED_ROOT, 'pub', 'indice', 'style.css');
+const DOT_DIRECTORY_STYLE = join('.symlinks', SHARED_ROOT, 'pub', 'indice', 'style.css');
 
-describe('Import: symlink bundle (--follow-symlinks=<dir>) consolidates escaping targets', () => {
-    const site = 'symlink-bundle';
+describe('Import: root remap (--remap /) places escaping followed targets', () => {
+    const site = 'root-remap';
     let tempDir;
     let tempDir2;
 
@@ -48,11 +48,11 @@ describe('Import: symlink bundle (--follow-symlinks=<dir>) consolidates escaping
                 writeFileSync(join(themes, 'indice-real', 'style.css'), '/* in-scope local theme */\n');
                 // The 2x2 matrix of {in-scope, escaping} x {relative, absolute}:
                 for (const [name, target] of [
-                    // escaping (target outside wp-content) — needs bundling
+                    // escaping (target outside wp-content) — goes to the catch-all remap
                     ['indice', SHARED_DIR],                              // escaping, absolute
                     ['indice2', SHARED_DIR],                             // escaping, absolute (dedup)
                     ['esc-rel', relative(themes, SHARED_DIR)],           // escaping, relative
-                    // in-scope (target inside wp-content) — must NOT be bundled
+                    // in-scope (target inside wp-content) — must NOT use the catch-all remap
                     ['local', './indice-real'],                         // in-scope, relative
                     ['abs-local', join(themes, 'indice-real')],         // in-scope, absolute
                 ]) {
@@ -63,7 +63,7 @@ describe('Import: symlink bundle (--follow-symlinks=<dir>) consolidates escaping
                 // A plugin that symlinks into themes — for the narrow `--only
                 // :wp-content:/plugins` run, themes/indice-real is OUTSIDE the
                 // --only scope but INSIDE the remapped wp-content, so remap (checked
-                // before bundle) should place it at wp-content/themes, not the bundle.
+                // before the catch-all) should place it at wp-content/themes, not the dot directory.
                 const plugin = join(siteDir, 'wp-content', 'plugins', 'cross-plugin');
                 mkdirSync(plugin, { recursive: true });
                 writeFileSync(join(plugin, 'cross-plugin.php'), '<?php // cross plugin\n');
@@ -72,8 +72,8 @@ describe('Import: symlink bundle (--follow-symlinks=<dir>) consolidates escaping
             },
         });
         prepareSharedTree();
-        tempDir = createTempDir('e2e-symlink-bundle');
-        tempDir2 = createTempDir('e2e-symlink-bundle-narrow');
+        tempDir = createTempDir('e2e-root-remap');
+        tempDir2 = createTempDir('e2e-root-remap-narrow');
     });
 
     afterAll(() => {
@@ -86,49 +86,50 @@ describe('Import: symlink bundle (--follow-symlinks=<dir>) consolidates escaping
     const fsRoot = () => fsRootDir(tempDir);
     const fsRoot2 = () => fsRootDir(tempDir2);
 
-    it('files-sync completes with --follow-symlinks=<dir>', () => {
+    it('files-sync completes with --follow-symlinks and --remap /', () => {
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
             extraArgs: [
                 '--only', ':wp-content:',
                 '--remap', ':wp-content:', ':fs-root:/wp-content',
-                '--follow-symlinks=:fs-root:/.symlinks-bundle',
+                '--follow-symlinks',
+                '--remap', '/', ':fs-root:/.symlinks',
             ],
         });
         assert.equal(result.exitCode, 0, `sync failed:\n${result.stdout}\n${result.stderr}`);
     });
 
-    it('escaping target content lands in the bundle, nested by source path', () => {
-        assert.ok(existsSync(join(fsRoot(), BUNDLED_STYLE)),
-            `expected bundled content at ${join(fsRoot(), BUNDLED_STYLE)}`);
-        assert.ok(readFileSync(join(fsRoot(), BUNDLED_STYLE), 'utf-8').includes('Shared indice theme'));
+    it('escaping target content lands in the dot directory, nested by source path', () => {
+        assert.ok(existsSync(join(fsRoot(), DOT_DIRECTORY_STYLE)),
+            `expected dot-directory content at ${join(fsRoot(), DOT_DIRECTORY_STYLE)}`);
+        assert.ok(readFileSync(join(fsRoot(), DOT_DIRECTORY_STYLE), 'utf-8').includes('Shared indice theme'));
     });
 
     it('escaping content is not left at its source path in the docroot', () => {
         assert.ok(!existsSync(join(fsRoot(), 'tmp')),
-            'with a bundle directory set, escaping content must not land at fs-root/tmp');
+            'with a root catch-all remap, escaping content must not land at fs-root/tmp');
     });
 
-    it('the escaping symlink resolves into the bundle', () => {
+    it('the escaping symlink resolves into the dot directory', () => {
         const link = join(fsRoot(), 'wp-content', 'themes', 'indice');
         assert.ok(lstatSync(link).isSymbolicLink(), 'indice is a symlink');
-        assert.ok(existsSync(join(link, 'style.css')), 'indice resolves to bundled style.css');
+        assert.ok(existsSync(join(link, 'style.css')), 'indice resolves to dot-directory style.css');
     });
 
-    it('dedups: two symlinks to one target share one bundle copy', () => {
+    it('dedups: two symlinks to one target share one dot directory copy', () => {
         const link2 = join(fsRoot(), 'wp-content', 'themes', 'indice2');
         assert.ok(existsSync(join(link2, 'style.css')), 'indice2 also resolves');
-        assert.ok(existsSync(join(fsRoot(), '.symlinks-bundle', SHARED_ROOT, 'pub', 'indice')));
+        assert.ok(existsSync(join(fsRoot(), '.symlinks', SHARED_ROOT, 'pub', 'indice')));
     });
 
-    it('escaping RELATIVE symlink resolves (into the bundle)', () => {
+    it('escaping RELATIVE symlink resolves (into the dot directory)', () => {
         const link = join(fsRoot(), 'wp-content', 'themes', 'esc-rel');
         assert.ok(lstatSync(link).isSymbolicLink(), 'esc-rel is a symlink');
-        assert.ok(existsSync(join(link, 'style.css')), 'esc-rel resolves to the bundled theme');
+        assert.ok(existsSync(join(link, 'style.css')), 'esc-rel resolves to the dot-directory theme');
         assert.ok(readFileSync(join(link, 'style.css'), 'utf-8').includes('Shared indice theme'));
     });
 
-    it('in-scope symlinks (relative AND absolute) are left in place, not bundled', () => {
+    it('in-scope symlinks (relative AND absolute) are left in place, not catch-all remapped', () => {
         for (const name of ['local', 'abs-local']) {
             const link = join(fsRoot(), 'wp-content', 'themes', name);
             assert.ok(lstatSync(link).isSymbolicLink(), `${name} stays a symlink`);
@@ -136,34 +137,35 @@ describe('Import: symlink bundle (--follow-symlinks=<dir>) consolidates escaping
             assert.ok(readFileSync(join(link, 'style.css'), 'utf-8').includes('in-scope local theme'),
                 `${name} resolves to the in-scope theme`);
         }
-        assert.ok(!existsSync(join(fsRoot(), '.symlinks-bundle', 'wp-content')),
-            'in-scope targets must not be bundled');
+        assert.ok(!existsSync(join(fsRoot(), '.symlinks', 'wp-content')),
+            'in-scope targets must not use the catch-all remap');
     });
 
     // ── Narrow --only: a plugin symlinks into themes (in wp-content, out of --only) ──
     // themes is OUTSIDE --only :wp-content:/plugins but INSIDE the remapped
-    // wp-content, so remap (checked before bundle) must place it at wp-content/themes,
-    // NOT the bundle — for both relative and absolute spellings.
+    // wp-content, so remap (checked before the catch-all) must place it at wp-content/themes,
+    // NOT the dot directory — for both relative and absolute spellings.
     it('narrow --only :wp-content:/plugins files-sync completes', () => {
         const result = runImporter(importUrl(), tempDir2, 'files-sync', {
             secret: getSiteSecret(site),
             extraArgs: [
                 '--only', ':wp-content:/plugins',
                 '--remap', ':wp-content:', ':fs-root:/wp-content',
-                '--follow-symlinks=:fs-root:/.symlinks-bundle',
+                '--follow-symlinks',
+                '--remap', '/', ':fs-root:/.symlinks',
             ],
         });
         assert.equal(result.exitCode, 0, `sync failed:\n${result.stdout}\n${result.stderr}`);
     });
 
-    it('cross-scope theme target lands under wp-content/themes (remapped), not the bundle', () => {
+    it('cross-scope theme target lands under wp-content/themes (remapped), not the dot directory', () => {
         // Followed from a plugin symlink; themes is out of --only but in wp-content.
         const themeStyle = join(fsRoot2(), 'wp-content', 'themes', 'indice-real', 'style.css');
         assert.ok(existsSync(themeStyle), `expected remapped theme at ${themeStyle}`);
         assert.ok(readFileSync(themeStyle, 'utf-8').includes('in-scope local theme'));
-        // It is NOT in the bundle (remap wins over bundling for in-wp-content targets).
-        assert.ok(!existsSync(join(fsRoot2(), '.symlinks-bundle')),
-            'a target inside the remapped wp-content must not be bundled');
+        // It is NOT in the dot directory (the wp-content remap wins for in-wp-content targets).
+        assert.ok(!existsSync(join(fsRoot2(), '.symlinks')),
+            'a target inside the remapped wp-content must not use the catch-all remap');
     });
 
     it('both relative and absolute plugin→theme symlinks resolve', () => {

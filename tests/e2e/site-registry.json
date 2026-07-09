@@ -131,7 +131,7 @@
     "edit-locks": {
       "port": 8122
     },
-    "symlink-bundle": {
+    "root-remap": {
       "port": 8123
     }
   }

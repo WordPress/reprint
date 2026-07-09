@@ -1089,15 +1089,6 @@ class ImportClient
      */
     private $follow_symlinks = true;
 
-    /**
-     * @var string|null Destination directory for escaping (out-of-scope) symlink targets,
-     * nested by the source path. null keeps the default: each symlink target is
-     * mirrored at its own source path underneath --fs-root.
-     *
-     * Usage: --follow-symlinks=<dir>
-     */
-    private $symlink_bundle_directory = null;
-
     /** @var array|null Cached result of get_export_directories(). */
     private $export_directories_cache = null;
 
@@ -1654,13 +1645,6 @@ class ImportClient
             $this->save_state($this->state);
         } elseif (isset($this->import_state()->follow_symlinks)) {
             $this->follow_symlinks = $this->import_state()->follow_symlinks;
-        }
-
-        if (isset($options["symlink_bundle_directory"])) {
-            $this->symlink_bundle_directory = $this->resolve_symlink_bundle_directory($options["symlink_bundle_directory"]);
-            $this->follow_symlinks = true;
-            $this->import_state()->follow_symlinks = true;
-            $this->save_state($this->state);
         }
 
         // Persist fs_root_nonempty_behavior in state so it survives across invocations.
@@ -2713,7 +2697,6 @@ class ImportClient
 
         $this->recover_index_updates();
         $this->assert_files_pull_only_unchanged_while_resuming($has_progress);
-        $this->assert_symlink_bundle_directory_unchanged();
 
         // Already completed.
         if ($current_status === "complete") {
@@ -8580,66 +8563,12 @@ class ImportClient
     }
 
     /**
-     * Refuse to run files-pull after the --follow-symlinks bundle directory
-     * changed. Placement of followed content is bound to it, so changing it
-     * mid-state would split content across two layouts. Recorded on the first
-     * run, compared on every run after; --abort resets it.
-     */
-    private function assert_symlink_bundle_directory_unchanged(): void
-    {
-        $fingerprint = $this->symlink_bundle_directory_fingerprint();
-        $previous = $this->import_state()->symlink_bundle_directory_fingerprint ?? null;
-
-        if ($previous !== null && $previous !== $fingerprint) {
-            throw new RuntimeException(
-                "Cannot change the --follow-symlinks bundle directory for an existing files-pull. " .
-                    "Use the original value, or use --abort to start a new files-pull.",
-            );
-        }
-
-        if ($previous === null) {
-            $this->import_state()->symlink_bundle_directory_fingerprint = $fingerprint;
-            $this->save_state($this->state);
-        }
-    }
-
-    /**
-     * Fingerprint of the effective bundle placement root. No bundle directory
-     * (and bare --follow-symlinks) fingerprints as fs-root, which is the
-     * equivalent placement — so switching between those spellings is allowed.
-     */
-    private function symlink_bundle_directory_fingerprint(): string
-    {
-        $effective = $this->symlink_bundle_directory ?? rtrim($this->get_filesystem_root_path(), "/");
-        return hash("sha256", $effective);
-    }
-
-    /**
-     * Resolve the --follow-symlinks=<dir> bundle destination.
-     *
-     * Uses the same target grammar as --remap targets: a :fs-root: path or a raw
-     * absolute path, which must resolve within --fs-root.
-     */
-    private function resolve_symlink_bundle_directory(string $raw): string
-    {
-        $fs_root = rtrim($this->get_filesystem_root_path(), "/");
-        $directory = $this->resolve_token_path($raw, ["fs-root" => $fs_root]);
-
-        if (!path_is_within_root($directory, $fs_root)) {
-            throw new InvalidArgumentException(
-                "--follow-symlinks bundle directory \"{$directory}\" resolves outside --fs-root ({$fs_root}); " .
-                    "it must stay within the destination root",
-            );
-        }
-
-        return $directory;
-    }
-
-    /**
      * Build the remap rules from the raw remap pairs + preflight data.
      *
      * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
      * Source arguments resolve against the remote site's WordPress path tokens.
+     * A source of `/` is the remote filesystem root catch-all; more specific
+     * source rules still win when they also match a path.
      * Target arguments resolve under --fs-root and must stay within it.
      * Each rule is a full source path => full local target path (both absolute).
      *
@@ -8873,7 +8802,9 @@ class ImportClient
             $resolved = $value . substr($resolved, strlen($token));
         }
 
-        $resolved = rtrim($resolved, "/");
+        if ($resolved !== "/") {
+            $resolved = rtrim($resolved, "/");
+        }
         assert_valid_path($resolved, "path \"{$raw}\"");
 
         return $resolved;
@@ -8928,12 +8859,6 @@ class ImportClient
             }
         }
 
-        // A followed target outside the original export scope goes underneath the bundle directory.
-        if ($this->symlink_bundle_directory !== null
-            && !$this->path_is_within_original_export_scope($path)) {
-            return $this->symlink_bundle_directory . $path;
-        }
-
         return $this->get_filesystem_root_path() . $path;
     }
 
@@ -8945,6 +8870,10 @@ class ImportClient
      */
     private static function path_remainder_under(string $path, string $prefix): ?string
     {
+        if ($prefix === "/") {
+            return $path === "/" ? "" : $path;
+        }
+
         $path = rtrim($path, "/");
         $prefix = rtrim($prefix, "/");
 
@@ -9749,22 +9678,6 @@ class ImportClient
     }
 
     /**
-     * Whether $path falls under one of the ORIGINAL export directories (the
-     * --only prefixes, or the base roots without --only) — i.e. it was going to
-     * be pulled anyway. Evaluated against the pre-follow scope; a followed
-     * target outside all of these is "escaping" and eligible for symlink bundling.
-     */
-    private function path_is_within_original_export_scope(string $path): bool
-    {
-        foreach ($this->get_export_directories() as $root) {
-            if (path_is_within_root($path, $root)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
      * Build the list of directories the server should traverse.
      *
      * Starts from the wp_detect roots (ABSPATH, etc.) and adds
@@ -9808,11 +9721,16 @@ class ImportClient
             $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/");
         }
 
-        // Ensure every --remap source is enumerated — including plugins or
+        // Ensure specific --remap sources are enumerated — including plugins or
         // uploads directories that live outside the WordPress roots and so
-        // wouldn't be discovered by traversal alone.
+        // wouldn't be discovered by traversal alone. A `/` source is placement-
+        // only here: enumerating it would ask the exporter to scan the remote
+        // filesystem root instead of just placing paths discovered another way.
         $remap_index = 0;
         foreach (array_keys($this->remap_rules) as $source) {
+            if ($source === "/") {
+                continue;
+            }
             $extra_paths["remap_source_{$remap_index}"] = $source;
             $remap_index++;
         }
@@ -10943,7 +10861,6 @@ class ImportClient
             "version" => null,
             "webhost" => null,
             "follow_symlinks" => true,
-            "symlink_bundle_directory_fingerprint" => null,
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
             "user_agent" => null,
@@ -11807,16 +11724,6 @@ if (
             'commands' => [],
         ],
         [
-            'name' => 'follow-symlinks',
-            'type' => 'value',
-            'target' => 'symlink_bundle_directory',
-            'placeholder' => 'DIR',
-            'help' => 'Follow symlinks, consolidating escaping (out-of-scope) targets into DIR ' .
-                '(a :fs-root: path or an absolute path within --fs-root), nested by source path. ' .
-                'Bare --follow-symlinks is equivalent to --follow-symlinks=:fs-root:.',
-            'commands' => ['pull', 'pull-files', 'files-pull'],
-        ],
-        [
             'name' => 'on-fs-root-nonempty',
             'type' => 'value',
             'target' => 'fs_root_nonempty_behavior',
@@ -12030,7 +11937,7 @@ if (
             'type' => 'pair',
             'target' => 'remap',
             'pair_args' => 'SOURCE TARGET',
-            'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
+            'help' => 'Place SOURCE (a :token: like :wp-uploads:, an absolute path, or / for remote root) at TARGET ' .
                 '(a :fs-root: path or an absolute path within --fs-root); repeatable',
             'commands' => ['pull-files', 'files-pull'],
         ],
