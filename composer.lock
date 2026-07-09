@@ -8,7 +8,7 @@
     "packages": [
         {
             "name": "wp-php-toolkit/bytestream",
-            "version": "v0.8.0",
+            "version": "v0.8.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/bytestream.git",
@@ -64,25 +64,25 @@
         },
         {
             "name": "wp-php-toolkit/data-liberation",
-            "version": "v0.8.0",
+            "version": "v0.8.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/data-liberation.git",
-                "reference": "6eaab346858777b197a5e530157b7388cf3e9cc7"
+                "reference": "63e2035a5d9ef069d13b0285150e1cbc72fab407"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/data-liberation/zipball/6eaab346858777b197a5e530157b7388cf3e9cc7",
-                "reference": "6eaab346858777b197a5e530157b7388cf3e9cc7",
+                "url": "https://api.github.com/repos/wp-php-toolkit/data-liberation/zipball/63e2035a5d9ef069d13b0285150e1cbc72fab407",
+                "reference": "63e2035a5d9ef069d13b0285150e1cbc72fab407",
                 "shasum": ""
             },
             "require": {
                 "php": ">=7.2",
-                "wp-php-toolkit/bytestream": "^0.8",
-                "wp-php-toolkit/filesystem": "^0.8",
-                "wp-php-toolkit/html": "^0.8",
-                "wp-php-toolkit/http-client": "^0.8",
-                "wp-php-toolkit/xml": "^0.8"
+                "wp-php-toolkit/bytestream": "^0.8.1",
+                "wp-php-toolkit/filesystem": "^0.8.1",
+                "wp-php-toolkit/html": "^0.8.1",
+                "wp-php-toolkit/http-client": "^0.8.1",
+                "wp-php-toolkit/xml": "^0.8.1"
             },
             "type": "library",
             "autoload": {
@@ -123,11 +123,11 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-19T19:53:55+00:00"
+            "time": "2026-05-27T22:01:51+00:00"
         },
         {
             "name": "wp-php-toolkit/encoding",
-            "version": "v0.8.0",
+            "version": "v0.8.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/encoding.git",
@@ -182,21 +182,21 @@
         },
         {
             "name": "wp-php-toolkit/filesystem",
-            "version": "v0.8.0",
+            "version": "v0.8.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/filesystem.git",
-                "reference": "5887e3a81cbed593180f9761cb1c855a5c0be80c"
+                "reference": "a86e7a3916c48ac9d29bb13bdb15c1cf122800c1"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/filesystem/zipball/5887e3a81cbed593180f9761cb1c855a5c0be80c",
-                "reference": "5887e3a81cbed593180f9761cb1c855a5c0be80c",
+                "url": "https://api.github.com/repos/wp-php-toolkit/filesystem/zipball/a86e7a3916c48ac9d29bb13bdb15c1cf122800c1",
+                "reference": "a86e7a3916c48ac9d29bb13bdb15c1cf122800c1",
                 "shasum": ""
             },
             "require": {
                 "php": ">=7.2",
-                "wp-php-toolkit/bytestream": "^0.8"
+                "wp-php-toolkit/bytestream": "^0.8.1"
             },
             "require-dev": {
                 "phpunit/phpunit": "^9.5"
@@ -238,11 +238,11 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-18T15:07:36+00:00"
+            "time": "2026-05-27T22:01:51+00:00"
         },
         {
             "name": "wp-php-toolkit/html",
-            "version": "v0.8.0",
+            "version": "v0.8.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/html.git",
@@ -299,23 +299,23 @@
         },
         {
             "name": "wp-php-toolkit/http-client",
-            "version": "v0.8.0",
+            "version": "v0.8.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/http-client.git",
-                "reference": "7d3b83e4af8a5740f3f290bf1c641767e716b1cc"
+                "reference": "4574ed51c15882190b46aee5564910bf4429f3c0"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/http-client/zipball/7d3b83e4af8a5740f3f290bf1c641767e716b1cc",
-                "reference": "7d3b83e4af8a5740f3f290bf1c641767e716b1cc",
+                "url": "https://api.github.com/repos/wp-php-toolkit/http-client/zipball/4574ed51c15882190b46aee5564910bf4429f3c0",
+                "reference": "4574ed51c15882190b46aee5564910bf4429f3c0",
                 "shasum": ""
             },
             "require": {
                 "php": ">=7.2",
-                "wp-php-toolkit/bytestream": "^0.8",
-                "wp-php-toolkit/data-liberation": "^0.8",
-                "wp-php-toolkit/filesystem": "^0.8"
+                "wp-php-toolkit/bytestream": "^0.8.1",
+                "wp-php-toolkit/data-liberation": "^0.8.1",
+                "wp-php-toolkit/filesystem": "^0.8.1"
             },
             "require-dev": {
                 "phpunit/phpunit": "^9.5"
@@ -354,15 +354,15 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-18T15:07:36+00:00"
+            "time": "2026-05-27T22:01:51+00:00"
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-push/staged-upload-endpoints-next",
+            "version": "dev-f26d/exporter-php-72-support",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
-                "reference": "75a17c2864d635cf0dc6f9db022a40319a3999b5"
+                "reference": "20a5cb0a822b98cafe39173c563a28ab9267786c"
             },
             "require": {
                 "php": ">=7.2",
@@ -406,7 +406,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-importer",
-            "version": "dev-a87e2773f3b6375f2d6c44ec6f9eb16a3a4561f4",
+            "version": "dev-f26d/exporter-php-72-support",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-importer",
@@ -435,21 +435,21 @@
         },
         {
             "name": "wp-php-toolkit/xml",
-            "version": "v0.8.0",
+            "version": "v0.8.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/wp-php-toolkit/xml.git",
-                "reference": "02ebcc706b1639751380a6501a7ec05431329865"
+                "reference": "a6b49175d5bab2e76816dd7bf514b81f51cc1109"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/wp-php-toolkit/xml/zipball/02ebcc706b1639751380a6501a7ec05431329865",
-                "reference": "02ebcc706b1639751380a6501a7ec05431329865",
+                "url": "https://api.github.com/repos/wp-php-toolkit/xml/zipball/a6b49175d5bab2e76816dd7bf514b81f51cc1109",
+                "reference": "a6b49175d5bab2e76816dd7bf514b81f51cc1109",
                 "shasum": ""
             },
             "require": {
                 "php": ">=7.2",
-                "wp-php-toolkit/encoding": "^0.8"
+                "wp-php-toolkit/encoding": "^0.8.1"
             },
             "require-dev": {
                 "phpunit/phpunit": "^9.5"
@@ -488,22 +488,22 @@
                 "issues": "https://github.com/WordPress/php-toolkit/issues",
                 "source": "https://github.com/WordPress/php-toolkit"
             },
-            "time": "2026-05-18T15:07:36+00:00"
+            "time": "2026-05-27T22:01:51+00:00"
         }
     ],
     "packages-dev": [
         {
             "name": "dealerdirect/phpcodesniffer-composer-installer",
-            "version": "v1.2.0",
+            "version": "v1.2.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/PHPCSStandards/composer-installer.git",
-                "reference": "845eb62303d2ca9b289ef216356568ccc075ffd1"
+                "reference": "963f0c67bffde0eac41b56be71ac0e8ba132f0bd"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/PHPCSStandards/composer-installer/zipball/845eb62303d2ca9b289ef216356568ccc075ffd1",
-                "reference": "845eb62303d2ca9b289ef216356568ccc075ffd1",
+                "url": "https://api.github.com/repos/PHPCSStandards/composer-installer/zipball/963f0c67bffde0eac41b56be71ac0e8ba132f0bd",
+                "reference": "963f0c67bffde0eac41b56be71ac0e8ba132f0bd",
                 "shasum": ""
             },
             "require": {
@@ -586,7 +586,7 @@
                     "type": "thanks_dev"
                 }
             ],
-            "time": "2025-11-11T04:32:07+00:00"
+            "time": "2026-05-06T08:26:05+00:00"
         },
         {
             "name": "myclabs/deep-copy",
@@ -650,20 +650,19 @@
         },
         {
             "name": "nikic/php-parser",
-            "version": "v5.7.0",
+            "version": "v5.8.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/nikic/PHP-Parser.git",
-                "reference": "dca41cd15c2ac9d055ad70dbfd011130757d1f82"
+                "reference": "044a6a392ff8ad0d61f14370a5fbbd0a0107152f"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/nikic/PHP-Parser/zipball/dca41cd15c2ac9d055ad70dbfd011130757d1f82",
-                "reference": "dca41cd15c2ac9d055ad70dbfd011130757d1f82",
+                "url": "https://api.github.com/repos/nikic/PHP-Parser/zipball/044a6a392ff8ad0d61f14370a5fbbd0a0107152f",
+                "reference": "044a6a392ff8ad0d61f14370a5fbbd0a0107152f",
                 "shasum": ""
             },
             "require": {
-                "ext-ctype": "*",
                 "ext-json": "*",
                 "ext-tokenizer": "*",
                 "php": ">=7.4"
@@ -702,9 +701,9 @@
             ],
             "support": {
                 "issues": "https://github.com/nikic/PHP-Parser/issues",
-                "source": "https://github.com/nikic/PHP-Parser/tree/v5.7.0"
+                "source": "https://github.com/nikic/PHP-Parser/tree/v5.8.0"
             },
-            "time": "2025-12-06T11:56:16+00:00"
+            "time": "2026-07-04T14:30:18+00:00"
         },
         {
             "name": "phar-io/manifest",
@@ -1437,24 +1436,24 @@
         },
         {
             "name": "phpunit/phpunit",
-            "version": "10.5.63",
+            "version": "10.5.64",
             "source": {
                 "type": "git",
                 "url": "https://github.com/sebastianbergmann/phpunit.git",
-                "reference": "33198268dad71e926626b618f3ec3966661e4d90"
+                "reference": "0e8c1d19cea35ad97d4887f363d07c78e30fbf06"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/sebastianbergmann/phpunit/zipball/33198268dad71e926626b618f3ec3966661e4d90",
-                "reference": "33198268dad71e926626b618f3ec3966661e4d90",
+                "url": "https://api.github.com/repos/sebastianbergmann/phpunit/zipball/0e8c1d19cea35ad97d4887f363d07c78e30fbf06",
+                "reference": "0e8c1d19cea35ad97d4887f363d07c78e30fbf06",
                 "shasum": ""
             },
             "require": {
                 "ext-dom": "*",
+                "ext-filter": "*",
                 "ext-json": "*",
                 "ext-libxml": "*",
                 "ext-mbstring": "*",
-                "ext-xml": "*",
                 "ext-xmlwriter": "*",
                 "myclabs/deep-copy": "^1.13.4",
                 "phar-io/manifest": "^2.0.4",
@@ -1518,31 +1517,15 @@
             "support": {
                 "issues": "https://github.com/sebastianbergmann/phpunit/issues",
                 "security": "https://github.com/sebastianbergmann/phpunit/security/policy",
-                "source": "https://github.com/sebastianbergmann/phpunit/tree/10.5.63"
+                "source": "https://github.com/sebastianbergmann/phpunit/tree/10.5.64"
             },
             "funding": [
                 {
-                    "url": "https://phpunit.de/sponsors.html",
-                    "type": "custom"
-                },
-                {
-                    "url": "https://github.com/sebastianbergmann",
-                    "type": "github"
-                },
-                {
-                    "url": "https://liberapay.com/sebastianbergmann",
-                    "type": "liberapay"
-                },
-                {
-                    "url": "https://thanks.dev/u/gh/sebastianbergmann",
-                    "type": "thanks_dev"
-                },
-                {
-                    "url": "https://tidelift.com/funding/github/packagist/phpunit/phpunit",
-                    "type": "tidelift"
+                    "url": "https://phpunit.de/sponsoring.html",
+                    "type": "other"
                 }
             ],
-            "time": "2026-01-27T05:48:37+00:00"
+            "time": "2026-07-06T14:50:35+00:00"
         },
         {
             "name": "sebastian/cli-parser",
