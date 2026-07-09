@@ -271,6 +271,22 @@ class ExportDirectoryAutoDetectTest extends TestCase
         $this->assertNotContains('/', $dirs);
     }
 
+    public function testRemoteRootRemapSourceIsPlacementOnly(): void
+    {
+        $this->writeState([]);
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->setPrivate($client, 'remap_rules', [
+            '/' => $this->fsRoot . '/.remote-root',
+            '/shared' => $this->fsRoot . '/shared',
+        ]);
+        $dirs = $this->getExportDirectories($client);
+
+        $this->assertNotContains('/', $dirs, 'remote root remap must not scan remote /');
+        $this->assertContains('/shared', $dirs, 'specific remap sources still get scanned');
+    }
+
     public function testIncludesBothPrependAndAppendDirectories(): void
     {
         $this->writeState([

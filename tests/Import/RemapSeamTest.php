@@ -116,6 +116,29 @@ class RemapSeamTest extends TestCase
         $this->assertSame($this->root . '/var/www/html/wp-admin/index.php', $local);
     }
 
+    public function testRemoteRootSourceMapsAnyRemotePath(): void
+    {
+        $c = $this->clientWithRules(array(
+            '/' => $this->root . '/.remote-root',
+        ));
+        $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
+            '/var/www/html/wp-admin/index.php',
+        ));
+        $this->assertSame($this->root . '/.remote-root/var/www/html/wp-admin/index.php', $local);
+    }
+
+    public function testSpecificSourceWinsOverRemoteRootSource(): void
+    {
+        $c = $this->clientWithRules(array(
+            '/' => $this->root . '/.remote-root',
+            '/var/www/html/wp-content' => $this->root . '/wp-content',
+        ));
+        $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
+            '/var/www/html/wp-content/plugins/woo/woo.php',
+        ));
+        $this->assertSame($this->root . '/wp-content/plugins/woo/woo.php', $local);
+    }
+
     public function testNoRulesIsLegacyMapping(): void
     {
         $c = $this->clientWithRules(array());
@@ -147,6 +170,8 @@ class RemapSeamTest extends TestCase
             'trailing slash on path' => array('', '/home/adam/', '/home/adam'),
             'trailing slash on both' => array('', '/home/adam/', '/home/adam/'),
             'under, prefix has trailing slash' => array('/c', '/a/b/c', '/a/b/'),
+            'remote root exact match' => array('', '/', '/'),
+            'remote root catches nested path' => array('/a/b', '/a/b', '/'),
         );
     }
 }

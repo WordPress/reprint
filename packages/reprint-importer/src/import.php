@@ -8610,6 +8610,8 @@ class ImportClient
      *
      * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
      * Source arguments resolve against the remote site's WordPress path tokens.
+     * A source of `/` is the remote filesystem root catch-all; more specific
+     * source rules still win when they also match a path.
      * Target arguments resolve under --fs-root and must stay within it.
      * Each rule is a full source path => full local target path (both absolute).
      *
@@ -8843,7 +8845,9 @@ class ImportClient
             $resolved = $value . substr($resolved, strlen($token));
         }
 
-        $resolved = rtrim($resolved, "/");
+        if ($resolved !== "/") {
+            $resolved = rtrim($resolved, "/");
+        }
         assert_valid_path($resolved, "path \"{$raw}\"");
 
         return $resolved;
@@ -8908,6 +8912,10 @@ class ImportClient
      */
     private static function path_remainder_under(string $path, string $prefix): ?string
     {
+        if ($prefix === "/") {
+            return $path === "/" ? "" : $path;
+        }
+
         $path = rtrim($path, "/");
         $prefix = rtrim($prefix, "/");
 
@@ -9747,11 +9755,16 @@ class ImportClient
             $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/");
         }
 
-        // Ensure every --remap source is enumerated — including plugins or
+        // Ensure specific --remap sources are enumerated — including plugins or
         // uploads directories that live outside the WordPress roots and so
-        // wouldn't be discovered by traversal alone.
+        // wouldn't be discovered by traversal alone. A `/` source is placement-
+        // only here: enumerating it would ask the exporter to scan the remote
+        // filesystem root instead of just placing paths discovered another way.
         $remap_index = 0;
         foreach (array_keys($this->remap_rules) as $source) {
+            if ($source === "/") {
+                continue;
+            }
             $extra_paths["remap_source_{$remap_index}"] = $source;
             $remap_index++;
         }
@@ -11957,7 +11970,7 @@ if (
             'type' => 'pair',
             'target' => 'remap',
             'pair_args' => 'SOURCE TARGET',
-            'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
+            'help' => 'Place SOURCE (a :token: like :wp-uploads:, an absolute path, or / for remote root) at TARGET ' .
                 '(a :fs-root: path or an absolute path within --fs-root); repeatable',
             'commands' => ['pull-files', 'files-pull'],
         ],

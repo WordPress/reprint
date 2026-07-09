@@ -129,6 +129,11 @@ class RemapResolveTest extends TestCase
                 '/var/log/site', ':fs-root:/logs',
                 '/var/log/site', '/logs',
             ),
+            'remote filesystem root source' => array(
+                array('content_dir' => '/var/www/html/wp-content'),
+                '/', ':fs-root:/.remote-root',
+                '/', '/.remote-root',
+            ),
             'fs-root token + subpath' => array(
                 array('content_dir' => '/var/www/html/wp-content'),
                 ':wp-content:', ':fs-root:/media',
