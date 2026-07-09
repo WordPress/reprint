@@ -4,8 +4,7 @@ set -euo pipefail
 # Install Composer dependencies (vendor/ is gitignored).
 # Needed for the importer package and the bundled plugin runtime.
 #
-# --ignore-platform-req=php: packages declare php >=7.4, but the exporter is
-# tested on 7.2. No-op on >=7.4.
+# `--ignore-platform-req=php` avoids `composer install` errors on PHP 7.2
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 if command -v composer &>/dev/null && [ -f "$PROJECT_ROOT/composer.json" ]; then
     composer install --no-dev --no-interaction --prefer-dist --ignore-platform-req=php --working-dir="$PROJECT_ROOT"
