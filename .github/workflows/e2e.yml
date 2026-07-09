@@ -117,9 +117,11 @@ jobs:
           SECRET="test-secret-basic"
           BASE="http://127.0.0.1:8081/?reprint-api"
           DIR="/srv/e2e-sites/basic"
+          STATE_DIR="/tmp/e2e-smoke-state"
+          FS_ROOT="/tmp/e2e-smoke-fs"
 
           echo "=== Importer preflight ==="
-          preflight_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1)" || {
+          preflight_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" || {
             status=$?
             echo "$preflight_output" | head -50
             echo "EXIT: $status"
@@ -128,7 +130,7 @@ jobs:
           echo "$preflight_output" | head -50
 
           echo "=== Importer files-pull ==="
-          files_pull_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1)" || {
+          files_pull_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" || {
             status=$?
             echo "$files_pull_output" | head -50
             echo "EXIT: $status"
