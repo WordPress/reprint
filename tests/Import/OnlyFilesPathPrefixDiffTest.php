@@ -154,4 +154,36 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $this->assertFileDoesNotExist($orphan);
         $this->assertNotContains('/wp-content/old/orphan.txt', $this->readLocalIndexPaths());
     }
+
+    public function testOnlyRootItselfSurvivesTheDeleteDrains(): void
+    {
+        // A remote index built with --only lists each selected directory's
+        // *contents* but never the directory itself, so the --only roots
+        // always look deleted-on-remote to the diff. The drains must not
+        // delete them: that would recursively remove the very directories
+        // the user asked to pull, while the matched children keep the
+        // download list empty — silent data loss.
+        $this->writeIndex('.import-index.jsonl',
+            $this->indexLine('/wp-content/themes', 1000, 0, 'dir')
+            . $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
+            . $this->indexLine('/wp-content/themes/old/orphan.css', 1000, 10)
+        );
+        $this->writeIndex('.import-remote-index.jsonl',
+            $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
+        );
+
+        $kept = $this->seedLocalFile('/wp-content/themes/keep/style.css');
+        $orphan = $this->seedLocalFile('/wp-content/themes/old/orphan.css');
+
+        [$client, $r] = $this->prepareClient(['/wp-content/themes']);
+        $r->getMethod('diff_indexes_and_build_fetch_list')->invoke($client);
+
+        // The selected root, its matched contents, and its index entry survive…
+        $this->assertDirectoryExists($this->fs_root . '/wp-content/themes');
+        $this->assertFileExists($kept);
+        $this->assertContains('/wp-content/themes', $this->readLocalIndexPaths());
+        // …while a genuine orphan inside it is still drained.
+        $this->assertFileDoesNotExist($orphan);
+        $this->assertNotContains('/wp-content/themes/old/orphan.css', $this->readLocalIndexPaths());
+    }
 }
