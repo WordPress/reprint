@@ -38,7 +38,8 @@ jobs:
 
       - run: composer install --no-interaction --prefer-dist
 
-      # Exporter runs on shared hosting down to PHP 7.2; importer requires 7.4.
+      # Checks exporter compat at PHP 7.2 (shared hosting) and importer at 7.4,
+      # via two PHPCompatibility runs (see lint:php:compat in composer.json).
       - run: composer lint:php:compat
 
   syntax-72:
