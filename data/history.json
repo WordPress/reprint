@@ -5262,6 +5262,85 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "94b8e392758adcefc54d00e5d22d9c8e63095ae3",
+      "shortSha": "94b8e39",
+      "date": "2026-07-09T13:45:05+02:00",
+      "message": "[Push] Reserve a safe artifact id for the deletion manifest (#330)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.8",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "preflightImporter": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 553.919222999999,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 5667.537954999998,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 109193.250793,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 35704.017519999994,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 94.06669700000202,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-pull",
+          "elapsedMs": 282592.58956399997,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-apply",
+          "elapsedMs": 60022.337508999975,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 187.79685100005008,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-binary-compression",
+          "elapsedMs": 118.07193199999165,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull-large-part-peak-memory",
+          "elapsedMs": 4367.325806000037,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
