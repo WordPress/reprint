@@ -205,9 +205,17 @@ Files first, database second, each PR small and stacked in this order:
    the configured storage path; web guards for inside-docroot placement.
 5. **Push journal and local diff** — per-site local baselines, capture and
    overwrite logic, local change and deletion detection.
-6. **Upload endpoint** — the store's HTTP surface plus the sender loop with
-   chunk sizing; deletion manifest staged; `--force-http` with honest help
-   text (the first push networking this flag can gate).
+6. **Push stream endpoint** — the store's HTTP surface plus a sender that
+   streams framed chunks for many files through one authenticated request;
+   deletion manifest staged; `--force-http` with honest help text (the first
+   push networking this flag can gate). Decisions this slice locked in:
+   sending streams through libcurl's pause mechanism, which PHP's curl
+   extension supports from 8.1 — so `reprint push` requires PHP 8.1+ (pull
+   keeps 7.4+; the full story is
+   https://github.com/WordPress/reprint/issues/327) — and artifact ids
+   travel base64-encoded in frames, response cursors, and control-plane
+   parameters, because file paths are arbitrary bytes and JSON strings must
+   be UTF-8.
 7. **Package unification** — importer and exporter become one Reprint
    package (lite = serve-only build). Placed here because apply is the
    first piece that needs import-side code running on the remote.
@@ -220,8 +228,11 @@ Files first, database second, each PR small and stacked in this order:
     diff generation and URL rewrite, the apply batch.
 11. **`reprint push`** — the one command that orchestrates plan, confirm,
     transfer, apply, resume.
-12. **Budgets and resumable limits** — upload stays bounded by chunk size and
-    explicit request limits; any endpoint that stops after durable work returns
-    the exact committed state the driver needs to retry. The apply step gets
-    the main budgeted loop: process until a deadline or operation limit, return
-    progress, and let the driver re-enter until complete.
+12. **Budgets and resumable limits** — push requests stay bounded by two
+    budgets of different dimensions: the fixed chunk (the sender's in-memory
+    unit of one read) and the host-learned request body budget that
+    PushRequestSizer sizes from reported php.ini limits and 413s, plus a
+    wall-clock budget per request; any endpoint that stops after durable work
+    returns the exact committed state the driver needs to retry. The apply step
+    gets the main budgeted loop: process until a deadline or operation limit,
+    return progress, and let the driver re-enter until complete.
