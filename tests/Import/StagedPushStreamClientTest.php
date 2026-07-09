@@ -320,6 +320,21 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertSame(['staged_push'], $this->endpointsSeen());
     }
 
+    public function testAFileInTheReservedNamespaceIsRejectedOverTheWire(): void
+    {
+        // A local site that happens to hold a .reprint/ file: the push must
+        // be refused end to end, not silently written into reprint's own
+        // namespace where apply would later trust it.
+        $this->writeSource('.reprint/evil.bin', 'x');
+        $client = $this->makeClient();
+        $local_paths_to_push = $this->writeLocalPathsToPush(['.reprint/evil.bin']);
+
+        $result = $this->pushAll($client, $local_paths_to_push);
+
+        $this->assertSame(['failed', 'reserved_artifact_id'], [$result['status'], $result['reason']], (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE));
+        $this->assertFileDoesNotExist($this->staging_dir . '/files/.reprint/evil.bin');
+    }
+
     public function testSendChunkWritesBytesToTheNetworkBeforeTheRequestIsFinalized(): void
     {
         // A raw TCP listener instead of the shared endpoint server, so the
