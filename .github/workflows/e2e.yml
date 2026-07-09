@@ -29,14 +29,30 @@ jobs:
           path: reprint.phar
 
   e2e:
-    name: E2E (PHP ${{ matrix.php }})
+    name: E2E (exporter PHP ${{ matrix.exporter_php }}, importer PHP ${{ matrix.importer_php }})
     needs: build-phar
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        include:
+          - exporter_php: '7.2'
+            importer_php: '8.2'
+          - exporter_php: '7.4'
+            importer_php: '7.4'
+          - exporter_php: '8.0'
+            importer_php: '8.0'
+          - exporter_php: '8.1'
+            importer_php: '8.1'
+          - exporter_php: '8.2'
+            importer_php: '8.2'
+          - exporter_php: '8.3'
+            importer_php: '8.3'
+          - exporter_php: '8.4'
+            importer_php: '8.4'
+          - exporter_php: '8.5'
+            importer_php: '8.5'
 
     steps:
       - uses: actions/checkout@v5
@@ -51,17 +67,25 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Setup importer PHP
+        if: matrix.importer_php != matrix.exporter_php
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.importer_php }}
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
+          coverage: none
+
       # PHP comes from the runner's pre-cached toolcache via this
       # action; we don't try to apt-install ondrej/php ourselves
       # because every Launchpad endpoint flakes regularly.
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ matrix.php }}
+          php-version: ${{ matrix.exporter_php }}
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
           coverage: none
 
       - name: Setup infrastructure
-        run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.php }}"
+        run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.exporter_php }}"
 
       - name: Setup test sites
         run: tests/e2e/setup.sh
@@ -73,6 +97,7 @@ jobs:
       - name: Provision basic site and smoke-test API
         env:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          IMPORTER_PHP: php${{ matrix.importer_php }}
         working-directory: tests/e2e
         run: |
           # Download WP-CLI (normally done by Vitest globalSetup, but we need it here)
@@ -94,12 +119,25 @@ jobs:
           DIR="/srv/e2e-sites/basic"
 
           echo "=== Importer preflight ==="
-          timeout 30 php "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+          preflight_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1)" || {
+            status=$?
+            echo "$preflight_output" | head -50
+            echo "EXIT: $status"
+            exit "$status"
+          }
+          echo "$preflight_output" | head -50
 
           echo "=== Importer files-pull ==="
-          timeout 30 php "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+          files_pull_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1)" || {
+            status=$?
+            echo "$files_pull_output" | head -50
+            echo "EXIT: $status"
+            exit "$status"
+          }
+          echo "$files_pull_output" | head -50
 
       - name: Run E2E tests
+        if: matrix.exporter_php != '7.2'
         env:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
         working-directory: tests/e2e
@@ -117,7 +155,7 @@ jobs:
           echo "--- Nginx config test ---"
           sudo nginx -t 2>&1 || true
           echo "--- PHP-FPM journal ---"
-          sudo journalctl -u "php${{ matrix.php }}-fpm" --no-pager -n 30 2>/dev/null || true
+          sudo journalctl -u "php${{ matrix.exporter_php }}-fpm" --no-pager -n 30 2>/dev/null || true
           echo "--- Nginx journal ---"
           sudo journalctl -u nginx --no-pager -n 30 2>/dev/null || true
           echo "--- MariaDB journal ---"

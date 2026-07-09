@@ -316,7 +316,7 @@ class MySQLDumpProducer
                 $this->current_result_set = $this->db->query($query);
             } catch (\PDOException $e) {
                 throw new \RuntimeException(
-                    "Database query `{$query}` failed for table " . $this->quote_identifier($this->current_table) . ": " . $e->getMessage(),
+                    "Database query `{$query}` failed for table " . $this->quote_identifier($this->current_table) . ": " . $e->getMessage()
                 );
             }
             $this->rows_fetched_from_current_query = 0;
@@ -384,7 +384,7 @@ class MySQLDumpProducer
             ",",
             array_map(function ($col) {
                 return $this->quote_identifier($col);
-            }, $this->current_column_names),
+            }, $this->current_column_names)
         );
 
         $header = "INSERT INTO " . $this->quote_identifier($this->current_table) . " ({$column_list}) VALUES\n";
@@ -488,7 +488,7 @@ class MySQLDumpProducer
             $row = $result->fetch(PDO::FETCH_ASSOC);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
-                "Failed to get CREATE TABLE for {$quoted_table}: " . $e->getMessage() . " Query: {$query}",
+                "Failed to get CREATE TABLE for {$quoted_table}: " . $e->getMessage() . " Query: {$query}"
             );
         }
 
@@ -716,7 +716,7 @@ class MySQLDumpProducer
             $current_condition_parts[] = $this->build_comparison(
                 $col,
                 $value,
-                ">",
+                ">"
             );
             $conditions[] =
                 "(" . implode(" AND ", $current_condition_parts) . ")";
@@ -762,7 +762,7 @@ class MySQLDumpProducer
             $stmt->execute([$db_name, $table]);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
-                "Failed to get primary key columns for " . $this->quote_identifier($table) . ": " . $e->getMessage() . " Query: {$query}",
+                "Failed to get primary key columns for " . $this->quote_identifier($table) . ": " . $e->getMessage() . " Query: {$query}"
             );
         }
 
@@ -788,12 +788,12 @@ class MySQLDumpProducer
 
         if ($this->current_table) {
             $this->current_pk_columns = $this->get_primary_key_columns(
-                $this->current_table,
+                $this->current_table
             );
             $this->last_pk_values = null;
             $this->current_offset = 0;
             $this->current_column_types = $this->get_column_types(
-                $this->current_table,
+                $this->current_table
             );
             $this->current_column_names = null;
             $this->current_row = null;
@@ -824,7 +824,7 @@ class MySQLDumpProducer
              FROM INFORMATION_SCHEMA.TABLES
              WHERE TABLE_SCHEMA = ?
                AND TABLE_TYPE = 'BASE TABLE'
-             ORDER BY TABLE_NAME",
+             ORDER BY TABLE_NAME"
         );
         $stmt->execute([$db_name]);
 
@@ -869,7 +869,7 @@ class MySQLDumpProducer
         ]);
         if ($json === false) {
             throw new \RuntimeException(
-                "Failed to encode reentrancy cursor: " . json_last_error_msg(),
+                "Failed to encode reentrancy cursor: " . json_last_error_msg()
             );
         }
         return $json;
@@ -1033,7 +1033,7 @@ class MySQLDumpProducer
 
             if ($this->current_table) {
                 $this->current_column_types = $this->get_column_types(
-                    $this->current_table,
+                    $this->current_table
                 );
                 if (empty($this->current_column_types)) {
                     throw new \RuntimeException(
@@ -1060,12 +1060,12 @@ class MySQLDumpProducer
                  FROM INFORMATION_SCHEMA.COLUMNS
                  WHERE TABLE_SCHEMA = ?
                    AND TABLE_NAME = ?
-                 ORDER BY ORDINAL_POSITION',
+                 ORDER BY ORDINAL_POSITION'
             );
             $stmt->execute([$database_name, $table_name]);
         } catch (\PDOException $e) {
             throw new \RuntimeException(
-                "Failed to get column types for " . $this->quote_identifier($table_name) . ": " . $e->getMessage(),
+                "Failed to get column types for " . $this->quote_identifier($table_name) . ": " . $e->getMessage()
             );
         }
 
@@ -1444,7 +1444,7 @@ class MySQLDumpProducer
         $chunk = $this->fetch_value_substring_from_the_current_oversized_row(
             $column,
             $byte_offset + 1,
-            $chunk_size,
+            $chunk_size
         );
 
         $formatted_chunk = $this->format_value($chunk, $data_type);

@@ -154,7 +154,7 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
 
     if ($require_headers && !$can_send_headers) {
         throw new RuntimeException(
-            "Cannot begin multipart stream: headers already sent",
+            "Cannot begin multipart stream: headers already sent"
         );
     }
 
@@ -221,7 +221,7 @@ function resolve_db_credentials(): array
         throw new InvalidArgumentException(
             "Database credentials not found. Please provide via environment variables, " .
                 "PHP constants, or ensure wp-config.php exists with valid credentials. " .
-                "Missing: " . implode(", ", $missing),
+                "Missing: " . implode(", ", $missing)
         );
     }
 
@@ -288,7 +288,7 @@ function create_db_connection(array $creds, array $options = [])
         "mysql:host={$creds['db_host']};dbname={$creds['db_name']};charset=utf8mb4",
         $creds["db_user"],
         $creds["db_password"],
-        $merged_options,
+        $merged_options
     );
 }
 
@@ -433,7 +433,7 @@ set_error_handler(function ($errno, $errstr, $errfile, $errline) {
         emit_error_chunk(
             $streaming_context['gz'],
             $streaming_context['boundary'],
-            "PHP Error ({$errno}): {$errstr} in {$errfile}:{$errline}",
+            "PHP Error ({$errno}): {$errstr} in {$errfile}:{$errline}"
         );
         return true;
     }
@@ -460,7 +460,7 @@ set_exception_handler(function ($e) {
         emit_error_chunk(
             $streaming_context['gz'],
             $streaming_context['boundary'],
-            get_class($e) . ": " . $e->getMessage(),
+            get_class($e) . ": " . $e->getMessage()
         );
         return;
     }
@@ -495,7 +495,7 @@ register_shutdown_function(function () {
             emit_error_chunk(
                 $streaming_context['gz'],
                 $streaming_context['boundary'],
-                $message,
+                $message
             );
         } catch (Throwable $ignored) {
             // Stream is too broken to write to — nothing more we can do.
@@ -607,7 +607,8 @@ function prepare_streaming_response(): void
 class GzipOutputStream
 {
     private $deflate_ctx;
-    private bool $enabled = true;
+    /** @var bool */
+    private $enabled = true;
 
     public function __construct(bool $enabled = true)
     {
@@ -616,7 +617,7 @@ class GzipOutputStream
             $this->deflate_ctx = deflate_init(ZLIB_ENCODING_GZIP, ["level" => 6]);
             if ($this->deflate_ctx === false) {
                 throw new \RuntimeException(
-                    "deflate_init() failed — zlib may be misconfigured",
+                    "deflate_init() failed — zlib may be misconfigured"
                 );
             }
             if (!headers_sent()) {
@@ -646,7 +647,7 @@ class GzipOutputStream
         $compressed = deflate_add(
             $this->deflate_ctx,
             $data,
-            ZLIB_NO_FLUSH,
+            ZLIB_NO_FLUSH
         );
         if ($compressed === false) {
             throw new \RuntimeException("deflate_add() failed during gzip write");
@@ -668,7 +669,7 @@ class GzipOutputStream
         $compressed = deflate_add(
             $this->deflate_ctx,
             "",
-            ZLIB_SYNC_FLUSH,
+            ZLIB_SYNC_FLUSH
         );
         if ($compressed === false) {
             throw new \RuntimeException("deflate_add() failed during gzip sync");
@@ -788,7 +789,7 @@ function endpoint_sql_chunk(
         "fragments_per_batch",
         (int) $fragments_per_batch,
         1,
-        10000,
+        10000
     );
 
     $pdo_options = [];
@@ -824,7 +825,7 @@ function endpoint_sql_chunk(
             if ($server_statement_size !== null) {
                 $producer_options["max_statement_size"] = min(
                     $client_statement_size,
-                    $server_statement_size,
+                    $server_statement_size
                 );
             } else {
                 $producer_options["max_statement_size"] = $client_statement_size;
@@ -838,7 +839,7 @@ function endpoint_sql_chunk(
             "db_query_time_limit",
             (int) $config["db_query_time_limit"],
             0,
-            300_000,
+            300000
         );
         $query_time_limit = min($query_time_limit, $execution_budget_ms);
         if ($query_time_limit > 0) {
@@ -857,7 +858,7 @@ function endpoint_sql_chunk(
 
     $reader = new WordPress\DataLiberation\MySQLDumpProducer(
         $mysql,
-        $producer_options,
+        $producer_options
     );
 
     if (ob_get_level()) {
@@ -928,7 +929,7 @@ function endpoint_sql_chunk(
                 "X-Chunk-Type: sql\r\n" .
                 "X-Query-Complete: " . ($query_complete ? "1" : "0") . "\r\n" .
                 "X-Cursor: " . base64_encode($cursor) . "\r\n" .
-                "\r\n",
+                "\r\n"
             );
             $gz->write($sql);
             $gz->write("\r\n");
@@ -969,7 +970,7 @@ function endpoint_sql_chunk(
             "X-Time-Elapsed: " . (microtime(true) - $budget->start_time) . "\r\n" .
             "\r\n" .
             "\r\n" .
-            "--{$boundary}--\r\n",
+            "--{$boundary}--\r\n"
         );
         $gz->finish();
     } catch (\Throwable $e) {
@@ -1003,7 +1004,7 @@ function endpoint_db_index(
         "tables_per_batch",
         (int) $tables_per_batch,
         10,
-        10000,
+        10000
     );
 
     $cursor = null;
@@ -1011,7 +1012,7 @@ function endpoint_db_index(
         $cursor = json_decode($config["cursor"], true);
         if ($cursor === null && json_last_error() !== JSON_ERROR_NONE) {
             throw new InvalidArgumentException(
-                "Invalid cursor format: " . json_last_error_msg(),
+                "Invalid cursor format: " . json_last_error_msg()
             );
         }
     }
@@ -1089,7 +1090,7 @@ function endpoint_db_index(
                 "X-Tables: " . count($tables) . "\r\n" .
                 "X-Cursor: " . base64_encode($cursor_json) . "\r\n" .
                 "\r\n" .
-                $payload . "\r\n",
+                $payload . "\r\n"
             );
             $gz->sync();
 
@@ -1117,7 +1118,7 @@ function endpoint_db_index(
             "X-Time-Elapsed: " . (microtime(true) - $budget->start_time) . "\r\n" .
             "\r\n" .
             "\r\n" .
-            "--{$boundary}--\r\n",
+            "--{$boundary}--\r\n"
         );
         $gz->finish();
     } catch (\Throwable $e) {
@@ -1143,7 +1144,7 @@ function resolve_directories(array $config): array
     $directories_input = $config["directory"] ?? null;
     if (!$directories_input) {
         throw new InvalidArgumentException(
-            "directory is required for files operation",
+            "directory is required for files operation"
         );
     }
 
@@ -1155,7 +1156,7 @@ function resolve_directories(array $config): array
     foreach ($dir_list as $directory) {
         if (!is_string($directory)) {
             throw new InvalidArgumentException(
-                "directory entries must be non-empty strings",
+                "directory entries must be non-empty strings"
             );
         }
         $directory = trim($directory);
@@ -1239,7 +1240,9 @@ function endpoint_preflight(array $config): array
                     : null,
                 __DIR__,
             ],
-            fn($value) => $value !== null && $value !== "",
+            function ($value) {
+                return $value !== null && $value !== "";
+            }
         );
         $search_roots = normalize_path_list($filtered);
     }
@@ -1275,7 +1278,7 @@ function endpoint_preflight(array $config): array
     $scan_roots = normalize_path_list($scan_roots);
 
     $wp_scan_roots = normalize_path_list(
-        array_merge($scan_roots, $detected_root_paths),
+        array_merge($scan_roots, $detected_root_paths)
     );
 
     // -- Probe each directory --
@@ -1371,9 +1374,11 @@ function endpoint_preflight(array $config): array
 
     $wp_paths = normalize_path_list(
         array_map(
-            fn($entry) => $entry["root"] ?? null,
-            $wp_paths,
-        ),
+            function ($entry) {
+                return $entry["root"] ?? null;
+            },
+            $wp_paths
+        )
     );
     $wp_paths = array_map(function ($root) {
         $root = rtrim($root, "/");
@@ -1565,7 +1570,7 @@ function endpoint_preflight(array $config): array
                             "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES " .
                                 "WHERE TABLE_SCHEMA = DATABASE() " .
                                 "AND TABLE_NAME LIKE '%\\_options' ESCAPE '\\\\' " .
-                                "LIMIT 5",
+                                "LIMIT 5"
                         );
                         if ($stmt !== false) {
                             $names = $stmt->fetchAll(PDO::FETCH_COLUMN);
@@ -1581,7 +1586,7 @@ function endpoint_preflight(array $config): array
                                     $table_prefix = substr(
                                         $name,
                                         0,
-                                        -strlen($suffix),
+                                        -strlen($suffix)
                                     );
                                     break;
                                 }
@@ -1749,7 +1754,7 @@ function endpoint_preflight(array $config): array
                             function_exists("get_site_option")
                         ) {
                             $db["wp"]["active_sitewide_plugins"] = get_site_option(
-                                "active_sitewide_plugins",
+                                "active_sitewide_plugins"
                             );
                         }
 
@@ -1897,7 +1902,7 @@ function endpoint_preflight(array $config): array
                                 "@@collation_connection AS connection_collation, " .
                                 "@@max_allowed_packet AS max_allowed_packet, " .
                                 "@@sql_mode AS sql_mode, " .
-                                "@@lower_case_table_names AS lower_case_table_names",
+                                "@@lower_case_table_names AS lower_case_table_names"
                         )
                         ->fetch(PDO::FETCH_ASSOC);
                     if (is_array($vars)) {
@@ -1912,7 +1917,7 @@ function endpoint_preflight(array $config): array
                             : null;
                         $db["sql_mode"] = $vars["sql_mode"] ?? null;
                         $db["lower_case_table_names"] = isset(
-                            $vars["lower_case_table_names"],
+                            $vars["lower_case_table_names"]
                         )
                             ? (int) $vars["lower_case_table_names"]
                             : null;
@@ -1925,7 +1930,7 @@ function endpoint_preflight(array $config): array
                 try {
                     $stmt = $mysql->query(
                         "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES " .
-                            "WHERE TABLE_SCHEMA = DATABASE() LIMIT 1",
+                            "WHERE TABLE_SCHEMA = DATABASE() LIMIT 1"
                     );
                     if ($stmt !== false) {
                         $stmt->fetchColumn();
@@ -2019,7 +2024,9 @@ function endpoint_preflight(array $config): array
             }
             usort(
                 $root_entry["plugins"],
-                fn($a, $b) => strcmp($a["name"], $b["name"]),
+                function ($a, $b) {
+                    return strcmp($a["name"], $b["name"]);
+                }
             );
         }
 
@@ -2038,7 +2045,9 @@ function endpoint_preflight(array $config): array
             }
             usort(
                 $root_entry["mu_plugins"],
-                fn($a, $b) => strcmp($a["name"], $b["name"]),
+                function ($a, $b) {
+                    return strcmp($a["name"], $b["name"]);
+                }
             );
         }
 
@@ -2138,7 +2147,7 @@ function endpoint_preflight(array $config): array
             // importer can use their presence as a webhost detection signal.
             "env_names" => array_values(array_unique(array_merge(
                 array_keys($_ENV),
-                array_keys(getenv()),
+                array_keys(getenv())
             ))),
             '$_SERVER_names' => array_keys($_SERVER),
         ],
@@ -2216,7 +2225,7 @@ function stream_file_producer(
             "X-Chunk-Type: progress\r\n" .
             "X-Cursor: " . base64_encode($initial_cursor) . "\r\n" .
             "\r\n" .
-            $initial_progress_json . "\r\n",
+            $initial_progress_json . "\r\n"
         );
         $gz->sync();
         while (true) {
@@ -2248,7 +2257,7 @@ function stream_file_producer(
                     "X-Chunk-Type: metadata\r\n" .
                     "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n" .
                     "\r\n" .
-                    $metadata_json . "\r\n",
+                    $metadata_json . "\r\n"
                 );
                 $gz->sync();
 
@@ -2269,7 +2278,7 @@ function stream_file_producer(
                         "X-Chunk-Type: progress\r\n" .
                         "X-Cursor: " . base64_encode($cursor) . "\r\n" .
                         "\r\n" .
-                        $progress_json . "\r\n",
+                        $progress_json . "\r\n"
                     );
                     $gz->sync();
 
@@ -2306,7 +2315,7 @@ function stream_file_producer(
                     "X-Symlink-Path: " . base64_encode($chunk["path"]) . "\r\n" .
                     "X-Symlink-Target: " . base64_encode($chunk["target"]) . "\r\n" .
                     "X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n" .
-                    "\r\n\r\n",
+                    "\r\n\r\n"
                 );
                 $gz->sync();
             } elseif ($chunk_type === "index") {
@@ -2319,7 +2328,7 @@ function stream_file_producer(
                     "X-Index-Path: " . base64_encode($chunk["path"]) . "\r\n" .
                     "X-File-Ctime: " . $chunk["ctime"] . "\r\n" .
                     "X-File-Size: " . $chunk["size"] . "\r\n" .
-                    "\r\n\r\n",
+                    "\r\n\r\n"
                 );
                 $gz->sync();
             } elseif ($chunk_type === "missing") {
@@ -2330,7 +2339,7 @@ function stream_file_producer(
                     "X-Chunk-Type: missing\r\n" .
                     "X-Cursor: " . base64_encode($cursor) . "\r\n" .
                     "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n" .
-                    "\r\n\r\n",
+                    "\r\n\r\n"
                 );
                 $gz->sync();
             } elseif ($chunk_type === "error") {
@@ -2353,7 +2362,7 @@ function stream_file_producer(
                     "X-Chunk-Type: error\r\n" .
                     "X-Cursor: " . base64_encode($cursor) . "\r\n" .
                     "\r\n" .
-                    $json . "\r\n",
+                    $json . "\r\n"
                 );
                 $gz->sync();
             } else {
@@ -2426,7 +2435,7 @@ function stream_file_producer(
                 "X-Chunk-Type: error\r\n" .
                 "X-Cursor: " . base64_encode($last_cursor) . "\r\n" .
                 "\r\n" .
-                $json . "\r\n",
+                $json . "\r\n"
             );
             $gz->sync();
         }
@@ -2443,7 +2452,7 @@ function stream_file_producer(
 
         error_log(
             "Export completion: status={$status}, phase={$progress["phase"]}, " .
-                "chunks={$chunks_processed}, files={$files_completed}, bytes={$bytes_processed}",
+                "chunks={$chunks_processed}, files={$files_completed}, bytes={$bytes_processed}"
         );
 
         $gz->write(
@@ -2460,7 +2469,7 @@ function stream_file_producer(
             "X-Time-Elapsed: " . (microtime(true) - $budget->start_time) . "\r\n" .
             "\r\n" .
             "\r\n" .
-            "--{$boundary}--\r\n",
+            "--{$boundary}--\r\n"
         );
         $gz->finish();
     } catch (\Throwable $e) {
@@ -2717,7 +2726,7 @@ function endpoint_file_index(
         "batch_size",
         (int) $batch_size,
         100,
-        100000,
+        100000
     );
 
     $list_dir = $config["list_dir"] ?? null;
@@ -2805,7 +2814,7 @@ function endpoint_file_index(
         $list_dir_real = realpath($list_dir);
         if ($list_dir_real === false || !is_dir($list_dir_real)) {
             throw new InvalidArgumentException(
-                "list_dir does not exist or is not accessible: {$list_dir}",
+                "list_dir does not exist or is not accessible: {$list_dir}"
             );
         }
 
@@ -2824,7 +2833,7 @@ function endpoint_file_index(
         // via HMAC, so there is no untrusted-input risk.
         if (!$allowed && !$follow_symlinks) {
             throw new InvalidArgumentException(
-                "list_dir is outside of allowed roots: {$list_dir_real}",
+                "list_dir is outside of allowed roots: {$list_dir_real}"
             );
         }
 
@@ -2920,7 +2929,7 @@ function endpoint_file_index(
             "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n" .
             "X-Index-Dir: " . base64_encode($list_dir_real ?? "") . "\r\n" .
             "\r\n" .
-            $metadata_json . "\r\n",
+            $metadata_json . "\r\n"
         );
         $gz->sync();
         $stop = false;
@@ -2948,7 +2957,7 @@ function endpoint_file_index(
                 $json = json_encode_or_throw($abort_payload);
                 $cursor_json = json_encode_or_throw(
                     ["stack" => encode_index_stack($stack)],
-                    JSON_UNESCAPED_SLASHES,
+                    JSON_UNESCAPED_SLASHES
                 );
                 $cursor_b64 = base64_encode($cursor_json);
                 $gz->write(
@@ -2958,7 +2967,7 @@ function endpoint_file_index(
                     "X-Chunk-Type: error\r\n" .
                     "X-Cursor: " . $cursor_b64 . "\r\n" .
                     "\r\n" .
-                    $json . "\r\n",
+                    $json . "\r\n"
                 );
                 $gz->sync();
                 $abort_payload = null;
@@ -2987,7 +2996,7 @@ function endpoint_file_index(
                 $json = json_encode_or_throw($abort_payload);
                 $cursor_json = json_encode_or_throw(
                     ["stack" => encode_index_stack($stack)],
-                    JSON_UNESCAPED_SLASHES,
+                    JSON_UNESCAPED_SLASHES
                 );
                 $cursor_b64 = base64_encode($cursor_json);
                 $gz->write(
@@ -2997,7 +3006,7 @@ function endpoint_file_index(
                     "X-Chunk-Type: error\r\n" .
                     "X-Cursor: " . $cursor_b64 . "\r\n" .
                     "\r\n" .
-                    $json . "\r\n",
+                    $json . "\r\n"
                 );
                 $gz->sync();
                 $abort_payload = null;
@@ -3025,7 +3034,7 @@ function endpoint_file_index(
                 $json = json_encode_or_throw($abort_payload);
                 $cursor_json = json_encode_or_throw(
                     ["stack" => encode_index_stack($stack)],
-                    JSON_UNESCAPED_SLASHES,
+                    JSON_UNESCAPED_SLASHES
                 );
                 $cursor_b64 = base64_encode($cursor_json);
                 $gz->write(
@@ -3035,7 +3044,7 @@ function endpoint_file_index(
                     "X-Chunk-Type: error\r\n" .
                     "X-Cursor: " . $cursor_b64 . "\r\n" .
                     "\r\n" .
-                    $json . "\r\n",
+                    $json . "\r\n"
                 );
                 $gz->sync();
                 $abort_payload = null;
@@ -3139,12 +3148,12 @@ function endpoint_file_index(
 
                     $cursor_json = json_encode_or_throw(
                         ["stack" => encode_index_stack($stack)],
-                        JSON_UNESCAPED_SLASHES,
+                        JSON_UNESCAPED_SLASHES
                     );
                     $cursor_b64 = base64_encode($cursor_json);
                     $json = json_encode_or_throw(
                         encode_index_batch($batch_items),
-                        JSON_UNESCAPED_SLASHES,
+                        JSON_UNESCAPED_SLASHES
                     );
 
                     $gz->write(
@@ -3154,7 +3163,7 @@ function endpoint_file_index(
                         "X-Chunk-Type: index_batch\r\n" .
                         "X-Cursor: " . $cursor_b64 . "\r\n" .
                         "X-Batch-Size: " . count($batch_items) . "\r\n" .
-                        "\r\n",
+                        "\r\n"
                     );
                     $gz->write($json);
                     $gz->write("\r\n");
@@ -3215,12 +3224,12 @@ function endpoint_file_index(
     if (!empty($batch_items)) {
         $cursor_json = json_encode_or_throw(
             ["stack" => encode_index_stack($stack)],
-            JSON_UNESCAPED_SLASHES,
+            JSON_UNESCAPED_SLASHES
         );
         $cursor_b64 = base64_encode($cursor_json);
         $json = json_encode_or_throw(
             encode_index_batch($batch_items),
-            JSON_UNESCAPED_SLASHES,
+            JSON_UNESCAPED_SLASHES
         );
 
         $gz->write(
@@ -3230,7 +3239,7 @@ function endpoint_file_index(
             "X-Chunk-Type: index_batch\r\n" .
             "X-Cursor: " . $cursor_b64 . "\r\n" .
             "X-Batch-Size: " . count($batch_items) . "\r\n" .
-            "\r\n",
+            "\r\n"
         );
         $gz->write($json);
         $gz->write("\r\n");
@@ -3245,7 +3254,7 @@ function endpoint_file_index(
             $json = json_encode_or_throw($abort_payload);
             $cursor_json = json_encode_or_throw(
                 ["stack" => encode_index_stack($stack)],
-                JSON_UNESCAPED_SLASHES,
+                JSON_UNESCAPED_SLASHES
             );
             $cursor_b64 = base64_encode($cursor_json);
             $gz->write(
@@ -3255,7 +3264,7 @@ function endpoint_file_index(
                 "X-Chunk-Type: error\r\n" .
                 "X-Cursor: " . $cursor_b64 . "\r\n" .
                 "\r\n" .
-                $json . "\r\n",
+                $json . "\r\n"
             );
             $gz->sync();
             $status = "partial";
@@ -3263,7 +3272,7 @@ function endpoint_file_index(
 
         $cursor_json = json_encode_or_throw(
             ["stack" => encode_index_stack($stack)],
-            JSON_UNESCAPED_SLASHES,
+            JSON_UNESCAPED_SLASHES
         );
         $cursor_b64 = base64_encode($cursor_json);
 
@@ -3282,7 +3291,7 @@ function endpoint_file_index(
             "X-Time-Elapsed: " . (microtime(true) - $budget->start_time) . "\r\n" .
             "\r\n" .
             "\r\n" .
-            "--{$boundary}--\r\n",
+            "--{$boundary}--\r\n"
         );
         $gz->finish();
     } catch (\Throwable $e) {
@@ -3318,7 +3327,7 @@ function endpoint_file_fetch(
         $tmp_name = $_FILES["file_list"]["tmp_name"] ?? "";
         if ($tmp_name === "" || !is_uploaded_file($tmp_name)) {
             throw new InvalidArgumentException(
-                "file_list upload missing or invalid",
+                "file_list upload missing or invalid"
             );
         }
         $list_path = $tmp_name;
@@ -3326,7 +3335,7 @@ function endpoint_file_fetch(
 
     if ($list_path === null) {
         throw new InvalidArgumentException(
-            "file_list is required for file_fetch endpoint",
+            "file_list is required for file_fetch endpoint"
         );
     }
 
@@ -3337,7 +3346,7 @@ function endpoint_file_fetch(
     $decoded = json_decode($raw, true);
     if (!is_array($decoded)) {
         throw new InvalidArgumentException(
-            "file_list must be a JSON array of paths",
+            "file_list must be a JSON array of paths"
         );
     }
     $paths = [];
@@ -3353,7 +3362,7 @@ function endpoint_file_fetch(
         "chunk_size",
         (int) $chunk_size,
         16 * 1024,
-        32 * 1024 * 1024,
+        32 * 1024 * 1024
     );
 
     $sync_options = [
@@ -3369,7 +3378,7 @@ function endpoint_file_fetch(
         $producer,
         $budget,
         $config,
-        file_fetch_paths_should_gzip($paths),
+        file_fetch_paths_should_gzip($paths)
     );
 }
 
@@ -3756,7 +3765,7 @@ function require_int_range(
 ): int {
     if ($value < $min || $value > $max) {
         throw new InvalidArgumentException(
-            "{$name} out of range. Expected {$min}-{$max}, got {$value}",
+            "{$name} out of range. Expected {$min}-{$max}, got {$value}"
         );
     }
     return $value;
@@ -3773,7 +3782,7 @@ function require_float_range(
 ): float {
     if ($value < $min || $value > $max) {
         throw new InvalidArgumentException(
-            "{$name} out of range. Expected {$min}-{$max}, got {$value}",
+            "{$name} out of range. Expected {$min}-{$max}, got {$value}"
         );
     }
     return $value;
