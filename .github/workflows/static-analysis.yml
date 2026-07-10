@@ -22,3 +22,44 @@ jobs:
       - run: composer install --no-interaction --prefer-dist
 
       - run: composer analyze
+
+  compat:
+    name: PHP Compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+
+      - run: composer install --no-interaction --prefer-dist
+
+      # Checks exporter compat at PHP 7.2 (shared hosting) and importer at 7.4,
+      # via two PHPCompatibility runs (see lint:php:compat in composer.json).
+      - run: composer lint:php:compat
+
+  syntax-72:
+    # PHPCompatibility 9.3.5 misses arrow functions and numeric separators, so
+    # a real PHP 7.2 parser is the authoritative check that the exporter (which
+    # runs on old shared hosting) contains no 7.3/7.4-only syntax.
+    name: PHP 7.2 syntax (exporter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "7.2"
+          coverage: none
+
+      - name: Lint exporter sources for PHP 7.2 parse errors
+        run: |
+          find packages/reprint-exporter/src reprint-exporter-wp \
+            -name '*.php' -not -path 'reprint-exporter-wp/wordpress/*' \
+            -print0 | xargs -0 -n1 php -l

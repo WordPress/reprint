@@ -7,25 +7,35 @@
  */
 class FileTreeProducer
 {
-    public const DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024;
+    const DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024;
 
     const PHASE_STREAMING = "streaming";
     const PHASE_FINISHED = "finished";
 
-    private array $directories;
-    private int $chunk_size;
-    private bool $index_only;
-    private ?string $filesystem_root;
+    /** @var array */
+    private $directories;
+    /** @var int */
+    private $chunk_size;
+    /** @var bool */
+    private $index_only;
+    /** @var string|null */
+    private $filesystem_root;
 
-    private string $phase;
-    private ?array $current_chunk = null;
+    /** @var string */
+    private $phase;
+    /** @var array|null */
+    private $current_chunk = null;
 
     /** Explicit list of paths to stream, sorted on first use. */
-    private array $paths;
-    private bool $paths_sorted = false;
-    private bool $paths_positioned = false;
+    /** @var array */
+    private $paths;
+    /** @var bool */
+    private $paths_sorted = false;
+    /** @var bool */
+    private $paths_positioned = false;
     /** Ephemeral index into $paths; NOT stored in cursor. */
-    private int $paths_position = 0;
+    /** @var int */
+    private $paths_position = 0;
 
     /** State for the file currently being streamed in chunks. */
     private $streaming_file_handle = null;
@@ -37,12 +47,16 @@ class FileTreeProducer
             $this->streaming_file_handle = null;
         }
     }
-    private int $streaming_file_offset = 0;
-    private ?array $current_file_meta = null;
+    /** @var int */
+    private $streaming_file_offset = 0;
+    /** @var array|null */
+    private $current_file_meta = null;
 
     /** Tracks the last emitted path for cursor generation. */
-    private ?string $last_emitted_path = null;
-    private ?int $last_emitted_ctime = null;
+    /** @var string|null */
+    private $last_emitted_path = null;
+    /** @var int|null */
+    private $last_emitted_ctime = null;
 
     /**
      * @param string|array $directories Root directories to scan.
@@ -61,7 +75,7 @@ class FileTreeProducer
 
         if (!isset($options["paths"]) || !is_array($options["paths"])) {
             throw new InvalidArgumentException(
-                "The 'paths' option is required and must be an array",
+                "The 'paths' option is required and must be an array"
             );
         }
         $this->paths = $options["paths"];
@@ -111,7 +125,7 @@ class FileTreeProducer
         $cursor = json_decode($cursor_json, true);
         if ($cursor === null && json_last_error() !== JSON_ERROR_NONE) {
             throw new InvalidArgumentException(
-                "Invalid cursor format: " . json_last_error_msg(),
+                "Invalid cursor format: " . json_last_error_msg()
             );
         }
 
@@ -170,7 +184,9 @@ class FileTreeProducer
         if (is_string($directories)) {
             return [rtrim($directories, "/")];
         }
-        return array_map(fn($d) => rtrim($d, "/"), $directories);
+        return array_map(function ($d) {
+            return rtrim($d, "/");
+        }, $directories);
     }
 
     /**
@@ -266,7 +282,7 @@ class FileTreeProducer
             if ($this->last_emitted_path !== null) {
                 $this->paths_position = $this->binary_search_next(
                     $this->paths,
-                    $this->last_emitted_path,
+                    $this->last_emitted_path
                 );
             } else {
                 $this->paths_position = 0;
@@ -413,7 +429,7 @@ class FileTreeProducer
             if ($this->streaming_file_offset > 0) {
                 $seek_result = fseek(
                     $this->streaming_file_handle,
-                    $this->streaming_file_offset,
+                    $this->streaming_file_offset
                 );
                 if ($seek_result === -1) {
                     fclose($this->streaming_file_handle);

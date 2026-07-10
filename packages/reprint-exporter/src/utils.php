@@ -130,7 +130,7 @@ function parse_size(string $value): int
     $value = trim($value);
     if (!preg_match('/^(\d+(?:\.\d+)?)\s*([KMGkmg])?[Bb]?$/', $value, $m)) {
         throw new InvalidArgumentException(
-            "Invalid size value: '{$value}'. Use a number optionally followed by K, M, or G (e.g. 64M).",
+            "Invalid size value: '{$value}'. Use a number optionally followed by K, M, or G (e.g. 64M)."
         );
     }
     $num = (float) $m[1];
@@ -218,7 +218,7 @@ function assert_valid_path(string $path, string $label = "path"): void
     foreach (explode("/", $path) as $segment) {
         if ($segment === "." || $segment === "..") {
             throw new InvalidArgumentException(
-                "{$label} must not contain dot-segments (. or ..): {$path}",
+                "{$label} must not contain dot-segments (. or ..): {$path}"
             );
         }
     }
