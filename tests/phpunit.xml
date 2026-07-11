@@ -32,6 +32,7 @@
             <file>SiteExportSecretTest.php</file>
             <file>StagedArtifactsTest.php</file>
             <file>StagedApplySessionTest.php</file>
+            <file>StagedApplyFileSessionTest.php</file>
             <file>StagedEndpointsTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">

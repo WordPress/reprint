@@ -5,6 +5,9 @@
 if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
     require_once __DIR__ . '/class-staged-push-stream-protocol.php';
 }
+if (!class_exists('Site_Export_Staged_Artifacts', false)) {
+    require_once __DIR__ . '/class-staged-artifacts.php';
+}
 
 /**
  * Owns one direct, resumable staged-apply upload session.
@@ -55,6 +58,9 @@ final class Site_Export_Staged_Apply_Session {
     /** @var string */
     private $staged_dir;
 
+    /** @var Site_Export_Staged_Artifacts */
+    private $artifact_store;
+
     /** @var bool */
     private $upload_lock_held = false;
 
@@ -78,6 +84,7 @@ final class Site_Export_Staged_Apply_Session {
         $this->lock_path = $this->session_dir . '/lock';
         $this->journal_path = $this->session_dir . '/work/operations.jsonl';
         $this->staged_dir = $this->session_dir . '/work/files';
+        $this->artifact_store = new Site_Export_Staged_Artifacts($this->session_dir . '/work');
     }
 
     /**
@@ -173,7 +180,7 @@ final class Site_Export_Staged_Apply_Session {
      * Returns durable upload progress without taking the writer lock.
      *
      * The response includes phase, operation_count, journal_bytes,
-     * last_path_b64, and failure.
+     * last_path_b64, failure, and the target-confirmed current file cursor.
      *
      * @return array<string,mixed> Durable session status.
      */
@@ -182,7 +189,9 @@ final class Site_Export_Staged_Apply_Session {
             throw new RuntimeException('The staged apply session does not exist: ' . $this->session_id, self::ERROR_SESSION_NOT_FOUND);
         }
         $this->require_private_workspace();
-        return $this->read_state();
+        $state = $this->read_state();
+        $state['current_file'] = $this->current_file_status($state);
+        return $state;
     }
 
     /**
@@ -222,7 +231,7 @@ final class Site_Export_Staged_Apply_Session {
      *
      * @param int    $operation_index Zero-based index expected next by the target.
      * @param string $path            Raw-byte target-relative directory path.
-     * @return array{status:string,reason:?string,operation_count:int}
+     * @return array{status:string,reason:?string,operation_count:int,current_file:?array<string,mixed>}
      */
     public function accept_directory(int $operation_index, string $path): array {
         $this->require_upload_lock();
@@ -230,6 +239,9 @@ final class Site_Export_Staged_Apply_Session {
         $gap = $this->operation_gap_result($state, $operation_index);
         if ($gap !== null) {
             return $gap;
+        }
+        if ($state['current_file'] !== null) {
+            return $this->upload_result('rejected', 'operation_mismatch', $state);
         }
         $this->validate_new_path_or_fail($state, $path, 'directory');
         $entry = ['type' => 'directory', 'path' => $path];
@@ -257,7 +269,7 @@ final class Site_Export_Staged_Apply_Session {
      * @param int    $operation_index Zero-based index expected next by the target.
      * @param string $path            Raw-byte target-relative symlink path.
      * @param string $target          Raw-byte symlink target stored without resolution.
-     * @return array{status:string,reason:?string,operation_count:int}
+     * @return array{status:string,reason:?string,operation_count:int,current_file:?array<string,mixed>}
      */
     public function accept_symlink(int $operation_index, string $path, string $target): array {
         $this->require_upload_lock();
@@ -265,6 +277,9 @@ final class Site_Export_Staged_Apply_Session {
         $gap = $this->operation_gap_result($state, $operation_index);
         if ($gap !== null) {
             return $gap;
+        }
+        if ($state['current_file'] !== null) {
+            return $this->upload_result('rejected', 'operation_mismatch', $state);
         }
         $this->validate_new_path_or_fail($state, $path, 'symlink');
         if ($target === '' || strpos($target, "\0") !== false || strlen($target) > self::MAX_PATH_BYTES) {
@@ -293,7 +308,7 @@ final class Site_Export_Staged_Apply_Session {
      *
      * @param int    $operation_index Zero-based index expected next by the target.
      * @param string $path            Raw-byte target-relative path to remove during commit.
-     * @return array{status:string,reason:?string,operation_count:int}
+     * @return array{status:string,reason:?string,operation_count:int,current_file:?array<string,mixed>}
      */
     public function accept_delete(int $operation_index, string $path): array {
         $this->require_upload_lock();
@@ -302,9 +317,210 @@ final class Site_Export_Staged_Apply_Session {
         if ($gap !== null) {
             return $gap;
         }
+        if ($state['current_file'] !== null) {
+            return $this->upload_result('rejected', 'operation_mismatch', $state);
+        }
         $this->validate_new_path_or_fail($state, $path, 'delete');
         $entry = ['type' => 'delete', 'path' => $path];
         return $this->complete_upload_operation($state, $entry);
+    }
+
+    /**
+     * Accepts one bounded file chunk at the target-confirmed cursor.
+     *
+     * The session persists only the current file's path, revision, and total.
+     * Site_Export_Staged_Artifacts owns its confirmed byte cursor. A changed
+     * revision replaces old bytes only when the client explicitly restarts at
+     * offset zero. Damage rejects the chunk instead of trusting or repairing
+     * staged bytes.
+     *
+     * @param int    $operation_index Zero-based index expected next by the target.
+     * @param string $path            Raw-byte target-relative file path.
+     * @param int    $revision        Sender-owned revision that increases after source changes.
+     * @param int    $offset          Offset of this payload in the file revision.
+     * @param string $payload         One caller-bounded chunk.
+     * @param int    $total_bytes     Complete byte length of this revision.
+     * @param bool   $restart         Whether offset zero explicitly replaces staged bytes.
+     * @return array{status:string,reason:?string,operation_count:int,current_file:?array<string,mixed>}
+     */
+    public function accept_file_chunk(
+        int $operation_index,
+        string $path,
+        int $revision,
+        int $offset,
+        string $payload,
+        int $total_bytes,
+        bool $restart
+    ): array {
+        $this->require_upload_lock();
+        $state = $this->read_state();
+        $gap = $this->operation_gap_result($state, $operation_index);
+        if ($gap !== null) {
+            return $gap;
+        }
+        if ($revision < 0 || $offset < 0 || $total_bytes < 0) {
+            $this->fail_invalid_operation('File operation ' . $operation_index . ' has a negative revision, offset, or total byte count.');
+        }
+        $payload_bytes = strlen($payload);
+        if ($offset > $total_bytes || $payload_bytes > $total_bytes - $offset) {
+            return $this->upload_result('rejected', 'size_exceeded', $state);
+        }
+        if ($restart && $offset !== 0) {
+            return $this->upload_result('rejected', 'offset_gap', $state);
+        }
+
+        $current_file = $state['current_file'];
+        if ($current_file === null) {
+            if ($offset !== 0) {
+                return $this->upload_result('rejected', 'offset_gap', $state);
+            }
+            $this->validate_new_path_or_fail($state, $path, 'file');
+            $state['current_file'] = [
+                'path_b64' => base64_encode($path),
+                'revision' => $revision,
+                'total_bytes' => $total_bytes,
+            ];
+            $this->write_state($state);
+            $current_file = $state['current_file'];
+            // Nothing predates a new descriptor, so a restart flag on its
+            // first frame has nothing to discard.
+            $restart = false;
+        } else {
+            $current_path = base64_decode($current_file['path_b64'], true);
+            if (!is_string($current_path) || $current_path !== $path) {
+                return $this->upload_result('rejected', 'operation_mismatch', $state);
+            }
+        }
+
+        if ($restart) {
+            if ($revision < $current_file['revision']) {
+                return $this->upload_result('rejected', 'stale_revision', $state);
+            }
+            if ($revision === $current_file['revision'] && $total_bytes !== $current_file['total_bytes']) {
+                return $this->upload_result('rejected', 'size_mismatch', $state);
+            }
+            if (!$this->ensure_staged_parents($path)) {
+                $this->fail_invalid_operation('Cannot restart file ' . $this->describe_path($path) . ' below a non-directory staged ancestor.');
+            }
+            // Discard first. A cut before the new descriptor is saved leaves
+            // the old revision at cursor zero, which tells the client to retry
+            // the same explicit restart.
+            if (!$this->artifact_store->discard($path)) {
+                throw new RuntimeException(
+                    'Could not discard the previous staged revision for ' . $this->describe_path($path) . '.',
+                    self::ERROR_RETRYABLE_IO
+                );
+            }
+            $state['current_file'] = [
+                'path_b64' => base64_encode($path),
+                'revision' => $revision,
+                'total_bytes' => $total_bytes,
+            ];
+            $this->write_state($state);
+            $current_file = $state['current_file'];
+        } elseif ($revision !== $current_file['revision']) {
+            return $this->upload_result('rejected', 'revision_mismatch', $state);
+        } elseif ($total_bytes !== $current_file['total_bytes']) {
+            return $this->upload_result('rejected', 'size_mismatch', $state);
+        }
+
+        if (!$this->ensure_staged_parents($path)) {
+            $this->fail_invalid_operation('Cannot stage file ' . $this->describe_path($path) . ' below a non-directory staged ancestor.');
+        }
+        $artifact_status = $this->artifact_store->status($path);
+        if (isset($artifact_status['damage'])) {
+            return $this->upload_result('rejected', 'staging_file_damaged', $state);
+        }
+        if ($artifact_status['verified']) {
+            $this->fail_invalid_operation('The staged file store has an unexpected verification marker for ' . $this->describe_path($path) . '.');
+        }
+        $committed_bytes = (int) $artifact_status['committed_bytes'];
+        if ($committed_bytes > $total_bytes) {
+            $this->fail_invalid_operation(
+                'The staged file cursor for ' . $this->describe_path($path) . ' exceeds its declared ' . $total_bytes . ' bytes.'
+            );
+        }
+        $staged_file_path = $this->staged_path($path);
+        $staged_file_stat = @lstat($staged_file_path);
+        if (is_array($staged_file_stat) && !self::stat_is_real_regular_file($staged_file_stat)) {
+            return $this->upload_result('rejected', 'staging_file_damaged', $state);
+        }
+
+        $entry = [
+            'type' => 'file',
+            'path' => $path,
+            'bytes' => $total_bytes,
+        ];
+        if ($total_bytes === 0) {
+            if (is_array($staged_file_stat) && (int) $staged_file_stat['size'] !== 0) {
+                if (!$this->artifact_store->discard($path)) {
+                    throw new RuntimeException('Could not clear stale bytes before staging zero-byte file ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                }
+                $staged_file_stat = false;
+            }
+            if (!is_array($staged_file_stat)) {
+                $empty_file = @fopen($staged_file_path, 'x+b');
+                if ($empty_file === false) {
+                    throw new RuntimeException('Could not create staged zero-byte file ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                }
+                try {
+                    if (!fflush($empty_file)) {
+                        throw new RuntimeException('Could not flush staged zero-byte file ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                    }
+                } finally {
+                    fclose($empty_file);
+                }
+                @chmod($staged_file_path, 0600);
+            }
+            $state['current_file'] = null;
+            return $this->complete_upload_operation($state, $entry);
+        }
+
+        if ($committed_bytes === $total_bytes) {
+            $state['current_file'] = null;
+            return $this->complete_file_operation($state, $entry, $staged_file_path, $total_bytes);
+        }
+        if ($payload_bytes > 0 && $offset + $payload_bytes <= $committed_bytes) {
+            return $this->upload_result('duplicate', null, $state);
+        }
+        if ($offset < $committed_bytes) {
+            // Chunk boundaries are not durable. Drop the already-confirmed
+            // prefix and append only the suffix the store still needs.
+            $payload = substr($payload, $committed_bytes - $offset);
+            $payload_bytes = strlen($payload);
+            $offset = $committed_bytes;
+        }
+        if ($offset !== $committed_bytes) {
+            return $this->upload_result('rejected', 'offset_gap', $state);
+        }
+        if ($payload_bytes === 0) {
+            return $this->upload_result('rejected', 'empty_payload', $state);
+        }
+
+        $append_result = $this->artifact_store->append($path, $offset, $payload);
+        if ($append_result['status'] === 'busy') {
+            throw new RuntimeException('The staged file store is busy for ' . $this->describe_path($path) . '.', self::ERROR_BUSY);
+        }
+        if ($append_result['status'] === 'rejected') {
+            if ($append_result['reason'] === 'staging_file_damaged') {
+                return $this->upload_result('rejected', 'staging_file_damaged', $state);
+            }
+            if ($append_result['reason'] === 'offset_gap') {
+                return $this->upload_result('rejected', 'offset_gap', $state);
+            }
+            throw new RuntimeException(
+                'Could not append staged file ' . $this->describe_path($path) . ': '
+                . (string) $append_result['reason'] . ( $append_result['detail'] === null ? '' : ' (' . $append_result['detail'] . ')' ) . '.',
+                self::ERROR_RETRYABLE_IO
+            );
+        }
+        $committed_bytes = (int) $append_result['committed_bytes'];
+        if ($committed_bytes < $total_bytes) {
+            return $this->upload_result('accepted', null, $state);
+        }
+
+        $state['current_file'] = null;
+        return $this->complete_file_operation($state, $entry, $staged_file_path, $total_bytes);
     }
 
     /**
@@ -375,6 +591,7 @@ final class Site_Export_Staged_Apply_Session {
                 'operation_count' => 0,
                 'journal_bytes' => 0,
                 'last_path_b64' => null,
+                'current_file' => null,
                 'failure' => null,
             ]);
         } catch (Throwable $exception) {
@@ -423,6 +640,16 @@ final class Site_Export_Staged_Apply_Session {
             ] as $path => $description
         ) {
             self::require_real_regular_file($path, $description);
+        }
+        foreach (
+            [
+                dirname($this->staged_dir) . '/state.json' => 'staged file cursor',
+                dirname($this->staged_dir) . '/lock' => 'staged file lock',
+            ] as $path => $description
+        ) {
+            if (is_array(@lstat($path))) {
+                self::require_real_regular_file($path, $description);
+            }
         }
     }
 
@@ -522,18 +749,75 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
+     * Requires the completed staged file to match its declared shape and size.
+     *
+     * @param array<string,mixed> $state
+     * @param array<string,mixed> $entry
+     * @return array<string,mixed>
+     */
+    private function complete_file_operation(array $state, array $entry, string $staged_file_path, int $total_bytes): array {
+        $staged_file_stat = @lstat($staged_file_path);
+        if (
+            !is_array($staged_file_stat)
+            || !self::stat_is_real_regular_file($staged_file_stat)
+            || !isset($staged_file_stat['size'])
+            || (int) $staged_file_stat['size'] !== $total_bytes
+        ) {
+            $this->fail_invalid_operation('The completed staged file has the wrong shape or size for ' . $this->describe_path($entry['path']) . '.');
+        }
+        return $this->complete_upload_operation($state, $entry);
+    }
+
+    /**
+     * Adds the artifact-store cursor to the persisted current-file descriptor.
+     *
+     * @param array<string,mixed> $state
+     * @return array<string,mixed>|null
+     */
+    private function current_file_status(array $state): ?array {
+        $current_file = $state['current_file'];
+        if (!is_array($current_file)) {
+            return null;
+        }
+        $path = base64_decode($current_file['path_b64'], true);
+        if (!is_string($path)) {
+            throw new RuntimeException('The staged apply current file path is malformed.');
+        }
+        $artifact_status = $this->artifact_store->status($path);
+        $status = [
+            'operation_index' => (int) $state['operation_count'],
+            'path_b64' => $current_file['path_b64'],
+            'revision' => $current_file['revision'],
+            'committed_bytes' => (int) $artifact_status['committed_bytes'],
+            'total_bytes' => $current_file['total_bytes'],
+        ];
+        if (isset($artifact_status['damage'])) {
+            $status['damage'] = $artifact_status['damage'];
+            $status['recorded_committed_bytes'] = (int) $artifact_status['recorded_committed_bytes'];
+            return $status;
+        }
+        $staged_stat = @lstat($this->staged_path($path));
+        if (is_array($staged_stat) && !self::stat_is_real_regular_file($staged_stat)) {
+            $status['damage'] = 'staging_file_not_regular';
+            $status['recorded_committed_bytes'] = (int) $artifact_status['committed_bytes'];
+        }
+        return $status;
+    }
+
+    /**
      * Builds the bounded response returned for an accepted, duplicate, or rejected frame.
      *
      * @param string              $status Accepted, duplicate, or rejected.
      * @param string|null         $reason Stable rejection reason, or null otherwise.
      * @param array<string,mixed> $state
-     * @return array{status:string,reason:?string,operation_count:int}
+     * @return array{status:string,reason:?string,operation_count:int,current_file:?array<string,mixed>}
      */
     private function upload_result(string $status, ?string $reason, array $state): array {
         return [
             'status' => $status,
             'reason' => $reason,
             'operation_count' => (int) $state['operation_count'],
+            'current_file' => $this->current_file_status($state),
         ];
     }
 
@@ -642,6 +926,29 @@ final class Site_Export_Staged_Apply_Session {
         if (!in_array($phase, ['uploading', 'failed'], true)) {
             throw new RuntimeException('The staged apply session phase is invalid: ' . ( is_string($phase) ? $phase : gettype($phase) ) . '.');
         }
+        if (!array_key_exists('current_file', $state) || ( $state['current_file'] !== null && !is_array($state['current_file']) )) {
+            throw new RuntimeException('The staged apply current file state is malformed.');
+        }
+        $current_file_path = null;
+        if (is_array($state['current_file'])) {
+            $encoded_current_file_path = $state['current_file']['path_b64'] ?? null;
+            $current_file_path = is_string($encoded_current_file_path) ? base64_decode($encoded_current_file_path, true) : false;
+            if (
+                !is_string($current_file_path)
+                || $current_file_path === ''
+                || strlen($current_file_path) > self::MAX_PATH_BYTES
+                || base64_encode($current_file_path) !== $encoded_current_file_path
+                || !isset($state['current_file']['revision'])
+                || !is_int($state['current_file']['revision'])
+                || $state['current_file']['revision'] < 0
+                || !isset($state['current_file']['total_bytes'])
+                || !is_int($state['current_file']['total_bytes'])
+                || $state['current_file']['total_bytes'] < 0
+            ) {
+                throw new RuntimeException('The staged apply current file state is malformed.');
+            }
+            $this->require_writable_target_path($current_file_path, 'file');
+        }
         $last_path_b64 = $state['last_path_b64'] ?? null;
         $last_path = is_string($last_path_b64) ? base64_decode($last_path_b64, true) : null;
         if (
@@ -654,6 +961,9 @@ final class Site_Export_Staged_Apply_Session {
             // Directory is the least restrictive legal shape: an accepted
             // directory may be an ancestor of a protected descendant.
             $this->require_writable_target_path($last_path, 'directory');
+        }
+        if (is_string($current_file_path) && is_string($last_path) && strcmp($last_path, $current_file_path) >= 0) {
+            throw new RuntimeException('The staged apply current file path is not after the last completed path.');
         }
         $failure = $state['failure'] ?? null;
         if (( $phase === 'failed' && ( !is_string($failure) || $failure === '' ) ) || ( $phase !== 'failed' && $failure !== null )) {
@@ -931,15 +1241,21 @@ final class Site_Export_Staged_Apply_Session {
             && ( $stat['mode'] & 0170000 ) === 0040000;
     }
 
+    /**
+     * Checks an lstat record for a real regular-file mode.
+     *
+     * @param array<string,mixed> $stat
+     */
+    private static function stat_is_real_regular_file(array $stat): bool {
+        return isset($stat['mode'])
+            && is_int($stat['mode'])
+            && ( $stat['mode'] & 0170000 ) === 0100000;
+    }
+
     /** Requires a path's leaf to be a real regular file. */
     private static function require_real_regular_file(string $path, string $description): void {
         $stat = @lstat($path);
-        if (
-            !is_array($stat)
-            || !isset($stat['mode'])
-            || !is_int($stat['mode'])
-            || ( $stat['mode'] & 0170000 ) !== 0100000
-        ) {
+        if (!is_array($stat) || !self::stat_is_real_regular_file($stat)) {
             throw new RuntimeException('The ' . $description . ' must be a real regular file, not a symlink or another file type: ' . $path);
         }
     }
