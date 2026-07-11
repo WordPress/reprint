@@ -12,6 +12,9 @@ final class Site_Export_Staged_Push_Stream_Protocol {
 
     public const CONTENT_TYPE = 'application/x-reprint-staged-push-stream';
 
+    /** Maximum raw bytes accepted for one path or symlink target. */
+    public const MAX_PATH_BYTES = 8192;
+
     /**
      * Top-level path segment reprint reserves for its own staged bookkeeping.
      * A sender's file artifacts may never land here — see
