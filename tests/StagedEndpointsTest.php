@@ -5,609 +5,445 @@ use PHPUnit\Framework\TestCase;
 final class StagedEndpointsTest extends TestCase {
 
     private const SECRET = 'staged-endpoints-test-secret';
-    private const PUSH_TARGET = '/?endpoint=staged_push';
 
     private string $staging_dir;
 
-    protected function setUp(): void
-    {
+    private string $target_dir;
+
+    protected function setUp(): void {
         $this->staging_dir = sys_get_temp_dir() . '/staged-endpoints-test-' . bin2hex(random_bytes(8));
+        $this->target_dir = sys_get_temp_dir() . '/staged-endpoints-target-' . bin2hex(random_bytes(8));
+        mkdir($this->target_dir, 0700, true);
     }
 
-    protected function tearDown(): void
-    {
-        $this->removeDir($this->staging_dir);
+    protected function tearDown(): void {
+        $this->remove_tree($this->staging_dir);
+        $this->remove_tree($this->target_dir);
     }
 
-    private function removeDir(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
+    public function test_create_is_idempotent_after_a_lost_response(): void {
+        $endpoints = $this->make_endpoints();
+        $create_token = str_repeat('a', 32);
+
+        $first = $endpoints->session_create(
+            ['create_token' => $create_token],
+            $this->session_headers('staged_session_create', null, null, 'POST', ['create_token' => $create_token])
+        );
+        $second = $endpoints->session_create(
+            ['create_token' => $create_token],
+            $this->session_headers('staged_session_create', null, null, 'POST', ['create_token' => $create_token])
+        );
+
+        $this->assertSame(201, $first['http_code']);
+        $this->assertSame('created', $first['body']['status']);
+        $this->assertSame($first['body']['session_id'], $second['body']['session_id']);
+        $this->assertSame('uploading', $first['body']['phase']);
+        $this->assertSame(0, $first['body']['operation_count']);
+        $this->assertNull($first['body']['current_file']);
+        $this->assertArrayNotHasKey('prepare_chunk_bytes', $first['body']);
+    }
+
+    public function test_typed_operations_stage_and_apply_without_a_manifest_step(): void {
+        file_put_contents($this->target_dir . '/old.txt', 'remove me');
+        $endpoints = $this->make_endpoints();
+        $session = $this->new_session();
+
+        $response = $this->push($endpoints, $session, 0, [
+            ['type' => 'directory', 'operation_index' => 0, 'path' => 'content'],
+            [
+                'type' => 'file',
+                'operation_index' => 1,
+                'path' => 'content/file.txt',
+                'revision' => 1,
+                'offset' => 0,
+                'total_bytes' => 5,
+                'restart' => false,
+                'payload' => 'hello',
+            ],
+            ['type' => 'symlink', 'operation_index' => 2, 'path' => 'content/link', 'target' => 'file.txt'],
+            ['type' => 'delete', 'operation_index' => 3, 'path' => 'old.txt'],
+        ]);
+
+        $this->assertSame(200, $response['http_code']);
+        $this->assertSame('complete', $response['body']['status']);
+        $this->assertSame(4, $response['body']['operation_count']);
+        $this->assertNull($response['body']['current_file']);
+        $this->assertSame('uploading', $response['body']['phase']);
+
+        $final = $this->advance_until_complete($endpoints, $session, $response['body']['request_generation']);
+        $this->assertSame('complete', $final['phase']);
+        $this->assertSame('hello', file_get_contents($this->target_dir . '/content/file.txt'));
+        $this->assertSame('file.txt', readlink($this->target_dir . '/content/link'));
+        $this->assertFileDoesNotExist($this->target_dir . '/old.txt');
+    }
+
+    public function test_file_upload_resumes_from_target_confirmed_bytes(): void {
+        $endpoints = $this->make_endpoints();
+        $session = $this->new_session();
+
+        $first = $this->push($endpoints, $session, 0, [[
+            'type' => 'file',
+            'operation_index' => 0,
+            'path' => 'partial.bin',
+            'revision' => 7,
+            'offset' => 0,
+            'total_bytes' => 4,
+            'restart' => false,
+            'payload' => 'ab',
+        ]]);
+
+        $this->assertSame(0, $first['body']['operation_count']);
+        $this->assertSame(2, $first['body']['current_file']['committed_bytes']);
+        $this->assertSame(7, $first['body']['current_file']['revision']);
+
+        $second = $this->push($endpoints, $session, $first['body']['request_generation'], [[
+            'type' => 'file',
+            'operation_index' => 0,
+            'path' => 'partial.bin',
+            'revision' => 7,
+            'offset' => 2,
+            'total_bytes' => 4,
+            'restart' => false,
+            'payload' => 'cd',
+        ]]);
+
+        $this->assertSame(1, $second['body']['operation_count']);
+        $this->assertNull($second['body']['current_file']);
+        $final = $this->advance_until_complete($endpoints, $session, $second['body']['request_generation']);
+        $this->assertSame('complete', $final['phase']);
+        $this->assertSame('abcd', file_get_contents($this->target_dir . '/partial.bin'));
+    }
+
+    public function test_replaying_the_same_restart_revision_does_not_truncate_its_prefix(): void {
+        $endpoints = $this->make_endpoints();
+        $session = $this->new_session();
+        $first = $this->push($endpoints, $session, 0, [[
+            'type' => 'file', 'operation_index' => 0, 'path' => 'changing.bin',
+            'revision' => 1, 'offset' => 0, 'total_bytes' => 4, 'restart' => false, 'payload' => 'ab',
+        ]]);
+        $restarted = $this->push($endpoints, $session, $first['body']['request_generation'], [[
+            'type' => 'file', 'operation_index' => 0, 'path' => 'changing.bin',
+            'revision' => 2, 'offset' => 0, 'total_bytes' => 4, 'restart' => true, 'payload' => 'XY',
+        ]]);
+
+        // Simulate retrying the request whose response was lost. Its signed
+        // generation is stale, so the body is rejected before it can restart
+        // the file a second time.
+        $stale = $this->push($endpoints, $session, $first['body']['request_generation'], [[
+            'type' => 'file', 'operation_index' => 0, 'path' => 'changing.bin',
+            'revision' => 2, 'offset' => 0, 'total_bytes' => 4, 'restart' => true, 'payload' => 'XY',
+        ]]);
+        $this->assertSame(409, $stale['http_code']);
+        $this->assertSame('stale_session_state', $stale['body']['reason']);
+
+        $status = $endpoints->session_status(
+            ['session_id' => $session->get_session_id()],
+            $this->session_headers('staged_session_status', $session->get_session_id(), null, 'GET')
+        );
+        $this->assertSame(2, $status['body']['current_file']['revision']);
+        $this->assertSame(2, $status['body']['current_file']['committed_bytes']);
+
+        $finished = $this->push($endpoints, $session, $restarted['body']['request_generation'], [
+            [
+                'type' => 'file', 'operation_index' => 0, 'path' => 'changing.bin',
+                'revision' => 2, 'offset' => 0, 'total_bytes' => 4, 'restart' => true, 'payload' => 'XY',
+            ],
+            [
+                'type' => 'file', 'operation_index' => 0, 'path' => 'changing.bin',
+                'revision' => 2, 'offset' => 2, 'total_bytes' => 4, 'restart' => false, 'payload' => 'ZW',
+            ],
+        ]);
+        $this->assertSame(1, $finished['body']['operation_count']);
+        $this->advance_until_complete($endpoints, $session, $finished['body']['request_generation']);
+        $this->assertSame('XYZW', file_get_contents($this->target_dir . '/changing.bin'));
+    }
+
+    public function test_invalid_frame_fails_the_session_instead_of_skipping_an_operation(): void {
+        $endpoints = $this->make_endpoints();
+        $session = $this->new_session();
+        $stream = $this->body_stream("not-json\n");
+        try {
+            $response = $endpoints->session_push_stream(
+                ['session_id' => $session->get_session_id()],
+                $this->session_headers('staged_session_push', $session->get_session_id(), 0),
+                $stream
+            );
+        } finally {
+            fclose($stream);
         }
-        foreach (glob($dir . '/*') ?: [] as $entry) {
-            is_dir($entry) ? $this->removeDir($entry) : @unlink($entry);
-        }
-        @rmdir($dir);
+
+        $this->assertSame(400, $response['http_code']);
+        $this->assertSame('invalid_frame', $response['body']['reason']);
+        $this->assertSame('failed', $response['body']['phase']);
+
+        $retry = $this->push($endpoints, $session, $response['body']['request_generation'], [
+            ['type' => 'delete', 'operation_index' => 0, 'path' => 'ignored.txt'],
+        ]);
+        $this->assertSame(409, $retry['http_code']);
+        $this->assertSame('session_rejected', $retry['body']['reason']);
     }
 
-    private function makeEndpoints(array $overrides = []): Site_Export_Staged_Endpoints
-    {
-        return new Site_Export_Staged_Endpoints(array_merge([
-            'staging_dir' => $this->staging_dir,
-            'secret' => self::SECRET,
-        ], $overrides));
+    public function test_payload_cap_rejection_keeps_the_session_resumable(): void {
+        $endpoints = $this->make_endpoints(['max_frame_bytes' => 2]);
+        $session = $this->new_session();
+        $oversized = $this->push($endpoints, $session, 0, [[
+            'type' => 'file', 'operation_index' => 0, 'path' => 'small.bin',
+            'revision' => 1, 'offset' => 0, 'total_bytes' => 3, 'restart' => false, 'payload' => 'abc',
+        ]]);
+
+        $this->assertSame(413, $oversized['http_code']);
+        $this->assertSame(2, $oversized['body']['max_frame_bytes']);
+        $this->assertSame(0, $oversized['body']['operation_count']);
+        $this->assertSame('uploading', $oversized['body']['phase']);
+
+        $accepted = $this->push($endpoints, $session, $oversized['body']['request_generation'], [
+            [
+                'type' => 'file', 'operation_index' => 0, 'path' => 'small.bin',
+                'revision' => 1, 'offset' => 0, 'total_bytes' => 3, 'restart' => false, 'payload' => 'ab',
+            ],
+            [
+                'type' => 'file', 'operation_index' => 0, 'path' => 'small.bin',
+                'revision' => 1, 'offset' => 2, 'total_bytes' => 3, 'restart' => false, 'payload' => 'c',
+            ],
+        ]);
+        $this->assertSame(1, $accepted['body']['operation_count']);
+    }
+
+    public function test_truncated_payload_keeps_the_confirmed_partial_cursor_resumable(): void {
+        $endpoints = $this->make_endpoints(['append_buffer_bytes' => 2]);
+        $session = $this->new_session();
+        $operation = [
+            'type' => 'file', 'operation_index' => 0, 'path' => 'truncated.bin',
+            'revision' => 1, 'offset' => 0, 'total_bytes' => 4, 'restart' => false, 'payload' => 'abcd',
+        ];
+        $body = Site_Export_Staged_Push_Stream_Protocol::encode_operation_header($operation) . 'ab';
+        $stream = $this->body_stream($body);
+        try {
+            $response = $endpoints->session_push_stream(
+                ['session_id' => $session->get_session_id()],
+                $this->session_headers('staged_session_push', $session->get_session_id(), 0),
+                $stream
+            );
+        } finally {
+            fclose($stream);
+        }
+
+        $this->assertSame(400, $response['http_code']);
+        $this->assertSame('body_read_failed', $response['body']['reason']);
+        $this->assertSame('uploading', $response['body']['phase']);
+        $this->assertSame(2, $response['body']['current_file']['committed_bytes']);
+
+        $finished = $this->push($endpoints, $session, $response['body']['request_generation'], [[
+            'type' => 'file', 'operation_index' => 0, 'path' => 'truncated.bin',
+            'revision' => 1, 'offset' => 2, 'total_bytes' => 4, 'restart' => false, 'payload' => 'cd',
+        ]]);
+        $this->assertSame(1, $finished['body']['operation_count']);
+    }
+
+    public function test_metadata_only_requests_stop_at_the_server_frame_cap(): void {
+        $endpoints = $this->make_endpoints(['max_frames_per_request' => 2]);
+        $session = $this->new_session();
+        $first = $this->push($endpoints, $session, 0, [
+            ['type' => 'delete', 'operation_index' => 0, 'path' => 'a'],
+            ['type' => 'delete', 'operation_index' => 1, 'path' => 'b'],
+            ['type' => 'delete', 'operation_index' => 2, 'path' => 'c'],
+        ]);
+
+        $this->assertSame(2, $first['body']['frames_processed']);
+        $this->assertSame(2, $first['body']['operation_count']);
+        $second = $this->push($endpoints, $session, $first['body']['request_generation'], [
+            ['type' => 'delete', 'operation_index' => 2, 'path' => 'c'],
+        ]);
+        $this->assertSame(3, $second['body']['operation_count']);
+    }
+
+    public function test_staged_symlink_ancestor_cannot_escape_the_private_tree(): void {
+        $outside = sys_get_temp_dir() . '/staged-endpoints-outside-' . bin2hex(random_bytes(8));
+        mkdir($outside, 0700, true);
+        try {
+            $endpoints = $this->make_endpoints();
+            $session = $this->new_session();
+            $response = $this->push($endpoints, $session, 0, [
+                ['type' => 'symlink', 'operation_index' => 0, 'path' => 'escape', 'target' => $outside],
+                [
+                    'type' => 'file', 'operation_index' => 1, 'path' => 'escape/written.txt',
+                    'revision' => 1, 'offset' => 0, 'total_bytes' => 1, 'restart' => false, 'payload' => 'x',
+                ],
+            ]);
+
+            $this->assertSame(409, $response['http_code']);
+            $this->assertSame('failed', $session->get_status()['phase']);
+            $this->assertFileDoesNotExist($outside . '/written.txt');
+        } finally {
+            $this->remove_tree($outside);
+        }
+    }
+
+    public function test_real_site_paths_under_dot_reprint_are_not_reserved(): void {
+        $endpoints = $this->make_endpoints();
+        $session = $this->new_session();
+        $response = $this->push($endpoints, $session, 0, [[
+            'type' => 'file', 'operation_index' => 0, 'path' => '.reprint/site-file',
+            'revision' => 1, 'offset' => 0, 'total_bytes' => 1, 'restart' => false, 'payload' => 'x',
+        ]]);
+
+        $this->assertSame(1, $response['body']['operation_count']);
+        $this->advance_until_complete($endpoints, $session, $response['body']['request_generation']);
+        $this->assertSame('x', file_get_contents($this->target_dir . '/.reprint/site-file'));
+    }
+
+    public function test_wrong_secret_is_rejected_before_the_body_is_opened(): void {
+        $endpoints = $this->make_endpoints();
+        $session = $this->new_session();
+        $headers = $this->session_headers('staged_session_push', $session->get_session_id(), 0);
+        $target = $headers['REQUEST_URI'];
+        $wrong = ( new Site_Export_HMAC_Client('wrong-secret') )->get_envelope_auth_headers('POST', $target) + [
+            'REQUEST_METHOD' => 'POST',
+            'REQUEST_URI' => $target,
+        ];
+
+        $response = $endpoints->session_push_stream(
+            ['session_id' => $session->get_session_id()],
+            $wrong,
+            null
+        );
+
+        $this->assertSame(403, $response['http_code']);
+        $this->assertSame('auth_failed', $response['body']['reason']);
+        $this->assertSame(0, $session->get_status()['request_generation']);
+    }
+
+    public function test_present_invalid_endpoint_limits_are_not_silently_defaulted(): void {
+        foreach (
+            [
+                ['secret' => ''],
+                ['secret' => false],
+                ['max_frame_bytes' => 0],
+                ['append_buffer_bytes' => 'no'],
+                ['append_buffer_bytes' => 4194305],
+                ['max_frames_per_request' => -1],
+                ['max_frames_per_request' => Site_Export_Staged_Push_Stream_Protocol::MAX_FRAMES_PER_REQUEST + 1],
+                ['timestamp_tolerance' => 0],
+            ] as $invalid
+        ) {
+            try {
+                $this->make_endpoints($invalid);
+                $this->fail('Expected invalid endpoint option to throw: ' . json_encode($invalid));
+            } catch (InvalidArgumentException $exception) {
+                $this->assertStringContainsString('must be', $exception->getMessage());
+            }
+        }
+    }
+
+    private function make_endpoints(array $overrides = []): Site_Export_Staged_Endpoints {
+        return new Site_Export_Staged_Endpoints(array_merge(
+            [
+                'staging_dir' => $this->staging_dir,
+                'secret' => self::SECRET,
+                'apply_target_root' => $this->target_dir,
+            ],
+            $overrides
+        ));
+    }
+
+    private function new_session(): Site_Export_Staged_Apply {
+        return Site_Export_Staged_Apply::create($this->staging_dir, $this->target_dir);
+    }
+
+    /** @param array<int,array<string,mixed>> $operations */
+    private function push(
+        Site_Export_Staged_Endpoints $endpoints,
+        Site_Export_Staged_Apply $session,
+        int $generation,
+        array $operations
+    ): array {
+        $body = '';
+        foreach ($operations as $operation) {
+            $body .= Site_Export_Staged_Push_Stream_Protocol::encode_operation_header($operation);
+            if ($operation['type'] === 'file') {
+                $body .= $operation['payload'];
+            }
+        }
+        $stream = $this->body_stream($body);
+        try {
+            return $endpoints->session_push_stream(
+                ['session_id' => $session->get_session_id()],
+                $this->session_headers('staged_session_push', $session->get_session_id(), $generation),
+                $stream
+            );
+        } finally {
+            fclose($stream);
+        }
+    }
+
+    /** @return array<string,mixed> */
+    private function advance_until_complete(
+        Site_Export_Staged_Endpoints $endpoints,
+        Site_Export_Staged_Apply $session,
+        int $generation
+    ): array {
+        for ($attempt = 0; $attempt < 100; ++$attempt) {
+            $response = $endpoints->session_advance(
+                ['session_id' => $session->get_session_id()],
+                $this->session_headers('staged_session_advance', $session->get_session_id(), $generation)
+            );
+            $this->assertSame(200, $response['http_code'], json_encode($response['body']));
+            $generation = $response['body']['request_generation'];
+            if ($response['body']['phase'] === 'complete') {
+                return $response['body'];
+            }
+        }
+        $this->fail('The staged apply session did not complete within 100 bounded advances.');
+    }
+
+    private function session_headers(
+        string $endpoint,
+        ?string $session_id = null,
+        ?int $expected_generation = null,
+        string $method = 'POST',
+        array $extra_parameters = []
+    ): array {
+        $target = '/?endpoint=' . rawurlencode($endpoint);
+        if ($session_id !== null) {
+            $target .= '&session_id=' . rawurlencode($session_id);
+        }
+        if ($expected_generation !== null) {
+            $target .= '&expected_request_generation=' . $expected_generation;
+        }
+        foreach ($extra_parameters as $name => $value) {
+            $target .= '&' . rawurlencode((string) $name) . '=' . rawurlencode((string) $value);
+        }
+        return ( new Site_Export_HMAC_Client(self::SECRET) )->get_envelope_auth_headers($method, $target) + [
+            'REQUEST_METHOD' => $method,
+            'REQUEST_URI' => $target,
+        ];
     }
 
     /** @return resource */
-    private function bodyStream(string $body)
-    {
+    private function body_stream(string $body) {
         $stream = fopen('php://temp', 'w+b');
-        fwrite($stream, $body);
-        rewind($stream);
+        if ($stream === false || fwrite($stream, $body) !== strlen($body) || fseek($stream, 0) !== 0) {
+            throw new RuntimeException('Could not create the staged endpoint test body.');
+        }
         return $stream;
     }
 
-    private function pushHeaders(string $secret = self::SECRET, array $overrides = []): array
-    {
-        $headers = (new Site_Export_HMAC_Client($secret))->get_envelope_auth_headers('POST', self::PUSH_TARGET);
-        return array_merge([
-            'REQUEST_METHOD' => 'POST',
-            'REQUEST_URI' => self::PUSH_TARGET,
-        ], $headers, $overrides);
-    }
-
-    /** @param array<int,array{artifact_id:string,offset:int,bytes:string,total_bytes:int,final:bool}> $frames */
-    private function pushBody(array $frames): string
-    {
-        $body = '';
-        foreach ($frames as $frame) {
-            $header = json_encode([
-                'type' => 'chunk',
-                'artifact_id' => base64_encode($frame['artifact_id']),
-                'offset' => $frame['offset'],
-                'bytes' => strlen($frame['bytes']),
-                'total_bytes' => $frame['total_bytes'],
-                'final' => $frame['final'],
-            ], JSON_UNESCAPED_SLASHES);
-            if ($header === false) {
-                throw new RuntimeException('Could not encode staged push stream frame header.');
-            }
-            $body .= $header . "\n" . $frame['bytes'];
+    private function remove_tree(string $path): void {
+        if (is_link($path) || is_file($path)) {
+            @unlink($path);
+            return;
         }
-        return $body;
-    }
-
-    /** @param array<int,array{artifact_id:string,offset:int,bytes:string,total_bytes:int,final:bool}> $frames */
-    private function push(
-        Site_Export_Staged_Endpoints $endpoints,
-        array $frames,
-        array $headers = [],
-        array $config = []
-    ): array {
-        $stream = $this->bodyStream($this->pushBody($frames));
-        try {
-            return $endpoints->push_stream($config, $headers ?: $this->pushHeaders(), $stream);
-        } finally {
-            fclose($stream);
+        if (!is_dir($path)) {
+            return;
         }
-    }
-
-    // ---------------------------------------------------------------
-    // Push data plane
-    // ---------------------------------------------------------------
-
-    public function testPushStreamStagesManyChunksAndFinalizes(): void
-    {
-        // A small append buffer forces many store steps per frame.
-        $endpoints = $this->makeEndpoints(['append_buffer_bytes' => 4]);
-        $body = 'the quick brown fox jumps over the lazy dog';
-        $split = 20;
-
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'a/b/dump.sql', 'offset' => 0, 'bytes' => substr($body, 0, $split), 'total_bytes' => strlen($body), 'final' => false],
-            ['artifact_id' => 'a/b/dump.sql', 'offset' => $split, 'bytes' => substr($body, $split), 'total_bytes' => strlen($body), 'final' => true],
-        ]);
-
-        $this->assertSame(200, $result['http_code']);
-        $this->assertSame('complete', $result['body']['status']);
-        $this->assertSame(['artifact_id' => base64_encode('a/b/dump.sql'), 'committed_bytes' => strlen($body)], $result['body']['cursor']);
-        $this->assertSame(1, $result['body']['files_verified']);
-        $this->assertSame($body, file_get_contents($this->staging_dir . '/files/a/b/dump.sql'));
-    }
-
-    public function testPushStreamRetryAbsorbsDuplicateBytes(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $frame = ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'abcdefghij', 'total_bytes' => 10, 'final' => true];
-        $this->push($endpoints, [$frame]);
-
-        // The sender timed out without the response and retries from the same cursor.
-        $retry = $this->push($endpoints, [$frame]);
-
-        $this->assertSame(200, $retry['http_code']);
-        $this->assertSame('complete', $retry['body']['status']);
-        $this->assertSame(['artifact_id' => base64_encode('artifact-1'), 'committed_bytes' => 10], $retry['body']['cursor']);
-        $this->assertSame(1, $retry['body']['files_verified']);
-        $this->assertSame('abcdefghij', file_get_contents($this->staging_dir . '/files/artifact-1'));
-    }
-
-    public function testPushStreamStraddlingFrameAppendsOnlyTheTail(): void
-    {
-        $endpoints = $this->makeEndpoints(['append_buffer_bytes' => 4]);
-        $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'abcdefghij', 'total_bytes' => 15, 'final' => false],
-        ]);
-
-        // After a resync the sender resends from offset 0 with a larger
-        // frame; only the bytes past the committed frontier may land.
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'abcdefghijKLMNO', 'total_bytes' => 15, 'final' => true],
-        ]);
-
-        $this->assertSame(200, $result['http_code']);
-        $this->assertSame(['artifact_id' => base64_encode('artifact-1'), 'committed_bytes' => 15], $result['body']['cursor']);
-        $this->assertSame('abcdefghijKLMNO', file_get_contents($this->staging_dir . '/files/artifact-1'));
-    }
-
-    public function testPushStreamFrameBeyondTheFrontierIsAnOffsetGapWithResumeHint(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'abcde', 'total_bytes' => 20, 'final' => false],
-        ]);
-
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 50, 'bytes' => 'later-bytes', 'total_bytes' => 100, 'final' => false],
-        ]);
-
-        $this->assertSame(409, $result['http_code']);
-        $this->assertSame('offset_gap', $result['body']['reason']);
-        $this->assertSame(['artifact_id' => base64_encode('artifact-1'), 'committed_bytes' => 5], $result['body']['cursor']);
-    }
-
-    public function testPushStreamRejectsWrongSecretBeforeTheStore(): void
-    {
-        $endpoints = $this->makeEndpoints();
-
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'secret.bin', 'offset' => 0, 'bytes' => 'secret', 'total_bytes' => 6, 'final' => true],
-        ], $this->pushHeaders('wrong-secret'));
-
-        $this->assertSame(403, $result['http_code']);
-        $this->assertSame('auth_failed', $result['body']['reason']);
-        $this->assertDirectoryDoesNotExist($this->staging_dir);
-    }
-
-    public function testPushStreamWithoutAConfiguredSecretIsUnavailable(): void
-    {
-        $endpoints = $this->makeEndpoints(['secret' => null]);
-
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'payload', 'total_bytes' => 7, 'final' => true],
-        ]);
-
-        $this->assertSame(503, $result['http_code']);
-        $this->assertSame('not_configured', $result['body']['reason']);
-    }
-
-    public function testPushStreamBodyOverTheCapIs413WithMaxFrameBytes(): void
-    {
-        $endpoints = $this->makeEndpoints(['max_frame_bytes' => 64]);
-
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => str_repeat('x', 100), 'total_bytes' => 100, 'final' => true],
-        ]);
-
-        $this->assertSame(413, $result['http_code']);
-        $this->assertSame('frame_too_large', $result['body']['reason']);
-        $this->assertSame(64, $result['body']['max_frame_bytes']);
-        $this->assertFileDoesNotExist($this->staging_dir . '/files/artifact-1');
-    }
-
-    public function testPushStreamWhileTheStoreIsHeldReportsBusy(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'first', 'total_bytes' => 11, 'final' => false],
-        ]);
-
-        $holder = fopen($this->staging_dir . '/lock', 'r+b');
-        flock($holder, LOCK_EX);
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 5, 'bytes' => 'second', 'total_bytes' => 11, 'final' => true],
-        ]);
-        flock($holder, LOCK_UN);
-        fclose($holder);
-
-        $this->assertSame(423, $result['http_code']);
-        $this->assertSame('busy', $result['body']['status']);
-        $this->assertSame(['artifact_id' => base64_encode('artifact-1'), 'committed_bytes' => 5], $result['body']['cursor']);
-    }
-
-    public function testMalformedPushFrameIsRejected(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $stream = $this->bodyStream(json_encode(['type' => 'chunk', 'artifact_id' => base64_encode('a'), 'offset' => 5, 'bytes' => 1, 'total_bytes' => 3, 'final' => false]) . "\nX");
-        try {
-            $result = $endpoints->push_stream([], $this->pushHeaders(), $stream);
-        } finally {
-            fclose($stream);
-        }
-
-        $this->assertSame(400, $result['http_code']);
-        $this->assertSame('invalid_frame', $result['body']['reason']);
-        $this->assertStringContainsString('offset 5 and 1 payload bytes, which exceeds total_bytes 3', $result['body']['detail']);
-    }
-
-    public function testPushStreamRejectsAReservedNamespaceFrameBeforeTheStore(): void
-    {
-        $endpoints = $this->makeEndpoints();
-
-        $result = $this->push($endpoints, [
-            ['artifact_id' => '.reprint/evil.txt', 'offset' => 0, 'bytes' => 'x', 'total_bytes' => 1, 'final' => true],
-        ]);
-
-        $this->assertSame(400, $result['http_code']);
-        $this->assertSame('reserved_artifact_id', $result['body']['reason']);
-        $this->assertStringContainsString('.reprint/', $result['body']['detail']);
-        // The store never saw it: nothing was written under files/.reprint/.
-        $this->assertFileDoesNotExist($this->staging_dir . '/files/.reprint/evil.txt');
-        $this->assertSame(['artifact_id' => base64_encode('.reprint/evil.txt'), 'committed_bytes' => 0], $result['body']['cursor']);
-    }
-
-    public function testPushStreamAcceptsTheDeletionManifestId(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $manifest = json_encode(['path' => base64_encode('wp-content/gone.txt')]) . "\n";
-
-        $result = $this->push($endpoints, [
-            ['artifact_id' => '.reprint/deletions.jsonl', 'offset' => 0, 'bytes' => $manifest, 'total_bytes' => strlen($manifest), 'final' => true],
-        ]);
-
-        // The one reserved id a sender may write stages like any artifact.
-        $this->assertSame(200, $result['http_code'], (string) json_encode($result['body']));
-        $this->assertSame('complete', $result['body']['status']);
-        $this->assertSame(1, $result['body']['files_verified']);
-        $this->assertSame($manifest, file_get_contents($this->staging_dir . '/files/.reprint/deletions.jsonl'));
-    }
-
-    public function testControlPlaneRoutesRefuseTheReservedNamespace(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $reserved = base64_encode('.reprint/evil.txt');
-
-        $finalize = $endpoints->finalize(['artifact_id' => $reserved, 'total_bytes' => 1], ['REQUEST_METHOD' => 'POST']);
-        $status = $endpoints->status(['artifact_id' => $reserved]);
-        $discard = $endpoints->discard(['artifact_id' => $reserved], ['REQUEST_METHOD' => 'POST']);
-
-        foreach (['finalize' => $finalize, 'status' => $status, 'discard' => $discard] as $route => $result) {
-            $this->assertSame(400, $result['http_code'], $route);
-            $this->assertSame('reserved_artifact_id', $result['body']['reason'], $route);
-        }
-
-        // The manifest id passes the gate on the control plane too.
-        $manifest_status = $endpoints->status(['artifact_id' => base64_encode('.reprint/deletions.jsonl')]);
-        $this->assertSame(200, $manifest_status['http_code']);
-    }
-
-    // ---------------------------------------------------------------
-    // Control plane: finalize, status, discard
-    // ---------------------------------------------------------------
-
-    public function testFinalizeWithWrongTotalIsRejected(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'payload', 'total_bytes' => 10, 'final' => false],
-        ]);
-
-        $result = $this->finalize($endpoints, 'artifact-1', 99);
-
-        $this->assertSame(409, $result['http_code']);
-        $this->assertSame('size_mismatch', $result['body']['reason']);
-    }
-
-    private function finalize(Site_Export_Staged_Endpoints $endpoints, string $artifact_id, int $total): array
-    {
-        return $endpoints->finalize(
-            ['artifact_id' => base64_encode($artifact_id), 'total_bytes' => $total],
-            ['REQUEST_METHOD' => 'POST']
-        );
-    }
-
-    public function testFinalizeOfUnknownArtifactReportsMissing(): void
-    {
-        $endpoints = $this->makeEndpoints();
-
-        $result = $this->finalize($endpoints, 'never-uploaded', 5);
-
-        $this->assertSame(409, $result['http_code']);
-        $this->assertSame('missing', $result['body']['reason']);
-    }
-
-    public function testFinalizeIsIdempotentAndZeroByteArtifactsVerify(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'payload', 'total_bytes' => 7, 'final' => true],
-        ]);
-
-        $this->assertSame(200, $this->finalize($endpoints, 'artifact-1', 7)['http_code']);
-        $this->assertSame('verified', $this->finalize($endpoints, 'empty.txt', 0)['body']['status']);
-    }
-
-    public function testStatusReportsResumeState(): void
-    {
-        $endpoints = $this->makeEndpoints();
-
-        $unknown = $endpoints->status(['artifact_id' => base64_encode('artifact-1')]);
-        $this->assertSame(200, $unknown['http_code']);
-        $this->assertSame(
-            ['exists' => false, 'committed_bytes' => 0, 'verified' => false],
-            $unknown['body']
-        );
-
-        $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'abcde', 'total_bytes' => 10, 'final' => false],
-        ]);
-        $known = $endpoints->status(['artifact_id' => base64_encode('artifact-1')]);
-        $this->assertSame(
-            ['exists' => true, 'committed_bytes' => 5, 'verified' => false],
-            $known['body']
-        );
-    }
-
-    public function testDiscardReportsHeldStoreAsRetriable(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => 'payload', 'total_bytes' => 7, 'final' => true],
-        ]);
-
-        $holder = fopen($this->staging_dir . '/lock', 'r+b');
-        flock($holder, LOCK_EX);
-        $busy = $endpoints->discard(
-            ['artifact_id' => base64_encode('artifact-1')],
-            ['REQUEST_METHOD' => 'POST']
-        );
-        flock($holder, LOCK_UN);
-        fclose($holder);
-
-        $this->assertSame(423, $busy['http_code']);
-        $this->assertSame(['discarded' => false], $busy['body']);
-
-        $done = $endpoints->discard(
-            ['artifact_id' => base64_encode('artifact-1')],
-            ['REQUEST_METHOD' => 'POST']
-        );
-        $this->assertSame(200, $done['http_code']);
-        $this->assertSame(['discarded' => true], $done['body']);
-    }
-
-    // ---------------------------------------------------------------
-    // Request validation and server-owned options
-    // ---------------------------------------------------------------
-
-    public function testOversizedFrameCursorReportsOnlyStoreCommittedBytes(): void
-    {
-        $endpoints = $this->makeEndpoints(['max_frame_bytes' => 6]);
-
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'claimed.bin', 'offset' => 4, 'bytes' => str_repeat('x', 10), 'total_bytes' => 20, 'final' => false],
-        ]);
-
-        $this->assertSame(413, $result['http_code']);
-        $this->assertSame(
-            ['artifact_id' => base64_encode('claimed.bin'), 'committed_bytes' => 0],
-            $result['body']['cursor'],
-            'a rejection cursor must report what the store confirmed, not what the sender claimed'
-        );
-    }
-
-    public function testOffsetZeroFrameRestartsAnUnverifiedArtifact(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        (new Site_Export_Staged_Artifacts($this->staging_dir))->append('restarted.bin', 0, 'AAAA');
-
-        // A frame starting at byte 0 means the sender is pushing the file
-        // over — it cannot vouch for the staged prefix. The old bytes must
-        // not survive underneath the new ones.
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'restarted.bin', 'offset' => 0, 'bytes' => 'BBBBBBBB', 'total_bytes' => 8, 'final' => true],
-        ]);
-
-        $this->assertSame(200, $result['http_code'], (string) json_encode($result['body']));
-        $this->assertSame(1, $result['body']['files_verified']);
-        $this->assertSame('BBBBBBBB', file_get_contents($this->staging_dir . '/files/restarted.bin'));
-    }
-
-    public function testOffsetZeroFrameWithANewTotalRestartsAVerifiedArtifact(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $store = new Site_Export_Staged_Artifacts($this->staging_dir);
-        $store->append('reverified.bin', 0, str_repeat('A', 8));
-        $store->finalize('reverified.bin', 8);
-
-        // The source changed after verification; the sender restarts the
-        // file with its new size. Refusing forever would deadlock the push.
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'reverified.bin', 'offset' => 0, 'bytes' => 'CCCCCC', 'total_bytes' => 6, 'final' => true],
-        ]);
-
-        $this->assertSame(200, $result['http_code'], (string) json_encode($result['body']));
-        $this->assertSame(1, $result['body']['files_verified']);
-        $this->assertSame('CCCCCC', file_get_contents($this->staging_dir . '/files/reverified.bin'));
-    }
-
-    public function testMutatingRoutesRequirePost(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $get = ['REQUEST_METHOD' => 'GET'];
-        $stream = $this->bodyStream('');
-
-        $push = $endpoints->push_stream([], $get, $stream);
-        fclose($stream);
-        $finalize = $endpoints->finalize(['artifact_id' => 'a', 'total_bytes' => 1], $get);
-        $discard = $endpoints->discard(['artifact_id' => 'a'], $get);
-
-        foreach ([$push, $finalize, $discard] as $result) {
-            $this->assertSame(405, $result['http_code']);
-            $this->assertSame('method_not_allowed', $result['body']['reason']);
-        }
-    }
-
-    public function testMalformedParametersAreRejected(): void
-    {
-        $endpoints = $this->makeEndpoints();
-        $post = ['REQUEST_METHOD' => 'POST'];
-
-        $bad_total = $endpoints->finalize(['artifact_id' => base64_encode('a'), 'total_bytes' => 'many'], $post);
-        $this->assertSame('invalid_total', $bad_total['body']['reason']);
-
-        $bad_status_id = $endpoints->status(['artifact_id' => '']);
-        $this->assertSame(400, $bad_status_id['http_code']);
-
-        // Control-plane ids travel base64, like push stream frames.
-        $undecodable_status_id = $endpoints->status(['artifact_id' => '!!!not-base64!!!']);
-        $this->assertSame(400, $undecodable_status_id['http_code']);
-        $this->assertSame('invalid_artifact_id', $undecodable_status_id['body']['reason']);
-    }
-
-    public function testClientParametersCannotChooseServerOptions(): void
-    {
-        $endpoints = $this->makeEndpoints(['max_frame_bytes' => 1024]);
-        $evil_dir = $this->staging_dir . '-evil';
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'artifact-1', 'offset' => 0, 'bytes' => str_repeat('x', 100), 'total_bytes' => 100, 'final' => true],
-        ], [], [
-            // Options are server-owned; parameters with the same names
-            // must be ignored.
-            'staging_dir' => $evil_dir,
-            'max_frame_bytes' => 10,
-            'secret' => 'attacker-chosen',
-        ]);
-
-        $this->assertSame(200, $result['http_code']);
-        $this->assertFileExists($this->staging_dir . '/files/artifact-1');
-        $this->assertDirectoryDoesNotExist($evil_dir);
-    }
-
-    // ---------------------------------------------------------------
-    // Dispatcher wiring
-    // ---------------------------------------------------------------
-
-    public function testHttpServerRoutesStagedEndpoints(): void
-    {
-        $server = new Site_Export_HTTP_Server([
-            'staged' => ['staging_dir' => $this->staging_dir, 'secret' => self::SECRET],
-        ]);
-
-        ob_start();
-        $server->handle_request([
-            'get' => ['endpoint' => 'staged_status', 'artifact_id' => base64_encode('artifact-1')],
-            'server' => ['REQUEST_METHOD' => 'GET'],
-            'body' => '',
-        ]);
-        $output = ob_get_clean();
-
-        $this->assertSame(
-            ['exists' => false, 'committed_bytes' => 0, 'verified' => false],
-            json_decode( (string) $output, true)
-        );
-    }
-
-    public function testStagedRoutesAreAbsentWithoutTheStagedOption(): void
-    {
-        $server = new Site_Export_HTTP_Server();
-
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage("Invalid endpoint: 'staged_status'");
-
-        $server->dispatch(['endpoint' => 'staged_status']);
-    }
-
-    public function testExplicitHandlersWinOverStagedRegistration(): void
-    {
-        $called = false;
-        $server = new Site_Export_HTTP_Server([
-            'handlers' => [
-                'staged_status' => function (array $config) use (&$called): void {
-                    $called = true;
-                },
-            ],
-            'staged' => ['staging_dir' => $this->staging_dir, 'secret' => self::SECRET],
-        ]);
-
-        $server->dispatch(['endpoint' => 'staged_status']);
-
-        $this->assertTrue($called);
-    }
-
-    public function testHandleRequestOnlyReadsTheBodyForJsonContent(): void
-    {
-        $reads = 0;
-        $options = [
-            'handlers' => ['preflight' => static function (array $config): void {}],
-            'body_reader' => function () use (&$reads): string {
-                ++$reads;
-                return '';
-            },
-        ];
-        $server = new Site_Export_HTTP_Server($options);
-
-        $server->handle_request([
-            'get' => ['endpoint' => 'preflight'],
-            'server' => ['REQUEST_METHOD' => 'POST', 'CONTENT_TYPE' => 'application/octet-stream'],
-        ]);
-        $this->assertSame(0, $reads, 'a raw body must not be buffered for config parsing');
-
-        $server->handle_request([
-            'get' => ['endpoint' => 'preflight'],
-            'server' => ['REQUEST_METHOD' => 'POST', 'CONTENT_TYPE' => 'application/json; charset=utf-8'],
-        ]);
-        $this->assertSame(1, $reads, 'a JSON body still feeds config parsing');
-    }
-
-    public function testHandleRequestDoesNotBufferStagedPushBodies(): void
-    {
-        $reads = 0;
-        $server = new Site_Export_HTTP_Server([
-            'staged' => ['staging_dir' => $this->staging_dir, 'secret' => self::SECRET],
-            'body_reader' => function () use (&$reads): string {
-                ++$reads;
-                return 'this would buffer the raw push body';
-            },
-        ]);
-
-        $previous_request_method = $_SERVER['REQUEST_METHOD'] ?? null;
-        $previous_request_uri = $_SERVER['REQUEST_URI'] ?? null;
-        $_SERVER['REQUEST_METHOD'] = 'POST';
-        $_SERVER['REQUEST_URI'] = self::PUSH_TARGET;
-        $buffer_level = ob_get_level();
-        ob_start();
-        try {
-            $server->handle_request([
-                'get' => ['endpoint' => 'staged_push'],
-                'server' => ['REQUEST_METHOD' => 'POST', 'CONTENT_TYPE' => 'application/json'],
-            ]);
-            $output = ob_get_clean();
-        } finally {
-            while (ob_get_level() > $buffer_level) {
-                ob_end_clean();
-            }
-            if ($previous_request_method === null) {
-                unset($_SERVER['REQUEST_METHOD']);
-            } else {
-                $_SERVER['REQUEST_METHOD'] = $previous_request_method;
-            }
-            if ($previous_request_uri === null) {
-                unset($_SERVER['REQUEST_URI']);
-            } else {
-                $_SERVER['REQUEST_URI'] = $previous_request_uri;
+        $entries = scandir($path);
+        if (is_array($entries)) {
+            foreach ($entries as $entry) {
+                if ($entry !== '.' && $entry !== '..') {
+                    $this->remove_tree($path . '/' . $entry);
+                }
             }
         }
-
-        $this->assertSame(0, $reads, 'staged_push body bytes must only be read by the staged handler');
-        $this->assertSame('auth_failed', json_decode( (string) $output, true)['reason']);
+        @rmdir($path);
     }
 }

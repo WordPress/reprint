@@ -34,6 +34,7 @@
             <file>StagedArtifactsTest.php</file>
             <file>StagedApplyTest.php</file>
             <file>StagedEndpointsTest.php</file>
+            <file>StagedPushStreamProtocolTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">
             <file>NaiveQueryStreamTest.php</file>

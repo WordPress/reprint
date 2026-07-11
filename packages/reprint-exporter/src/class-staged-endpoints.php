@@ -1,72 +1,62 @@
 <?php
 
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Endpoint errors are returned as API JSON, never rendered as HTML.
+
 use function WordPress\Reprint\Exporter\parse_size;
 
 if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
     require_once __DIR__ . '/class-staged-push-stream-protocol.php';
 }
+if (!class_exists('Site_Export_Staged_Apply', false)) {
+    require_once __DIR__ . '/class-staged-apply.php';
+}
 
 /**
- * HTTP endpoints for the staged artifact store.
+ * Authenticated HTTP surface for target-owned staged apply sessions.
  *
- * This is the target side of a push stream: the sender opens one request,
- * frames many bounded chunks for many files, and this endpoint commits each
- * frame into Site_Export_Staged_Artifacts instead of touching the live site.
+ * A push request carries typed operations, not an apply manifest. Each frame
+ * is validated and materialized in the private session before its server-owned
+ * journal record becomes durable. `advance` closes uploads and commits a fixed
+ * batch directly from that journal; there is no seal, preparation, or
+ * validation pass between upload and commit.
  *
- * Four routes share the existing endpoint dispatcher:
- *
- * - staged_push     (POST, data plane): framed file chunks in one streamed
- *   request body.
- * - staged_finalize (POST, control plane): confirm the assembled size.
- * - staged_status   (GET, control plane): resume hint for a sender.
- * - staged_discard  (POST, control plane): drop an artifact; retry
- *   until the response says discarded.
- *
- * Control-plane routes have small bodies and ride the embedding layer's
- * existing HMAC verification, like every other endpoint. staged_push uses
- * envelope HMAC instead: authenticate method + request target before reading
- * bytes, then let TLS protect the body. That keeps one push stream as one
- * request even when it carries many frames for many files.
- *
- * Chunk retries are the normal case, not an error: a sender that timed
- * out learns nothing about what landed, retries from its last cursor or
- * asks staged_status for the store's committed offset, and may later
- * resend with shifted boundaries. push_stream therefore compares the store's
- * committed offset with each frame first, skips the committed prefix of a
- * straddling mid-file frame, restarts an artifact when the sender begins it
- * again at offset 0 (the sender only does that when its source changed or
- * it cannot vouch for the staged prefix), and reports offset_gap with the
- * cursor only when a frame starts beyond the frontier.
- *
- * Rejections the chunk sizer must learn from are typed for it: a frame
- * over the frame cap is HTTP 413 with max_frame_bytes in the payload,
- * exactly what record_too_large() consumes. The cap defaults to post_max_size
- * (falling back to the sizer's own 1 GiB hard cap when PHP reports none),
- * because a proxy or PHP itself would refuse larger bodies before this code
- * runs anyway.
- *
- * All options are server-owned. Client config never chooses the staging
- * directory, the secret, or the caps — a request parameter named like
- * an option is ignored. Methods return ['http_code' => int, 'body' =>
- * array] and never echo, so tests drive them directly; the dispatcher
- * wiring in Site_Export_HTTP_Server emits the JSON.
+ * All session parameters live in the signed request target. The streaming
+ * route authenticates its method and target before reading the body and relies
+ * on TLS for body integrity, so it can carry many files in one request without
+ * buffering or hashing the entity body. A request-generation fence rejects a
+ * lost-response replay before PHP reads its body. Status then reports only the
+ * target-confirmed operation count and active file cursor.
  */
 final class Site_Export_Staged_Endpoints {
 
-    /** The chunk sizer never sends more than this, so accept up to it. */
+    /** The sender's hard ceiling for one file-frame payload. */
     private const DEFAULT_MAX_FRAME_BYTES = 1073741824;
 
-    /** One append() step per this many request-body bytes. */
+    /** One durable file-write step per this many request-body bytes. */
     private const DEFAULT_APPEND_BUFFER_BYTES = 262144;
 
-    /** Request-body read size while discarding already-committed bytes. */
-    private const READ_BUFFER_BYTES = 65536;
+    /** Matches the direct session's largest bounded file-write step. */
+    private const MAX_APPEND_BUFFER_BYTES = 4194304;
 
-    /** Detail returned when a control-plane call names the reserved namespace. */
-    private const RESERVED_NAMESPACE_MESSAGE = 'This artifact id is in reprint\'s reserved ".reprint/" namespace; only the deletion manifest may be written there.';
+    /** Bound zero-payload work as well as file chunks in one PHP request. */
+    private const DEFAULT_MAX_FRAMES_PER_REQUEST = 1024;
 
-    /** @var Site_Export_Staged_Artifacts */
-    private $store;
+    /** Endpoint-owned failure when live apply recovery is unavailable. */
+    private const ERROR_APPLY_NOT_CONFIGURED = 2001;
+
+    private const APPLY_NOT_CONFIGURED_MESSAGE = 'Server configuration has not enabled a safe staged-apply recovery entry point.';
+
+    /** @var string */
+    private $staging_dir;
+
+    /** @var string|null */
+    private $apply_target_root;
+
+    /** @var string[] */
+    private $apply_protected_paths;
+
+    /** @var bool */
+    private $apply_sessions_enabled;
 
     /** @var string|null */
     private $secret;
@@ -74,486 +64,549 @@ final class Site_Export_Staged_Endpoints {
     /** @var int */
     private $max_frame_bytes;
 
+    /** @var int|null Actual PHP entity-body limit, when the host reports one. */
+    private $post_max_bytes;
+
     /** @var int */
     private $append_buffer_bytes;
+
+    /** @var int */
+    private $max_frames_per_request;
 
     /** @var int */
     private $timestamp_tolerance;
 
     /**
      * @param array $options Server-owned configuration:
-     *   - staging_dir (string, required): passed to the artifact store.
-     *     Must live outside the web-served tree.
-     *   - secret (?string): shared secret for push authentication.
-     *     Null leaves pushes answering 503 until one is configured.
-     *   - max_frame_bytes (int): single frame payload cap; defaults to
-     *     post_max_size, or 1 GiB when PHP reports no limit.
-     *   - append_buffer_bytes (int): request-to-store step size.
+     *   - staging_dir (string, required): private session storage.
+     *   - secret (?string): shared secret for request authentication.
+     *   - max_frame_bytes (int): maximum file payload in one frame.
+     *   - append_buffer_bytes (int): one target write step.
+     *   - max_frames_per_request (int): bounds metadata-only work.
      *   - timestamp_tolerance (int): HMAC freshness window in seconds.
+     *   - apply_target_root (?string): server-owned live target.
+     *   - apply_protected_paths (string[]): paths sessions never mutate.
+     *   - apply_sessions_enabled (bool): whether a boot-independent recovery
+     *     entry point can finish a live apply.
      */
     public function __construct(array $options) {
         $staging_dir = $options['staging_dir'] ?? null;
         if (!is_string($staging_dir) || $staging_dir === '') {
             throw new InvalidArgumentException('Staged endpoints require a staging_dir option.');
         }
-        $this->store = new Site_Export_Staged_Artifacts($staging_dir);
+        $this->staging_dir = $staging_dir;
+
+        $apply_target_root = $options['apply_target_root'] ?? null;
+        if ($apply_target_root !== null && ( !is_string($apply_target_root) || $apply_target_root === '' )) {
+            throw new InvalidArgumentException('Staged apply target root must be a non-empty string when configured.');
+        }
+        $this->apply_target_root = $apply_target_root;
+
+        $protected_paths = $options['apply_protected_paths'] ?? [];
+        if (!is_array($protected_paths)) {
+            throw new InvalidArgumentException('Staged apply protected paths must be an array of target-relative paths.');
+        }
+        $this->apply_protected_paths = $protected_paths;
+
+        $apply_sessions_enabled = $options['apply_sessions_enabled'] ?? true;
+        if (!is_bool($apply_sessions_enabled)) {
+            throw new InvalidArgumentException('Staged apply_sessions_enabled must be a boolean.');
+        }
+        $this->apply_sessions_enabled = $apply_sessions_enabled;
 
         $secret = $options['secret'] ?? null;
-        $this->secret = is_string($secret) && $secret !== '' ? $secret : null;
-
-        $max_frame_bytes_option = $options['max_frame_bytes'] ?? null;
-        if (!is_numeric($max_frame_bytes_option) || (int) $max_frame_bytes_option <= 0) {
-            $post_max_size = ini_get('post_max_size');
-            $max_frame_bytes_option = is_string($post_max_size) && $post_max_size !== ''
-                ? parse_size($post_max_size)
-                : 0;
-            if ($max_frame_bytes_option <= 0) {
-                $max_frame_bytes_option = self::DEFAULT_MAX_FRAME_BYTES;
-            }
+        if ($secret !== null && ( !is_string($secret) || $secret === '' )) {
+            throw new InvalidArgumentException('Staged secret must be a non-empty string or null when configured.');
         }
-        $this->max_frame_bytes = (int) $max_frame_bytes_option;
+        $this->secret = $secret;
 
-        $append_buffer_bytes_option = $options['append_buffer_bytes'] ?? null;
-        $this->append_buffer_bytes = is_numeric($append_buffer_bytes_option) && (int) $append_buffer_bytes_option > 0
-            ? (int) $append_buffer_bytes_option
-            : self::DEFAULT_APPEND_BUFFER_BYTES;
+        $post_max_size = ini_get('post_max_size');
+        $post_max_bytes = is_string($post_max_size) && $post_max_size !== ''
+            ? parse_size($post_max_size)
+            : 0;
+        $this->post_max_bytes = $post_max_bytes > 0 ? $post_max_bytes : null;
 
-        $timestamp_tolerance_option = $options['timestamp_tolerance'] ?? null;
-        $this->timestamp_tolerance = is_numeric($timestamp_tolerance_option) && (int) $timestamp_tolerance_option > 0
-            ? (int) $timestamp_tolerance_option
-            : 300;
+        $max_frame_bytes = $options['max_frame_bytes'] ?? null;
+        if ($max_frame_bytes === null) {
+            $max_frame_bytes = $this->post_max_bytes ?? self::DEFAULT_MAX_FRAME_BYTES;
+        } elseif (!is_numeric($max_frame_bytes) || (int) $max_frame_bytes <= 0) {
+            throw new InvalidArgumentException('Staged max_frame_bytes must be a positive integer when configured.');
+        }
+        $this->max_frame_bytes = (int) $max_frame_bytes;
+
+        $append_buffer_bytes = $options['append_buffer_bytes'] ?? self::DEFAULT_APPEND_BUFFER_BYTES;
+        if (
+            !is_numeric($append_buffer_bytes)
+            || (int) $append_buffer_bytes <= 0
+            || (int) $append_buffer_bytes > self::MAX_APPEND_BUFFER_BYTES
+        ) {
+            throw new InvalidArgumentException(
+                'Staged append_buffer_bytes must be between 1 and ' . self::MAX_APPEND_BUFFER_BYTES . ' when configured.'
+            );
+        }
+        $this->append_buffer_bytes = (int) $append_buffer_bytes;
+
+        $max_frames_per_request = $options['max_frames_per_request'] ?? self::DEFAULT_MAX_FRAMES_PER_REQUEST;
+        if (
+            !is_numeric($max_frames_per_request)
+            || (int) $max_frames_per_request <= 0
+            || (int) $max_frames_per_request > Site_Export_Staged_Push_Stream_Protocol::MAX_FRAMES_PER_REQUEST
+        ) {
+            throw new InvalidArgumentException(
+                'Staged max_frames_per_request must be between 1 and '
+                . Site_Export_Staged_Push_Stream_Protocol::MAX_FRAMES_PER_REQUEST . ' when configured.'
+            );
+        }
+        $this->max_frames_per_request = (int) $max_frames_per_request;
+
+        $timestamp_tolerance = $options['timestamp_tolerance'] ?? 300;
+        if (!is_numeric($timestamp_tolerance) || (int) $timestamp_tolerance <= 0) {
+            throw new InvalidArgumentException('Staged timestamp_tolerance must be a positive integer when configured.');
+        }
+        $this->timestamp_tolerance = (int) $timestamp_tolerance;
     }
 
-    /**
-     * Stage a framed stream of chunks for many artifacts in one request.
-     *
-     * Each frame is one JSON line followed by exactly "bytes" raw bytes:
-     *
-     * {"type":"chunk","artifact_id":"<base64 of path>","offset":0,"bytes":123,"total_bytes":456,"final":false}\n
-     *
-     * A frame commits before the next frame is read. If the request dies after
-     * a commit, the next request may replay from the last sender cursor or from
-     * the beginning: verified artifacts replayed at their verified size are
-     * skipped, and an offset-0 frame for anything else that holds bytes
-     * restarts the artifact from zero — the sender only starts a file over
-     * when its source changed or it cannot vouch for the staged prefix, and
-     * appending one version behind another would corrupt the artifact.
-     *
-     * Behavior steps:
-     * 1. Read one JSON header line and validate the frame before reading its
-     *    payload bytes.
-     * 2. Reject frames larger than this endpoint accepts, before consuming the
-     *    oversized payload. Every rejection cursor reports the store's
-     *    committed count, never the offset the sender claimed.
-     * 3. If the artifact is verified and the frame declares its verified size,
-     *    consume the frame payload only to keep the stream aligned with the
-     *    next JSON header.
-     * 4. If the frame starts at byte 0 and the artifact holds anything else,
-     *    discard the staged bytes and stage this frame fresh.
-     * 5. If the artifact is partially committed and the frame starts mid-file,
-     *    discard any replayed prefix bytes the store already has and append
-     *    only the missing suffix, in bounded pieces so one frame cannot force
-     *    the endpoint to hold the full chunk in memory.
-     * 6. Finalize only when the frame marks the artifact final, then report the
-     *    latest cursor for the sender to resume from after failures.
-     *
-     * @param array $config Request parameters.
-     * @param array $headers Request headers/server vars ($_SERVER shape).
-     * @param resource|null $input Request body stream (php://input).
-     * @return array{http_code:int,body:array}
-     */
-    public function push_stream(array $config, array $headers, $input): array {
+    /** @return array{http_code:int,body:array} */
+    public function session_create(array $config, array $headers): array {
         $method_error = $this->require_post($headers);
         if ($method_error !== null) {
             return $method_error;
         }
-        if ($this->secret === null) {
-            return $this->rejected(503, 'not_configured', 'shared_secret');
-        }
-        if (!is_resource($input)) {
-            return $this->rejected(500, 'io_error', 'open_request_body');
-        }
-
-        $request_target = $headers['REQUEST_URI'] ?? null;
-        if (!is_string($request_target) || $request_target === '') {
-            return $this->rejected(400, 'missing_request_target');
-        }
-        $auth_error = (new Site_Export_HMAC_Server($this->secret, $this->timestamp_tolerance))
-            ->verify_envelope($headers, (string) ( $headers['REQUEST_METHOD'] ?? 'POST' ), $request_target);
+        $auth_error = $this->require_envelope_auth($headers, 'staged_session_create');
         if ($auth_error !== null) {
-            return $this->rejected(403, 'auth_failed', $auth_error);
+            return $auth_error;
         }
 
-        $files_verified = 0;
-        $cursor = null;
-        while (!feof($input)) {
-            $line = fgets($input);
-            if ($line === false) {
+        return $this->session_action(function () use ($config, $headers): array {
+            $parameters = $this->request_target_parameters($headers);
+            $create_token = $parameters['create_token'] ?? null;
+            if (!is_string($create_token) || !preg_match('/^[a-f0-9]{32}$/D', $create_token)) {
+                throw new InvalidArgumentException('Staged apply session creation requires a 32-character lowercase hexadecimal create_token in the signed request target.');
+            }
+            if (array_key_exists('create_token', $config) && $config['create_token'] !== $create_token) {
+                throw new InvalidArgumentException('Staged apply create_token must match the signed request target.');
+            }
+            if (!$this->apply_sessions_enabled || $this->apply_target_root === null) {
+                return $this->rejected(503, 'apply_not_configured', self::APPLY_NOT_CONFIGURED_MESSAGE);
+            }
+
+            // A client persists this token before sending create. The server
+            // derives the id, so replay after a lost response opens the same
+            // workspace without accepting a caller-chosen session id.
+            $server_session_id = substr(hash_hmac('sha256', 'reprint-staged-apply-create-v2:' . $create_token, (string) $this->secret), 0, 32);
+            $retired_session_seconds = $this->timestamp_tolerance > intdiv(PHP_INT_MAX - 1, 2)
+                ? PHP_INT_MAX
+                : $this->timestamp_tolerance * 2 + 1;
+            $session = Site_Export_Staged_Apply::create(
+                $this->staging_dir,
+                $this->apply_target_root,
+                $this->apply_protected_paths,
+                $server_session_id,
+                $retired_session_seconds
+            );
+            $state = $session->get_status();
+            $body = $this->session_state_body($state);
+            $body['status'] = 'created';
+            $body['max_frame_bytes'] = $this->max_frame_bytes;
+            $body['max_frames_per_request'] = $this->max_frames_per_request;
+            // This is the decoded entity-body budget PHP reports. A proxy's
+            // hidden limit is learned later from actual 413 responses.
+            $body['post_max_bytes'] = $this->post_max_bytes;
+            return ['http_code' => 201, 'body' => $body];
+        });
+    }
+
+    /**
+     * Authenticate before the HTTP server parses or buffers other input.
+     *
+     * @return array{http_code:int,body:array}|null
+     */
+    public function pre_authenticate_envelope(array $headers, string $expected_endpoint): ?array {
+        $error = $this->require_envelope_auth($headers, $expected_endpoint);
+        if ($error === null || $error['http_code'] === 503) {
+            return $error;
+        }
+        return $this->rejected(403, 'auth_failed', 'Authentication failed.');
+    }
+
+    /**
+     * Stream typed operations into one isolated target session.
+     *
+     * @param resource|null $input
+     * @return array{http_code:int,body:array}
+     */
+    public function session_push_stream(array $config, array $headers, $input): array {
+        $method_error = $this->require_post($headers);
+        if ($method_error !== null) {
+            return $method_error;
+        }
+        $auth_error = $this->require_envelope_auth($headers, 'staged_session_push');
+        if ($auth_error !== null) {
+            return $auth_error;
+        }
+
+        return $this->session_action(function () use ($config, $headers, $input): array {
+            $expected_request_generation = $this->expected_session_request_generation($headers);
+            $session = $this->open_session($config, $headers);
+            return $session->while_uploading(
+                $expected_request_generation,
+                function (Site_Export_Staged_Apply $locked_session) use ($input): array {
+                    return $this->stream_operation_frames($locked_session, $input);
+                }
+            );
+        });
+    }
+
+    /** Close uploads and commit the next fixed server-owned batch. */
+    public function session_advance(array $config, array $headers): array {
+        $method_error = $this->require_post($headers);
+        if ($method_error !== null) {
+            return $method_error;
+        }
+        $auth_error = $this->require_envelope_auth($headers, 'staged_session_advance');
+        if ($auth_error !== null) {
+            return $auth_error;
+        }
+        return $this->session_action(function () use ($config, $headers): array {
+            $session = $this->open_session($config, $headers);
+            $state = $session->advance($this->expected_session_request_generation($headers));
+            return $this->session_state_response($state);
+        });
+    }
+
+    /** @return array{http_code:int,body:array} */
+    public function session_status(array $config, array $headers): array {
+        $method_error = $this->require_get($headers);
+        if ($method_error !== null) {
+            return $method_error;
+        }
+        $auth_error = $this->require_envelope_auth($headers, 'staged_session_status');
+        if ($auth_error !== null) {
+            return $auth_error;
+        }
+        return $this->session_action(function () use ($config, $headers): array {
+            return $this->session_state_response($this->open_session($config, $headers)->get_status());
+        });
+    }
+
+    /** @return array{http_code:int,body:array} */
+    public function session_discard(array $config, array $headers): array {
+        $method_error = $this->require_post($headers);
+        if ($method_error !== null) {
+            return $method_error;
+        }
+        $auth_error = $this->require_envelope_auth($headers, 'staged_session_discard');
+        if ($auth_error !== null) {
+            return $auth_error;
+        }
+        return $this->session_action(function () use ($config, $headers): array {
+            $session = $this->open_session($config, $headers);
+            $discarded = $session->discard($this->expected_session_request_generation($headers));
+            return [
+                'http_code' => 200,
+                'body' => [
+                    'status' => $discarded ? 'discarded' : 'discarding',
+                    'session_id' => $session->get_session_id(),
+                ],
+            ];
+        });
+    }
+
+    /**
+     * Process at most the server-owned frame cap. Each file piece is passed to
+     * the session before the next piece is read, so a truncated request loses
+     * at most one bounded in-memory piece and resumes at the persisted cursor.
+     *
+     * @param resource|null $input
+     * @return array{http_code:int,body:array}
+     */
+    private function stream_operation_frames(Site_Export_Staged_Apply $session, $input): array {
+        if (!is_resource($input)) {
+            return $this->rejected(500, 'io_error', 'Could not open the staged push request body.');
+        }
+
+        $frames_processed = 0;
+        while ($frames_processed < $this->max_frames_per_request && !feof($input)) {
+            try {
+                $line = Site_Export_Staged_Push_Stream_Protocol::read_header_line($input);
+            } catch (InvalidArgumentException $exception) {
+                $session->fail_upload($exception->getMessage());
+                return $this->stream_rejected(400, 'invalid_frame', $exception->getMessage(), $session);
+            } catch (RuntimeException $exception) {
+                // The stream itself failed, rather than carrying a malformed
+                // header. A later request can resume from durable session
+                // state, so this must not turn the session terminal.
+                return $this->stream_rejected(400, 'body_read_failed', $exception->getMessage(), $session);
+            }
+            if ($line === null) {
                 break;
             }
-            $line = rtrim($line, "\r\n");
             try {
-                $frame = Site_Export_Staged_Push_Stream_Protocol::decode_chunk_header($line);
-            } catch (InvalidArgumentException $e) {
-                return $this->stream_rejected(400, 'invalid_frame', $e->getMessage(), $cursor, $files_verified);
-            }
-            $artifact_id = $frame['artifact_id'];
-            $offset = $frame['offset'];
-            $bytes = $frame['bytes'];
-            $total_bytes = $frame['total_bytes'];
-            $final = $frame['final'];
-
-            // Refuse frames that name reprint's reserved namespace before the
-            // store is touched, so a pushed file can never overwrite the
-            // deletion manifest (or hide as another .reprint/ artifact apply
-            // would then trust). The one deletion-manifest id is allowed
-            // through and stages like any other artifact.
-            if (Site_Export_Staged_Push_Stream_Protocol::is_reserved_sender_artifact_id($artifact_id)) {
-                return $this->stream_rejected(
-                    400,
-                    'reserved_artifact_id',
-                    'The artifact id "' . $artifact_id . '" is in reprint\'s reserved ".reprint/" namespace; only the deletion manifest may be written there.',
-                    ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => 0],
-                    $files_verified
-                );
+                $frame = Site_Export_Staged_Push_Stream_Protocol::decode_operation_header($line);
+            } catch (InvalidArgumentException $exception) {
+                $session->fail_upload($exception->getMessage());
+                return $this->stream_rejected(400, 'invalid_frame', $exception->getMessage(), $session);
             }
 
-            // Response cursors re-encode the id so responses stay valid JSON
-            // for arbitrary-byte paths, and they report only what the store
-            // has confirmed — never the offset the sender claims. A rejection
-            // echoing a claimed offset would send the retry to a position the
-            // store never reached.
-            $status = $this->store->status($artifact_id);
-            $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => (int) $status['committed_bytes']];
-
-            if ($bytes > $this->max_frame_bytes) {
-                $response = $this->stream_rejected(413, 'frame_too_large', null, $cursor, $files_verified);
-                $response['body']['max_frame_bytes'] = $this->max_frame_bytes;
-                return $response;
-            }
-
-            /**
-             * Already-verified replay case.
-             *
-             * The sender may replay a request body from the beginning after a
-             * previous request committed and finalized this artifact. When the
-             * declared size still matches, the store must not append or
-             * finalize again, but the frame payload is still present in the
-             * request body: read and discard those bytes so the next loop
-             * iteration starts at the following JSON header.
-             */
-            if ($status['verified'] && $status['committed_bytes'] === $total_bytes) {
-                if (!Site_Export_Staged_Push_Stream_Protocol::discard_exactly($input, $bytes, self::READ_BUFFER_BYTES)) {
-                    return $this->stream_rejected(400, 'body_read_failed', null, $cursor, $files_verified);
+            ++$frames_processed;
+            if ($frame['type'] === 'directory') {
+                $result = $session->accept_directory($frame['operation_index'], $frame['path']);
+                $rejection = $this->accept_result_rejection($result, $session);
+                if ($rejection !== null) {
+                    return $rejection;
                 }
-                if ($final) {
-                    $files_verified++;
+                continue;
+            }
+            if ($frame['type'] === 'symlink') {
+                $result = $session->accept_symlink($frame['operation_index'], $frame['path'], $frame['target']);
+                $rejection = $this->accept_result_rejection($result, $session);
+                if ($rejection !== null) {
+                    return $rejection;
+                }
+                continue;
+            }
+            if ($frame['type'] === 'delete') {
+                $result = $session->accept_delete($frame['operation_index'], $frame['path']);
+                $rejection = $this->accept_result_rejection($result, $session);
+                if ($rejection !== null) {
+                    return $rejection;
                 }
                 continue;
             }
 
-            /**
-             * Restart case.
-             *
-             * An offset-0 frame for an artifact that already holds bytes means
-             * the sender is pushing the file over: its source changed since
-             * those bytes were staged, or it is replaying after a failure and
-             * cannot vouch for the staged prefix. Drop the staged bytes and
-             * stage this frame fresh — appending a new version behind an old
-             * prefix would build a file no version of the source ever was.
-             */
-            if ($offset === 0 && ($status['verified'] || (int) $status['committed_bytes'] > 0)) {
-                if (!$this->store->discard($artifact_id)) {
-                    return $this->stream_rejected(423, 'busy', null, $cursor, $files_verified);
-                }
-                $status = $this->store->status($artifact_id);
-                $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => 0];
-            } elseif ($status['verified']) {
-                // A mid-file frame into a verified artifact of another size:
-                // the source changed but the sender did not restart. Refuse
-                // rather than mix versions; the sender restarts from zero.
-                return $this->stream_rejected(409, 'size_mismatch', null, $cursor, $files_verified);
+            if ($frame['bytes'] > $this->max_frame_bytes) {
+                $response = $this->stream_rejected(413, 'frame_too_large', 'The file frame payload exceeds this target\'s limit.', $session);
+                $response['body']['max_frame_bytes'] = $this->max_frame_bytes;
+                return $response;
             }
 
-            if ($bytes > 0) {
-                $remaining_frame_bytes = $bytes;
-                $append_offset = $offset;
-
-                $committed_bytes = (int) $status['committed_bytes'];
-
-                /**
-                 * Partially-committed replay case.
-                 *
-                 * The sender can retry a frame whose prefix was accepted before
-                 * the earlier request failed. Consume the bytes already stored,
-                 * advance the append offset to the first missing byte, and keep
-                 * the cursor at the remote committed position so the sender can
-                 * resume from that boundary if this request fails too.
-                 */
-                if ($committed_bytes > $offset) {
-                    $already_committed_bytes = min($bytes, $committed_bytes - $offset);
-                    if (!Site_Export_Staged_Push_Stream_Protocol::discard_exactly($input, $already_committed_bytes, self::READ_BUFFER_BYTES)) {
-                        return $this->stream_rejected(400, 'body_read_failed', null, $cursor, $files_verified);
-                    }
-                    $remaining_frame_bytes -= $already_committed_bytes;
-                    $append_offset += $already_committed_bytes;
-                    $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => $committed_bytes];
+            $remaining = $frame['bytes'];
+            $piece_offset = $frame['offset'];
+            $restart = $frame['restart'];
+            if ($remaining === 0) {
+                $result = $session->append_file_chunk(
+                    $frame['operation_index'],
+                    $frame['path'],
+                    $frame['revision'],
+                    $piece_offset,
+                    '',
+                    $frame['total_bytes'],
+                    $restart
+                );
+                $rejection = $this->accept_result_rejection($result, $session);
+                if ($rejection !== null) {
+                    return $rejection;
                 }
-
-                while ($remaining_frame_bytes > 0) {
-                    $payload_piece_bytes = min($this->append_buffer_bytes, $remaining_frame_bytes);
-                    $payload_piece = Site_Export_Staged_Push_Stream_Protocol::read_exactly($input, $payload_piece_bytes);
-                    if ($payload_piece === null) {
-                        return $this->stream_rejected(400, 'body_read_failed', null, $cursor, $files_verified);
-                    }
-                    $remaining_frame_bytes -= $payload_piece_bytes;
-
-                    while ($payload_piece !== '') {
-                        /**
-                         * Append/reconcile case.
-                         *
-                         * A bounded payload piece normally appends once. If the
-                         * store reports that part of this piece was already
-                         * committed, trim that prefix and retry only the suffix;
-                         * this keeps a resumed request moving forward without
-                         * asking the sender to open another request for the same
-                         * frame.
-                         */
-                        $append_result = $this->store->append($artifact_id, $append_offset, $payload_piece);
-                        if ($append_result['status'] === 'accepted' || $append_result['status'] === 'duplicate') {
-                            $append_offset = max($append_offset + strlen($payload_piece), (int) $append_result['committed_bytes']);
-                            $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => (int) $append_result['committed_bytes']];
-                            break;
-                        }
-
-                        $committed_bytes = (int) $append_result['committed_bytes'];
-                        if (
-                            $append_result['reason'] === 'offset_gap'
-                            && $committed_bytes > $append_offset
-                            && $committed_bytes < $append_offset + strlen($payload_piece)
-                        ) {
-                            $payload_piece = substr($payload_piece, $committed_bytes - $append_offset);
-                            $append_offset = $committed_bytes;
-                            continue;
-                        }
-
-                        $response = $this->from_store_result($append_result);
-                        $response['body']['cursor'] = [
-                            'artifact_id' => base64_encode($artifact_id),
-                            'committed_bytes' => $committed_bytes,
-                        ];
-                        $response['body']['files_verified'] = $files_verified;
-                        return $response;
-                    }
-                }
+                continue;
             }
 
-            /**
-             * Final frame case.
-             *
-             * Payload bytes are durable before this branch runs. Only frames
-             * marked final ask the store to compare committed bytes with
-             * total_bytes and mark the artifact verified.
-             */
-            if ($final) {
-                $finalize_result = $this->store->finalize($artifact_id, $total_bytes);
-                unset($finalize_result['path']);
-                if ($finalize_result['status'] !== 'verified') {
-                    $response = $this->from_store_result($finalize_result);
-                    $response['body']['cursor'] = $cursor;
-                    $response['body']['files_verified'] = $files_verified;
-                    return $response;
+            while ($remaining > 0) {
+                $piece_bytes = min($remaining, $this->append_buffer_bytes);
+                $payload = Site_Export_Staged_Push_Stream_Protocol::read_exactly($input, $piece_bytes);
+                if ($payload === null) {
+                    return $this->stream_rejected(
+                        400,
+                        'body_read_failed',
+                        'The request body ended before the declared file-frame payload was complete.',
+                        $session
+                    );
                 }
-                $files_verified++;
-                $cursor = ['artifact_id' => base64_encode($artifact_id), 'committed_bytes' => (int) $finalize_result['committed_bytes']];
+                $result = $session->append_file_chunk(
+                    $frame['operation_index'],
+                    $frame['path'],
+                    $frame['revision'],
+                    $piece_offset,
+                    $payload,
+                    $frame['total_bytes'],
+                    $restart
+                );
+                $rejection = $this->accept_result_rejection($result, $session);
+                if ($rejection !== null) {
+                    return $rejection;
+                }
+                $piece_offset += strlen($payload);
+                $remaining -= strlen($payload);
+                $restart = false;
             }
         }
 
-        return [
-            'http_code' => 200,
-            'body' => [
-                'status' => 'complete',
-                'reason' => null,
-                'detail' => null,
-                'cursor' => $cursor,
-                'files_verified' => $files_verified,
-            ],
-        ];
+        $body = $this->session_state_body($session->get_status());
+        $body['status'] = 'complete';
+        $body['frames_processed'] = $frames_processed;
+        return ['http_code' => 200, 'body' => $body];
     }
 
-    /**
-     * Confirm an assembled artifact against its plan-declared size.
-     *
-     * @return array{http_code:int,body:array}
-     */
-    public function finalize(array $config, array $headers): array {
-        $method_error = $this->require_post($headers);
-        if ($method_error !== null) {
-            return $method_error;
-        }
-
-        $artifact_id = $this->decode_artifact_id_param($config);
-        if ($artifact_id === null) {
-            return $this->rejected(400, 'invalid_artifact_id');
-        }
-        if (Site_Export_Staged_Push_Stream_Protocol::is_reserved_sender_artifact_id($artifact_id)) {
-            return $this->rejected(400, 'reserved_artifact_id', self::RESERVED_NAMESPACE_MESSAGE);
-        }
-        $total_bytes = $config['total_bytes'] ?? null;
-        if (!is_numeric($total_bytes) || (int) $total_bytes < 0) {
-            return $this->rejected(400, 'invalid_total');
-        }
-
-        $result = $this->store->finalize($artifact_id, (int) $total_bytes);
-        // The staged path is server-local detail; apply resolves by id.
-        unset($result['path']);
-        return $this->from_store_result($result);
-    }
-
-    /**
-     * Resume hint for a sender: committed offset and verified flag.
-     *
-     * @return array{http_code:int,body:array}
-     */
-    public function status(array $config): array {
-        $artifact_id = $this->decode_artifact_id_param($config);
-        if ($artifact_id === null) {
-            return $this->rejected(400, 'invalid_artifact_id');
-        }
-        if (Site_Export_Staged_Push_Stream_Protocol::is_reserved_sender_artifact_id($artifact_id)) {
-            return $this->rejected(400, 'reserved_artifact_id', self::RESERVED_NAMESPACE_MESSAGE);
-        }
-
-        return [
-            'http_code' => 200,
-            'body' => $this->store->status($artifact_id),
-        ];
-    }
-
-    /**
-     * Drop an artifact's staged bytes and records.
-     *
-     * @return array{http_code:int,body:array}
-     */
-    public function discard(array $config, array $headers): array {
-        $method_error = $this->require_post($headers);
-        if ($method_error !== null) {
-            return $method_error;
-        }
-
-        $artifact_id = $this->decode_artifact_id_param($config);
-        if ($artifact_id === null) {
-            return $this->rejected(400, 'invalid_artifact_id');
-        }
-        if (Site_Export_Staged_Push_Stream_Protocol::is_reserved_sender_artifact_id($artifact_id)) {
-            return $this->rejected(400, 'reserved_artifact_id', self::RESERVED_NAMESPACE_MESSAGE);
-        }
-
-        if (!$this->store->discard($artifact_id)) {
-            // Held by a concurrent writer or a failed cleanup step; both
-            // are the store's retry-until-true contract.
-            return [
-                'http_code' => 423,
-                'body' => ['discarded' => false],
-            ];
-        }
-        return [
-            'http_code' => 200,
-            'body' => ['discarded' => true],
-        ];
-    }
-
-    /**
-     * Read a control-plane artifact id parameter: base64 in the request —
-     * file paths are arbitrary bytes, the same convention the push stream
-     * frames use — raw path out. Null when missing or not decodable.
-     */
-    private function decode_artifact_id_param(array $config): ?string {
-        $artifact_id = $config['artifact_id'] ?? null;
-        if (!is_string($artifact_id) || $artifact_id === '') {
+    /** @return array{http_code:int,body:array}|null */
+    private function accept_result_rejection(array $result, Site_Export_Staged_Apply $session): ?array {
+        if ($result['status'] !== 'rejected') {
             return null;
         }
-        $artifact_id = base64_decode($artifact_id, true);
-        return $artifact_id === false || $artifact_id === '' ? null : $artifact_id;
+        $reason = (string) $result['reason'];
+        $http_code = $reason === 'operation_gap' || $reason === 'offset_gap'
+            ? 409
+            : 400;
+        return $this->stream_rejected($http_code, $reason, null, $session);
+    }
+
+    private function open_session(array $config, array $headers): Site_Export_Staged_Apply {
+        if (!$this->apply_sessions_enabled || $this->apply_target_root === null) {
+            throw new RuntimeException(self::APPLY_NOT_CONFIGURED_MESSAGE, self::ERROR_APPLY_NOT_CONFIGURED);
+        }
+        $parameters = $this->request_target_parameters($headers);
+        $session_id = $parameters['session_id'] ?? null;
+        if (!is_string($session_id) || $session_id === '') {
+            throw new InvalidArgumentException('Staged apply session requests require a session_id in the signed request target.');
+        }
+        if (array_key_exists('session_id', $config) && $config['session_id'] !== $session_id) {
+            throw new InvalidArgumentException('Staged apply session_id must match the signed request target.');
+        }
+        return Site_Export_Staged_Apply::open(
+            $this->staging_dir,
+            $this->apply_target_root,
+            $session_id,
+            $this->apply_protected_paths
+        );
+    }
+
+    private function expected_session_request_generation(array $headers): int {
+        $parameters = $this->request_target_parameters($headers);
+        $value = $parameters['expected_request_generation'] ?? null;
+        if (!is_string($value) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $value)) {
+            throw new InvalidArgumentException('Staged apply session requests require a non-negative expected_request_generation in the signed request target.');
+        }
+        $maximum = (string) PHP_INT_MAX;
+        if (strlen($value) > strlen($maximum) || ( strlen($value) === strlen($maximum) && strcmp($value, $maximum) > 0 )) {
+            throw new InvalidArgumentException('The staged apply expected_request_generation exceeds this server\'s integer range: ' . $value . '.');
+        }
+        return (int) $value;
+    }
+
+    /** @return array{http_code:int,body:array} */
+    private function session_state_response(array $state): array {
+        return ['http_code' => 200, 'body' => $this->session_state_body($state)];
+    }
+
+    /** @return array<string,mixed> */
+    private function session_state_body(array $state): array {
+        return [
+            'status' => 'ok',
+            'session_id' => $state['session_id'],
+            'phase' => $state['phase'],
+            'request_generation' => $state['request_generation'],
+            'operation_count' => $state['operation_count'],
+            'current_file' => $state['current_file'] ?? null,
+            'commit_offset' => $state['commit_offset'] ?? 0,
+            'committed_operations' => $state['commit_count'] ?? 0,
+            'failure' => $state['failure'] ?? null,
+        ];
     }
 
     /**
-     * @return array{http_code:int,body:array}|null Null when the method is POST.
+     * @param callable():array{http_code:int,body:array} $callback
+     * @return array{http_code:int,body:array}
      */
+    private function session_action(callable $callback): array {
+        try {
+            return $callback();
+        } catch (InvalidArgumentException $exception) {
+            return $this->rejected(400, 'invalid_session_request', $exception->getMessage());
+        } catch (RuntimeException $exception) {
+            switch ($exception->getCode()) {
+                case self::ERROR_APPLY_NOT_CONFIGURED:
+                    return $this->rejected(503, 'apply_not_configured', $exception->getMessage());
+                case Site_Export_Staged_Apply::ERROR_RETRYABLE_IO:
+                    return $this->rejected(500, 'retryable_io_error', $exception->getMessage());
+                case Site_Export_Staged_Apply::ERROR_BUSY:
+                    return $this->rejected(423, 'busy', $exception->getMessage());
+                case Site_Export_Staged_Apply::ERROR_DISCARD_PENDING:
+                    return $this->rejected(423, 'discard_pending', $exception->getMessage());
+                case Site_Export_Staged_Apply::ERROR_STALE_GENERATION:
+                    return $this->rejected(409, 'stale_session_state', $exception->getMessage());
+                case Site_Export_Staged_Apply::ERROR_SESSION_NOT_FOUND:
+                    return $this->rejected(404, 'session_not_found', $exception->getMessage());
+                default:
+                    return $this->rejected(409, 'session_rejected', $exception->getMessage());
+            }
+        }
+    }
+
+    /** @return array{http_code:int,body:array}|null */
     private function require_post(array $headers): ?array {
-        $method = strtoupper( (string) ( $headers['REQUEST_METHOD'] ?? '' ));
-        if ($method === 'POST') {
+        if (strtoupper( (string) ( $headers['REQUEST_METHOD'] ?? '' )) === 'POST') {
             return null;
         }
         return $this->rejected(405, 'method_not_allowed');
     }
 
-    /**
-     * Map a store result onto an HTTP code, passing its typed body through.
-     *
-     * @return array{http_code:int,body:array}
-     */
-    private function from_store_result(array $result): array {
-        switch ($result['status']) {
-            case 'accepted':
-            case 'duplicate':
-            case 'verified':
-                $code = 200;
-                break;
-            case 'busy':
-                $code = 423;
-                break;
-            default:
-                switch ((string) $result['reason']) {
-                    case 'io_error':
-                        $code = 500;
-                        break;
-                    case 'offset_gap':
-                    case 'already_verified':
-                    case 'size_mismatch':
-                    case 'missing':
-                        $code = 409;
-                        break;
-                    default:
-                        $code = 400;
-                }
+    /** @return array{http_code:int,body:array}|null */
+    private function require_get(array $headers): ?array {
+        if (strtoupper( (string) ( $headers['REQUEST_METHOD'] ?? '' )) === 'GET') {
+            return null;
         }
-
-        return [
-            'http_code' => $code,
-            'body' => $result,
-        ];
+        return $this->rejected(405, 'method_not_allowed');
     }
 
-    /**
-     * @return array{http_code:int,body:array}
-     */
-    private function stream_rejected(int $http_code, string $reason, ?string $detail, ?array $cursor, int $files_verified): array {
+    /** @return array{http_code:int,body:array}|null */
+    private function require_envelope_auth(array $headers, string $expected_endpoint): ?array {
+        if ($this->secret === null) {
+            return $this->rejected(503, 'not_configured', 'Staged session authentication is unavailable because no shared secret is configured.');
+        }
+        $request_target = $headers['REQUEST_URI'] ?? null;
+        if (!is_string($request_target) || $request_target === '') {
+            return $this->rejected(400, 'missing_request_target');
+        }
+        $error = ( new Site_Export_HMAC_Server($this->secret, $this->timestamp_tolerance) )->verify_envelope(
+            $headers,
+            (string) ( $headers['REQUEST_METHOD'] ?? '' ),
+            $request_target
+        );
+        if ($error !== null) {
+            return $this->rejected(403, 'auth_failed', $error);
+        }
+        try {
+            $parameters = $this->request_target_parameters($headers);
+        } catch (InvalidArgumentException $exception) {
+            return $this->rejected(400, 'invalid_request_target', $exception->getMessage());
+        }
+        if (( $parameters['endpoint'] ?? null ) !== $expected_endpoint) {
+            return $this->rejected(400, 'invalid_request_target', 'The signed request target must name endpoint=' . $expected_endpoint . '.');
+        }
+        return null;
+    }
+
+    /** @return array<string,mixed> */
+    private function request_target_parameters(array $headers): array {
+        $request_target = $headers['REQUEST_URI'] ?? null;
+        if (!is_string($request_target) || $request_target === '') {
+            throw new InvalidArgumentException('The request target is missing.');
+        }
+        $query = parse_url($request_target, PHP_URL_QUERY);
+        if ($query === false) {
+            throw new InvalidArgumentException('The request target is malformed.');
+        }
+        $parameters = [];
+        parse_str(is_string($query) ? $query : '', $parameters);
+        return $parameters;
+    }
+
+    /** @return array{http_code:int,body:array} */
+    private function stream_rejected(int $http_code, string $reason, ?string $detail, Site_Export_Staged_Apply $session): array {
+        $body = $this->session_state_body($session->get_status());
+        $body['status'] = 'rejected';
+        $body['reason'] = $reason;
+        $body['detail'] = $detail;
+        return ['http_code' => $http_code, 'body' => $body];
+    }
+
+    /** @return array{http_code:int,body:array} */
+    private function rejected(int $http_code, string $reason, ?string $detail = null): array {
         return [
             'http_code' => $http_code,
             'body' => [
                 'status' => 'rejected',
                 'reason' => $reason,
                 'detail' => $detail,
-                'cursor' => $cursor,
-                'files_verified' => $files_verified,
             ],
         ];
     }
-
-    /**
-     * @return array{http_code:int,body:array}
-     */
-    private function rejected(int $http_code, string $reason, ?string $detail = null, int $committed_bytes = 0): array {
-        return [
-            'http_code' => $http_code,
-            'body' => [
-                'status' => 'rejected',
-                'reason' => $reason,
-                'detail' => $detail,
-                'committed_bytes' => $committed_bytes,
-            ],
-        ];
-    }
-
 }

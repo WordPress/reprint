@@ -1,53 +1,43 @@
 <?php
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Client errors are CLI messages, never HTML output.
 /**
  * Sender for the staged push stream endpoint.
  *
  * A push stream is one authenticated HTTP request whose body is a sequence of
- * framed file chunks. The target commits each frame into
- * Site_Export_Staged_Artifacts as it is read, so a broken connection can be
- * retried from the last cursor the sender has, or from the beginning: the
- * target skips replayed files it already verified and restarts partially
- * staged ones from zero, so a source file that changed between requests can
- * never end up half old version, half new. Callers persist the source token
- * (size and ctime — the signals the push journal's own diff keys on)
- * alongside each cursor and restart a file at offset 0 when the file on disk
- * no longer matches it; a same-size edit within the same timestamp second
- * escapes the token, and the diff layer's change detection is the deeper
- * net. The reference loop in StagedPushStreamClientTest::pushOnce() shows
- * both halves.
+ * typed directory, file, symlink, and delete frames. Only file frames carry a
+ * payload. The target stages each operation directly and reports its durable
+ * operation count and partial-file cursor, so a later request resumes from
+ * target-confirmed state instead of uploading a manifest or preparing a
+ * second copy.
  *
  * The client is a pass-through wire. The caller reads a chunk of a file into
  * memory — at most next_chunk_body_bytes(), which is why a chunk is the one
- * thing that may be buffered — and send_chunk() sends it over the network
+ * thing that may be buffered — and send_operation() sends it over the network
  * before returning:
  *
- *     // Open the request only once the first chunk exists — an empty
- *     // source should not cost a network exchange (the reference loop in
- *     // StagedPushStreamClientTest::pushOnce() shows the lazy shape).
+ *     $client->set_session_request_generation($request_generation);
  *     $client->start_push_request();
- *     while (...) {
- *         if ($client->should_finish_request()) {
- *             $result = $client->finish_request();   // persist $result['cursor']
- *             $client->start_push_request();
- *         }
- *         $payload = fread($source_handle, $client->next_chunk_body_bytes());
- *         $client->send_chunk([
- *             'artifact_id' => $artifact_id,
- *             'offset'      => $offset,
- *             'total_bytes' => $total_bytes,
- *             'final'       => $offset + strlen($payload) >= $total_bytes,
- *             'payload'     => $payload,
- *         ]);
- *     }
+ *     $payload = fread($source_handle, $client->next_chunk_body_bytes());
+ *     $client->send_operation([
+ *         'type'            => 'file',
+ *         'operation_index' => $operation_index,
+ *         'path'            => $path,
+ *         'revision'        => $revision,
+ *         'offset'          => $offset,
+ *         'total_bytes'     => $total_bytes,
+ *         'restart'         => false,
+ *         'payload'         => $payload,
+ *     ]);
  *     $result = $client->finish_request();
+ *     persist_target_cursor($result);
  *
  * The transfer runs through libcurl, driven with the curl_multi API so the
- * request stays open between chunks: send_chunk() hands the frame to curl's
+ * request stays open between frames: send_operation() hands the frame to curl's
  * read callback and pumps the transfer until libcurl has consumed every
- * byte. libcurl writes to the socket as it consumes, so when send_chunk()
+ * byte. libcurl writes to the socket as it consumes, so when send_operation()
  * returns true the frame has left for the network — what trails behind is
  * libcurl's upload buffer (64 KiB) and the kernel's socket send buffer,
- * never a request body. Between chunks the read callback returns
+ * never a request body. Between frames the read callback returns
  * CURL_READFUNC_PAUSE, which PHP's curl extension only supports since
  * PHP 8.1 — on 7.4/8.0 that return is misread as end-of-body and the upload
  * silently truncates, so the constructor refuses to run there. The full
@@ -67,16 +57,36 @@
  * measured. That budget is learned per host by PushRequestSizer and charges
  * frame header lines alongside payloads; the transfer framing around them
  * is libcurl's business (chunked on HTTP/1.1, DATA frames on HTTP/2) and
- * rides in the sizer's safety margin. next_chunk_body_bytes() folds both
- * sizes into the one number a caller's fread needs.
+ * rides in the sizer's safety margin. Every header is charged to the request
+ * budget, including metadata-only operations; next_chunk_body_bytes() folds
+ * the payload limits into the one number a caller's fread needs.
  */
 class StagedPushStreamClient
 {
+    private const MAX_CHUNK_BYTES = 4 * 1024 * 1024;
+
+    private const MAX_RESPONSE_BYTES = 65536;
+
     private string $base_url;
 
     private Site_Export_HMAC_Client $hmac_client;
 
     private PushRequestSizer $request_sizer;
+
+    /**
+     * Frames belong to this server-owned staged-apply session. It stays in
+     * the signed request target so one session cannot receive another
+     * session's bytes.
+     */
+    private string $session_id;
+
+    /**
+     * The server-confirmed generation the next session stream must present in
+     * its signed request target. It is cleared as the request starts, so a
+     * caller persists the response value before setting it for every next
+     * request; a lost response cannot replay a stale stream over newer state.
+     */
+    private ?int $session_request_generation = null;
 
     /** Seconds to establish the connection and get the request head out. */
     private int $connect_timeout;
@@ -107,6 +117,13 @@ class StagedPushStreamClient
 
     /** @var int In-memory unit of one caller fread, in bytes. */
     private int $chunk_bytes;
+
+    /**
+     * The smallest payload cap a target has reported for one frame. This is
+     * independent of the request-body budget: many capped frames may share
+     * one request.
+     */
+    private ?int $max_frame_bytes = null;
 
     /** @var resource|object|null curl easy handle for the open request */
     private $curl_handle = null;
@@ -157,11 +174,15 @@ class StagedPushStreamClient
 
     private ?string $transfer_error = null;
 
+    private string $response_body = "";
+
+    private bool $response_too_large = false;
+
     private float $request_started_at = 0.0;
 
     private int $body_bytes_sent = 0;
 
-    private int $chunks_sent = 0;
+    private int $frames_sent = 0;
 
     private ?string $last_error = null;
 
@@ -179,6 +200,9 @@ class StagedPushStreamClient
      *   - hmac_client (Site_Export_HMAC_Client, required): signs every
      *     request; the staged endpoints reject unsigned requests before
      *     reading the body, so there is no unauthenticated push.
+     *   - session_id (string, required): a 32-character lowercase hexadecimal
+     *     staged apply session id. Each request goes to staged_session_push
+     *     and requires set_session_request_generation() before it can start.
      *   - request_sizer (?PushRequestSizer): request-body-size decisions;
      *     defaults to a fresh sizer. Pass one restored from persisted state
      *     to keep learned limits.
@@ -248,12 +272,30 @@ class StagedPushStreamClient
         $this->hmac_client = $hmac_client;
         $this->request_sizer = $options["request_sizer"] ?? new PushRequestSizer();
 
+        $session_id = $options["session_id"] ?? null;
+        if (!is_string($session_id) || preg_match('/^[a-f0-9]{32}$/D', $session_id) !== 1) {
+            throw new InvalidArgumentException(
+                "Expected option \"session_id\" to be 32 lowercase hexadecimal characters; received " . json_encode($session_id) . "."
+            );
+        }
+        $this->session_id = $session_id;
+
         // Absent options get defaults; present-but-invalid options throw —
         // silently substituting a default would hide the caller's mistake
         // until it surfaces as puzzling runtime behavior.
         $chunk_bytes = $options["chunk_bytes"] ?? null;
-        if ($chunk_bytes !== null && (!is_numeric($chunk_bytes) || (int) $chunk_bytes <= 0)) {
-            throw new InvalidArgumentException("Expected option \"chunk_bytes\" to be a positive integer; received " . json_encode($chunk_bytes) . ".");
+        if (
+            $chunk_bytes !== null
+            && (
+                !is_numeric($chunk_bytes)
+                || (int) $chunk_bytes <= 0
+                || (int) $chunk_bytes > self::MAX_CHUNK_BYTES
+            )
+        ) {
+            throw new InvalidArgumentException(
+                "Expected option \"chunk_bytes\" to be between 1 and " . self::MAX_CHUNK_BYTES
+                . " bytes; received " . json_encode($chunk_bytes) . "."
+            );
         }
         $this->chunk_bytes = $chunk_bytes !== null ? (int) $chunk_bytes : 4 * 1024 * 1024;
         $connect_timeout = $options["connect_timeout"] ?? null;
@@ -281,9 +323,9 @@ class StagedPushStreamClient
     }
 
     /**
-     * Open a staged_push request: connect and send the signed request head,
-     * returning once libcurl asks for body bytes. The request body starts
-     * empty; send_chunk() fills it.
+     * Open a staged_session_push request: connect and send the signed request
+     * head, returning once libcurl asks for body bytes. The request body starts
+     * empty; send_operation() fills it.
      *
      * @return bool False when the connection could not be opened;
      *              get_last_error() says why.
@@ -292,6 +334,11 @@ class StagedPushStreamClient
     {
         if ($this->curl_handle !== null) {
             throw new RuntimeException("A push request is already open; call finish_request() before starting another.");
+        }
+        if ($this->session_request_generation === null) {
+            throw new RuntimeException(
+                "A staged session push requires set_session_request_generation() before start_push_request()."
+            );
         }
 
         $this->outbound_frame_header = "";
@@ -302,16 +349,27 @@ class StagedPushStreamClient
         $this->curl_requested_body = false;
         $this->transfer_finished = false;
         $this->transfer_error = null;
+        $this->response_body = "";
+        $this->response_too_large = false;
         $this->body_bytes_sent = 0;
-        $this->chunks_sent = 0;
+        $this->frames_sent = 0;
         $this->last_error = null;
 
         // Signing covers the method and the URL (path + query), so it can
         // happen before the body exists — the body itself is not signed;
         // the X-Auth-Content-Hash header says so explicitly.
+        $request_parameters = [
+            "endpoint" => "staged_session_push",
+            "session_id" => $this->session_id,
+            "expected_request_generation" => $this->session_request_generation,
+        ];
+        // A stream consumes its generation when its signed request target is
+        // made. Requiring the caller to set the next one explicitly makes
+        // persistence part of every request rotation.
+        $this->session_request_generation = null;
         $request_url = $this->base_url
             . (strpos($this->base_url, "?") === false ? "?" : "&")
-            . http_build_query(["endpoint" => "staged_push"]);
+            . http_build_query($request_parameters);
         $request_headers = $this->hmac_client->get_envelope_auth_headers("POST", $request_url);
         $request_headers["Content-Type"] = Site_Export_Staged_Push_Stream_Protocol::CONTENT_TYPE;
 
@@ -348,12 +406,11 @@ class StagedPushStreamClient
             CURLOPT_UPLOAD => true,
             CURLOPT_CUSTOMREQUEST => "POST",
             CURLOPT_HTTPHEADER => $header_lines,
-            CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
             // Deliberately no CURLOPT_TIMEOUT: a total-transfer cap kills
             // healthy-but-slow bulk uploads. Each phase has its own bound —
-            // connect_timeout, the stall watch in send_chunk(), and
+            // connect_timeout, the stall watch in send_operation(), and
             // response_timeout in finish_request().
             //
             // libcurl drives the upload by asking: whenever the socket can
@@ -365,7 +422,7 @@ class StagedPushStreamClient
             //   - "": the body is complete, libcurl ends the request;
             //   - CURL_READFUNC_PAUSE: nothing to send right now, but the
             //     body is not over — libcurl parks the upload until
-            //     send_chunk() supplies the next frame and unpauses. This
+            //     send_operation() supplies the next frame and unpauses. This
             //     constant is why push needs PHP 8.1+ (class docblock).
             CURLOPT_READFUNCTION => function ($curl_handle, $stream, int $length) {
                 $this->curl_requested_body = true;
@@ -390,12 +447,22 @@ class StagedPushStreamClient
                 }
                 return CURL_READFUNC_PAUSE;
             },
+            CURLOPT_WRITEFUNCTION => function ($curl_handle, string $bytes): int {
+                if (strlen($this->response_body) + strlen($bytes) > self::MAX_RESPONSE_BYTES) {
+                    $this->response_too_large = true;
+                    $this->transfer_error = "The staged session push response exceeded "
+                        . self::MAX_RESPONSE_BYTES . " bytes.";
+                    return 0;
+                }
+                $this->response_body .= $bytes;
+                return strlen($bytes);
+            },
         ]);
 
         // One transfer at a time in one long-lived curl_multi handle. Multi
         // is not for concurrency here: unlike curl_exec(), which blocks
         // until the whole exchange is over, curl_multi_exec() performs one
-        // small slice of work and returns. That is what lets send_chunk()
+        // small slice of work and returns. That is what lets send_operation()
         // feed a frame, pump until libcurl consumed it, and hand control
         // back to the caller while the request stays open. The handle
         // itself lives as long as the client so requests reuse connections
@@ -428,93 +495,40 @@ class StagedPushStreamClient
     }
 
     /**
-     * Send one framed chunk — header line, then the payload — over the
-     * network.
+     * Send one typed operation frame over the network.
      *
-     * This performs the actual network transmission: the frame is handed to
-     * libcurl's read callback and the transfer is pumped until libcurl has
-     * consumed every byte and written it toward the socket. When this
-     * returns true the frame is on the network, not queued in this process;
-     * libcurl's 64 KiB upload buffer and the kernel's socket send buffer
-     * trail behind — buffers, never a request body.
+     * This performs the actual transmission: the frame is handed to libcurl's
+     * read callback and the transfer is pumped until libcurl has consumed
+     * every byte and written it toward the socket. File payloads stay in a
+     * separate copy-on-write field; metadata operations carry no payload.
+     * Invalid descriptors throw before any bytes are sent. Remote conditions
+     * do not throw: false means finish_request() must classify the early end.
      *
-     * The payload's length is the frame's byte count; there is no separate
-     * declaration to reconcile. The artifact_id may be arbitrary bytes —
-     * file names are not guaranteed UTF-8 — and travels base64-encoded
-     * inside the JSON frame header. Invalid descriptors throw with the exact
-     * violated condition. Remote conditions do not throw: false means the
-     * transfer ended early — dead connection or the target already
-     * responded — and finish_request() reports which.
-     *
-     * @param array{artifact_id:string,offset:int,total_bytes:int,final:bool,payload:string} $chunk
+     * @param array<string,mixed> $operation Raw-byte path and target fields.
      */
-    public function send_chunk(array $chunk): bool
+    public function send_operation(array $operation): bool
     {
-        // This mirrors the target's own frame validation, so a bad
-        // descriptor fails here — naming the exact field — instead of after
-        // uploading it. The last two checks are protocol invariants no type
-        // system covers: a zero-byte non-final frame means the source file
-        // shrank under the caller, and a final frame must land exactly on
-        // total_bytes or the target will 409 after staging the bytes.
-        $artifact_id = $chunk["artifact_id"] ?? null;
-        if (!is_string($artifact_id) || $artifact_id === "") {
-            throw new InvalidArgumentException("Expected chunk field \"artifact_id\" to be a non-empty string.");
-        }
-        $offset = $chunk["offset"] ?? null;
-        if (!is_int($offset) || $offset < 0) {
-            throw new InvalidArgumentException("Expected chunk field \"offset\" to be a non-negative integer for \"" . $artifact_id . "\".");
-        }
-        $total_bytes = $chunk["total_bytes"] ?? null;
-        if (!is_int($total_bytes) || $total_bytes < 0) {
-            throw new InvalidArgumentException("Expected chunk field \"total_bytes\" to be a non-negative integer for \"" . $artifact_id . "\".");
-        }
-        $final = $chunk["final"] ?? null;
-        if (!is_bool($final)) {
-            throw new InvalidArgumentException("Expected chunk field \"final\" to be a boolean for \"" . $artifact_id . "\".");
-        }
-        $payload = $chunk["payload"] ?? null;
-        if (!is_string($payload)) {
-            throw new InvalidArgumentException("Expected chunk field \"payload\" to be a string for \"" . $artifact_id . "\".");
-        }
-        if ($offset + strlen($payload) > $total_bytes) {
-            throw new InvalidArgumentException(
-                "Chunk for \"" . $artifact_id . "\" spans bytes " . $offset . "-" . ($offset + strlen($payload)) . ", which exceeds total_bytes " . $total_bytes . "."
-            );
-        }
-        if ($payload === "" && !$final && $total_bytes > 0) {
-            throw new InvalidArgumentException(
-                "Refusing a zero-byte non-final chunk for \"" . $artifact_id . "\" — the source file is shorter than its declared total_bytes " . $total_bytes . "."
-            );
-        }
-        if ($final && $offset + strlen($payload) !== $total_bytes) {
-            throw new InvalidArgumentException(
-                "Chunk for \"" . $artifact_id . "\" is marked final at byte " . ($offset + strlen($payload)) . " but total_bytes is " . $total_bytes . "."
-            );
-        }
+        $frame_header = Site_Export_Staged_Push_Stream_Protocol::encode_operation_header($operation);
+        $payload = $operation['type'] === Site_Export_Staged_Push_Stream_Protocol::OPERATION_FILE
+            ? $operation['payload']
+            : '';
 
         if ($this->curl_handle === null) {
-            throw new RuntimeException("No push request is open; call start_push_request() before send_chunk().");
+            throw new RuntimeException("No push request is open; call start_push_request() before send_operation().");
         }
         if ($this->transfer_finished) {
             return false;
         }
-
-        $frame_header = json_encode([
-            "type" => "chunk",
-            // File paths are arbitrary bytes and JSON strings must be UTF-8,
-            // so the id travels base64-encoded — the same convention the
-            // journal and the pull cursors use. json_encode would return
-            // false on a raw non-UTF-8 name.
-            "artifact_id" => base64_encode($artifact_id),
-            "offset" => $offset,
-            "bytes" => strlen($payload),
-            "total_bytes" => $total_bytes,
-            "final" => $final,
-        ], JSON_UNESCAPED_SLASHES);
-        if ($frame_header === false) {
-            throw new RuntimeException("Could not encode the staged push stream frame header for \"" . $artifact_id . "\".");
+        if (
+            $operation['type'] === Site_Export_Staged_Push_Stream_Protocol::OPERATION_FILE
+            && strlen($payload) > $this->next_chunk_body_bytes()
+        ) {
+            throw new InvalidArgumentException(
+                "File operation " . $operation['operation_index'] . " carries " . strlen($payload)
+                . " payload bytes, exceeding the next bounded chunk allowance of "
+                . $this->next_chunk_body_bytes() . "."
+            );
         }
-        $frame_header .= "\n";
 
         // Copy-on-write assignments: neither line copies the payload bytes.
         // Unpausing tells libcurl to start calling the read callback again.
@@ -533,7 +547,9 @@ class StagedPushStreamClient
                 $consumed_at_last_progress = $this->outbound_consumed_bytes;
                 $last_progress_at = microtime(true);
             } elseif (microtime(true) - $last_progress_at > $this->stall_timeout) {
-                $this->transfer_error = "The push stream stalled: no bytes moved for " . $this->stall_timeout . "s while sending a chunk of \"" . $artifact_id . "\".";
+                $this->transfer_error = "The push stream stalled: no bytes moved for " . $this->stall_timeout
+                    . "s while sending operation " . $operation['operation_index']
+                    . " for base64 path \"" . base64_encode($operation['path']) . "\".";
                 $this->transfer_finished = true;
                 break;
             }
@@ -549,17 +565,18 @@ class StagedPushStreamClient
         }
 
         $this->body_bytes_sent += strlen($frame_header) + strlen($payload);
-        $this->chunks_sent++;
+        $this->frames_sent++;
         return true;
     }
 
     /**
      * How many bytes the caller's next fread should ask for.
      *
-     * The fixed chunk size — the in-memory unit — bounded by what remains of
-     * the host-learned request body budget. That budget is denominated in
-     * entity-body bytes, the dimension request-size limits measure: frame
-     * header lines and payloads. Returns 0 when the request is full;
+     * The fixed chunk size — the in-memory unit — bounded by the smallest
+     * target-reported frame payload cap and what remains of the host-learned
+     * request body budget. That budget is denominated in entity-body bytes,
+     * the dimension request-size limits measure: frame header lines and
+     * payloads. Returns 0 when the request is full;
      * should_finish_request() is already true then. Near the end of a file
      * fread simply returns fewer bytes and the smaller frame is correct, so
      * callers need no min() of their own. The budget is soft: the header
@@ -572,7 +589,7 @@ class StagedPushStreamClient
             throw new RuntimeException("No push request is open; call start_push_request() before next_chunk_body_bytes().");
         }
         $remaining_body_budget = max(0, $this->request_sizer->request_body_bytes() - $this->body_bytes_sent);
-        return min($this->chunk_bytes, $remaining_body_budget);
+        return min($this->chunk_bytes, $this->max_frame_bytes ?? PHP_INT_MAX, $remaining_body_budget);
     }
 
     /**
@@ -586,6 +603,7 @@ class StagedPushStreamClient
             throw new RuntimeException("No push request is open; call start_push_request() before should_finish_request().");
         }
         return $this->transfer_finished
+            || $this->frames_sent >= Site_Export_Staged_Push_Stream_Protocol::MAX_FRAMES_PER_REQUEST
             || $this->next_chunk_body_bytes() === 0
             || (microtime(true) - $this->request_started_at) > $this->max_request_seconds;
     }
@@ -599,13 +617,14 @@ class StagedPushStreamClient
      * transfer broke mid-stream, a parseable response still wins over the
      * transport error — a target that rejected mid-stream (413 from a proxy,
      * auth failure) breaks the upload but its response carries the reason
-     * and a resume cursor.
+     * and the target-confirmed operation/file cursor.
      *
-     * The returned cursor is the server-confirmed one from the response, or
-     * null when no response arrived — resume from the last persisted cursor
-     * or ask staged_status.
+     * The returned operation_count and current_file are server-confirmed, or
+     * null when no usable response arrived. Responses also carry the confirmed
+     * request_generation for the next signed stream request; persist all
+     * three before passing the generation to set_session_request_generation().
      *
-     * @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int}
+     * @return array{status:string,reason:?string,detail:?string,operation_count:?int,current_file:?array,frames_sent:int,body_bytes_sent:int,request_generation:?int,max_frame_bytes:?int}
      */
     public function finish_request(): array
     {
@@ -628,7 +647,7 @@ class StagedPushStreamClient
 
         $http_code = (int) curl_getinfo($this->curl_handle, CURLINFO_HTTP_CODE);
         $redirect_url = (string) curl_getinfo($this->curl_handle, CURLINFO_REDIRECT_URL);
-        $response_body = (string) curl_multi_getcontent($this->curl_handle);
+        $response_body = $this->response_body;
         // The easy handle is done; the multi handle stays for the next
         // request so its connection cache can hand the connection back.
         curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
@@ -648,8 +667,30 @@ class StagedPushStreamClient
             );
         }
 
+        if ($this->response_too_large && $http_code !== 413) {
+            return $this->result(
+                "failed",
+                "response_too_large",
+                "The staged session push response exceeded " . self::MAX_RESPONSE_BYTES . " bytes."
+            );
+        }
+
         $decoded = json_decode($response_body, true);
         if (!is_array($decoded)) {
+            if ($http_code === 413) {
+                // Proxies often reject an oversized entity before PHP runs,
+                // returning HTML or an empty body instead of the endpoint's
+                // typed frame response. HTTP 413 is still permanent request
+                // budget evidence; only a structured frame_too_large narrows
+                // the separate payload cap below.
+                $decision = $this->request_sizer->record_too_large();
+                return $this->result(
+                    $decision["action"] === "give_up" ? "failed" : "retry",
+                    $decision["action"] === "give_up" ? "request_size_exhausted" : "request_too_large",
+                    $this->transfer_error
+                        ?? "HTTP 413 rejected the push request body before the target returned JSON."
+                );
+            }
             $decision = $this->request_sizer->record_request_failure();
             return $this->result(
                 $decision["action"] === "give_up" ? "failed" : "retry",
@@ -659,54 +700,243 @@ class StagedPushStreamClient
             );
         }
 
-        $response_cursor = is_array($decoded["cursor"] ?? null) ? $decoded["cursor"] : null;
-        if ($response_cursor !== null) {
-            // The wire carries the id base64-encoded (see send_chunk); hand
-            // callers the raw path back. A cursor that does not decode is as
-            // useless as none — callers fall back to their persisted cursor.
-            $decoded_artifact_id = base64_decode((string) ($response_cursor["artifact_id"] ?? ""), true);
-            $response_cursor = $decoded_artifact_id !== false && $decoded_artifact_id !== ""
-                ? ["artifact_id" => $decoded_artifact_id, "committed_bytes" => (int) ($response_cursor["committed_bytes"] ?? 0)]
-                : null;
+        $has_confirmed_session_state = ( $decoded["status"] ?? null ) === "complete"
+            || array_key_exists("request_generation", $decoded)
+            || array_key_exists("operation_count", $decoded)
+            || array_key_exists("current_file", $decoded);
+        if ($has_confirmed_session_state && ( $decoded["session_id"] ?? null ) !== $this->session_id) {
+            return $this->result(
+                "failed",
+                "invalid_session_response",
+                "The staged session push response did not name the requested session " . $this->session_id . "."
+            );
         }
 
-        if ($http_code === 413 || ($decoded["reason"] ?? null) === "frame_too_large") {
-            $reported_limit_bytes = $decoded["max_frame_bytes"] ?? null;
-            $decision = $this->request_sizer->record_too_large(
-                is_numeric($reported_limit_bytes) ? (int) $reported_limit_bytes : null
+        $request_generation = null;
+        if (array_key_exists("request_generation", $decoded)) {
+            $response_generation = $decoded["request_generation"];
+            if (!is_int($response_generation) || $response_generation < 0) {
+                return $this->result(
+                    "failed",
+                    "invalid_session_response",
+                    "The staged session push response reported an invalid request_generation " . json_encode($response_generation) . "."
+                );
+            }
+            $request_generation = $response_generation;
+        }
+
+        $operation_count = null;
+        if (array_key_exists("operation_count", $decoded)) {
+            if (!is_int($decoded["operation_count"]) || $decoded["operation_count"] < 0) {
+                return $this->result(
+                    "failed",
+                    "invalid_session_response",
+                    "The staged session push response reported an invalid operation_count "
+                        . json_encode($decoded["operation_count"]) . ".",
+                    null,
+                    null,
+                    $request_generation
+                );
+            }
+            $operation_count = $decoded["operation_count"];
+        }
+
+        $current_file = null;
+        if (array_key_exists("current_file", $decoded) && $decoded["current_file"] !== null) {
+            if (!is_array($decoded["current_file"])) {
+                return $this->result(
+                    "failed",
+                    "invalid_session_response",
+                    "The staged session push response reported current_file as "
+                        . json_encode($decoded["current_file"]) . " instead of an object or null.",
+                    $operation_count,
+                    null,
+                    $request_generation
+                );
+            }
+            $wire_current_file = $decoded["current_file"];
+            foreach (["operation_index", "revision", "committed_bytes", "total_bytes"] as $field) {
+                if (!is_int($wire_current_file[$field] ?? null) || $wire_current_file[$field] < 0) {
+                    return $this->result(
+                        "failed",
+                        "invalid_session_response",
+                        "The staged session push response reported current_file." . $field . " as "
+                            . json_encode($wire_current_file[$field] ?? null)
+                            . " instead of a non-negative integer.",
+                        $operation_count,
+                        null,
+                        $request_generation
+                    );
+                }
+            }
+            $current_path = is_string($wire_current_file["path_b64"] ?? null)
+                ? base64_decode($wire_current_file["path_b64"], true)
+                : false;
+            if ($current_path === false || $current_path === "") {
+                return $this->result(
+                    "failed",
+                    "invalid_session_response",
+                    "The staged session push response reported current_file.path_b64 as "
+                        . json_encode($wire_current_file["path_b64"] ?? null)
+                        . " instead of base64 for a non-empty path.",
+                    $operation_count,
+                    null,
+                    $request_generation
+                );
+            }
+            if ($wire_current_file["committed_bytes"] > $wire_current_file["total_bytes"]) {
+                return $this->result(
+                    "failed",
+                    "invalid_session_response",
+                    "The staged session push response reported current_file.committed_bytes "
+                        . $wire_current_file["committed_bytes"] . " beyond total_bytes "
+                        . $wire_current_file["total_bytes"] . ".",
+                    $operation_count,
+                    null,
+                    $request_generation
+                );
+            }
+            $current_file = [
+                "operation_index" => $wire_current_file["operation_index"],
+                "path" => $current_path,
+                "revision" => $wire_current_file["revision"],
+                "committed_bytes" => $wire_current_file["committed_bytes"],
+                "total_bytes" => $wire_current_file["total_bytes"],
+            ];
+        }
+
+        if ( ( $decoded["reason"] ?? null ) === "frame_too_large" ) {
+            $reported_max_frame_bytes = $decoded["max_frame_bytes"] ?? null;
+            if (!is_int($reported_max_frame_bytes) || $reported_max_frame_bytes <= 0) {
+                return $this->result(
+                    "failed",
+                    "invalid_frame_limit",
+                    "The staged push response reported frame_too_large without a positive integer max_frame_bytes.",
+                    $operation_count,
+                    $current_file,
+                    $request_generation
+                );
+            }
+            $this->max_frame_bytes = $this->max_frame_bytes === null
+                ? $reported_max_frame_bytes
+                : min($this->max_frame_bytes, $reported_max_frame_bytes);
+            return $this->result(
+                "retry",
+                "frame_too_large",
+                null,
+                $operation_count,
+                $current_file,
+                $request_generation
             );
+        }
+
+        if ($http_code === 413) {
+            $decision = $this->request_sizer->record_too_large();
             return $this->result(
                 $decision["action"] === "give_up" ? "failed" : "retry",
-                $decision["action"] === "give_up" ? "request_size_exhausted" : "frame_too_large",
+                $decision["action"] === "give_up" ? "request_size_exhausted" : "request_too_large",
                 null,
-                $response_cursor
+                $operation_count,
+                $current_file,
+                $request_generation
+            );
+        }
+
+        if (($decoded["status"] ?? null) === "complete" && ($http_code < 200 || $http_code >= 300)) {
+            return $this->result(
+                "failed",
+                "invalid_session_response",
+                "The staged session push response reported complete with HTTP " . $http_code . ".",
+                $operation_count,
+                $current_file,
+                $request_generation
             );
         }
 
         if (($decoded["status"] ?? null) !== "complete") {
             $reason = is_string($decoded["reason"] ?? null) ? $decoded["reason"] : "unexpected_response";
-            // The protocol designs these two as recoverable, not fatal:
-            // busy is the store's retry-until-free lock contract, and
-            // offset_gap arrives with the store's own cursor to resume
-            // from. Neither says anything about request size, so the
-            // sizer records nothing.
-            $retryable = $reason === "busy" || $reason === "offset_gap";
+            // The protocol designs these as recoverable, not fatal. busy is
+            // the store's retry-until-free lock contract; offset_gap arrives
+            // with the store's own cursor; and both I/O reasons report a
+            // server-side persistence failure that a later request may outlive.
+            // None says anything about request size, so the sizer records
+            // nothing.
+            $retryable = $reason === "busy"
+                || $reason === "operation_gap"
+                || $reason === "offset_gap"
+                || $reason === "body_read_failed"
+                || $reason === "io_error"
+                || $reason === "retryable_io_error"
+                // A session stream may have reached the remote and consumed
+                // its generation before this client lost the response. The
+                // driver fetches session status before its next request, so
+                // stale_session_state is recoverable after the driver refreshes
+                // its session state before its next request.
+                || $reason === "stale_session_state";
             return $this->result(
                 $retryable ? "retry" : "failed",
                 $reason,
                 is_string($decoded["detail"] ?? null) ? $decoded["detail"] : ("HTTP " . $http_code),
-                $response_cursor,
-                (int) ($decoded["files_verified"] ?? 0)
+                $operation_count,
+                $current_file,
+                $request_generation
+            );
+        }
+
+        if ($request_generation === null) {
+            return $this->result(
+                "failed",
+                "invalid_session_response",
+                "The staged session push response omitted its server-confirmed request_generation.",
+                $operation_count,
+                $current_file
+            );
+        }
+        if ($operation_count === null) {
+            return $this->result(
+                "failed",
+                "invalid_session_response",
+                "The staged session push response omitted its server-confirmed operation_count.",
+                null,
+                $current_file,
+                $request_generation
             );
         }
 
         // A success only teaches the sizer something when the request
         // carried bytes: "the host accepted an empty body" is no evidence
         // that the current size is safe to grow from.
-        if ($this->chunks_sent > 0) {
+        if ($this->frames_sent > 0) {
             $this->request_sizer->record_success();
         }
-        return $this->result("complete", null, null, $response_cursor, (int) ($decoded["files_verified"] ?? 0));
+        return $this->result(
+            "complete",
+            null,
+            null,
+            $operation_count,
+            $current_file,
+            $request_generation
+        );
+    }
+
+    /**
+     * Set the server-confirmed generation required by the next session push
+     * request. The target increments its generation before it reads a stream,
+     * so callers must persist a response generation before selecting it here.
+     */
+    public function set_session_request_generation(int $expected_request_generation): void
+    {
+        if ($expected_request_generation < 0) {
+            throw new InvalidArgumentException(
+                "Expected a non-negative staged session request generation; received " . $expected_request_generation . "."
+            );
+        }
+        if ($this->curl_handle !== null) {
+            throw new RuntimeException(
+                "Cannot change the staged session request generation while a push request is open; call finish_request() first."
+            );
+        }
+        $this->session_request_generation = $expected_request_generation;
     }
 
     /**
@@ -715,6 +945,31 @@ class StagedPushStreamClient
     public function get_last_error(): ?string
     {
         return $this->last_error;
+    }
+
+    /**
+     * Abandon an open request without sending more body bytes.
+     *
+     * A caller that cannot continue reading its source must not leave the
+     * remote session lock held behind a paused curl read callback. Closing the
+     * easy handle makes the peer observe the broken body; the next driver run
+     * fetches session status before choosing another generation.
+     */
+    public function abort_push_request(): void
+    {
+        if ($this->curl_handle === null) {
+            return;
+        }
+        if ($this->multi_handle !== null) {
+            curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
+        }
+        curl_close($this->curl_handle);
+        $this->curl_handle = null;
+        $this->outbound_frame_header = "";
+        $this->outbound_payload = "";
+        $this->outbound_payload_offset = 0;
+        $this->body_complete = false;
+        $this->transfer_finished = true;
     }
 
     /**
@@ -736,7 +991,7 @@ class StagedPushStreamClient
         while (($message = curl_multi_info_read($this->multi_handle)) !== false) {
             if ($message["msg"] === CURLMSG_DONE) {
                 $this->transfer_finished = true;
-                if ($message["result"] !== CURLE_OK) {
+                if ($message["result"] !== CURLE_OK && $this->transfer_error === null) {
                     $this->transfer_error = curl_error($this->curl_handle) ?: curl_strerror((int) $message["result"]);
                 }
             }
@@ -747,17 +1002,26 @@ class StagedPushStreamClient
         }
     }
 
-    /** @return array{status:string,reason:?string,detail:?string,cursor:?array,files_verified:int,chunks_sent:int,body_bytes_sent:int} */
-    private function result(string $status, ?string $reason, ?string $detail, ?array $cursor = null, int $files_verified = 0): array
+    /** @return array{status:string,reason:?string,detail:?string,operation_count:?int,current_file:?array,frames_sent:int,body_bytes_sent:int,request_generation:?int,max_frame_bytes:?int} */
+    private function result(
+        string $status,
+        ?string $reason,
+        ?string $detail,
+        ?int $operation_count = null,
+        ?array $current_file = null,
+        ?int $request_generation = null
+    ): array
     {
         return [
             "status" => $status,
             "reason" => $reason,
             "detail" => $detail,
-            "cursor" => $cursor,
-            "files_verified" => $files_verified,
-            "chunks_sent" => $this->chunks_sent,
+            "operation_count" => $operation_count,
+            "current_file" => $current_file,
+            "frames_sent" => $this->frames_sent,
             "body_bytes_sent" => $this->body_bytes_sent,
+            "request_generation" => $request_generation,
+            "max_frame_bytes" => $this->max_frame_bytes,
         ];
     }
 }

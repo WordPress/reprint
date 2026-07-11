@@ -1,12 +1,14 @@
 <?php
 
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Validation errors are API/CLI messages, never HTML output.
+
 /**
- * Shared wire format helpers for staged push streams.
+ * Shared wire format helpers for staged push operation streams.
  *
- * A staged push stream is a sequence of JSON header lines followed by exactly
- * the number of raw payload bytes declared by each header. Both the importer
- * and the exporter use this class so frame shape, validation, and bounded
- * stream reads stay in one place.
+ * Each frame is one bounded JSON header line. File frames alone carry raw
+ * payload bytes immediately after the line; the header's bytes field says
+ * exactly how many. Paths and symlink targets travel as base64 because file
+ * system names are bytes while JSON strings must be UTF-8.
  */
 final class Site_Export_Staged_Push_Stream_Protocol {
 
@@ -18,130 +20,190 @@ final class Site_Export_Staged_Push_Stream_Protocol {
     /** Holds two maximum base64 fields plus bounded JSON metadata. */
     public const MAX_HEADER_BYTES = 32768;
 
-    /**
-     * Top-level path segment reprint reserves for its own staged bookkeeping.
-     * A sender's file artifacts may never land here — see
-     * is_reserved_sender_artifact_id() — so the apply step can trust that
-     * everything under it is reprint's own, not pushed site content.
-     */
-    public const RESERVED_NAMESPACE_SEGMENT = '.reprint';
+    /** Bounds metadata-only work even when request bodies are tiny. */
+    public const MAX_FRAMES_PER_REQUEST = 1024;
+
+    public const OPERATION_DIRECTORY = 'directory';
+
+    public const OPERATION_FILE = 'file';
+
+    public const OPERATION_SYMLINK = 'symlink';
+
+    public const OPERATION_DELETE = 'delete';
 
     /**
-     * The one artifact id inside the reserved namespace a sender is allowed
-     * to write: the list of paths deleted locally since the last push, staged
-     * like any other artifact so apply can unlink them in its window. Content
-     * is the local-paths-to-delete.jsonl the push journal produces.
-     */
-    public const DELETION_MANIFEST_ARTIFACT_ID = '.reprint/deletions.jsonl';
-
-    /**
-     * Whether a sender-named artifact id intrudes on reprint's reserved
-     * namespace. True for the bare reserved segment and anything beneath it,
-     * except the one deletion-manifest id a sender may legitimately write.
+     * Read one LF-terminated header without ever buffering an unbounded line.
      *
-     * The check is on the first path segment, not a raw string prefix, so
-     * a real site file like ".reprintfoo" or "wp-content/.reprint/x" is not
-     * caught — only the top-level ".reprint" namespace is.
-     */
-    public static function is_reserved_sender_artifact_id(string $artifact_id): bool {
-        if ($artifact_id === self::DELETION_MANIFEST_ARTIFACT_ID) {
-            return false;
-        }
-        return explode('/', $artifact_id, 2)[0] === self::RESERVED_NAMESPACE_SEGMENT;
-    }
-
-    /**
-     * Read the next frame header line from a stream.
+     * A clean EOF before another header returns null; EOF in a header is a
+     * truncated frame, not a shorter valid line.
      *
      * @param resource $input
      */
-    public static function read_header_line($input): ?string {
-        $line = fgets($input);
-        if ($line === false) {
-            return null;
+    public static function read_header_line(
+        $input,
+        int $max_header_bytes = self::MAX_HEADER_BYTES
+    ): ?string {
+        if (!is_resource($input)) {
+            throw new InvalidArgumentException('Expected the staged push stream input to be a resource.');
         }
-        return rtrim($line, "\r\n");
+        if ($max_header_bytes <= 0) {
+            throw new InvalidArgumentException(
+                'Expected the staged push stream header limit to be positive; received ' . $max_header_bytes . '.'
+            );
+        }
+
+        $line = @fgets($input, $max_header_bytes + 2);
+        if ($line === false) {
+            if (feof($input)) {
+                return null;
+            }
+            throw new RuntimeException('Could not read the next staged push stream frame header.');
+        }
+
+        if (substr($line, -1) !== "\n") {
+            if (strlen($line) > $max_header_bytes) {
+                throw new InvalidArgumentException(
+                    'Staged push stream frame header exceeds ' . $max_header_bytes . ' bytes.'
+                );
+            }
+            throw new InvalidArgumentException('Staged push stream frame header ended before its LF terminator.');
+        }
+
+        $line = substr($line, 0, -1);
+        if (substr($line, -1) === "\r") {
+            $line = substr($line, 0, -1);
+        }
+        if (strlen($line) > $max_header_bytes) {
+            throw new InvalidArgumentException(
+                'Staged push stream frame header exceeds ' . $max_header_bytes . ' bytes.'
+            );
+        }
+        return $line;
     }
 
     /**
-     * Decode and validate one chunk frame header.
+     * Encode one sender operation as its LF-terminated wire header.
      *
-     * The artifact_id in the wire frame is base64: file paths are arbitrary
-     * bytes and JSON strings must be UTF-8, so ids travel encoded — the same
-     * convention the pull cursors and the local journal use for paths. The
-     * returned artifact_id is the decoded raw path.
-     *
-     * @return array{artifact_id:string,offset:int,bytes:int,total_bytes:int,final:bool}
+     * The file payload is not concatenated here. The streaming client holds
+     * it separately and hands both strings to curl using copy-on-write.
      */
-    public static function decode_chunk_header(string $line): array {
-        $frame = json_decode($line, true);
-        if (!is_array($frame)) {
+    public static function encode_operation_header(array $operation): string {
+        $type = self::require_operation_type($operation);
+        $operation_index = self::require_non_negative_integer_field($operation, 'operation_index');
+        $path = self::require_raw_path_field($operation, 'path', false);
+
+        $frame = [
+            'type' => $type,
+            'operation_index' => $operation_index,
+            'path' => base64_encode($path),
+        ];
+
+        if ($type === self::OPERATION_SYMLINK) {
+            self::require_exact_fields($operation, ['type', 'operation_index', 'path', 'target']);
+            $frame['target'] = base64_encode(self::require_raw_path_field($operation, 'target', true));
+        } elseif ($type === self::OPERATION_FILE) {
+            self::require_exact_fields(
+                $operation,
+                ['type', 'operation_index', 'path', 'revision', 'offset', 'total_bytes', 'restart', 'payload']
+            );
+            if (!is_string($operation['payload'] ?? null)) {
+                throw new InvalidArgumentException(
+                    'Expected staged push operation field "payload" to be a string; received ' .
+                    self::describe_value($operation['payload'] ?? null) . '.'
+                );
+            }
+            $frame['revision'] = self::require_non_negative_integer_field($operation, 'revision');
+            $frame['offset'] = self::require_non_negative_integer_field($operation, 'offset');
+            $frame['bytes'] = strlen($operation['payload']);
+            $frame['total_bytes'] = self::require_non_negative_integer_field($operation, 'total_bytes');
+            $frame['restart'] = self::require_boolean_field($operation, 'restart');
+        } else {
+            self::require_exact_fields($operation, ['type', 'operation_index', 'path']);
+        }
+
+        $header = json_encode($frame, JSON_UNESCAPED_SLASHES);
+        if ($header === false) {
+            throw new RuntimeException(
+                'Could not encode the staged push operation header for base64 path "' . base64_encode($path) . '".'
+            );
+        }
+
+        // Apply the same range and restart checks on both sides of the wire.
+        self::decode_operation_header($header);
+        if (strlen($header) > self::MAX_HEADER_BYTES) {
+            throw new InvalidArgumentException(
+                'Staged push stream frame header exceeds ' . self::MAX_HEADER_BYTES . ' bytes.'
+            );
+        }
+        return $header . "\n";
+    }
+
+    /**
+     * Decode and validate one typed operation header.
+     *
+     * @return array<string,mixed> Raw-byte path and target values are decoded.
+     */
+    public static function decode_operation_header(string $line): array {
+        $decoded = json_decode($line);
+        if (!is_object($decoded)) {
             throw new InvalidArgumentException('Expected staged push stream frame header to be a JSON object.');
         }
+        $frame = (array) $decoded;
 
-        if (!array_key_exists('type', $frame)) {
-            throw new InvalidArgumentException('Missing staged push stream frame field "type".');
-        }
-        if ($frame['type'] !== 'chunk') {
-            throw new InvalidArgumentException(
-                'Expected staged push stream frame field "type" to be "chunk"; received ' .
-                self::describe_value($frame['type']) .
-                '.'
-            );
-        }
+        $type = self::require_operation_type($frame);
+        $operation_index = self::require_non_negative_integer_field($frame, 'operation_index');
+        $path = self::require_base64_field($frame, 'path', false);
 
-        if (!array_key_exists('artifact_id', $frame)) {
-            throw new InvalidArgumentException('Missing staged push stream frame field "artifact_id".');
-        }
-        if (!is_string($frame['artifact_id']) || $frame['artifact_id'] === '') {
-            throw new InvalidArgumentException(
-                'Expected staged push stream frame field "artifact_id" to be base64 of a non-empty path; received ' .
-                self::describe_value($frame['artifact_id']) .
-                '.'
-            );
-        }
-        $artifact_id = base64_decode($frame['artifact_id'], true);
-        if ($artifact_id === false || $artifact_id === '') {
-            throw new InvalidArgumentException(
-                'Expected staged push stream frame field "artifact_id" to be base64 of a non-empty path; received ' .
-                self::describe_value($frame['artifact_id']) .
-                '.'
-            );
+        $operation = [
+            'type' => $type,
+            'operation_index' => $operation_index,
+            'path' => $path,
+        ];
+
+        if ($type === self::OPERATION_SYMLINK) {
+            self::require_exact_fields($frame, ['type', 'operation_index', 'path', 'target']);
+            $operation['target'] = self::require_base64_field($frame, 'target', true);
+            return $operation;
         }
 
-        $offset = self::require_non_negative_integer_field($frame, 'offset');
-        $bytes = self::require_non_negative_integer_field($frame, 'bytes');
-        $total_bytes = self::require_non_negative_integer_field($frame, 'total_bytes');
-
-        if (!array_key_exists('final', $frame)) {
-            throw new InvalidArgumentException('Missing staged push stream frame field "final".');
-        }
-        if (!is_bool($frame['final'])) {
-            throw new InvalidArgumentException(
-                'Expected staged push stream frame field "final" to be a boolean; received ' .
-                self::describe_value($frame['final']) .
-                '.'
-            );
+        if ($type !== self::OPERATION_FILE) {
+            self::require_exact_fields($frame, ['type', 'operation_index', 'path']);
+            return $operation;
         }
 
-        if ($offset + $bytes > $total_bytes) {
+        self::require_exact_fields(
+            $frame,
+            ['type', 'operation_index', 'path', 'revision', 'offset', 'bytes', 'total_bytes', 'restart']
+        );
+        $operation['revision'] = self::require_non_negative_integer_field($frame, 'revision');
+        $operation['offset'] = self::require_non_negative_integer_field($frame, 'offset');
+        $operation['bytes'] = self::require_non_negative_integer_field($frame, 'bytes');
+        $operation['total_bytes'] = self::require_non_negative_integer_field($frame, 'total_bytes');
+        $operation['restart'] = self::require_boolean_field($frame, 'restart');
+
+        if ($operation['offset'] > $operation['total_bytes'] ||
+            $operation['bytes'] > $operation['total_bytes'] - $operation['offset']) {
             throw new InvalidArgumentException(
                 sprintf(
-                    'Staged push stream frame declares offset %d and %d payload bytes, which exceeds total_bytes %d.',
-                    $offset,
-                    $bytes,
-                    $total_bytes
+                    'Staged push file frame declares offset %d and %d payload bytes, which exceeds total_bytes %d.',
+                    $operation['offset'],
+                    $operation['bytes'],
+                    $operation['total_bytes']
                 )
             );
         }
+        if ($operation['bytes'] === 0 && $operation['offset'] !== $operation['total_bytes']) {
+            throw new InvalidArgumentException(
+                'Staged push file frames with zero payload bytes must be positioned at total_bytes.'
+            );
+        }
+        if ($operation['restart'] && $operation['offset'] !== 0) {
+            throw new InvalidArgumentException(
+                'Staged push file frame field "restart" may be true only when offset is 0.'
+            );
+        }
 
-        return [
-            'artifact_id' => $artifact_id,
-            'offset' => $offset,
-            'bytes' => $bytes,
-            'total_bytes' => $total_bytes,
-            'final' => $frame['final'],
-        ];
+        return $operation;
     }
 
     /**
@@ -149,29 +211,33 @@ final class Site_Export_Staged_Push_Stream_Protocol {
      */
     public static function read_exactly($input, int $bytes): ?string {
         $data = '';
-        while (strlen($data) < $bytes) {
-            $piece = fread($input, $bytes - strlen($data));
+        $remaining = $bytes;
+        while ($remaining > 0) {
+            $piece = fread($input, $remaining);
             if ($piece === false || $piece === '') {
                 return null;
             }
             $data .= $piece;
+            $remaining -= strlen($piece);
         }
         return $data;
     }
 
-    /**
-     * @param resource $input
-     */
-    public static function discard_exactly($input, int $bytes, int $buffer_bytes): bool {
-        $remaining = $bytes;
-        while ($remaining > 0) {
-            $piece = fread($input, min($buffer_bytes, $remaining));
-            if ($piece === false || $piece === '') {
-                return false;
-            }
-            $remaining -= strlen($piece);
+    private static function require_operation_type(array $frame): string {
+        if (!array_key_exists('type', $frame)) {
+            throw new InvalidArgumentException('Missing staged push stream frame field "type".');
         }
-        return true;
+        if (!is_string($frame['type']) || !in_array(
+            $frame['type'],
+            [self::OPERATION_DIRECTORY, self::OPERATION_FILE, self::OPERATION_SYMLINK, self::OPERATION_DELETE],
+            true
+        )) {
+            throw new InvalidArgumentException(
+                'Expected staged push stream frame field "type" to be "directory", "file", "symlink", or "delete"; received ' .
+                self::describe_value($frame['type']) . '.'
+            );
+        }
+        return $frame['type'];
     }
 
     private static function require_non_negative_integer_field(array $frame, string $field): int {
@@ -181,11 +247,82 @@ final class Site_Export_Staged_Push_Stream_Protocol {
         if (!is_int($frame[$field]) || $frame[$field] < 0) {
             throw new InvalidArgumentException(
                 'Expected staged push stream frame field "' . $field . '" to be a non-negative integer; received ' .
-                self::describe_value($frame[$field]) .
-                '.'
+                self::describe_value($frame[$field]) . '.'
             );
         }
         return $frame[$field];
+    }
+
+    private static function require_boolean_field(array $frame, string $field): bool {
+        if (!array_key_exists($field, $frame)) {
+            throw new InvalidArgumentException('Missing staged push stream frame field "' . $field . '".');
+        }
+        if (!is_bool($frame[$field])) {
+            throw new InvalidArgumentException(
+                'Expected staged push stream frame field "' . $field . '" to be a boolean; received ' .
+                self::describe_value($frame[$field]) . '.'
+            );
+        }
+        return $frame[$field];
+    }
+
+    private static function require_raw_path_field(array $operation, string $field, bool $allow_empty): string {
+        if (!array_key_exists($field, $operation)) {
+            throw new InvalidArgumentException('Missing staged push operation field "' . $field . '".');
+        }
+        if (!is_string($operation[$field]) || ( !$allow_empty && $operation[$field] === '' )) {
+            throw new InvalidArgumentException(
+                'Expected staged push operation field "' . $field . '" to be ' .
+                ( $allow_empty ? 'a byte string' : 'a non-empty byte string' ) . '; received ' .
+                self::describe_value($operation[$field]) . '.'
+            );
+        }
+        if (strlen($operation[$field]) > self::MAX_PATH_BYTES) {
+            throw new InvalidArgumentException(
+                'Staged push operation field "' . $field . '" exceeds ' . self::MAX_PATH_BYTES
+                . ' raw bytes; observed ' . strlen($operation[$field]) . '.'
+            );
+        }
+        return $operation[$field];
+    }
+
+    private static function require_base64_field(array $frame, string $field, bool $allow_empty): string {
+        if (!array_key_exists($field, $frame)) {
+            throw new InvalidArgumentException('Missing staged push stream frame field "' . $field . '".');
+        }
+        if (!is_string($frame[$field]) || ( !$allow_empty && $frame[$field] === '' )) {
+            throw new InvalidArgumentException(
+                'Expected staged push stream frame field "' . $field . '" to be base64 of ' .
+                ( $allow_empty ? 'a byte string' : 'a non-empty path' ) . '; received ' .
+                self::describe_value($frame[$field]) . '.'
+            );
+        }
+        $decoded = base64_decode($frame[$field], true);
+        if ($decoded === false || ( !$allow_empty && $decoded === '' )) {
+            throw new InvalidArgumentException(
+                'Expected staged push stream frame field "' . $field . '" to be base64 of ' .
+                ( $allow_empty ? 'a byte string' : 'a non-empty path' ) . '; received ' .
+                self::describe_value($frame[$field]) . '.'
+            );
+        }
+        if (strlen($decoded) > self::MAX_PATH_BYTES) {
+            throw new InvalidArgumentException(
+                'Staged push stream frame field "' . $field . '" exceeds ' . self::MAX_PATH_BYTES
+                . ' decoded bytes; observed ' . strlen($decoded) . '.'
+            );
+        }
+        return $decoded;
+    }
+
+    private static function require_exact_fields(array $frame, array $expected_fields): void {
+        foreach ($frame as $field => $_value) {
+            if (!in_array($field, $expected_fields, true)) {
+                throw new InvalidArgumentException(
+                    'Unexpected staged push stream frame field "' . $field . '" for operation type "' .
+                    ( is_string($frame['type'] ?? null) ? $frame['type'] : 'unknown' ) . '".'
+                );
+            }
+        }
     }
 
     private static function describe_value($value): string {

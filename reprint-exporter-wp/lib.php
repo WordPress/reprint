@@ -29,11 +29,27 @@ if (!defined('SITE_EXPORT_SECRET_OPTION')) {
  */
 define('SITE_EXPORT_TIMESTAMP_TOLERANCE', 300);
 
-/** Sends a JSON error response and terminates. */
-function _site_export_error(int $code, string $message): void {
+/**
+ * Sends a JSON error response and terminates.
+ *
+ * @return never
+ */
+function _site_export_error(int $code, string $message, ?string $reason = null): void {
+    // The API entry point clears pre-existing output buffers before starting
+    // its request buffer. Drop everything buffered since then before emitting
+    // the one JSON response callers can safely parse.
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
     http_response_code($code);
     header('Content-Type: application/json');
-    echo json_encode(['error' => $message, 'code' => $code]);
+    $response = ['error' => $message, 'code' => $code];
+    if ($reason !== null) {
+        $response['status'] = 'rejected';
+        $response['reason'] = $reason;
+        $response['detail'] = $message;
+    }
+    echo json_encode($response);
     exit;
 }
 
@@ -180,25 +196,176 @@ function _site_export_default_authenticate(): void {
 }
 
 /**
- * Server-side options for the staged artifact endpoints.
+ * Server-side options for direct staged-apply session endpoints.
  *
- * The staging directory must live outside the web-served tree, and WordPress
- * has no guaranteed writable directory there, so the default sits under the
- * system temp dir, keyed by ABSPATH so co-hosted sites do not share staging
- * state. A host that cleans its temp dir only costs a transfer its progress —
- * artifacts re-upload from offset 0. Define SITE_EXPORT_STAGING_DIR to pick a
- * durable location instead.
+ * Push sessions need an administrator-owned staging directory, preferably
+ * outside the web-served tree. WordPress has no guaranteed private writable
+ * directory, so sessions are unavailable until SITE_EXPORT_STAGING_DIR
+ * explicitly supplies one. Pull routes remain available without it. The
+ * WordPress route also keeps live apply disabled until the standalone recovery
+ * endpoint can advance a session without booting WordPress.
  */
-function _site_export_staged_options(): array {
-    $staging_dir = defined('SITE_EXPORT_STAGING_DIR')
-        ? SITE_EXPORT_STAGING_DIR
-        : rtrim(sys_get_temp_dir(), '/') . '/reprint-staging-' . md5(ABSPATH);
+function _site_export_staged_options(): ?array {
+    if (!defined('SITE_EXPORT_STAGING_DIR')) {
+        return null;
+    }
+    if (
+        _site_export_staging_directory_error() !== null
+        || _site_export_apply_target_error() !== null
+    ) {
+        return null;
+    }
+    $staging_dir = rtrim(SITE_EXPORT_STAGING_DIR, '/');
+
+    $apply_target_root = defined('SITE_EXPORT_APPLY_ROOT')
+        ? SITE_EXPORT_APPLY_ROOT
+        : ABSPATH;
+    $apply_target_root = rtrim($apply_target_root, '/');
+    $apply_target_root = $apply_target_root === '' ? '/' : $apply_target_root;
+    $protected_paths = [];
+
+    // __DIR__ resolves a plugin-directory symlink to its target. Keep the
+    // configured path lexical as well, so an apply cannot remove the symlink
+    // WordPress uses to load this plugin.
+    $plugin_directory_candidates = [rtrim(SITE_EXPORT_PLUGIN_DIR, '/')];
+    $real_plugin_dir = realpath(__DIR__);
+    $real_target_root = realpath($apply_target_root);
+
+    // WordPress records plugin symlink mappings before it includes a plugin.
+    // plugin_basename() turns the resolved __FILE__ back into that install
+    // path; only accept a candidate under one of WordPress's two known plugin
+    // roots when it resolves to this plugin's real directory.
+    if (is_string($real_plugin_dir) && function_exists('plugin_basename')) {
+        $plugin_relative_file = plugin_basename(__FILE__);
+        $plugin_relative_directory = dirname($plugin_relative_file);
+        $plugin_relative_segments = explode('/', $plugin_relative_directory);
+        if (
+            $plugin_relative_directory !== '.'
+            && $plugin_relative_directory !== ''
+            && $plugin_relative_directory[0] !== '/'
+            && strpos($plugin_relative_directory, '\\') === false
+            && !in_array('.', $plugin_relative_segments, true)
+            && !in_array('..', $plugin_relative_segments, true)
+        ) {
+            $plugin_roots = [
+                defined('WP_PLUGIN_DIR') ? WP_PLUGIN_DIR : null,
+                defined('WPMU_PLUGIN_DIR') ? WPMU_PLUGIN_DIR : null,
+            ];
+            foreach ($plugin_roots as $plugin_root) {
+                if (!is_string($plugin_root) || $plugin_root === '') {
+                    continue;
+                }
+                $lexical_plugin_directory = rtrim($plugin_root, '/') . '/' . $plugin_relative_directory;
+                if (
+                    ( is_dir($lexical_plugin_directory) || is_link($lexical_plugin_directory) )
+                    && realpath($lexical_plugin_directory) === $real_plugin_dir
+                ) {
+                    $plugin_directory_candidates[] = $lexical_plugin_directory;
+                }
+            }
+        }
+    }
+
+    $lexical_target_root = rtrim($apply_target_root, '/');
+    $lexical_target_prefix = $lexical_target_root === '' || $lexical_target_root === '/'
+        ? '/'
+        : $lexical_target_root . '/';
+    foreach ($plugin_directory_candidates as $plugin_directory) {
+        if (
+            $plugin_directory === ''
+            || strpos($plugin_directory, $lexical_target_prefix) !== 0
+            || ( !is_dir($plugin_directory) && !is_link($plugin_directory) )
+        ) {
+            continue;
+        }
+        $protected_path = substr($plugin_directory, strlen($lexical_target_prefix));
+        $protected_path_segments = explode('/', $protected_path);
+        if (
+            $protected_path !== ''
+            && !in_array('', $protected_path_segments, true)
+            && !in_array('.', $protected_path_segments, true)
+            && !in_array('..', $protected_path_segments, true)
+            && strpos($protected_path, '\\') === false
+        ) {
+            $protected_paths[] = $protected_path;
+        }
+    }
+
+    // Keep protecting a normal in-tree installation even when WordPress did
+    // not register a symlink mapping and SITE_EXPORT_PLUGIN_DIR is resolved.
+    if (is_string($real_plugin_dir) && is_string($real_target_root)) {
+        $target_prefix = rtrim($real_target_root, '/') . '/';
+        if (strpos($real_plugin_dir, $target_prefix) === 0) {
+            $protected_paths[] = substr($real_plugin_dir, strlen($target_prefix));
+        }
+    }
+    $protected_paths = array_values(array_unique($protected_paths));
 
     return [
         'staging_dir' => $staging_dir,
         'secret' => _site_export_get_shared_secret(),
         'timestamp_tolerance' => SITE_EXPORT_TIMESTAMP_TOLERANCE,
+        'apply_target_root' => $apply_target_root,
+        'apply_protected_paths' => $protected_paths,
+        // A commit can leave WordPress's maintenance marker behind or install
+        // PHP that prevents the next WordPress boot. Do not expose live apply
+        // through this boot-dependent route until the standalone recovery
+        // endpoint can advance the same session without loading WordPress.
+        'apply_sessions_enabled' => false,
     ];
+}
+
+/** Returns a pointed error for a present but unsafe staging directory. */
+function _site_export_staging_directory_error(): ?string {
+    if (!defined('SITE_EXPORT_STAGING_DIR')) {
+        return null;
+    }
+    if (!class_exists('Site_Export_HTTP_Server')) {
+        _site_export_load_exporter_runtime();
+    }
+    if (!class_exists('Site_Export_HTTP_Server')) {
+        return 'Reprint Exporter runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.';
+    }
+    try {
+        Site_Export_HTTP_Server::normalize_storage_path(
+            SITE_EXPORT_STAGING_DIR,
+            'SITE_EXPORT_STAGING_DIR'
+        );
+    } catch (InvalidArgumentException $exception) {
+        return $exception->getMessage();
+    }
+    return null;
+}
+
+/** Returns a pointed error for an unsafe staged-apply target. */
+function _site_export_apply_target_error(): ?string {
+    $apply_target_root = defined('SITE_EXPORT_APPLY_ROOT')
+        ? SITE_EXPORT_APPLY_ROOT
+        : ABSPATH;
+    if (!is_string($apply_target_root)) {
+        return 'SITE_EXPORT_APPLY_ROOT must be a string; observed ' . gettype($apply_target_root) . '.';
+    }
+    if ($apply_target_root === '' || $apply_target_root[0] !== '/' || strpos($apply_target_root, "\0") !== false) {
+        return 'SITE_EXPORT_APPLY_ROOT must be an absolute non-empty path without NUL bytes; observed base64 '
+            . base64_encode($apply_target_root) . '.';
+    }
+    foreach (explode('/', $apply_target_root) as $segment) {
+        if ($segment === '.' || $segment === '..') {
+            return 'SITE_EXPORT_APPLY_ROOT must not contain dot segments; observed base64 '
+                . base64_encode($apply_target_root) . '.';
+        }
+    }
+    $apply_target_root = rtrim($apply_target_root, '/');
+    $apply_target_root = $apply_target_root === '' ? '/' : $apply_target_root;
+    if (!is_dir($apply_target_root)) {
+        return 'SITE_EXPORT_APPLY_ROOT must name an existing directory; observed base64 '
+            . base64_encode($apply_target_root) . '.';
+    }
+    if (!is_string(realpath($apply_target_root))) {
+        return 'SITE_EXPORT_APPLY_ROOT could not be resolved to a canonical directory; observed base64 '
+            . base64_encode($apply_target_root) . '.';
+    }
+    return null;
 }
 
 /**
@@ -209,8 +376,10 @@ function _site_export_staged_options(): array {
  * are all available.
  *
  * @param array $options Optional overrides:
- *   - 'authenticate' (callable): Called to authenticate the request.
- *        Defaults to _site_export_default_authenticate().
+ *   - 'authenticate' (callable): Runs first for every endpoint and replaces
+ *        default whole-body HMAC on ordinary routes. The staged_session_*
+ *        routes additionally require their shared-secret
+ *        envelope HMAC.
  */
 function _site_export_handle_api_request(array $options = []): void {
     // Revert WordPress error display settings (wp_debug_mode may
@@ -226,10 +395,17 @@ function _site_export_handle_api_request(array $options = []): void {
     // Emit CORS headers and short-circuit OPTIONS preflight before
     // authentication runs — browsers send preflight OPTIONS without
     // credentials, so we must not require auth before CORS passes.
-    // The class is loaded by the Composer autoloader on demand, but
-    // load it eagerly in case the autoloader hasn't been required yet.
+    // Load Composer exactly once. clearstatcache() below can make the same
+    // symlinked plugin path resolve under another spelling; requiring its
+    // generated autoloader again would redeclare Composer's initializer.
     if (!class_exists('Site_Export_HTTP_Server')) {
         _site_export_load_exporter_runtime();
+    }
+    if (!class_exists('Site_Export_HTTP_Server')) {
+        _site_export_error(
+            500,
+            'Reprint Exporter runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.'
+        );
     }
     Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options('*');
 
@@ -252,10 +428,7 @@ function _site_export_handle_api_request(array $options = []): void {
             'type' => $errno,
         ];
         error_log('Reprint Exporter API error: ' . json_encode($error));
-        http_response_code(500);
-        @header('Content-Type: application/json');
-        echo json_encode($error);
-        exit(1);
+        _site_export_error(500, 'The Reprint Exporter encountered an internal error.');
     });
 
     set_exception_handler(function ($e) {
@@ -265,52 +438,111 @@ function _site_export_handle_api_request(array $options = []): void {
             'line' => $e->getLine(),
         ];
         error_log('Reprint Exporter API exception: ' . json_encode($error));
-        http_response_code(500);
-        @header('Content-Type: application/json');
-        echo json_encode($error);
-        exit(1);
+        _site_export_error(500, 'The Reprint Exporter encountered an internal error.');
     });
 
     // -- Authenticate --
-    // staged_upload authenticates inside its handler: the default handler
-    // here buffers the whole request body to hash it, which a chunk upload
-    // cannot afford. The upload route verifies the signed headers first and
-    // hashes the body as it streams. A custom authenticate callable still
-    // runs for every endpoint — its embedder owns that tradeoff.
+    // Chunk uploads cannot afford the default handler's whole-body hash, and
+    // every session route needs envelope HMAC to bind its session id and
+    // generation in the exact request target. The retired staged_push route
+    // also takes this path so an older sender's large body can be rejected
+    // without buffering it. Verify the envelope before reading server
+    // configuration; the HTTP route verifies current session routes again for
+    // direct HTTP-server users. TLS protects streamed bytes. A custom
+    // authenticate callable still runs first for every endpoint as an
+    // additional host-owned policy; it never replaces the staged envelope.
     // filter_input, not WP sanitizers: lib.php also runs without WordPress
     // bootstrapped (hosts that route the API from their own index.php).
     $endpoint = (string) filter_input(INPUT_GET, 'endpoint');
     $authenticate = $options['authenticate'] ?? null;
+    $is_staged_session_endpoint = Site_Export_HTTP_Server::is_staged_session_endpoint($endpoint);
+    $is_retired_staged_push_endpoint = $endpoint === 'staged_push';
     if ($authenticate !== null) {
+        // Embedders use this hook for policy as well as authentication, so it
+        // must run for every endpoint before any built-in rejection exits.
         $authenticate();
-    } elseif ($endpoint !== 'staged_upload') {
+    }
+
+    if ($is_staged_session_endpoint || $is_retired_staged_push_endpoint) {
+        $secret = _site_export_get_shared_secret();
+        if ($secret === null) {
+            _site_export_error(
+                503,
+                'Staged session authentication is unavailable because no shared secret is configured.',
+                'not_configured'
+            );
+        }
+        // HMAC must verify the exact request target and method, not sanitized
+        // values that could differ from the bytes the client signed.
+        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- Sanitizing would change the signed bytes.
+        $request_target = $_SERVER['REQUEST_URI'] ?? null;
+        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- HMAC must verify the exact HTTP method.
+        $request_method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
+        if (!is_string($request_target) || $request_target === '') {
+            _site_export_error(403, 'Authentication failed.', 'auth_failed');
+        }
+        $auth_error = ( new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE) )->verify_envelope(
+            $_SERVER,
+            $request_method,
+            $request_target
+        );
+        if ($auth_error !== null) {
+            _site_export_error(403, 'Authentication failed.', 'auth_failed');
+        }
+    } elseif ($authenticate === null) {
         _site_export_default_authenticate();
     }
 
-    // Ensure the Composer autoloader is loaded so Site_Export_HTTP_Server
-    // is resolvable. The class itself will require export.php on demand
-    // via serve() below.
-    if (_site_export_load_exporter_runtime() === null) {
+    if ($is_retired_staged_push_endpoint) {
         _site_export_error(
-            500,
-            'Reprint Exporter runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.'
+            410,
+            'The staged_push endpoint was removed. Use staged_session_create and staged_session_push.',
+            'endpoint_retired'
         );
     }
 
     // -- Dispatch --
     try {
-        Site_Export_HTTP_Server::serve([
-            'default_directory' => ABSPATH,
-            'staged' => _site_export_staged_options(),
-        ]);
-    } catch (Exception $e) {
-        if (!headers_sent()) {
-            http_response_code(400);
-            header('Content-Type: application/json');
+        $staging_configuration_error = _site_export_staging_directory_error();
+        $apply_target_configuration_error = defined('SITE_EXPORT_STAGING_DIR')
+            && $staging_configuration_error === null
+            ? _site_export_apply_target_error()
+            : null;
+        $staged_options = _site_export_staged_options();
+        if (
+            $staged_options === null
+            && ( $is_staged_session_endpoint || $staging_configuration_error !== null )
+        ) {
+            if ($staging_configuration_error !== null) {
+                _site_export_error(503, $staging_configuration_error, 'apply_storage_invalid');
+            }
+            if ($apply_target_configuration_error !== null) {
+                _site_export_error(503, $apply_target_configuration_error, 'apply_target_invalid');
+            }
+            if ($is_staged_session_endpoint) {
+                _site_export_error(
+                    503,
+                    'Push requires SITE_EXPORT_STAGING_DIR to name an explicitly managed private staging directory.',
+                    'apply_storage_not_configured'
+                );
+            }
         }
-        echo json_encode([
-            'error' => $e->getMessage(),
-            'trace' => $e->getTraceAsString(),
-        ]);
+        $server_options = ['default_directory' => ABSPATH];
+        if ($staged_options !== null) {
+            $server_options['staged'] = $staged_options;
+        } elseif (defined('SITE_EXPORT_STAGING_DIR') && $staging_configuration_error === null) {
+            // A bad apply target must not make pull indexes expose otherwise
+            // valid server-owned staging data.
+            $server_options['storage_path'] = rtrim(SITE_EXPORT_STAGING_DIR, '/');
+        }
+        Site_Export_HTTP_Server::serve($server_options);
+    } catch (InvalidArgumentException $e) {
+        // Dispatcher validation messages are the API's actionable response to
+        // authenticated caller input. Return the message, but never its trace.
+        _site_export_error(400, $e->getMessage());
+    } catch (Exception $e) {
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Details stay in the server log, never the response.
+        error_log('Reprint Exporter API request exception: ' . $e);
+        _site_export_error(500, 'The Reprint Exporter encountered an internal error.');
     }
 }

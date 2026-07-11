@@ -38,7 +38,9 @@ if ($myRouter->matches('/export')) {
     // otherwise falls back to the site option):
     _site_export_handle_api_request();
 
-    // Or supply your own authentication:
+    // Or supply your own authentication/policy. The staged_session_* routes
+    // still enforce their shared-secret envelope HMAC
+    // after this callback runs:
     _site_export_handle_api_request([
         'authenticate' => function () {
             if (!my_auth_check()) {
@@ -48,6 +50,12 @@ if ($myRouter->matches('/export')) {
     ]);
 }
 ```
+
+The custom callback runs first for every endpoint and replaces the default
+whole-body HMAC check on ordinary routes. The built-in `staged_session_*`
+routes additionally require envelope HMAC with the configured
+Reprint shared secret; the callback does not replace that streaming-safe
+protocol authentication.
 
 `lib.php` defines these constants (using WordPress's `plugin_dir_path`):
 

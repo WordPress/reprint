@@ -178,10 +178,8 @@ class PushRequestSizer
      * structured request_too_large response.
      *
      * The failed size caps the session ceiling so growth cannot retry it.
-     * When the server reported its actual limit — the staged_push endpoint's
-     * 413 carries max_frame_bytes, which it derives from its request-size
-     * limits — the ceiling drops below that limit directly instead of
-     * probing downward.
+     * When the server reports its actual request-body limit, the ceiling drops
+     * below that limit directly instead of probing downward.
      *
      * @param int|null $reported_max_bytes Server-reported request limit, if any.
      * @return array{action:string,request_body_bytes:int} Decision summary.

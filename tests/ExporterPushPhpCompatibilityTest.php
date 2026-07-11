@@ -7,7 +7,8 @@ use PHPUnit\Framework\TestCase;
 /**
  * The target may run PHP 7.2 even when the sending CLI runs a newer PHP.
  * Repo-wide compatibility lint currently reports unrelated vendor-patched
- * code, so keep an enforced scan over the direct-staging files in this layer.
+ * code, so keep an enforced scan over every direct-push exporter file loaded
+ * by the HTTP server or WordPress wrapper.
  */
 final class ExporterPushPhpCompatibilityTest extends TestCase {
 
@@ -18,6 +19,9 @@ final class ExporterPushPhpCompatibilityTest extends TestCase {
         $relative_paths = [
             '../packages/reprint-exporter/src/class-staged-push-stream-protocol.php',
             '../packages/reprint-exporter/src/class-staged-apply.php',
+            '../packages/reprint-exporter/src/class-staged-endpoints.php',
+            '../packages/reprint-exporter/src/class-http-server.php',
+            '../reprint-exporter-wp/lib.php',
         ];
         $paths = [];
         foreach ($relative_paths as $relative_path) {

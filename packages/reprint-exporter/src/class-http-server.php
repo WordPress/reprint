@@ -7,6 +7,15 @@ use function WordPress\Reprint\Exporter\parse_size;
  */
 final class Site_Export_HTTP_Server {
 
+    /** Reserved session route names. */
+    public const STAGED_SESSION_ENDPOINTS = [
+        'staged_session_create',
+        'staged_session_push',
+        'staged_session_advance',
+        'staged_session_status',
+        'staged_session_discard',
+    ];
+
     /** @var array<string, callable> */
     private $handlers;
 
@@ -22,6 +31,15 @@ final class Site_Export_HTTP_Server {
     /** @var string|null */
     private $default_directory;
 
+    /** @var string|null Server-owned path excluded from file indexes. */
+    private $storage_path;
+
+    /** @var Site_Export_Staged_Endpoints|null */
+    private $staged_endpoints;
+
+    /** @var array<string,bool> Session routes authenticated before parsing. */
+    private $staged_envelope_endpoints = [];
+
     /** @var string[] Endpoints dispatched without a resource budget. */
     private $no_budget_endpoints = ['preflight'];
 
@@ -34,23 +52,131 @@ final class Site_Export_HTTP_Server {
         };
         $this->cursor_header_name = $options['cursor_header_name'] ?? 'HTTP_X_EXPORT_CURSOR';
         $this->default_directory = $options['default_directory'] ?? null;
+        $this->staged_endpoints = null;
 
-        if (isset($options['staged']) && is_array($options['staged'])) {
-            $this->register_staged_handlers(new Site_Export_Staged_Endpoints($options['staged']));
+        $staged_options = isset($options['staged']) && is_array($options['staged'])
+            ? $options['staged']
+            : null;
+        $has_explicit_storage_path = array_key_exists('storage_path', $options);
+        $has_staged_storage_path = $staged_options !== null && array_key_exists('staging_dir', $staged_options);
+        $explicit_storage_path = $has_explicit_storage_path
+            ? self::normalize_storage_path($options['storage_path'], 'The HTTP server storage_path')
+            : null;
+        $staged_storage_path = $has_staged_storage_path
+            ? self::normalize_storage_path($staged_options['staging_dir'], 'The HTTP server staged.staging_dir')
+            : null;
+        if ($staged_options !== null && $has_explicit_storage_path && !$has_staged_storage_path) {
+            throw new InvalidArgumentException('The HTTP server storage_path cannot replace a missing staged.staging_dir.');
         }
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exception text is not HTML output.
+        if (
+            $explicit_storage_path !== null
+            && $staged_storage_path !== null
+            && $explicit_storage_path !== $staged_storage_path
+        ) {
+            throw new InvalidArgumentException(
+                'The HTTP server storage_path must match staged.staging_dir when both are configured; observed '
+                . $explicit_storage_path . ' and ' . $staged_storage_path . '.'
+            );
+        }
+        $this->storage_path = $staged_storage_path ?? $explicit_storage_path;
+
+        if ($staged_options !== null) {
+            if ($staged_storage_path !== null) {
+                $staged_options['staging_dir'] = $staged_storage_path;
+            }
+            $this->staged_endpoints = new Site_Export_Staged_Endpoints($staged_options);
+            $this->register_staged_handlers($this->staged_endpoints);
+        }
+    }
+
+    /**
+     * Keep the HTTP server and its host integration on one storage-path
+     * invariant before either lets the path affect a file index.
+     *
+     * @param mixed $storage_path
+     */
+    public static function normalize_storage_path($storage_path, string $option_name): string {
+        if (!is_string($storage_path)) {
+            throw new InvalidArgumentException(
+                $option_name . ' must be a string; observed ' . gettype($storage_path) . '.'
+            );
+        }
+        if ($storage_path === '' || $storage_path[0] !== '/' || strpos($storage_path, "\0") !== false) {
+            throw new InvalidArgumentException(
+                $option_name . ' must be an absolute non-empty path without NUL bytes; observed base64 '
+                . base64_encode($storage_path) . '.'
+            );
+        }
+        foreach (explode('/', $storage_path) as $segment) {
+            if ($segment === '.' || $segment === '..') {
+                throw new InvalidArgumentException(
+                    $option_name . ' must not contain dot segments; observed base64 '
+                    . base64_encode($storage_path) . '.'
+                );
+            }
+        }
+        $storage_path = rtrim($storage_path, '/');
+        if ($storage_path === '') {
+            throw new InvalidArgumentException($option_name . ' must not be the filesystem root; observed /.');
+        }
+        if (is_link($storage_path)) {
+            throw new InvalidArgumentException(
+                $option_name . ' must not be a symlink; observed base64 ' . base64_encode($storage_path) . '.'
+            );
+        }
+        $existing_path = $storage_path;
+        while (!file_exists($existing_path) && !is_link($existing_path)) {
+            $parent_path = dirname($existing_path);
+            if ($parent_path === $existing_path) {
+                break;
+            }
+            $existing_path = $parent_path;
+        }
+        if (!is_dir($existing_path)) {
+            throw new InvalidArgumentException(
+                $option_name . ' must not be blocked by a non-directory path; observed base64 '
+                . base64_encode($existing_path) . '.'
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        return $storage_path;
     }
 
     public function handle_request(array $request = []): void {
         $server = $request['server'] ?? $_SERVER;
         $get = $request['get'] ?? $_GET;
         $post = $request['post'] ?? $_POST;
+        if (!$this->pre_authenticate_staged_query($get, $server)) {
+            return;
+        }
+        $post_endpoint = $post['endpoint'] ?? null;
+        if (
+            is_string($post_endpoint)
+            && isset($this->staged_envelope_endpoints[$post_endpoint])
+            && ( $get['endpoint'] ?? null ) !== $post_endpoint
+        ) {
+            $this->reject_staged_endpoint_outside_query($post_endpoint);
+            return;
+        }
         if (array_key_exists('body', $request)) {
             $body = (string) $request['body'];
         } else {
-            $endpoint = (string) ( $get['endpoint'] ?? $post['endpoint'] ?? '' );
-            // Data-plane staged routes carry raw bytes and must only be read
-            // by their handlers. Other JSON requests still feed config parsing.
-            $body = $endpoint !== 'staged_push' && $this->is_json_content_type($server)
+            // The query endpoint is what plugin authentication sees. It must
+            // therefore also win dispatch selection; a form body cannot turn
+            // an envelope-authenticated staged route into another endpoint.
+            $endpoint = $get['endpoint'] ?? $post['endpoint'] ?? '';
+            $endpoint = is_string($endpoint) ? $endpoint : '';
+            // Staged session parameters live in the signed request target,
+            // never a JSON body. Do not read any session body here: push owns
+            // its raw stream, and control routes must authenticate before an
+            // untrusted body can be buffered. Other JSON requests still feed
+            // config parsing.
+            // Older senders may still upload a large staged_push body. The
+            // route is retired, but its rejection must not buffer that body.
+            $body = $endpoint !== 'staged_push'
+                && !self::is_staged_session_endpoint($endpoint)
+                && $this->is_json_content_type($server)
                 ? call_user_func($this->body_reader)
                 : '';
         }
@@ -60,8 +186,21 @@ final class Site_Export_HTTP_Server {
             $server,
             $body
         );
+        $selected_endpoint = $config['endpoint'] ?? null;
+        if (
+            is_string($selected_endpoint)
+            && isset($this->staged_envelope_endpoints[$selected_endpoint])
+            && ( $get['endpoint'] ?? null ) !== $selected_endpoint
+        ) {
+            $this->reject_staged_endpoint_outside_query($selected_endpoint);
+            return;
+        }
         $config = $this->normalize_config($config, $server);
         $this->dispatch($config);
+    }
+
+    public static function is_staged_session_endpoint(string $endpoint): bool {
+        return in_array($endpoint, self::STAGED_SESSION_ENDPOINTS, true);
     }
 
     /**
@@ -161,15 +300,34 @@ final class Site_Export_HTTP_Server {
      */
     public function parse_http_config(array $get = [], array $post = [], array $server = [], string $body = ''): array {
         $config = [];
-        $params = array_merge($get, $post);
+        $json_data = [];
 
         $content_type = $server['CONTENT_TYPE'] ?? '';
         $content_type_main = strtolower(trim((string) strtok((string) $content_type, ';')));
         if ($content_type_main === 'application/json' && $body !== '') {
-            $json_data = json_decode($body, true);
-            if (is_array($json_data)) {
-                $params = array_merge($json_data, $params);
+            $decoded_json = json_decode($body, true);
+            if (is_array($decoded_json)) {
+                $json_data = $decoded_json;
             }
+        }
+
+        $endpoint = null;
+        foreach ([$get, $post, $json_data] as $parameters) {
+            if (!array_key_exists('endpoint', $parameters)) {
+                continue;
+            }
+            if (!is_string($parameters['endpoint'])) {
+                throw new InvalidArgumentException('endpoint parameter must be a string.');
+            }
+            if ($endpoint !== null && $parameters['endpoint'] !== $endpoint) {
+                throw new InvalidArgumentException('endpoint parameter must match in the request target and body.');
+            }
+            $endpoint = $parameters['endpoint'];
+        }
+
+        $params = array_merge($json_data, $get, $post);
+        if ($endpoint !== null) {
+            $params['endpoint'] = $endpoint;
         }
 
         foreach ($params as $key => $value) {
@@ -215,6 +373,14 @@ final class Site_Export_HTTP_Server {
             !isset($config['directory'])
         ) {
             $config['directory'] = $this->default_directory;
+        }
+
+        // A peer must not hide an arbitrary target subtree from file_index.
+        // The server either supplies its own storage path or removes the
+        // request parameter entirely.
+        unset($config['storage_path']);
+        if ($this->storage_path !== null) {
+            $config['storage_path'] = $this->storage_path;
         }
 
         if (!isset($config['cursor']) && isset($server[$this->cursor_header_name])) {
@@ -306,18 +472,22 @@ final class Site_Export_HTTP_Server {
     }
 
     /**
-     * Wire the staged artifact routes to the shared dispatcher.
+     * Wire direct staged-apply session routes to the shared dispatcher.
      *
-     * Explicitly-passed handlers win over these, matching how the
-     * handlers option replaces the default map.
+     * Explicitly-passed handlers win over these, matching how the handlers
+     * option replaces the default map. Reserved session route names still use
+     * the configured envelope authentication before an override is called.
      */
     private function register_staged_handlers(Site_Export_Staged_Endpoints $endpoints): void {
-        $routes = [
-            'staged_push' => static function (array $config) use ($endpoints): void {
+        $session_routes = [
+            'staged_session_create' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->session_create($config, $_SERVER));
+            },
+            'staged_session_push' => static function (array $config) use ($endpoints): void {
                 $input = @fopen('php://input', 'rb');
                 try {
                     self::emit_json_response(
-                        $endpoints->push_stream($config, $_SERVER, $input === false ? null : $input)
+                        $endpoints->session_push_stream($config, $_SERVER, $input === false ? null : $input)
                     );
                 } finally {
                     if (is_resource($input)) {
@@ -325,18 +495,22 @@ final class Site_Export_HTTP_Server {
                     }
                 }
             },
-            'staged_finalize' => static function (array $config) use ($endpoints): void {
-                self::emit_json_response($endpoints->finalize($config, $_SERVER));
+            'staged_session_advance' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->session_advance($config, $_SERVER));
             },
-            'staged_status' => static function (array $config) use ($endpoints): void {
-                self::emit_json_response($endpoints->status($config));
+            'staged_session_status' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->session_status($config, $_SERVER));
             },
-            'staged_discard' => static function (array $config) use ($endpoints): void {
-                self::emit_json_response($endpoints->discard($config, $_SERVER));
+            'staged_session_discard' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->session_discard($config, $_SERVER));
             },
         ];
+        if (array_keys($session_routes) !== self::STAGED_SESSION_ENDPOINTS) {
+            throw new LogicException('The staged session route registry does not match its authentication allowlist.');
+        }
 
-        foreach ($routes as $endpoint => $handler) {
+        foreach ($session_routes as $endpoint => $handler) {
+            $this->staged_envelope_endpoints[$endpoint] = true;
             if (!isset($this->handlers[$endpoint])) {
                 $this->handlers[$endpoint] = $handler;
             }
@@ -345,12 +519,54 @@ final class Site_Export_HTTP_Server {
     }
 
     /**
+     * Authenticate a staged query route before reading or parsing any other
+     * request input. Envelope HMAC covers the exact method and raw
+     * REQUEST_URI and never reads the request body.
+     *
+     * @param array<string,mixed> $get
+     * @param array<string,mixed> $server
+     */
+    private function pre_authenticate_staged_query(array $get, array $server): bool {
+        $endpoint = $get['endpoint'] ?? null;
+        if (
+            $this->staged_endpoints === null
+            || !is_string($endpoint)
+            || !isset($this->staged_envelope_endpoints[$endpoint])
+        ) {
+            return true;
+        }
+        $error = $this->staged_endpoints->pre_authenticate_envelope($server, $endpoint);
+        if ($error === null) {
+            return true;
+        }
+        self::emit_json_response($error);
+        return false;
+    }
+
+    private function reject_staged_endpoint_outside_query(string $endpoint): void {
+        self::emit_json_response([
+            'http_code' => 400,
+            'body' => [
+                'status' => 'rejected',
+                'reason' => 'endpoint_not_in_query',
+                'detail' => 'Reserved staged endpoint ' . $endpoint . ' must be named in the signed request query.',
+            ],
+        ]);
+    }
+
+    /**
      * @param array{http_code:int,body:array} $response
      */
     private static function emit_json_response(array $response): void {
+        $body = json_encode($response['body']);
+        if ($body === false) {
+            $response['http_code'] = 500;
+            $body = '{"status":"rejected","reason":"response_encoding_failed","detail":"The server could not encode its response as JSON.","committed_bytes":0}';
+        }
         http_response_code($response['http_code']);
         header('Content-Type: application/json');
-        echo json_encode($response['body']);
+        // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Checked json_encode output or a fixed JSON fallback literal.
+        echo $body;
     }
 
     private function is_json_content_type(array $server): bool {
