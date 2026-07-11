@@ -209,12 +209,12 @@ final class Site_Export_Staged_Artifacts {
             // append to any other artifact starts it from scratch.
             $state = $this->read_state();
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
-            $staging_file_damage = $this->staging_file_damage($file_path, $committed);
-            if ($staging_file_damage !== null) {
+            $staging_file_diagnostic = $this->diagnose_staging_file($file_path, $committed);
+            if ($staging_file_diagnostic !== null) {
                 return [
                     'status' => 'rejected',
                     'reason' => 'staging_file_damaged',
-                    'detail' => $staging_file_damage,
+                    'detail' => $staging_file_diagnostic,
                     'committed_bytes' => 0,
                 ];
             }
@@ -249,12 +249,12 @@ final class Site_Export_Staged_Artifacts {
             // bytes until the cursor decides what tail to discard.
             $file = @fopen($file_path, $committed > 0 ? 'r+b' : 'c+b');
             if ($file === false) {
-                $staging_file_damage = $this->staging_file_damage($file_path, $committed);
-                if ($staging_file_damage !== null) {
+                $staging_file_diagnostic = $this->diagnose_staging_file($file_path, $committed);
+                if ($staging_file_diagnostic !== null) {
                     return [
                         'status' => 'rejected',
                         'reason' => 'staging_file_damaged',
-                        'detail' => $staging_file_damage,
+                        'detail' => $staging_file_diagnostic,
                         'committed_bytes' => 0,
                     ];
                 }
@@ -267,12 +267,12 @@ final class Site_Export_Staged_Artifacts {
             }
 
             try {
-                $opened_staging_file_damage = $this->opened_staging_file_damage($file, $committed);
-                if ($opened_staging_file_damage !== null) {
+                $staging_file_diagnostic = $this->diagnose_staging_file($file, $committed);
+                if ($staging_file_diagnostic !== null) {
                     return [
                         'status' => 'rejected',
                         'reason' => 'staging_file_damaged',
-                        'detail' => $opened_staging_file_damage,
+                        'detail' => $staging_file_diagnostic,
                         'committed_bytes' => 0,
                     ];
                 }
@@ -431,12 +431,12 @@ final class Site_Export_Staged_Artifacts {
 
             $state = $this->read_state();
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
-            $staging_file_damage = $this->staging_file_damage($file_path, $committed);
-            if ($staging_file_damage !== null) {
+            $staging_file_diagnostic = $this->diagnose_staging_file($file_path, $committed);
+            if ($staging_file_diagnostic !== null) {
                 return [
                     'status' => 'rejected',
                     'reason' => 'staging_file_damaged',
-                    'detail' => $staging_file_damage,
+                    'detail' => $staging_file_diagnostic,
                     'committed_bytes' => 0,
                     'path' => null,
                 ];
@@ -477,12 +477,12 @@ final class Site_Export_Staged_Artifacts {
 
             $file = @fopen($file_path, $committed > 0 ? 'r+b' : 'c+b');
             if ($file === false) {
-                $staging_file_damage = $this->staging_file_damage($file_path, $committed);
-                if ($staging_file_damage !== null) {
+                $staging_file_diagnostic = $this->diagnose_staging_file($file_path, $committed);
+                if ($staging_file_diagnostic !== null) {
                     return [
                         'status' => 'rejected',
                         'reason' => 'staging_file_damaged',
-                        'detail' => $staging_file_damage,
+                        'detail' => $staging_file_diagnostic,
                         'committed_bytes' => 0,
                         'path' => null,
                     ];
@@ -495,13 +495,13 @@ final class Site_Export_Staged_Artifacts {
                     'path' => null,
                 ];
             }
-            $opened_staging_file_damage = $this->opened_staging_file_damage($file, $committed);
-            if ($opened_staging_file_damage !== null) {
+            $staging_file_diagnostic = $this->diagnose_staging_file($file, $committed);
+            if ($staging_file_diagnostic !== null) {
                 fclose($file);
                 return [
                     'status' => 'rejected',
                     'reason' => 'staging_file_damaged',
-                    'detail' => $opened_staging_file_damage,
+                    'detail' => $staging_file_diagnostic,
                     'committed_bytes' => 0,
                     'path' => null,
                 ];
@@ -580,14 +580,14 @@ final class Site_Export_Staged_Artifacts {
 
         $state = $this->read_state();
         $committed_bytes = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
-        $staging_file_damage = $this->staging_file_damage($file_path, $committed_bytes);
+        $staging_file_diagnostic = $this->diagnose_staging_file($file_path, $committed_bytes);
         $status = [
             'exists' => file_exists($file_path),
-            'committed_bytes' => $staging_file_damage === null ? $committed_bytes : 0,
+            'committed_bytes' => $staging_file_diagnostic === null ? $committed_bytes : 0,
             'verified' => false,
         ];
-        if ($staging_file_damage !== null) {
-            $status['damage'] = $staging_file_damage;
+        if ($staging_file_diagnostic !== null) {
+            $status['damage'] = $staging_file_diagnostic;
             $status['recorded_committed_bytes'] = $committed_bytes;
         }
         return $status;
@@ -718,43 +718,29 @@ final class Site_Export_Staged_Artifacts {
     }
 
     /**
-     * Return why a nonzero cursor no longer has trustworthy backing bytes.
+     * Diagnose whether a nonzero cursor still has trustworthy backing bytes.
      * A longer file is valid: it is an uncommitted tail left by an interrupted
      * append and the next writer truncates it back to the cursor.
-     */
-    private function staging_file_damage(string $file_path, int $committed_bytes): ?string {
-        if ($committed_bytes === 0) {
-            return null;
-        }
-
-        $file_stat = @lstat($file_path);
-        if (!is_array($file_stat)) {
-            return 'staging_file_missing_at_cursor';
-        }
-        if (
-            !isset($file_stat['mode'])
-            || ( ( (int) $file_stat['mode'] & 0170000 ) !== 0100000 )
-        ) {
-            return 'staging_file_not_regular';
-        }
-        if (!isset($file_stat['size']) || (int) $file_stat['size'] < $committed_bytes) {
-            return 'staging_file_shorter_than_cursor';
-        }
-        return null;
-    }
-
-    /**
-     * Recheck the opened file before ftruncate() can extend it. The path check
-     * and open are separate filesystem operations, so cleanup may race them.
      *
-     * @param resource $file
+     * A path is inspected with lstat() so links are never followed. An open
+     * handle is rechecked with fstat() before ftruncate() can extend it: the
+     * path check and open are separate operations, so cleanup may race them.
+     *
+     * @param string|resource $staging_file_path_or_handle
      */
-    private function opened_staging_file_damage($file, int $committed_bytes): ?string {
+    private function diagnose_staging_file($staging_file_path_or_handle, int $committed_bytes): ?string {
         if ($committed_bytes === 0) {
             return null;
         }
 
-        $file_stat = @fstat($file);
+        if (is_string($staging_file_path_or_handle)) {
+            $file_stat = @lstat($staging_file_path_or_handle);
+            if (!is_array($file_stat)) {
+                return 'staging_file_missing_at_cursor';
+            }
+        } else {
+            $file_stat = @fstat($staging_file_path_or_handle);
+        }
         if (
             !is_array($file_stat)
             || !isset($file_stat['mode'])
