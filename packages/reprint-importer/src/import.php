@@ -72,8 +72,12 @@ if (!class_exists('Site_Export_Staged_Push_Stream_Protocol')) {
 // Adaptive sizing for staged push request bodies
 require_once __DIR__ . '/lib/upload/class-push-request-sizer.php';
 
-// One-request push streams into the target's staged artifact store
+// One-request typed operation streams into the target's direct apply session.
 require_once __DIR__ . '/lib/upload/class-staged-push-stream-client.php';
+
+// Per-target push baseline and its durable direct staged-apply driver.
+require_once __DIR__ . '/lib/push/class-push-journal.php';
+require_once __DIR__ . '/lib/push/class-staged-apply-session-driver.php';
 
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
