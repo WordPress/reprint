@@ -105,9 +105,10 @@ drives the loop — one `append()` per buffer, individually committed, so the
 transfer can stop after any step and resume from `committed_bytes` in a new
 request. `finalize()` checks the assembled size against the size declared in
 the plan; nothing re-reads or hashes artifacts. A missing, shortened, or
-non-regular file behind the cursor is lost progress, not a valid resume point:
-status reports a zero frontier, a mid-file push retries from zero, and an
-offset-zero push replaces the damaged state.
+non-regular file behind the cursor is damaged staging, not a valid resume
+point: status reports a zero frontier, a mid-file frame ends the request with
+`staging_file_damaged` before its payload is read, and a later offset-zero push
+replaces the damaged state.
 
 Driver rule: **a discard that did not return true must be retried until it
 does** so all stale bytes are eventually removed. Discard invalidates cursor

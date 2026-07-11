@@ -841,6 +841,32 @@ class StagedPushStreamClientTest extends TestCase
         $this->assertSame(['staged_push', 'staged_push'], $this->endpointsSeen(), 'one gap rejection, one clean resume from the store cursor');
     }
 
+    public function testDamagedStagingStopsThePush(): void
+    {
+        $content = str_repeat('d', 8);
+        $source_path = $this->writeSource('damaged.bin', $content);
+        ( new Site_Export_Staged_Artifacts($this->staging_dir) )->append('damaged.bin', 0, 'AAAA');
+        file_put_contents($this->staging_dir . '/files/damaged.bin', 'A');
+        clearstatcache();
+        $source_stat = stat($source_path);
+        $this->assertNotFalse($source_stat);
+
+        $result = $this->pushAll($this->makeClient(), $this->writeLocalPathsToPush(['damaged.bin']), [
+            'artifact_id' => 'damaged.bin',
+            'committed_bytes' => 4,
+            'total_bytes' => 8,
+            'source_ctime' => (int) $source_stat['ctime'],
+        ]);
+
+        $this->assertSame(
+            ['failed', 'staging_file_damaged', 'staging_file_shorter_than_cursor'],
+            [$result['status'], $result['reason'], $result['detail']],
+            (string) json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE)
+        );
+        $this->assertSame('A', file_get_contents($this->staging_dir . '/files/damaged.bin'));
+        $this->assertSame(['staged_push'], $this->endpointsSeen());
+    }
+
     public function testExhaustedRetriesReportATerminalFailure(): void
     {
         $this->writeSource('never.bin', str_repeat('n', 4));

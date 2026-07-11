@@ -421,7 +421,7 @@ final class StagedEndpointsTest extends TestCase {
         $this->assertSame('BBBBBBBB', file_get_contents($this->staging_dir . '/files/restarted.bin'));
     }
 
-    public function testDamagedCursorRetriesFromZero(): void
+    public function testDamagedCursorStopsBeforeReadingTheFramePayload(): void
     {
         $endpoints = $this->makeEndpoints();
         ( new Site_Export_Staged_Artifacts($this->staging_dir) )->append('damaged.bin', 0, 'AAAA');
@@ -437,19 +437,40 @@ final class StagedEndpointsTest extends TestCase {
             ]
         );
 
-        // The sender still has its old mid-file cursor. Return the
-        // store-confirmed zero frontier; its offset-zero retry replaces damage.
-        $resume = $this->push($endpoints, [
+        // PHP may receive the whole request before this code runs. Once the
+        // damaged cursor is found, leave its payload and every later frame
+        // unread instead of doing more work from a request that must fail.
+        $body = $this->pushBody([
             ['artifact_id' => 'damaged.bin', 'offset' => 4, 'bytes' => 'BBBB', 'total_bytes' => 8, 'final' => true],
+            ['artifact_id' => 'later.bin', 'offset' => 0, 'bytes' => 'later', 'total_bytes' => 5, 'final' => true],
         ]);
-        $this->assertSame(409, $resume['http_code']);
-        $this->assertSame('offset_gap', $resume['body']['reason']);
-        $this->assertSame('staging_file_shorter_than_cursor', $resume['body']['detail']);
-        $this->assertSame(
-            ['artifact_id' => base64_encode('damaged.bin'), 'committed_bytes' => 0],
-            $resume['body']['cursor']
-        );
+        $first_header_bytes = strpos($body, "\n") + 1;
+        $stream = $this->bodyStream($body);
+        try {
+            $result = $endpoints->push_stream([], $this->pushHeaders(), $stream);
+
+            $this->assertSame(409, $result['http_code']);
+            $this->assertSame('staging_file_damaged', $result['body']['reason']);
+            $this->assertSame('staging_file_shorter_than_cursor', $result['body']['detail']);
+            $this->assertSame(
+                ['artifact_id' => base64_encode('damaged.bin'), 'committed_bytes' => 0],
+                $result['body']['cursor']
+            );
+            $this->assertSame($first_header_bytes, ftell($stream));
+            $this->assertSame(substr($body, $first_header_bytes), stream_get_contents($stream));
+        } finally {
+            fclose($stream);
+        }
+
         $this->assertSame('A', file_get_contents($this->staging_dir . '/files/damaged.bin'));
+        $this->assertFileDoesNotExist($this->staging_dir . '/files/later.bin');
+    }
+
+    public function testOffsetZeroFrameReplacesADamagedArtifact(): void
+    {
+        $endpoints = $this->makeEndpoints();
+        ( new Site_Export_Staged_Artifacts($this->staging_dir) )->append('damaged.bin', 0, 'AAAA');
+        file_put_contents($this->staging_dir . '/files/damaged.bin', 'A');
 
         $restarted = $this->push($endpoints, [
             ['artifact_id' => 'damaged.bin', 'offset' => 0, 'bytes' => 'BBBBBBBB', 'total_bytes' => 8, 'final' => true],

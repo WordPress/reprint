@@ -33,10 +33,10 @@ if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
  * asks staged_status for the store's committed offset, and may later
  * resend with shifted boundaries. push_stream therefore compares the store's
  * committed offset with each frame first, skips the committed prefix of a
- * straddling mid-file frame, restarts an artifact when the sender begins it
- * again at offset 0 (the sender only does that when its source changed or
- * it cannot vouch for the staged prefix), and reports offset_gap with cursor
- * zero when the staged bytes behind a durable cursor were lost.
+ * straddling mid-file frame, and restarts an artifact when the sender begins
+ * it again at offset 0 (the sender only does that when its source changed or
+ * it cannot vouch for the staged prefix). If a cursor's staged bytes were
+ * lost, a mid-file frame fails the request without consuming its payload.
  *
  * Rejections the chunk sizer must learn from are typed for it: a frame
  * over the frame cap is HTTP 413 with max_frame_bytes in the payload,
@@ -135,11 +135,12 @@ final class Site_Export_Staged_Endpoints {
      * a commit, the next request may replay from the last sender cursor or from
      * the beginning: verified artifacts replayed at their verified size are
      * skipped, and an offset-0 frame for anything else that holds bytes
-     * restarts the artifact from zero. A damaged cursor is discarded; a
-     * mid-file frame then receives offset_gap at zero so its retry restarts.
-     * The sender only starts a file over when its source changed or it cannot
-     * vouch for the staged prefix, and appending one version behind another
-     * would corrupt the artifact.
+     * restarts the artifact from zero. A mid-file frame behind a damaged
+     * cursor fails without consuming its payload or later frames. An
+     * offset-zero frame discards the damage and stages fresh. The sender only
+     * starts a file over when its source changed or it cannot vouch for the
+     * staged prefix, and appending one version behind another would corrupt
+     * the artifact.
      *
      * Behavior steps:
      * 1. Read one JSON header line and validate the frame before reading its
@@ -150,8 +151,9 @@ final class Site_Export_Staged_Endpoints {
      * 3. If the artifact is verified and the frame declares its verified size,
      *    consume the frame payload only to keep the stream aligned with the
      *    next JSON header.
-     * 4. A damaged cursor makes a mid-file frame retry from zero; an
-     *    offset-zero frame discards the damaged state and stages fresh.
+     * 4. A damaged cursor rejects a mid-file frame without consuming its
+     *    payload or later frames; an offset-zero frame discards the damaged
+     *    state and stages fresh.
      * 5. If the frame starts at byte 0 and the artifact holds anything else,
      *    discard the staged bytes and stage this frame fresh.
      * 6. If the artifact is partially committed and the frame starts mid-file,
@@ -239,7 +241,7 @@ final class Site_Export_Staged_Endpoints {
             if (isset($status['damage'])) {
                 $damage = (string) $status['damage'];
                 if ($offset !== 0) {
-                    return $this->stream_rejected(409, 'offset_gap', $damage, $cursor, $files_verified);
+                    return $this->stream_rejected(409, 'staging_file_damaged', $damage, $cursor, $files_verified);
                 }
                 if (!$this->store->discard($artifact_id)) {
                     return $this->stream_rejected(423, 'busy', $damage, $cursor, $files_verified);
@@ -528,6 +530,7 @@ final class Site_Export_Staged_Endpoints {
                     case 'already_verified':
                     case 'size_mismatch':
                     case 'missing':
+                    case 'staging_file_damaged':
                         $code = 409;
                         break;
                     default:

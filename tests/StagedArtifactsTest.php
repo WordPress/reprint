@@ -233,24 +233,24 @@ final class StagedArtifactsTest extends TestCase
         $this->assertSame('accepted', $store->append('artifact-1', 0, 'fresh')['status']);
     }
 
-    public function testDamagedStagingFileForcesRestartFromZero(): void
+    public function testDamagedStagingFileIsRejected(): void
     {
         $store = $this->makeStore();
         $store->append('artifact-1', 0, 'first');
 
         // The staging file drifts between requests: something shrinks it
         // below the committed size. Never fill the missing committed bytes
-        // with zeroes; report lost progress so the sender restarts from zero.
+        // with zeroes or treat this as an ordinary, recoverable offset gap.
         file_put_contents($this->staging_dir . '/files/artifact-1', 'fi');
 
         $resumed = $store->append('artifact-1', 5, 'second');
         $this->assertSame(
-            ['rejected', 'offset_gap', 'staging_file_shorter_than_cursor', 0],
+            ['rejected', 'staging_file_damaged', 'staging_file_shorter_than_cursor', 0],
             [$resumed['status'], $resumed['reason'], $resumed['detail'], $resumed['committed_bytes']]
         );
         $finalized = $store->finalize('artifact-1', 5);
         $this->assertSame(
-            ['offset_gap', 'staging_file_shorter_than_cursor', 0],
+            ['staging_file_damaged', 'staging_file_shorter_than_cursor', 0],
             [$finalized['reason'], $finalized['detail'], $finalized['committed_bytes']]
         );
         $this->assertSame(

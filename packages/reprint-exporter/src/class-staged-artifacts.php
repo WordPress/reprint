@@ -39,8 +39,8 @@
  * does not read the artifact back, so finalize() costs the same for a 1 KB
  * file and a 50 GB dump. Corruption that preserves length is not detected,
  * the same trust pull's writer places in its local disk. A missing, shortened,
- * or non-regular file behind a committed cursor is rejected as lost progress
- * instead of being extended with zero bytes. The wire belongs to TLS,
+ * or non-regular file behind a committed cursor is rejected as damaged
+ * staging instead of being extended with zero bytes. The wire belongs to TLS,
  * and whether a caller may talk to the endpoint at all is checked by
  * Site_Export_HMAC_Server before any of this code runs.
  *
@@ -745,7 +745,7 @@ final class Site_Export_Staged_Artifacts {
     private function damaged_cursor_result(string $damage): array {
         return [
             'status' => 'rejected',
-            'reason' => 'offset_gap',
+            'reason' => 'staging_file_damaged',
             'detail' => $damage,
             'committed_bytes' => 0,
         ];
