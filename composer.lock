@@ -358,11 +358,11 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-f26d/exporter-php-72-support",
+            "version": "dev-review/pr339-simplify",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
-                "reference": "20a5cb0a822b98cafe39173c563a28ab9267786c"
+                "reference": "592957e10635ad3300ec6b7b33c7c2a304f94fea"
             },
             "require": {
                 "php": ">=7.2",
@@ -385,7 +385,9 @@
                     "src/class-hmac-server.php",
                     "src/class-http-server.php",
                     "src/class-staged-artifacts.php",
+                    "src/class-staged-apply-session.php",
                     "src/class-staged-push-stream-protocol.php",
+                    "src/class-staged-push-stream-parser.php",
                     "src/class-staged-endpoints.php",
                     "src/class-sqlite-driver-pdo.php",
                     "src/class-wpdb-driver-pdo.php"

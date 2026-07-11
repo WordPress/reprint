@@ -5,6 +5,9 @@ use function WordPress\Reprint\Exporter\parse_size;
 if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
     require_once __DIR__ . '/class-staged-push-stream-protocol.php';
 }
+if (!class_exists('Site_Export_Staged_Push_Stream_Parser', false)) {
+    require_once __DIR__ . '/class-staged-push-stream-parser.php';
+}
 
 /**
  * HTTP endpoints for the staged artifact store.
@@ -190,18 +193,21 @@ final class Site_Export_Staged_Endpoints {
             return $this->rejected(403, 'auth_failed', $auth_error);
         }
 
+        $stream_parser = new Site_Export_Staged_Push_Stream_Parser($input);
         $files_verified = 0;
         $cursor = null;
-        while (!feof($input)) {
-            $line = fgets($input);
-            if ($line === false) {
-                break;
-            }
-            $line = rtrim($line, "\r\n");
+        while (true) {
             try {
-                $frame = Site_Export_Staged_Push_Stream_Protocol::decode_chunk_header($line);
-            } catch (InvalidArgumentException $e) {
-                return $this->stream_rejected(400, 'invalid_frame', $e->getMessage(), $cursor, $files_verified);
+                if (!$stream_parser->next_frame()) {
+                    break;
+                }
+                $frame = Site_Export_Staged_Push_Stream_Protocol::decode_chunk_frame(
+                    $stream_parser->get_current_frame()
+                );
+            } catch (InvalidArgumentException $exception) {
+                return $this->stream_rejected(400, 'invalid_frame', $exception->getMessage(), $cursor, $files_verified);
+            } catch (RuntimeException $exception) {
+                return $this->stream_rejected(400, 'body_read_failed', $exception->getMessage(), $cursor, $files_verified);
             }
             $artifact_id = $frame['artifact_id'];
             $offset = $frame['offset'];
@@ -261,8 +267,10 @@ final class Site_Export_Staged_Endpoints {
              * iteration starts at the following JSON header.
              */
             if ($status['verified'] && $status['committed_bytes'] === $total_bytes) {
-                if (!Site_Export_Staged_Push_Stream_Protocol::discard_exactly($input, $bytes, self::READ_BUFFER_BYTES)) {
-                    return $this->stream_rejected(400, 'body_read_failed', null, $cursor, $files_verified);
+                try {
+                    $stream_parser->discard_payload_bytes($bytes, self::READ_BUFFER_BYTES);
+                } catch (RuntimeException $exception) {
+                    return $this->stream_rejected(400, 'body_read_failed', $exception->getMessage(), $cursor, $files_verified);
                 }
                 if ($final) {
                     $files_verified++;
@@ -310,8 +318,10 @@ final class Site_Export_Staged_Endpoints {
                  */
                 if ($committed_bytes > $offset) {
                     $already_committed_bytes = min($bytes, $committed_bytes - $offset);
-                    if (!Site_Export_Staged_Push_Stream_Protocol::discard_exactly($input, $already_committed_bytes, self::READ_BUFFER_BYTES)) {
-                        return $this->stream_rejected(400, 'body_read_failed', null, $cursor, $files_verified);
+                    try {
+                        $stream_parser->discard_payload_bytes($already_committed_bytes, self::READ_BUFFER_BYTES);
+                    } catch (RuntimeException $exception) {
+                        return $this->stream_rejected(400, 'body_read_failed', $exception->getMessage(), $cursor, $files_verified);
                     }
                     $remaining_frame_bytes -= $already_committed_bytes;
                     $append_offset += $already_committed_bytes;
@@ -320,11 +330,12 @@ final class Site_Export_Staged_Endpoints {
 
                 while ($remaining_frame_bytes > 0) {
                     $payload_piece_bytes = min($this->append_buffer_bytes, $remaining_frame_bytes);
-                    $payload_piece = Site_Export_Staged_Push_Stream_Protocol::read_exactly($input, $payload_piece_bytes);
-                    if ($payload_piece === null) {
-                        return $this->stream_rejected(400, 'body_read_failed', null, $cursor, $files_verified);
+                    try {
+                        $payload_piece = $stream_parser->read_payload_piece($payload_piece_bytes);
+                    } catch (RuntimeException $exception) {
+                        return $this->stream_rejected(400, 'body_read_failed', $exception->getMessage(), $cursor, $files_verified);
                     }
-                    $remaining_frame_bytes -= $payload_piece_bytes;
+                    $remaining_frame_bytes -= strlen($payload_piece);
 
                     while ($payload_piece !== '') {
                         /**

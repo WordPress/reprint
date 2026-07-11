@@ -175,14 +175,13 @@ class StagedPushStreamClientTest extends TestCase
     public function testBodyBudgetCountsFrameHeadersWhenRotatingRequests(): void
     {
         $this->writeSource('budget.bin', str_repeat('y', 10));
-        $first_frame_header = json_encode([
-            'type' => 'chunk',
-            'artifact_id' => base64_encode('budget.bin'),
-            'offset' => 0,
-            'bytes' => 4,
-            'total_bytes' => 10,
-            'final' => false,
-        ], JSON_UNESCAPED_SLASHES) . "\n";
+        $first_frame_header = \Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header(
+            'budget.bin',
+            0,
+            4,
+            10,
+            false
+        );
         // Budget for one full frame plus 3 spare bytes, so the value of
         // next_chunk_body_bytes() after the first chunk reveals whether the
         // frame header was charged against the budget alongside the payload.

@@ -106,17 +106,111 @@ final class StagedPushStreamProtocolTest extends TestCase
         ];
     }
 
-    public function testReadAndDiscardUseTheSameBoundedStreamHelpers(): void
+    public function testParserReadsAndDiscardsBoundedPayloads(): void
     {
         $stream = fopen('php://temp', 'w+b');
-        fwrite($stream, "abc\ndefghijk");
+        $first_header = rtrim(
+            Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header('first.txt', 0, 5, 5, true),
+            "\n"
+        ) . "\r\n";
+        fwrite(
+            $stream,
+            $first_header
+            . 'abcde'
+            . Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header('second.txt', 0, 2, 2, true)
+            . 'fg'
+        );
         rewind($stream);
 
-        $this->assertSame("abc\n", fgets($stream));
-        $this->assertSame('def', Site_Export_Staged_Push_Stream_Protocol::read_exactly($stream, 3));
-        $this->assertTrue(Site_Export_Staged_Push_Stream_Protocol::discard_exactly($stream, 3, 2));
-        $this->assertSame('jk', Site_Export_Staged_Push_Stream_Protocol::read_exactly($stream, 2));
+        try {
+            $parser = new Site_Export_Staged_Push_Stream_Parser($stream);
 
-        fclose($stream);
+            $this->assertTrue($parser->next_frame());
+            $this->assertSame(
+                ['artifact_id' => 'first.txt', 'offset' => 0, 'bytes' => 5, 'total_bytes' => 5, 'final' => true],
+                Site_Export_Staged_Push_Stream_Protocol::decode_chunk_frame($parser->get_current_frame())
+            );
+            $this->assertSame('ab', $parser->read_payload_piece(2));
+            $this->assertSame('cde', $parser->read_payload_piece(8));
+
+            $this->assertTrue($parser->next_frame());
+            $this->assertSame(
+                ['artifact_id' => 'second.txt', 'offset' => 0, 'bytes' => 2, 'total_bytes' => 2, 'final' => true],
+                Site_Export_Staged_Push_Stream_Protocol::decode_chunk_frame($parser->get_current_frame())
+            );
+            $parser->discard_payload_bytes(2, 1);
+            $this->assertFalse($parser->next_frame());
+        } finally {
+            fclose($stream);
+        }
+    }
+
+    public function testParserDoesNotAdvanceBeforeTheCurrentPayloadIsConsumed(): void
+    {
+        $next_header = Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header('second.txt', 0, 0, 0, true);
+        $stream = fopen('php://temp', 'w+b');
+        fwrite(
+            $stream,
+            Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header('first.txt', 0, 1, 1, true)
+            . 'x'
+            . $next_header
+        );
+        rewind($stream);
+
+        try {
+            $parser = new Site_Export_Staged_Push_Stream_Parser($stream);
+            $this->assertTrue($parser->next_frame());
+
+            try {
+                $parser->next_frame();
+                $this->fail('Expected parser to require the current payload first.');
+            } catch (LogicException $exception) {
+                $this->assertSame(
+                    'Read or discard the current staged push stream frame payload before reading another frame.',
+                    $exception->getMessage()
+                );
+            }
+
+            $this->assertSame('x' . $next_header, stream_get_contents($stream));
+        } finally {
+            fclose($stream);
+        }
+    }
+
+    public function testParserRejectsATruncatedPayload(): void
+    {
+        $stream = fopen('php://temp', 'w+b');
+        fwrite(
+            $stream,
+            Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header('short.txt', 0, 2, 2, true) . 'x'
+        );
+        rewind($stream);
+
+        try {
+            $parser = new Site_Export_Staged_Push_Stream_Parser($stream);
+            $this->assertTrue($parser->next_frame());
+            $this->assertSame('x', $parser->read_payload_piece(2));
+
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('payload ended before its declared byte count');
+            $parser->read_payload_piece(2);
+        } finally {
+            fclose($stream);
+        }
+    }
+
+    public function testApplyChangeHeadersRoundTrip(): void
+    {
+        $changes = [
+            ['type' => 'directory', 'path' => 'directory'],
+            ['type' => 'symlink', 'path' => 'link', 'target' => "raw-\xff"],
+            ['type' => 'delete', 'path' => 'deleted'],
+        ];
+
+        foreach ($changes as $change) {
+            $header = Site_Export_Staged_Push_Stream_Protocol::encode_apply_change_header($change);
+            $frame = Site_Export_Staged_Push_Stream_Protocol::decode_frame_header(rtrim($header, "\n"));
+            $this->assertSame($change, Site_Export_Staged_Push_Stream_Protocol::decode_apply_change_frame($frame));
+        }
     }
 }

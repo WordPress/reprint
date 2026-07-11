@@ -499,22 +499,13 @@ class StagedPushStreamClient
             return false;
         }
 
-        $frame_header = json_encode([
-            "type" => "chunk",
-            // File paths are arbitrary bytes and JSON strings must be UTF-8,
-            // so the id travels base64-encoded — the same convention the
-            // journal and the pull cursors use. json_encode would return
-            // false on a raw non-UTF-8 name.
-            "artifact_id" => base64_encode($artifact_id),
-            "offset" => $offset,
-            "bytes" => strlen($payload),
-            "total_bytes" => $total_bytes,
-            "final" => $final,
-        ], JSON_UNESCAPED_SLASHES);
-        if ($frame_header === false) {
-            throw new RuntimeException("Could not encode the staged push stream frame header for \"" . $artifact_id . "\".");
-        }
-        $frame_header .= "\n";
+        $frame_header = Site_Export_Staged_Push_Stream_Protocol::encode_chunk_header(
+            $artifact_id,
+            $offset,
+            strlen($payload),
+            $total_bytes,
+            $final
+        );
 
         // Copy-on-write assignments: neither line copies the payload bytes.
         // Unpausing tells libcurl to start calling the read callback again.

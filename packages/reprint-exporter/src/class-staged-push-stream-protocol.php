@@ -1,16 +1,24 @@
 <?php
 
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol errors are returned as API JSON, never rendered as HTML.
+
 /**
  * Shared wire format helpers for staged push streams.
  *
  * A staged push stream is a sequence of JSON header lines followed by exactly
  * the number of raw payload bytes declared by each header. Both the importer
- * and the exporter use this class so frame shape, validation, and bounded
- * stream reads stay in one place.
+ * and the exporter use this class so frame shape and validation stay in one
+ * place. Site_Export_Staged_Push_Stream_Parser reads those frames.
  */
 final class Site_Export_Staged_Push_Stream_Protocol {
 
     public const CONTENT_TYPE = 'application/x-reprint-staged-push-stream';
+
+    /** Maximum raw bytes accepted for one path or symlink target. */
+    public const MAX_PATH_BYTES = 8192;
+
+    /** Maximum JSON header bytes in one framed request-body record. */
+    public const MAX_HEADER_BYTES = 32768;
 
     /**
      * Top-level path segment reprint reserves for its own staged bookkeeping.
@@ -44,17 +52,18 @@ final class Site_Export_Staged_Push_Stream_Protocol {
         return explode('/', $artifact_id, 2)[0] === self::RESERVED_NAMESPACE_SEGMENT;
     }
 
-    /**
-     * Read the next frame header line from a stream.
-     *
-     * @param resource $input
-     */
-    public static function read_header_line($input): ?string {
-        $line = fgets($input);
-        if ($line === false) {
-            return null;
+    /** Decodes the JSON object shared by every staged push frame header. */
+    public static function decode_frame_header(string $line): array {
+        $frame = json_decode($line, true);
+        if (!is_array($frame)) {
+            throw new InvalidArgumentException('Expected staged push stream frame header to be a JSON object.');
         }
-        return rtrim($line, "\r\n");
+        return $frame;
+    }
+
+    /** Returns the raw payload byte count declared by a decoded frame header. */
+    public static function frame_payload_bytes(array $frame): int {
+        return self::require_non_negative_integer_field($frame, 'bytes');
     }
 
     /**
@@ -68,10 +77,15 @@ final class Site_Export_Staged_Push_Stream_Protocol {
      * @return array{artifact_id:string,offset:int,bytes:int,total_bytes:int,final:bool}
      */
     public static function decode_chunk_header(string $line): array {
-        $frame = json_decode($line, true);
-        if (!is_array($frame)) {
-            throw new InvalidArgumentException('Expected staged push stream frame header to be a JSON object.');
-        }
+        return self::decode_chunk_frame(self::decode_frame_header($line));
+    }
+
+    /**
+     * Decodes a chunk header already read by Site_Export_Staged_Push_Stream_Parser.
+     *
+     * @return array{artifact_id:string,offset:int,bytes:int,total_bytes:int,final:bool}
+     */
+    public static function decode_chunk_frame(array $frame): array {
 
         if (!array_key_exists('type', $frame)) {
             throw new InvalidArgumentException('Missing staged push stream frame field "type".');
@@ -104,7 +118,7 @@ final class Site_Export_Staged_Push_Stream_Protocol {
         }
 
         $offset = self::require_non_negative_integer_field($frame, 'offset');
-        $bytes = self::require_non_negative_integer_field($frame, 'bytes');
+        $bytes = self::frame_payload_bytes($frame);
         $total_bytes = self::require_non_negative_integer_field($frame, 'total_bytes');
 
         if (!array_key_exists('final', $frame)) {
@@ -139,33 +153,109 @@ final class Site_Export_Staged_Push_Stream_Protocol {
     }
 
     /**
-     * @param resource $input
+     * Encodes one file chunk header for the importer to send.
+     *
+     * The artifact id is base64 because file names are arbitrary bytes while
+     * JSON strings must be UTF-8.
+     *
+     * @param string $artifact_id Raw-byte path.
      */
-    public static function read_exactly($input, int $bytes): ?string {
-        $data = '';
-        while (strlen($data) < $bytes) {
-            $piece = fread($input, $bytes - strlen($data));
-            if ($piece === false || $piece === '') {
-                return null;
-            }
-            $data .= $piece;
-        }
-        return $data;
+    public static function encode_chunk_header(string $artifact_id, int $offset, int $payload_bytes, int $total_bytes, bool $is_final): string {
+        return self::encode_header([
+            'type' => 'chunk',
+            'artifact_id' => base64_encode($artifact_id),
+            'offset' => $offset,
+            'bytes' => $payload_bytes,
+            'total_bytes' => $total_bytes,
+            'final' => $is_final,
+        ]);
     }
 
     /**
-     * @param resource $input
+     * Encodes one payload-free directory, symlink, or delete change header.
+     *
+     * @param array<string,mixed> $change type, path, and target for a symlink.
      */
-    public static function discard_exactly($input, int $bytes, int $buffer_bytes): bool {
-        $remaining = $bytes;
-        while ($remaining > 0) {
-            $piece = fread($input, min($buffer_bytes, $remaining));
-            if ($piece === false || $piece === '') {
-                return false;
-            }
-            $remaining -= strlen($piece);
+    public static function encode_apply_change_header(array $change): string {
+        $type = $change['type'] ?? null;
+        $path = $change['path'] ?? null;
+        if (!in_array($type, ['directory', 'symlink', 'delete'], true)) {
+            throw new InvalidArgumentException('Expected staged apply change field "type" to be "directory", "symlink", or "delete".');
         }
-        return true;
+        if (!is_string($path)) {
+            throw new InvalidArgumentException('Expected staged apply change field "path" to be a string.');
+        }
+        $frame = [
+            'type' => $type,
+            'path_b64' => base64_encode($path),
+            'bytes' => 0,
+        ];
+        if ($type === 'symlink') {
+            $target = $change['target'] ?? null;
+            if (!is_string($target)) {
+                throw new InvalidArgumentException('Expected staged apply symlink change field "target" to be a string.');
+            }
+            $frame['target_b64'] = base64_encode($target);
+        }
+        return self::encode_header($frame);
+    }
+
+    /**
+     * Decodes one payload-free directory, symlink, or delete change frame.
+     *
+     * @return array{type:string,path:string,target?:string}
+     */
+    public static function decode_apply_change_frame(array $frame): array {
+        if (!array_key_exists('type', $frame)) {
+            throw new InvalidArgumentException('Missing staged apply change frame field "type".');
+        }
+        if (!in_array($frame['type'], ['directory', 'symlink', 'delete'], true)) {
+            throw new InvalidArgumentException(
+                'Expected staged apply change frame field "type" to be "directory", "symlink", or "delete"; received '
+                . self::describe_value($frame['type']) . '.'
+            );
+        }
+        if (self::frame_payload_bytes($frame) !== 0) {
+            throw new InvalidArgumentException('A staged apply change frame must not declare payload bytes.');
+        }
+
+        $path = self::decode_non_empty_base64_path($frame, 'path_b64', 'staged apply change');
+        if ($frame['type'] !== 'symlink') {
+            return ['type' => $frame['type'], 'path' => $path];
+        }
+        if (!array_key_exists('target_b64', $frame) || !is_string($frame['target_b64'])) {
+            throw new InvalidArgumentException('Expected staged apply symlink change frame field "target_b64" to be base64 text.');
+        }
+        $target = base64_decode($frame['target_b64'], true);
+        if ($target === false) {
+            throw new InvalidArgumentException('Expected staged apply symlink change frame field "target_b64" to be valid base64 text.');
+        }
+        return ['type' => 'symlink', 'path' => $path, 'target' => $target];
+    }
+
+    /** @param array<string,mixed> $frame */
+    private static function encode_header(array $frame): string {
+        $encoded_frame = json_encode($frame, JSON_UNESCAPED_SLASHES);
+        if (!is_string($encoded_frame)) {
+            throw new RuntimeException('Could not encode a staged push stream frame header.');
+        }
+        return $encoded_frame . "\n";
+    }
+
+    /** @param array<string,mixed> $frame */
+    private static function decode_non_empty_base64_path(array $frame, string $field, string $frame_description): string {
+        if (!array_key_exists($field, $frame) || !is_string($frame[$field]) || $frame[$field] === '') {
+            throw new InvalidArgumentException(
+                'Expected ' . $frame_description . ' frame field "' . $field . '" to be base64 of a non-empty path.'
+            );
+        }
+        $path = base64_decode($frame[$field], true);
+        if ($path === false || $path === '') {
+            throw new InvalidArgumentException(
+                'Expected ' . $frame_description . ' frame field "' . $field . '" to be base64 of a non-empty path.'
+            );
+        }
+        return $path;
     }
 
     private static function require_non_negative_integer_field(array $frame, string $field): int {

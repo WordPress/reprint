@@ -34,6 +34,10 @@ if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-push-stream-protocol.php';
 }
 
+if (!class_exists('Site_Export_Staged_Push_Stream_Parser', false)) {
+    require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-push-stream-parser.php';
+}
+
 if (!class_exists('Site_Export_Staged_Endpoints', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-endpoints.php';
 }

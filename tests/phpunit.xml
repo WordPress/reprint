@@ -31,6 +31,8 @@
             <file>HmacServerTest.php</file>
             <file>SiteExportSecretTest.php</file>
             <file>StagedArtifactsTest.php</file>
+            <file>StagedApplySessionTest.php</file>
+            <file>StagedPushStreamProtocolTest.php</file>
             <file>StagedEndpointsTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">
