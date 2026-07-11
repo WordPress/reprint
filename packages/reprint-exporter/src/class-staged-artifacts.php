@@ -37,10 +37,10 @@
  * finalize() compares the assembled size against the total declared at plan
  * time. That catches truncation, missing bytes, and resume-offset bugs; it
  * does not read the artifact back, so finalize() costs the same for a 1 KB
- * file and a 50 GB dump. Corruption that preserves length — including a
- * staging file that shrank between requests and was zero-filled back to the
- * committed size by the next append's ftruncate — is not detected, the same
- * trust pull's writer places in its local disk. The wire belongs to TLS,
+ * file and a 50 GB dump. Corruption that preserves length is not detected,
+ * the same trust pull's writer places in its local disk. A missing, shortened,
+ * or non-regular file behind a committed cursor is rejected as damaged
+ * staging instead of being extended with zero bytes. The wire belongs to TLS,
  * and whether a caller may talk to the endpoint at all is checked by
  * Site_Export_HMAC_Server before any of this code runs.
  *
@@ -209,6 +209,15 @@ final class Site_Export_Staged_Artifacts {
             // append to any other artifact starts it from scratch.
             $state = $this->read_state();
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
+            $staging_file_diagnostic = $this->diagnose_staging_file($file_path, $committed);
+            if ($staging_file_diagnostic !== null) {
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'staging_file_damaged',
+                    'detail' => $staging_file_diagnostic,
+                    'committed_bytes' => 0,
+                ];
+            }
 
             if ($offset + strlen($bytes) <= $committed) {
                 return [
@@ -238,8 +247,17 @@ final class Site_Export_Staged_Artifacts {
 
             // Open without truncating: a resumed transfer must keep committed
             // bytes until the cursor decides what tail to discard.
-            $file = @fopen($file_path, 'c+b');
+            $file = @fopen($file_path, $committed > 0 ? 'r+b' : 'c+b');
             if ($file === false) {
+                $staging_file_diagnostic = $this->diagnose_staging_file($file_path, $committed);
+                if ($staging_file_diagnostic !== null) {
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'staging_file_damaged',
+                        'detail' => $staging_file_diagnostic,
+                        'committed_bytes' => 0,
+                    ];
+                }
                 return [
                     'status' => 'rejected',
                     'reason' => 'io_error',
@@ -249,6 +267,16 @@ final class Site_Export_Staged_Artifacts {
             }
 
             try {
+                $staging_file_diagnostic = $this->diagnose_staging_file($file, $committed);
+                if ($staging_file_diagnostic !== null) {
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'staging_file_damaged',
+                        'detail' => $staging_file_diagnostic,
+                        'committed_bytes' => 0,
+                    ];
+                }
+
                 // Discard any uncommitted tail from an interrupted earlier
                 // step, then append at the only offset the cursor says is
                 // committed.
@@ -403,6 +431,16 @@ final class Site_Export_Staged_Artifacts {
 
             $state = $this->read_state();
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
+            $staging_file_diagnostic = $this->diagnose_staging_file($file_path, $committed);
+            if ($staging_file_diagnostic !== null) {
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'staging_file_damaged',
+                    'detail' => $staging_file_diagnostic,
+                    'committed_bytes' => 0,
+                    'path' => null,
+                ];
+            }
 
             if (!file_exists($file_path)) {
                 // A zero-byte artifact legitimately has no appends; the fopen
@@ -437,8 +475,18 @@ final class Site_Export_Staged_Artifacts {
                 ];
             }
 
-            $file = @fopen($file_path, 'c+b');
+            $file = @fopen($file_path, $committed > 0 ? 'r+b' : 'c+b');
             if ($file === false) {
+                $staging_file_diagnostic = $this->diagnose_staging_file($file_path, $committed);
+                if ($staging_file_diagnostic !== null) {
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'staging_file_damaged',
+                        'detail' => $staging_file_diagnostic,
+                        'committed_bytes' => 0,
+                        'path' => null,
+                    ];
+                }
                 return [
                     'status' => 'rejected',
                     'reason' => 'io_error',
@@ -447,6 +495,18 @@ final class Site_Export_Staged_Artifacts {
                     'path' => null,
                 ];
             }
+            $staging_file_diagnostic = $this->diagnose_staging_file($file, $committed);
+            if ($staging_file_diagnostic !== null) {
+                fclose($file);
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'staging_file_damaged',
+                    'detail' => $staging_file_diagnostic,
+                    'committed_bytes' => 0,
+                    'path' => null,
+                ];
+            }
+
             // Drop any uncommitted tail so the artifact holds committed bytes only.
             $truncated = ftruncate($file, $committed);
             fclose($file);
@@ -494,7 +554,10 @@ final class Site_Export_Staged_Artifacts {
      * This is advisory and intentionally lock-free; writers still enforce the
      * committed offset under the lock before accepting bytes.
      *
-     * @return array{exists:bool,committed_bytes:int,verified:bool}
+     * When the recorded cursor has lost its backing file, committed_bytes is
+     * zero and the response describes the damage and the untrusted old cursor.
+     *
+     * @return array{exists:bool,committed_bytes:int,verified:bool,damage?:string,recorded_committed_bytes?:int}
      */
     public function status(string $artifact_id): array {
         $file_path = $this->artifact_path($artifact_id);
@@ -516,20 +579,28 @@ final class Site_Export_Staged_Artifacts {
         }
 
         $state = $this->read_state();
-        return [
+        $committed_bytes = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
+        $staging_file_diagnostic = $this->diagnose_staging_file($file_path, $committed_bytes);
+        $status = [
             'exists' => file_exists($file_path),
-            'committed_bytes' => $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0,
+            'committed_bytes' => $staging_file_diagnostic === null ? $committed_bytes : 0,
             'verified' => false,
         ];
+        if ($staging_file_diagnostic !== null) {
+            $status['damage'] = $staging_file_diagnostic;
+            $status['recorded_committed_bytes'] = $committed_bytes;
+        }
+        return $status;
     }
 
     /**
      * Remove all staged data and records for an artifact. Safe to call for
      * unknown ids.
      *
-     * Retry until true: a discard killed between its steps — or stopped by
-     * a failing one — leaves a partial state that only another discard
-     * fully cleans up. Every partial state is retriable.
+     * Cursor and verification records are removed before the artifact. A kill
+     * or failed unlink can therefore leave untrusted bytes behind, but never a
+     * durable cursor or marker that authorizes bytes already removed. Retry
+     * until true to finish removing any such orphan.
      *
      * @return bool False when a concurrent writer holds the store (an
      *              unguarded unlink would let that writer's commit resurrect
@@ -561,14 +632,14 @@ final class Site_Export_Staged_Artifacts {
                 return false;
             }
 
-            if (file_exists($file_path) && !@unlink($file_path)) {
-                return false;
-            }
             $state = $this->read_state();
             if ($state['artifact_id'] === $artifact_id && !$this->write_state(null, 0)) {
                 return false;
             }
-            return $this->remove_verified_marker($artifact_id);
+            if (!$this->remove_verified_marker($artifact_id)) {
+                return false;
+            }
+            return !( file_exists($file_path) || is_link($file_path) ) || @unlink($file_path);
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -644,6 +715,43 @@ final class Site_Export_Staged_Artifacts {
         $dir = dirname($path);
         // A concurrent creator winning the mkdir race is success, not failure.
         return is_dir($dir) || @mkdir($dir, 0700, true) || is_dir($dir);
+    }
+
+    /**
+     * Diagnose whether a nonzero cursor still has trustworthy backing bytes.
+     * A longer file is valid: it is an uncommitted tail left by an interrupted
+     * append and the next writer truncates it back to the cursor.
+     *
+     * A path is inspected with lstat() so links are never followed. An open
+     * handle is rechecked with fstat() before ftruncate() can extend it: the
+     * path check and open are separate operations, so cleanup may race them.
+     *
+     * @param string|resource $staging_file_path_or_handle
+     */
+    private function diagnose_staging_file($staging_file_path_or_handle, int $committed_bytes): ?string {
+        if ($committed_bytes === 0) {
+            return null;
+        }
+
+        if (is_string($staging_file_path_or_handle)) {
+            $file_stat = @lstat($staging_file_path_or_handle);
+            if (!is_array($file_stat)) {
+                return 'staging_file_missing_at_cursor';
+            }
+        } else {
+            $file_stat = @fstat($staging_file_path_or_handle);
+        }
+        if (
+            !is_array($file_stat)
+            || !isset($file_stat['mode'])
+            || ( ( (int) $file_stat['mode'] & 0170000 ) !== 0100000 )
+        ) {
+            return 'staging_file_not_regular';
+        }
+        if (!isset($file_stat['size']) || (int) $file_stat['size'] < $committed_bytes) {
+            return 'staging_file_shorter_than_cursor';
+        }
+        return null;
     }
 
     /**

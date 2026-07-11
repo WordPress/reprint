@@ -233,20 +233,58 @@ final class StagedArtifactsTest extends TestCase
         $this->assertSame('accepted', $store->append('artifact-1', 0, 'fresh')['status']);
     }
 
-    public function testShrunkenStagingFileIsZeroFilledBackToTheCursor(): void
+    public function testDamagedStagingFileIsRejected(): void
     {
         $store = $this->makeStore();
         $store->append('artifact-1', 0, 'first');
 
         // The staging file drifts between requests: something shrinks it
-        // below the committed size. The cursor, not the file, is the
-        // authority — the next append zero-fills back to the committed size.
+        // below the committed size. Never fill the missing committed bytes
+        // with zeroes or treat this as an ordinary, recoverable offset gap.
         file_put_contents($this->staging_dir . '/files/artifact-1', 'fi');
 
-        $this->assertSame('accepted', $store->append('artifact-1', 5, 'second')['status']);
+        $resumed = $store->append('artifact-1', 5, 'second');
+        $this->assertSame(
+            ['rejected', 'staging_file_damaged', 'staging_file_shorter_than_cursor', 0],
+            [$resumed['status'], $resumed['reason'], $resumed['detail'], $resumed['committed_bytes']]
+        );
+        $finalized = $store->finalize('artifact-1', 5);
+        $this->assertSame(
+            ['staging_file_damaged', 'staging_file_shorter_than_cursor', 0],
+            [$finalized['reason'], $finalized['detail'], $finalized['committed_bytes']]
+        );
+        $this->assertSame(
+            [
+                'exists' => true,
+                'committed_bytes' => 0,
+                'verified' => false,
+                'damage' => 'staging_file_shorter_than_cursor',
+                'recorded_committed_bytes' => 5,
+            ],
+            $store->status('artifact-1')
+        );
+        $this->assertSame('fi', file_get_contents($this->staging_dir . '/files/artifact-1'));
+
+        unlink($this->staging_dir . '/files/artifact-1');
+        $this->assertSame(
+            [
+                'exists' => false,
+                'committed_bytes' => 0,
+                'verified' => false,
+                'damage' => 'staging_file_missing_at_cursor',
+                'recorded_committed_bytes' => 5,
+            ],
+            $store->status('artifact-1')
+        );
+        mkdir($this->staging_dir . '/files/artifact-1');
+        $this->assertSame('staging_file_not_regular', $store->status('artifact-1')['damage']);
+        rmdir($this->staging_dir . '/files/artifact-1');
+
+        $this->assertTrue($store->discard('artifact-1'));
+        $this->assertSame('accepted', $store->append('artifact-1', 0, 'firstsecond')['status']);
         $verified = $store->finalize('artifact-1', 11);
         $this->assertSame('verified', $verified['status']);
-        $this->assertSame("fi\0\0\0second", file_get_contents($verified['path']));
+        $this->assertSame('firstsecond', file_get_contents($verified['path']));
     }
 
     // ---------------------------------------------------------------
@@ -348,24 +386,29 @@ final class StagedArtifactsTest extends TestCase
         $this->assertSame('verified', $store->finalize('artifact-1', 7)['status']);
     }
 
-    public function testDiscardKilledMidwayIsRetriable(): void
+    public function testDiscardKilledMidwayLeavesOnlyUntrustedBytes(): void
     {
-        // Window 1: the artifact file was unlinked, the cursor survived.
+        // Window 1: the cursor was cleared, then the process died before the
+        // artifact unlink. With no trusted cursor, offset zero replaces it.
         $store = $this->makeStore();
         $store->append('artifact-1', 0, 'first');
-        unlink($this->staging_dir . '/files/artifact-1');
+        file_put_contents(
+            $this->staging_dir . '/state.json',
+            json_encode(['artifact_id' => null, 'committed_bytes' => 0])
+        );
 
-        $this->assertTrue($store->discard('artifact-1'));
         $this->assertSame(0, $store->status('artifact-1')['committed_bytes']);
         $this->assertSame('accepted', $store->append('artifact-1', 0, 'fresh')['status']);
+        $this->assertSame('fresh', file_get_contents($this->staging_dir . '/files/artifact-1'));
 
-        // Window 2: the cursor was cleared, the verified record survived.
+        // Window 2: the verification marker was removed before the artifact.
+        // The surviving bytes are untrusted and may likewise be overwritten.
         $store->finalize('artifact-1', 5);
-        unlink($this->staging_dir . '/files/artifact-1');
+        unlink($this->staging_dir . '/verified/artifact-1');
 
-        $this->assertTrue($store->discard('artifact-1'));
         $this->assertFalse($store->status('artifact-1')['verified']);
         $this->assertSame('accepted', $store->append('artifact-1', 0, 'again')['status']);
+        $this->assertSame('again', file_get_contents($this->staging_dir . '/files/artifact-1'));
     }
 
     public function testArtifactPathBlockedByAnotherEntryIsATypedError(): void
@@ -665,6 +708,7 @@ final class StagedArtifactsTest extends TestCase
         chmod($this->staging_dir . '/files', 0500);
         $this->assertFalse($store->discard('artifact-1'));
         $this->assertFileExists($this->staging_dir . '/files/artifact-1');
+        $this->assertSame(0, $store->status('artifact-1')['committed_bytes']);
 
         // Retry until true: the next attempt finishes the cleanup.
         chmod($this->staging_dir . '/files', 0700);
