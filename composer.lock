@@ -358,11 +358,11 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-f26d/exporter-php-72-support",
+            "version": "dev-rewrite/direct-ops-stack",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
-                "reference": "20a5cb0a822b98cafe39173c563a28ab9267786c"
+                "reference": "a35a27bbee52ec0fbb4e53b2e68dc6f8479e9247"
             },
             "require": {
                 "php": ">=7.2",
@@ -387,6 +387,7 @@
                     "src/class-staged-artifacts.php",
                     "src/class-staged-push-stream-protocol.php",
                     "src/class-staged-endpoints.php",
+                    "src/class-staged-apply.php",
                     "src/class-sqlite-driver-pdo.php",
                     "src/class-wpdb-driver-pdo.php"
                 ],

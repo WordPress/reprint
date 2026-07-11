@@ -25,6 +25,7 @@
             "src/class-staged-artifacts.php",
             "src/class-staged-push-stream-protocol.php",
             "src/class-staged-endpoints.php",
+            "src/class-staged-apply.php",
             "src/class-sqlite-driver-pdo.php",
             "src/class-wpdb-driver-pdo.php"
         ],
