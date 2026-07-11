@@ -421,23 +421,41 @@ final class StagedEndpointsTest extends TestCase {
         $this->assertSame('BBBBBBBB', file_get_contents($this->staging_dir . '/files/restarted.bin'));
     }
 
-    public function testOffsetZeroFrameRestartsAnArtifactWithADamagedCursor(): void
+    public function testDamagedCursorRetriesFromZero(): void
     {
         $endpoints = $this->makeEndpoints();
         ( new Site_Export_Staged_Artifacts($this->staging_dir) )->append('damaged.bin', 0, 'AAAA');
         file_put_contents($this->staging_dir . '/files/damaged.bin', 'A');
 
         $damaged_status = $endpoints->status(['artifact_id' => base64_encode('damaged.bin')]);
-        $this->assertSame(0, $damaged_status['body']['committed_bytes']);
-        $this->assertSame('staging_file_shorter_than_cursor', $damaged_status['body']['damage']);
-        $this->assertSame(4, $damaged_status['body']['recorded_committed_bytes']);
+        $this->assertSame(
+            [0, 'staging_file_shorter_than_cursor', 4],
+            [
+                $damaged_status['body']['committed_bytes'],
+                $damaged_status['body']['damage'],
+                $damaged_status['body']['recorded_committed_bytes'],
+            ]
+        );
 
-        $result = $this->push($endpoints, [
-            ['artifact_id' => 'damaged.bin', 'offset' => 0, 'bytes' => 'BBBB', 'total_bytes' => 4, 'final' => true],
+        // The sender still has its old mid-file cursor. Return the
+        // store-confirmed zero frontier; its offset-zero retry replaces damage.
+        $resume = $this->push($endpoints, [
+            ['artifact_id' => 'damaged.bin', 'offset' => 4, 'bytes' => 'BBBB', 'total_bytes' => 8, 'final' => true],
         ]);
+        $this->assertSame(409, $resume['http_code']);
+        $this->assertSame('offset_gap', $resume['body']['reason']);
+        $this->assertSame('staging_file_shorter_than_cursor', $resume['body']['detail']);
+        $this->assertSame(
+            ['artifact_id' => base64_encode('damaged.bin'), 'committed_bytes' => 0],
+            $resume['body']['cursor']
+        );
+        $this->assertSame('A', file_get_contents($this->staging_dir . '/files/damaged.bin'));
 
-        $this->assertSame(200, $result['http_code'], (string) json_encode($result['body']));
-        $this->assertSame('BBBB', file_get_contents($this->staging_dir . '/files/damaged.bin'));
+        $restarted = $this->push($endpoints, [
+            ['artifact_id' => 'damaged.bin', 'offset' => 0, 'bytes' => 'BBBBBBBB', 'total_bytes' => 8, 'final' => true],
+        ]);
+        $this->assertSame(200, $restarted['http_code'], (string) json_encode($restarted['body']));
+        $this->assertSame('BBBBBBBB', file_get_contents($this->staging_dir . '/files/damaged.bin'));
     }
 
     public function testOffsetZeroFrameWithANewTotalRestartsAVerifiedArtifact(): void

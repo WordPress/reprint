@@ -104,12 +104,17 @@ half-written record), one small verified marker per finished artifact under
 drives the loop — one `append()` per buffer, individually committed, so the
 transfer can stop after any step and resume from `committed_bytes` in a new
 request. `finalize()` checks the assembled size against the size declared in
-the plan; nothing re-reads or hashes artifacts.
+the plan; nothing re-reads or hashes artifacts. A missing, shortened, or
+non-regular file behind the cursor is lost progress, not a valid resume point:
+status reports a zero frontier, a mid-file push retries from zero, and an
+offset-zero push replaces the damaged state.
 
 Driver rule: **a discard that did not return true must be retried until it
-does** — before re-uploading an artifact and before starting a fresh push
-over leftovers. A half-finished discard leaves states that only another
-discard cleans up.
+does** so all stale bytes are eventually removed. Discard invalidates cursor
+and verification records before unlinking the artifact, so an interrupted
+discard may leave untrusted bytes behind but never metadata authorizing bytes
+that were already removed. A fresh offset-zero upload safely replaces such an
+orphan.
 
 ## Where reprint stores its own data on the remote
 
@@ -197,10 +202,6 @@ Stated here so nobody rediscovers them as surprises:
   before pushing over them.
 - **Shell and cron can write during the maintenance window.** Maintenance
   blocks web requests; it cannot block SSH or system cron.
-- **A sender that abandons a failed discard and re-uploads anyway** can end
-  up with a zero-filled prefix that passes the size check. The discard
-  retry rule exists precisely to make this unreachable.
-
 ## Delivery plan
 
 Files first, database second, each PR small and stacked in this order:

@@ -37,10 +37,10 @@
  * finalize() compares the assembled size against the total declared at plan
  * time. That catches truncation, missing bytes, and resume-offset bugs; it
  * does not read the artifact back, so finalize() costs the same for a 1 KB
- * file and a 50 GB dump. Corruption that preserves length — including a
- * same-size local edit between requests — is not detected, the same trust
- * pull's writer places in its local disk. A file shorter than its committed
- * cursor is rejected rather than being zero-filled. The wire belongs to TLS,
+ * file and a 50 GB dump. Corruption that preserves length is not detected,
+ * the same trust pull's writer places in its local disk. A missing, shortened,
+ * or non-regular file behind a committed cursor is rejected as lost progress
+ * instead of being extended with zero bytes. The wire belongs to TLS,
  * and whether a caller may talk to the endpoint at all is checked by
  * Site_Export_HMAC_Server before any of this code runs.
  *
@@ -209,33 +209,9 @@ final class Site_Export_Staged_Artifacts {
             // append to any other artifact starts it from scratch.
             $state = $this->read_state();
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
-            if (!$this->artifact_parent_directories_are_safe($this->files_dir, $artifact_id, false)) {
-                return [
-                    'status' => 'rejected',
-                    'reason' => 'io_error',
-                    'detail' => 'create_staging_dir',
-                    'committed_bytes' => $committed,
-                ];
-            }
-            $file_stat = @lstat($file_path);
-            $file_is_regular = is_array($file_stat)
-                && isset($file_stat['mode'])
-                && ( ( (int) $file_stat['mode'] & 0170000 ) === 0100000 );
-            if (is_array($file_stat) && !$file_is_regular) {
-                return [
-                    'status' => 'rejected',
-                    'reason' => 'io_error',
-                    'detail' => 'open_artifact_file',
-                    'committed_bytes' => 0,
-                ];
-            }
-            if ($committed > 0 && ( !$file_is_regular || !isset($file_stat['size']) || (int) $file_stat['size'] < $committed )) {
-                return [
-                    'status' => 'rejected',
-                    'reason' => 'io_error',
-                    'detail' => 'staging_file_shorter_than_cursor',
-                    'committed_bytes' => 0,
-                ];
+            $staging_file_damage = $this->staging_file_damage($file_path, $committed);
+            if ($staging_file_damage !== null) {
+                return $this->damaged_cursor_result($staging_file_damage);
             }
 
             if ($offset + strlen($bytes) <= $committed) {
@@ -255,7 +231,7 @@ final class Site_Export_Staged_Artifacts {
                 ];
             }
 
-            if (!$this->artifact_parent_directories_are_safe($this->files_dir, $artifact_id, true)) {
+            if (!$this->ensure_parent_dir($file_path)) {
                 return [
                     'status' => 'rejected',
                     'reason' => 'io_error',
@@ -266,8 +242,12 @@ final class Site_Export_Staged_Artifacts {
 
             // Open without truncating: a resumed transfer must keep committed
             // bytes until the cursor decides what tail to discard.
-            $file = @fopen($file_path, 'c+b');
+            $file = @fopen($file_path, $committed > 0 ? 'r+b' : 'c+b');
             if ($file === false) {
+                $staging_file_damage = $this->staging_file_damage($file_path, $committed);
+                if ($staging_file_damage !== null) {
+                    return $this->damaged_cursor_result($staging_file_damage);
+                }
                 return [
                     'status' => 'rejected',
                     'reason' => 'io_error',
@@ -277,6 +257,11 @@ final class Site_Export_Staged_Artifacts {
             }
 
             try {
+                $opened_staging_file_damage = $this->opened_staging_file_damage($file, $committed);
+                if ($opened_staging_file_damage !== null) {
+                    return $this->damaged_cursor_result($opened_staging_file_damage);
+                }
+
                 // Discard any uncommitted tail from an interrupted earlier
                 // step, then append at the only offset the cursor says is
                 // committed.
@@ -397,28 +382,6 @@ final class Site_Export_Staged_Artifacts {
                 ];
             }
 
-            if (!$this->artifact_parent_directories_are_safe($this->files_dir, $artifact_id, false)) {
-                return [
-                    'status' => 'rejected',
-                    'reason' => 'io_error',
-                    'detail' => 'create_staging_dir',
-                    'committed_bytes' => 0,
-                    'path' => null,
-                ];
-            }
-            $file_stat = @lstat($file_path);
-            if (
-                is_array($file_stat)
-                && ( !isset($file_stat['mode']) || ( ( (int) $file_stat['mode'] & 0170000 ) !== 0100000 ) )
-            ) {
-                return [
-                    'status' => 'rejected',
-                    'reason' => 'io_error',
-                    'detail' => 'open_artifact_file',
-                    'committed_bytes' => 0,
-                    'path' => null,
-                ];
-            }
             $verified_size = $this->read_verified_size($artifact_id);
             if ($verified_size !== null) {
                 // The record can outlive the file — a discard killed between
@@ -453,20 +416,13 @@ final class Site_Export_Staged_Artifacts {
 
             $state = $this->read_state();
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
-
-            if (
-                is_array($file_stat)
-                && isset($file_stat['size'])
-                && (int) $file_stat['size'] < $committed
-            ) {
-                return [
-                    'status' => 'rejected',
-                    'reason' => 'io_error',
-                    'detail' => 'staging_file_shorter_than_cursor',
-                    'committed_bytes' => 0,
-                    'path' => null,
-                ];
+            $staging_file_damage = $this->staging_file_damage($file_path, $committed);
+            if ($staging_file_damage !== null) {
+                $result = $this->damaged_cursor_result($staging_file_damage);
+                $result['path'] = null;
+                return $result;
             }
+
             if (!file_exists($file_path)) {
                 // A zero-byte artifact legitimately has no appends; the fopen
                 // below creates its empty file.
@@ -479,7 +435,7 @@ final class Site_Export_Staged_Artifacts {
                         'path' => null,
                     ];
                 }
-                if (!$this->artifact_parent_directories_are_safe($this->files_dir, $artifact_id, true)) {
+                if (!$this->ensure_parent_dir($file_path)) {
                     return [
                         'status' => 'rejected',
                         'reason' => 'io_error',
@@ -500,8 +456,14 @@ final class Site_Export_Staged_Artifacts {
                 ];
             }
 
-            $file = @fopen($file_path, 'c+b');
+            $file = @fopen($file_path, $committed > 0 ? 'r+b' : 'c+b');
             if ($file === false) {
+                $staging_file_damage = $this->staging_file_damage($file_path, $committed);
+                if ($staging_file_damage !== null) {
+                    $result = $this->damaged_cursor_result($staging_file_damage);
+                    $result['path'] = null;
+                    return $result;
+                }
                 return [
                     'status' => 'rejected',
                     'reason' => 'io_error',
@@ -510,6 +472,14 @@ final class Site_Export_Staged_Artifacts {
                     'path' => null,
                 ];
             }
+            $opened_staging_file_damage = $this->opened_staging_file_damage($file, $committed);
+            if ($opened_staging_file_damage !== null) {
+                fclose($file);
+                $result = $this->damaged_cursor_result($opened_staging_file_damage);
+                $result['path'] = null;
+                return $result;
+            }
+
             // Drop any uncommitted tail so the artifact holds committed bytes only.
             $truncated = ftruncate($file, $committed);
             fclose($file);
@@ -557,9 +527,8 @@ final class Site_Export_Staged_Artifacts {
      * This is advisory and intentionally lock-free; writers still enforce the
      * committed offset under the lock before accepting bytes.
      *
-     * When a cursor's staged file is missing, short, or not regular,
-     * committed_bytes stays zero and the response adds damage plus the
-     * recorded cursor so the caller can distinguish damage from no progress.
+     * When the recorded cursor has lost its backing file, committed_bytes is
+     * zero and the response describes the damage and the untrusted old cursor.
      *
      * @return array{exists:bool,committed_bytes:int,verified:bool,damage?:string,recorded_committed_bytes?:int}
      */
@@ -572,40 +541,27 @@ final class Site_Export_Staged_Artifacts {
                 'verified' => false,
             ];
         }
-        $file_parent_is_safe = $this->artifact_parent_directories_are_safe($this->files_dir, $artifact_id, false);
 
         $verified_size = $this->read_verified_size($artifact_id);
         if ($verified_size !== null) {
             return [
-                'exists' => $file_parent_is_safe && file_exists($file_path),
+                'exists' => file_exists($file_path),
                 'committed_bytes' => $verified_size,
                 'verified' => true,
             ];
         }
 
         $state = $this->read_state();
-        $file_stat = $file_parent_is_safe ? @lstat($file_path) : false;
-        $committed_bytes = 0;
-        $damage = null;
-        if ($state['artifact_id'] === $artifact_id) {
-            if (!$file_parent_is_safe || ( is_array($file_stat) && ( !isset($file_stat['mode']) || ( ( (int) $file_stat['mode'] & 0170000 ) !== 0100000 ) ) )) {
-                $damage = 'staging_file_not_regular';
-            } elseif (!is_array($file_stat)) {
-                $damage = 'staging_file_missing_at_cursor';
-            } elseif (!isset($file_stat['size']) || (int) $file_stat['size'] < $state['committed_bytes']) {
-                $damage = 'staging_file_shorter_than_cursor';
-            } else {
-                $committed_bytes = $state['committed_bytes'];
-            }
-        }
+        $committed_bytes = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
+        $staging_file_damage = $this->staging_file_damage($file_path, $committed_bytes);
         $status = [
-            'exists' => $file_parent_is_safe && file_exists($file_path),
-            'committed_bytes' => $committed_bytes,
+            'exists' => file_exists($file_path),
+            'committed_bytes' => $staging_file_damage === null ? $committed_bytes : 0,
             'verified' => false,
         ];
-        if ($damage !== null) {
-            $status['damage'] = $damage;
-            $status['recorded_committed_bytes'] = $state['committed_bytes'];
+        if ($staging_file_damage !== null) {
+            $status['damage'] = $staging_file_damage;
+            $status['recorded_committed_bytes'] = $committed_bytes;
         }
         return $status;
     }
@@ -614,9 +570,10 @@ final class Site_Export_Staged_Artifacts {
      * Remove all staged data and records for an artifact. Safe to call for
      * unknown ids.
      *
-     * Retry until true: a discard killed between its steps — or stopped by
-     * a failing one — leaves a partial state that only another discard
-     * fully cleans up. Every partial state is retriable.
+     * Cursor and verification records are removed before the artifact. A kill
+     * or failed unlink can therefore leave untrusted bytes behind, but never a
+     * durable cursor or marker that authorizes bytes already removed. Retry
+     * until true to finish removing any such orphan.
      *
      * @return bool False when a concurrent writer holds the store (an
      *              unguarded unlink would let that writer's commit resurrect
@@ -648,17 +605,14 @@ final class Site_Export_Staged_Artifacts {
                 return false;
             }
 
-            if (!$this->artifact_parent_directories_are_safe($this->files_dir, $artifact_id, false)) {
-                return false;
-            }
-            if (( file_exists($file_path) || is_link($file_path) ) && !@unlink($file_path)) {
-                return false;
-            }
             $state = $this->read_state();
             if ($state['artifact_id'] === $artifact_id && !$this->write_state(null, 0)) {
                 return false;
             }
-            return $this->remove_verified_marker($artifact_id);
+            if (!$this->remove_verified_marker($artifact_id)) {
+                return false;
+            }
+            return !( file_exists($file_path) || is_link($file_path) ) || @unlink($file_path);
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -710,55 +664,23 @@ final class Site_Export_Staged_Artifacts {
      * files, and the index exclusion of storage_path still applies.
      */
     private function ensure_web_guards(string $dir): void {
-        $this->ensure_web_guard(
-            $dir . '/.htaccess',
-            "# Reprint staging area - never web-served.\n" .
-            "<IfModule mod_authz_core.c>\n" .
-            "    Require all denied\n" .
-            "</IfModule>\n" .
-            "<IfModule !mod_authz_core.c>\n" .
-            "    Deny from all\n" .
-            "</IfModule>\n"
-        );
-        $this->ensure_web_guard($dir . '/index.php', "<?php\n");
-    }
-
-    /**
-     * Leave a regular guard alone, or replace any other leaf without ever
-     * opening a planted symlink. Exclusive creation also makes a race that
-     * installs a new leaf between lstat() and fopen() fail closed.
-     */
-    private function ensure_web_guard(string $path, string $contents): void {
-        $guard_stat = @lstat($path);
-        if (
-            is_array($guard_stat)
-            && isset($guard_stat['mode'])
-            && ( ( (int) $guard_stat['mode'] & 0170000 ) === 0100000 )
-        ) {
-            return;
-        }
-        if (is_array($guard_stat) && !@unlink($path)) {
-            return;
+        $htaccess = $dir . '/.htaccess';
+        if (!file_exists($htaccess)) {
+            @file_put_contents(
+                $htaccess,
+                "# Reprint staging area - never web-served.\n" .
+                "<IfModule mod_authz_core.c>\n" .
+                "    Require all denied\n" .
+                "</IfModule>\n" .
+                "<IfModule !mod_authz_core.c>\n" .
+                "    Deny from all\n" .
+                "</IfModule>\n"
+            );
         }
 
-        $guard = @fopen($path, 'xb');
-        if ($guard === false) {
-            return;
-        }
-
-        $contents_length = strlen($contents);
-        $written_bytes = 0;
-        while ($written_bytes < $contents_length) {
-            $written = @fwrite($guard, substr($contents, $written_bytes));
-            if (!is_int($written) || $written === 0) {
-                break;
-            }
-            $written_bytes += $written;
-        }
-        $write_succeeded = $written_bytes === $contents_length && @fflush($guard);
-        @fclose($guard);
-        if (!$write_succeeded) {
-            @unlink($path);
+        $index = $dir . '/index.php';
+        if (!file_exists($index)) {
+            @file_put_contents($index, "<?php\n");
         }
     }
 
@@ -769,37 +691,64 @@ final class Site_Export_Staged_Artifacts {
     }
 
     /**
-     * Check every parent below an artifact root without following symlinks.
-     * A missing parent either gets created one component at a time and
-     * rechecked, or proves that a read/removal cannot reach an artifact.
+     * Return why a nonzero cursor no longer has trustworthy backing bytes.
+     * A longer file is valid: it is an uncommitted tail left by an interrupted
+     * append and the next writer truncates it back to the cursor.
      */
-    private function artifact_parent_directories_are_safe(string $root_dir, string $artifact_id, bool $create_missing): bool {
-        $parent_segments = explode('/', $artifact_id);
-        array_pop($parent_segments);
-        $directory = $root_dir;
-        $segment_index = 0;
-
-        while (true) {
-            $directory_stat = @lstat($directory);
-            if ($directory_stat === false && $create_missing) {
-                @mkdir($directory, 0700);
-                $directory_stat = @lstat($directory);
-            }
-            if ($directory_stat === false) {
-                return !$create_missing;
-            }
-            if (
-                !isset($directory_stat['mode'])
-                || ( ( (int) $directory_stat['mode'] & 0170000 ) !== 0040000 )
-            ) {
-                return false;
-            }
-            if ($segment_index === count($parent_segments)) {
-                return true;
-            }
-            $directory .= '/' . $parent_segments[$segment_index];
-            ++$segment_index;
+    private function staging_file_damage(string $file_path, int $committed_bytes): ?string {
+        if ($committed_bytes === 0) {
+            return null;
         }
+
+        $file_stat = @lstat($file_path);
+        if (!is_array($file_stat)) {
+            return 'staging_file_missing_at_cursor';
+        }
+        if (
+            !isset($file_stat['mode'])
+            || ( ( (int) $file_stat['mode'] & 0170000 ) !== 0100000 )
+        ) {
+            return 'staging_file_not_regular';
+        }
+        if (!isset($file_stat['size']) || (int) $file_stat['size'] < $committed_bytes) {
+            return 'staging_file_shorter_than_cursor';
+        }
+        return null;
+    }
+
+    /**
+     * Recheck the opened file before ftruncate() can extend it. The path check
+     * and open are separate filesystem operations, so cleanup may race them.
+     *
+     * @param resource $file
+     */
+    private function opened_staging_file_damage($file, int $committed_bytes): ?string {
+        if ($committed_bytes === 0) {
+            return null;
+        }
+
+        $file_stat = @fstat($file);
+        if (
+            !is_array($file_stat)
+            || !isset($file_stat['mode'])
+            || ( ( (int) $file_stat['mode'] & 0170000 ) !== 0100000 )
+        ) {
+            return 'staging_file_not_regular';
+        }
+        if (!isset($file_stat['size']) || (int) $file_stat['size'] < $committed_bytes) {
+            return 'staging_file_shorter_than_cursor';
+        }
+        return null;
+    }
+
+    /** @return array{status:string,reason:string,detail:string,committed_bytes:int} */
+    private function damaged_cursor_result(string $damage): array {
+        return [
+            'status' => 'rejected',
+            'reason' => 'offset_gap',
+            'detail' => $damage,
+            'committed_bytes' => 0,
+        ];
     }
 
     /**
@@ -840,15 +789,29 @@ final class Site_Export_Staged_Artifacts {
     }
 
     private function write_state(?string $artifact_id, int $committed_bytes): bool {
+        // Write-then-rename keeps the cursor atomic: readers see the old
+        // record or the new one, never a torn file. The temp file sits next
+        // to the target so rename stays on the same filesystem.
+        $tmp_path = $this->state_path . '.tmp';
         // The id is stored base64: file names are arbitrary bytes, JSON
         // strings must be UTF-8, and json_encode() returning false would
-        // otherwise slip through the atomic writer as an empty
+        // otherwise slip through the strlen() comparison below as an empty
         // record — committed_bytes would silently reset to 0 on every read.
         $json = json_encode([
             'artifact_id' => $artifact_id !== null ? base64_encode($artifact_id) : null,
             'committed_bytes' => $committed_bytes,
         ]);
-        return $this->write_atomically($this->state_path, $this->state_path . '.tmp', $json);
+        // A short write (disk full) returns a byte count, not false — never
+        // rename a torn record over the good one.
+        if (@file_put_contents($tmp_path, $json) !== strlen($json)) {
+            @unlink($tmp_path);
+            return false;
+        }
+        if (!@rename($tmp_path, $this->state_path)) {
+            @unlink($tmp_path);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -867,19 +830,7 @@ final class Site_Export_Staged_Artifacts {
      * worst case is re-finalizing an artifact, never trusting a torn record.
      */
     private function read_verified_size(string $artifact_id): ?int {
-        if (!$this->artifact_parent_directories_are_safe($this->verified_dir, $artifact_id, false)) {
-            return null;
-        }
-        $marker_path = $this->verified_marker_path($artifact_id);
-        $marker_stat = @lstat($marker_path);
-        if (
-            !is_array($marker_stat)
-            || !isset($marker_stat['mode'])
-            || ( ( (int) $marker_stat['mode'] & 0170000 ) !== 0100000 )
-        ) {
-            return null;
-        }
-        $raw = @file_get_contents($marker_path);
+        $raw = @file_get_contents($this->verified_marker_path($artifact_id));
         if ($raw === false) {
             return null;
         }
@@ -892,42 +843,25 @@ final class Site_Export_Staged_Artifacts {
 
     private function write_verified_marker(string $artifact_id, int $size): bool {
         $marker_path = $this->verified_marker_path($artifact_id);
-        if (!$this->artifact_parent_directories_are_safe($this->verified_dir, $artifact_id, true)) {
+        if (!$this->ensure_parent_dir($marker_path)) {
             return false;
         }
         $json = json_encode(['size' => $size]);
-        return $this->write_atomically($marker_path, $this->verified_tmp_path, $json);
-    }
-
-    private function remove_verified_marker(string $artifact_id): bool {
-        if (!$this->artifact_parent_directories_are_safe($this->verified_dir, $artifact_id, false)) {
+        // Same discipline as the cursor: a short write (disk full) must
+        // never become a marker, so write whole to the temp file and rename.
+        if (@file_put_contents($this->verified_tmp_path, $json) !== strlen($json)) {
+            @unlink($this->verified_tmp_path);
             return false;
         }
-        $marker_path = $this->verified_marker_path($artifact_id);
-        return !( file_exists($marker_path) || is_link($marker_path) ) || @unlink($marker_path);
-    }
-
-    /**
-     * Atomically replace a small record without ever opening a planted temp
-     * symlink or hardlink. Readers see the old record or the new one, never a
-     * torn file; the temp path shares the target's filesystem for rename().
-     */
-    private function write_atomically(string $target_path, string $temporary_path, string $contents): bool {
-        @unlink($temporary_path);
-        $temporary_file = @fopen($temporary_path, 'xb');
-        if ($temporary_file === false) {
-            return false;
-        }
-
-        // A short write (disk full) returns a byte count, not false — never
-        // rename a torn record over the good one.
-        $written = @fwrite($temporary_file, $contents);
-        $write_succeeded = $written === strlen($contents) && @fflush($temporary_file);
-        @fclose($temporary_file);
-        if (!$write_succeeded || !@rename($temporary_path, $target_path)) {
-            @unlink($temporary_path);
+        if (!@rename($this->verified_tmp_path, $marker_path)) {
+            @unlink($this->verified_tmp_path);
             return false;
         }
         return true;
+    }
+
+    private function remove_verified_marker(string $artifact_id): bool {
+        $marker_path = $this->verified_marker_path($artifact_id);
+        return !file_exists($marker_path) || @unlink($marker_path);
     }
 }
