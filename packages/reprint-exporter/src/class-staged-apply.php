@@ -7,14 +7,18 @@ if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
 }
 
 /**
- * Owns one direct, resumable staged-apply upload session.
+ * Owns one direct, resumable staged-apply session.
  *
  * Typed operations are materialized directly below work/staged as they are
  * accepted. The target writes one bounded JSONL record for each completed
  * operation; there is no uploaded manifest, validation pass, prepared copy,
  * or file-content scan. A file has one durable cursor and one private
  * incoming name until its final chunk is flushed and renamed into staged/.
- * The live target tree is never mutated by this upload-only session.
+ *
+ * Commit reads one target-authored record at a time. Before changing the live
+ * tree it persists an intent containing the original target identity and the
+ * staged identity. A missing staged node is accepted after a lost response
+ * only when the live node still has that recorded identity.
  */
 final class Site_Export_Staged_Apply {
 
@@ -38,6 +42,8 @@ final class Site_Export_Staged_Apply {
 
     private const MAX_FILE_CHUNK_BYTES = 4194304;
 
+    private const MAX_ADVANCE_COMMIT_STEPS = 8;
+
     private const MAX_CREATED_SESSION_CLEANUP_OPERATIONS = 128;
 
     private const MAX_DISCARD_STEPS = 256;
@@ -45,6 +51,13 @@ final class Site_Export_Staged_Apply {
     private const MAX_DISCARD_STATE_BYTES = 32768;
 
     private const MAX_RETIRED_GC_ENTRIES = 64;
+
+    private const MAX_MAINTENANCE_MARKER_BYTES = 128;
+
+    private const MAINTENANCE_FILENAME = '.maintenance';
+
+    /** @var string */
+    private $storage_dir;
 
     /** @var string */
     private $target_root;
@@ -85,11 +98,24 @@ final class Site_Export_Staged_Apply {
     /** @var string */
     private $staged_dir;
 
+    /** @var string */
+    private $backup_dir;
+
+    /** @var string */
+    private $maintenance_marker_identity_path;
+
+    /** @var string */
+    private $previous_maintenance_marker_identity_path;
+
+    /** @var string */
+    private $next_maintenance_marker_link_path;
+
     /** @var bool */
     private $upload_lock_held = false;
 
     /** @param string[] $protected_paths */
     private function __construct(string $storage_dir, string $target_root, string $session_id, array $protected_paths) {
+        $this->storage_dir = $storage_dir;
         $this->target_root = $target_root;
         $this->protected_paths = $protected_paths;
         $this->session_id = $session_id;
@@ -103,6 +129,10 @@ final class Site_Export_Staged_Apply {
         $this->journal_path = $this->session_dir . '/work/operations.jsonl';
         $this->incoming_file_path = $this->session_dir . '/work/incoming-file';
         $this->staged_dir = $this->session_dir . '/work/staged';
+        $this->backup_dir = $this->session_dir . '/work/backups';
+        $this->maintenance_marker_identity_path = $this->session_dir . '/work/maintenance-marker.php';
+        $this->previous_maintenance_marker_identity_path = $this->session_dir . '/work/maintenance-marker.previous.php';
+        $this->next_maintenance_marker_link_path = $this->session_dir . '/work/maintenance-marker.next.php';
     }
 
     /**
@@ -123,6 +153,7 @@ final class Site_Export_Staged_Apply {
     ): self {
         $target_root = self::require_absolute_directory($target_root, 'apply target', false);
         $storage_dir = self::require_staging_directory($storage_dir, $target_root, true);
+        self::require_same_filesystem($storage_dir, $target_root);
         $protected_paths = self::protect_storage_path(
             $storage_dir,
             $target_root,
@@ -321,6 +352,7 @@ final class Site_Export_Staged_Apply {
         } elseif (!@symlink($target, $staged)) {
             throw new RuntimeException('Could not create staged symlink ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
         }
+        $entry['staged_identity'] = $this->require_path_identity($staged, 'staged symlink');
         return $this->complete_upload_operation($state, $entry);
     }
 
@@ -467,6 +499,7 @@ final class Site_Export_Staged_Apply {
             if (!is_file($staged) || is_link($staged) || @filesize($staged) !== $total_bytes) {
                 $this->fail_invalid_operation('The recovered staged file has the wrong shape for ' . $this->describe_path($path) . '.');
             }
+            $entry['staged_identity'] = $this->require_path_identity($staged, 'staged file');
             return $this->complete_upload_operation($state, $entry);
         }
 
@@ -510,6 +543,7 @@ final class Site_Export_Staged_Apply {
         if (!@rename($this->incoming_file_path, $staged)) {
             throw new RuntimeException('Could not finalize staged file ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
         }
+        $entry['staged_identity'] = $this->require_path_identity($staged, 'staged file');
         return $this->complete_upload_operation($state, $entry);
     }
 
@@ -528,7 +562,64 @@ final class Site_Export_Staged_Apply {
         $this->write_state($state);
     }
 
-    /** Abort and remove an uploading or failed session in bounded steps. */
+    /**
+     * Close upload and commit at most a fixed number of target operations.
+     *
+     * @return array<string,mixed>
+     */
+    public function advance(int $expected_request_generation): array {
+        return $this->with_session_lock(function () use ($expected_request_generation): array {
+            $state = $this->read_state();
+            $this->require_expected_request_generation($state, $expected_request_generation);
+            if ($state['phase'] === 'complete') {
+                return $this->complete_session_while_locked($state);
+            }
+            if ($state['phase'] === 'failed') {
+                throw new RuntimeException('The failed staged apply session cannot advance; discard it. Failure: ' . $state['failure']);
+            }
+            if ($state['phase'] !== 'uploading' && $state['phase'] !== 'committing') {
+                throw new RuntimeException('The staged apply session cannot advance in phase ' . $state['phase'] . '.');
+            }
+            if ($state['current_file'] !== null) {
+                throw new RuntimeException('Cannot close staged apply upload while file operation ' . $state['current_file']['operation_index'] . ' has only ' . $state['current_file']['committed_bytes'] . ' of ' . $state['current_file']['total_bytes'] . ' bytes.');
+            }
+            $operation = $this->read_operation();
+            if (is_array($operation) && ( $operation['purpose'] ?? null ) === 'upload') {
+                $operation_index = (int) ( $operation['operation_index'] ?? -1 );
+                if ($operation_index < (int) $state['operation_count']) {
+                    // The operation was journaled and state advanced before
+                    // death; only the final unlink of its descriptor was lost.
+                    $this->clear_operation();
+                } else {
+                    throw new RuntimeException(
+                        'Cannot close staged apply upload while operation ' . $operation_index
+                        . ' has a durable upload intent that has not reached the target-authored journal. Replay that operation first.'
+                    );
+                }
+            }
+
+            $this->claim_active_session();
+            $this->create_maintenance_marker();
+            ++$state['request_generation'];
+            if ($state['phase'] === 'uploading') {
+                $this->truncate_journal_tail( (int) $state['journal_bytes']);
+                $state['phase'] = 'committing';
+            }
+            $this->write_state($state);
+
+            for ($step = 0; $step < self::MAX_ADVANCE_COMMIT_STEPS; $step++) {
+                $state = $this->commit_one_while_locked($state);
+                if ($state['phase'] === 'complete') {
+                    return $this->complete_session_while_locked($state);
+                }
+            }
+            return $state;
+        });
+    }
+
+    /**
+     * Abort an uncommitted/failed session or remove a completed session.
+     */
     public function discard(int $expected_request_generation): bool {
         if (is_dir($this->discarding_session_dir) || is_file($this->discard_state_path)) {
             return $this->advance_discard_cleanup();
@@ -539,13 +630,23 @@ final class Site_Export_Staged_Apply {
         $this->with_session_lock(function () use ($expected_request_generation): void {
             $state = $this->read_state(false);
             $this->require_expected_request_generation($state, $expected_request_generation);
+            $discarding_complete = $state['phase'] === 'discarding' && ( $state['discarding_complete'] ?? false ) === true;
+            $target_mutation_started = is_file($this->operation_path)
+                && ( ( $this->read_operation()['purpose'] ?? null ) === 'commit' );
+            $target_mutation_started = $target_mutation_started || (int) $state['commit_count'] > 0;
+            if ($state['phase'] !== 'complete' && !$discarding_complete && $target_mutation_started) {
+                throw new RuntimeException('Cannot discard staged apply session ' . $this->session_id . ' after it has begun target mutations. Resume its durable commit instead.');
+            }
             if ($state['phase'] !== 'discarding') {
+                $state['discarding_complete'] = $state['phase'] === 'complete';
                 $state['phase'] = 'discarding';
                 $state['failure'] = null;
                 ++$state['request_generation'];
                 $this->write_state($state);
             }
             try {
+                $this->remove_maintenance_marker();
+                $this->release_active_session();
                 if (( $state['retire_session_id'] ?? false ) === true) {
                     $this->write_retired_session_marker();
                 }
@@ -576,8 +677,10 @@ final class Site_Export_Staged_Apply {
             throw new RuntimeException('Could not record the staged apply target root identity: ' . $target_root, self::ERROR_RETRYABLE_IO);
         }
         try {
-            if (!@mkdir($session->staged_dir, 0700, true) && !is_dir($session->staged_dir)) {
-                throw new RuntimeException('Could not create staged apply workspace directory: ' . $session->staged_dir, self::ERROR_RETRYABLE_IO);
+            foreach ([$session->staged_dir, $session->backup_dir] as $directory) {
+                if (!@mkdir($directory, 0700, true) && !is_dir($directory)) {
+                    throw new RuntimeException('Could not create staged apply workspace directory: ' . $directory, self::ERROR_RETRYABLE_IO);
+                }
             }
             if (@file_put_contents($session->lock_path, '') === false) {
                 throw new RuntimeException('Could not create the staged apply session lock: ' . $session->lock_path, self::ERROR_RETRYABLE_IO);
@@ -607,6 +710,8 @@ final class Site_Export_Staged_Apply {
                 'last_path_b64' => null,
                 'last_type' => null,
                 'current_file' => null,
+                'commit_offset' => 0,
+                'commit_count' => 0,
                 'failure' => null,
                 'retire_session_id' => $retire_session_id,
             ]);
@@ -630,6 +735,7 @@ final class Site_Export_Staged_Apply {
                 $this->session_dir => 'staged apply session directory',
                 dirname($this->staged_dir) => 'staged apply work directory',
                 $this->staged_dir => 'staged apply staged tree',
+                $this->backup_dir => 'staged apply backup tree',
             ] as $path => $description
         ) {
             self::require_real_directory_path($path, $description, false);
@@ -647,6 +753,9 @@ final class Site_Export_Staged_Apply {
             [
                 $this->operation_path => 'staged apply current operation',
                 $this->incoming_file_path => 'staged apply incoming file',
+                $this->maintenance_marker_identity_path => 'staged apply maintenance identity',
+                $this->previous_maintenance_marker_identity_path => 'staged apply previous maintenance identity',
+                $this->next_maintenance_marker_link_path => 'staged apply next maintenance identity',
             ] as $path => $description
         ) {
             if (is_array(@lstat($path))) {
@@ -936,6 +1045,310 @@ final class Site_Export_Staged_Apply {
         }
     }
 
+    /** @param array<string,mixed> $state @return array<string,mixed> */
+    private function complete_session_while_locked(array $state): array {
+        // Completion is durable before these two cleanup steps. A later
+        // advance repairs a process death between either cleanup and return.
+        $this->remove_maintenance_marker();
+        $this->release_active_session();
+        return $state;
+    }
+
+    /** @param array<string,mixed> $state @return array<string,mixed> */
+    private function commit_one_while_locked(array $state): array {
+        $operation = $this->read_operation();
+        if (
+            $operation !== null
+            && ( $operation['purpose'] ?? null ) === 'upload'
+            && (int) ( $operation['operation_index'] ?? -1 ) < (int) $state['operation_count']
+        ) {
+            $this->clear_operation();
+            $operation = null;
+        }
+        if (
+            $operation !== null
+            && ( $operation['purpose'] ?? null ) === 'commit'
+            && (int) ( $operation['next_offset'] ?? -1 ) === (int) $state['commit_offset']
+        ) {
+            $this->clear_operation();
+            return $state;
+        }
+
+        if ( (int) $state['commit_offset'] === (int) $state['journal_bytes']) {
+            if ( (int) $state['commit_count'] !== (int) $state['operation_count']) {
+                throw new RuntimeException('The staged apply commit count does not match the completed operation count at the journal end.');
+            }
+            if ($operation !== null) {
+                throw new RuntimeException('The staged apply current operation remains at the completed journal cursor.');
+            }
+            $state['phase'] = 'complete';
+            $this->write_state($state);
+            return $state;
+        }
+
+        if ($operation === null) {
+            $record = $this->read_journal_record( (int) $state['commit_offset'], (int) $state['journal_bytes']);
+            if ($record['operation_index'] !== (int) $state['commit_count']) {
+                throw new RuntimeException(
+                    'The target-authored staged apply journal operation index ' . $record['operation_index']
+                    . ' does not match commit count ' . $state['commit_count'] . '.'
+                );
+            }
+            $path = $record['entry']['path'];
+            $target_status = $this->inspect_target_path_without_following($path);
+            $operation = [
+                'purpose' => 'commit',
+                'journal_offset' => (int) $state['commit_offset'],
+                'next_offset' => $record['next_offset'],
+                'operation_index' => $record['operation_index'],
+                'entry' => $record['entry'],
+                'target_was_absent' => !$target_status['present'],
+                'target_identity' => $target_status['present'] ? $target_status['identity'] : null,
+            ];
+            $this->write_operation($operation);
+        } elseif (
+            ( $operation['purpose'] ?? null ) !== 'commit'
+            || (int) ( $operation['journal_offset'] ?? -1 ) !== (int) $state['commit_offset']
+            || (int) ( $operation['operation_index'] ?? -1 ) !== (int) $state['commit_count']
+        ) {
+            throw new RuntimeException('The staged apply current operation does not match the server-confirmed commit cursor.');
+        }
+
+        $this->commit_entry($operation);
+        $state['commit_offset'] = (int) $operation['next_offset'];
+        ++$state['commit_count'];
+        $this->write_state($state);
+        $this->clear_operation();
+        return $state;
+    }
+
+    /**
+     * @return array{operation_index:int,next_offset:int,entry:array<string,mixed>}
+     */
+    private function read_journal_record(int $offset, int $journal_bytes): array {
+        if ($offset < 0 || $offset >= $journal_bytes) {
+            throw new RuntimeException('The staged apply journal cursor ' . $offset . ' is outside its confirmed ' . $journal_bytes . ' bytes.');
+        }
+        $journal = @fopen($this->journal_path, 'rb');
+        if ($journal === false) {
+            throw new RuntimeException('Could not read the target-authored staged apply journal: ' . $this->journal_path, self::ERROR_RETRYABLE_IO);
+        }
+        try {
+            if (fseek($journal, $offset, SEEK_SET) !== 0) {
+                throw new RuntimeException('Could not seek to staged apply journal byte ' . $offset . '.', self::ERROR_RETRYABLE_IO);
+            }
+            $maximum_read = min(self::MAX_OPERATION_LINE_BYTES + 1, $journal_bytes - $offset + 1);
+            $line = fgets($journal, $maximum_read);
+            if (!is_string($line)) {
+                throw new RuntimeException('Could not read staged apply journal operation at byte ' . $offset . '.', self::ERROR_RETRYABLE_IO);
+            }
+        } finally {
+            fclose($journal);
+        }
+        if (substr($line, -1) !== "\n") {
+            throw new RuntimeException('The target-authored staged apply journal operation at byte ' . $offset . ' is truncated or overlong.');
+        }
+        $next_offset = $offset + strlen($line);
+        if ($next_offset > $journal_bytes) {
+            throw new RuntimeException('The target-authored staged apply journal operation crosses its confirmed byte length.');
+        }
+        $record = json_decode(substr($line, 0, -1), true);
+        if (
+            !is_array($record)
+            || !isset($record['operation_index'], $record['entry'])
+            || !is_int($record['operation_index'])
+            || $record['operation_index'] < 0
+            || !is_array($record['entry'])
+        ) {
+            throw new RuntimeException('The target-authored staged apply journal operation at byte ' . $offset . ' is malformed.');
+        }
+        return [
+            'operation_index' => $record['operation_index'],
+            'next_offset' => $next_offset,
+            'entry' => $this->deserialize_entry($record['entry']),
+        ];
+    }
+
+    /** @param array<string,mixed> $operation */
+    private function commit_entry(array $operation): void {
+        $entry = $operation['entry'];
+        $path = $entry['path'];
+        $target = $this->target_path($path);
+        $backup = $this->backup_path($path);
+        $this->require_writable_target_path($path, $entry['type']);
+        $this->require_unfollowed_workspace_parents($backup);
+
+        if ($entry['type'] === 'delete') {
+            $this->commit_delete($operation, $target, $backup);
+            return;
+        }
+
+        $this->ensure_target_parents($path);
+        if ($entry['type'] === 'directory') {
+            if ($this->is_protected_ancestor($path)) {
+                if (!is_dir($target) || is_link($target)) {
+                    throw new RuntimeException('Protected staged apply ancestor ' . $this->describe_path($path) . ' is no longer a real directory.');
+                }
+                return;
+            }
+            if ($this->path_present($target) && ( !is_dir($target) || is_link($target) )) {
+                if ($this->path_present($backup)) {
+                    $this->require_confirmed_backup($operation, $backup, 'directory target backup');
+                    throw new RuntimeException('Cannot resume directory ' . $this->describe_path($path) . ' because its backup exists while a non-directory target reappeared.');
+                }
+                $this->require_identity_match($target, $operation['target_identity'], 'original directory target replacement');
+                if (!$this->move_to_backup($target, $backup)) {
+                    throw new RuntimeException('Could not back up target before creating directory ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                }
+                $this->require_confirmed_backup($operation, $backup, 'directory target backup');
+            }
+            if ($this->path_present($backup)) {
+                $this->require_confirmed_backup($operation, $backup, 'directory target backup');
+            }
+            if (!is_dir($target)) {
+                if ($this->path_present($target) || !@mkdir($target, 0755)) {
+                    throw new RuntimeException('Could not create target directory ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                }
+            }
+            return;
+        }
+
+        $this->require_existing_staged_parents($path);
+        $staged = $this->staged_path($path);
+        if ($this->path_present($staged)) {
+            $this->require_identity_match($staged, $entry['staged_identity'], 'staged ' . $entry['type']);
+            if ($entry['type'] === 'symlink' && ( !is_link($staged) || readlink($staged) !== $entry['target'] )) {
+                throw new RuntimeException('The staged symlink target changed for ' . $this->describe_path($path) . '.');
+            }
+            if ($this->path_present($target)) {
+                if ($this->path_present($backup)) {
+                    $this->require_confirmed_backup($operation, $backup, 'original target backup');
+                    throw new RuntimeException('Cannot apply ' . $this->describe_path($path) . ' because its backup exists while the target reappeared.');
+                }
+                if (( $operation['target_was_absent'] ?? null ) !== false) {
+                    throw new RuntimeException('Cannot apply ' . $this->describe_path($path) . ' because a target appeared after the commit intent was recorded.');
+                }
+                $this->require_identity_match($target, $operation['target_identity'], 'original target');
+                if (!$this->move_to_backup($target, $backup)) {
+                    throw new RuntimeException('Could not back up target before applying ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                }
+                $this->require_confirmed_backup($operation, $backup, 'original target backup');
+            } elseif (( $operation['target_was_absent'] ?? null ) === false && !$this->path_present($backup)) {
+                throw new RuntimeException('Cannot apply ' . $this->describe_path($path) . ' because its original target disappeared before it was backed up.');
+            }
+            if ($this->path_present($backup)) {
+                $this->require_confirmed_backup($operation, $backup, 'original target backup');
+            }
+            $this->require_same_filesystem_for_rename($staged, $target, 'move staged item into target');
+            if (!@rename($staged, $target)) {
+                throw new RuntimeException('Could not atomically move staged item into target: ' . $target, self::ERROR_RETRYABLE_IO);
+            }
+            return;
+        }
+
+        // A successful rename removes the private name. Device, inode, mode,
+        // size, and mtime must still match at the live name. ctime is omitted
+        // because rename changes it on some filesystems but not others.
+        if (!$this->path_present($target)) {
+            throw new RuntimeException(
+                'Cannot confirm installed target after lost rename response at ' . $target
+                . ' because both its staged and live names are absent.'
+            );
+        }
+        $this->require_identity_match($target, $entry['staged_identity'], 'installed target after lost rename response', true);
+        if ($this->path_present($backup)) {
+            $this->require_confirmed_backup($operation, $backup, 'original target backup');
+        }
+        if ($entry['type'] === 'symlink' && ( !is_link($target) || readlink($target) !== $entry['target'] )) {
+            throw new RuntimeException('Cannot confirm the installed symlink target for ' . $this->describe_path($path) . '.');
+        }
+    }
+
+    /** @param array<string,mixed> $operation */
+    private function commit_delete(array $operation, string $target, string $backup): void {
+        $path = $operation['entry']['path'];
+        $target_status = $this->inspect_target_path_without_following($path);
+        if (!$target_status['present']) {
+            if ($this->path_present($backup)) {
+                $this->require_confirmed_backup($operation, $backup, 'delete target backup');
+                return;
+            }
+            if (( $operation['target_was_absent'] ?? null ) === true) {
+                return;
+            }
+            throw new RuntimeException('Cannot confirm deletion of ' . $this->describe_path($path) . ' because its original target disappeared before backup.');
+        }
+        if (( $operation['target_was_absent'] ?? null ) === true) {
+            throw new RuntimeException('Cannot delete ' . $this->describe_path($path) . ' because a target appeared after the commit intent was recorded.');
+        }
+        if ($this->path_present($backup)) {
+            $this->require_confirmed_backup($operation, $backup, 'delete target backup');
+            throw new RuntimeException('Cannot delete ' . $this->describe_path($path) . ' because its backup exists while the target reappeared.');
+        }
+        $this->require_identity_match($target, $operation['target_identity'], 'delete target');
+        if (!$this->move_to_backup($target, $backup)) {
+            throw new RuntimeException('Could not back up target scheduled for deletion: ' . $target, self::ERROR_RETRYABLE_IO);
+        }
+        $this->require_confirmed_backup($operation, $backup, 'delete target backup');
+    }
+
+    /** @param array<string,mixed> $operation */
+    private function require_confirmed_backup(array $operation, string $backup, string $description): void {
+        if (( $operation['target_was_absent'] ?? null ) === true) {
+            // An earlier ancestor replacement can leave an inherited path in
+            // the backup tree. This operation did not create or own it.
+            return;
+        }
+        if (( $operation['target_was_absent'] ?? null ) !== false) {
+            throw new RuntimeException('Cannot confirm ' . $description . ' because the commit intent has no valid original-target state.');
+        }
+        $this->require_identity_match($backup, $operation['target_identity'] ?? null, $description, true);
+    }
+
+    /**
+     * Inspect a relative target without ever resolving a symlinked ancestor.
+     * A missing or non-directory ancestor makes the leaf absent in the safe
+     * target namespace, which is sufficient for a descendant delete.
+     *
+     * @return array{present:bool,identity:?array<string,int>}
+     */
+    private function inspect_target_path_without_following(string $path): array {
+        $segments = explode('/', $path);
+        $leaf = array_pop($segments);
+        $current = $this->target_root;
+        foreach ($segments as $segment) {
+            $current = $this->join_path($current, $segment);
+            $stat = @lstat($current);
+            if (!is_array($stat) || !$this->stat_is_directory($stat)) {
+                return ['present' => false, 'identity' => null];
+            }
+        }
+        $target = $this->join_path($current, $leaf);
+        $stat = @lstat($target);
+        if (!is_array($stat)) {
+            return ['present' => false, 'identity' => null];
+        }
+        return ['present' => true, 'identity' => $this->identity_from_stat($stat)];
+    }
+
+    private function ensure_target_parents(string $path): void {
+        $segments = explode('/', $path);
+        array_pop($segments);
+        $current = $this->target_root;
+        foreach ($segments as $segment) {
+            $current = $this->join_path($current, $segment);
+            $stat = @lstat($current);
+            if (is_array($stat)) {
+                if (!$this->stat_is_directory($stat)) {
+                    throw new RuntimeException('Refusing to apply through non-directory target parent: ' . $current);
+                }
+                continue;
+            }
+            if (!@mkdir($current, 0755)) {
+                throw new RuntimeException('Could not create missing target parent directory: ' . $current, self::ERROR_RETRYABLE_IO);
+            }
+        }
+    }
     private function advance_discard_cleanup(): bool {
         $discarding_stat = @lstat($this->discarding_session_dir);
         if (is_array($discarding_stat) && !self::stat_is_real_directory($discarding_stat)) {
@@ -1123,6 +1536,481 @@ final class Site_Export_Staged_Apply {
         }
     }
 
+    private function claim_active_session(): void {
+        $lock_path = $this->storage_dir . '/apply.lock';
+        $lock = @fopen($lock_path, 'c+b');
+        if ($lock === false) {
+            throw new RuntimeException('Could not open staged apply coordinator lock: ' . $lock_path, self::ERROR_RETRYABLE_IO);
+        }
+        try {
+            if (!flock($lock, LOCK_EX | LOCK_NB)) {
+                throw new RuntimeException(
+                    'Another staged apply session is changing the target. Retry after it finishes.',
+                    self::ERROR_BUSY
+                );
+            }
+            $this->recover_completed_maintenance_marker();
+            $active_path = $this->storage_dir . '/active-apply.json';
+            $active = $this->read_json_file($active_path);
+            if (is_file($active_path) && !is_array($active)) {
+                throw new RuntimeException('The staged apply coordinator record is malformed: ' . $active_path);
+            }
+            $active_id = is_array($active) ? ( $active['session_id'] ?? null ) : null;
+            if (is_array($active) && !is_string($active_id)) {
+                throw new RuntimeException('The staged apply coordinator record has no valid session id: ' . $active_path);
+            }
+            if (is_string($active_id) && $active_id !== $this->session_id) {
+                $active_state_path = $this->storage_dir . '/apply-sessions/' . $active_id . '/state.json';
+                $active_state = $this->read_json_file($active_state_path);
+                if (!is_array($active_state) || !in_array($active_state['phase'] ?? null, ['complete'], true)) {
+                    throw new RuntimeException(
+                        'Staged apply session ' . $active_id . ' owns the target. Resume or discard that session before starting another.',
+                        self::ERROR_BUSY
+                    );
+                }
+            }
+            $this->write_json_file($active_path, ['session_id' => $this->session_id]);
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    private function recover_completed_maintenance_marker(): void {
+        $maintenance_path = $this->target_path(self::MAINTENANCE_FILENAME);
+        $contents = $this->read_maintenance_marker_contents($maintenance_path, 'completed staged apply maintenance marker');
+        if ($contents === null) {
+            return;
+        }
+        if (!preg_match('/\A<\?php\n\$upgrading = [0-9]+;\n\/\/ reprint-staged-apply-session:([a-f0-9]{32})\n\z/D', $contents, $matches)) {
+            return;
+        }
+        $completed_session_dir = $this->storage_dir . '/apply-sessions/' . $matches[1];
+        $owned_marker = $this->maintenance_marker_identity_for_target(
+            $maintenance_path,
+            $matches[1],
+            [
+                $completed_session_dir . '/work/maintenance-marker.php',
+                $completed_session_dir . '/work/maintenance-marker.previous.php',
+            ],
+            $contents
+        );
+        if ($owned_marker === null || $owned_marker['contents'] !== $contents) {
+            return;
+        }
+        $owned_identity_path = $owned_marker['identity_path'];
+        $state = $this->read_json_file($completed_session_dir . '/state.json');
+        $encoded_target_root = is_array($state) ? ( $state['target_root_b64'] ?? null ) : null;
+        $completed_target_root = is_string($encoded_target_root) ? base64_decode($encoded_target_root, true) : false;
+        $completed_or_discarding = is_array($state)
+            && ( $state['phase'] === 'complete' || ( $state['phase'] === 'discarding' && ( $state['discarding_complete'] ?? false ) === true ) );
+        if (!$completed_or_discarding || $completed_target_root !== $this->target_root) {
+            return;
+        }
+        $confirmed_marker = $this->maintenance_marker_identity_for_target(
+            $maintenance_path,
+            $matches[1],
+            [$owned_identity_path],
+            $owned_marker['contents']
+        );
+        if (
+            $confirmed_marker === null
+            || $confirmed_marker['identity_path'] !== $owned_identity_path
+            || $confirmed_marker['contents'] !== $owned_marker['contents']
+        ) {
+            return;
+        }
+        if (!@unlink($maintenance_path)) {
+            $confirmed_marker = $this->maintenance_marker_identity_for_target(
+                $maintenance_path,
+                $matches[1],
+                [$owned_identity_path],
+                $owned_marker['contents']
+            );
+            if (
+                $confirmed_marker === null
+                || $confirmed_marker['identity_path'] !== $owned_identity_path
+                || $confirmed_marker['contents'] !== $owned_marker['contents']
+            ) {
+                return;
+            }
+            throw new RuntimeException('Could not remove the maintenance marker left by completed staged apply session ' . $matches[1] . ': ' . $maintenance_path, self::ERROR_RETRYABLE_IO);
+        }
+    }
+
+    private function release_active_session(): void {
+        $lock_path = $this->storage_dir . '/apply.lock';
+        $lock = @fopen($lock_path, 'c+b');
+        if ($lock === false) {
+            throw new RuntimeException('Could not open staged apply coordinator lock: ' . $lock_path, self::ERROR_RETRYABLE_IO);
+        }
+        try {
+            if (!flock($lock, LOCK_EX | LOCK_NB)) {
+                throw new RuntimeException('The staged apply coordinator is busy while releasing session ' . $this->session_id . '. Retry.', self::ERROR_BUSY);
+            }
+            $active_path = $this->storage_dir . '/active-apply.json';
+            $active = $this->read_json_file($active_path);
+            if (is_array($active) && ( $active['session_id'] ?? null ) === $this->session_id && is_file($active_path) && !@unlink($active_path)) {
+                throw new RuntimeException('Could not release staged apply session ownership: ' . $active_path, self::ERROR_RETRYABLE_IO);
+            }
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    private function create_maintenance_marker(): void {
+        $maintenance_path = $this->target_path(self::MAINTENANCE_FILENAME);
+        $marker = '// reprint-staged-apply-session:' . $this->session_id;
+        $owned_identity_path = null;
+        $owned_marker_contents = null;
+        if ($this->path_present($maintenance_path)) {
+            if (is_link($maintenance_path) || !is_file($maintenance_path)) {
+                throw new RuntimeException(
+                    'The target already has a maintenance marker not owned by staged apply: ' . $maintenance_path,
+                    self::ERROR_BUSY
+                );
+            }
+            $owned_marker = $this->maintenance_marker_identity_for_target(
+                $maintenance_path,
+                $this->session_id,
+                [
+                    $this->maintenance_marker_identity_path,
+                    $this->previous_maintenance_marker_identity_path,
+                ]
+            );
+            if ($owned_marker === null) {
+                throw new RuntimeException(
+                    'The target already has a maintenance marker not owned by staged apply: ' . $maintenance_path,
+                    self::ERROR_BUSY
+                );
+            }
+            $owned_identity_path = $owned_marker['identity_path'];
+            $owned_marker_contents = $owned_marker['contents'];
+        }
+
+        if ($owned_identity_path === null) {
+            $this->clear_private_maintenance_marker_path($this->previous_maintenance_marker_identity_path);
+            $this->clear_private_maintenance_marker_path($this->next_maintenance_marker_link_path);
+            $this->publish_maintenance_marker_identity($marker);
+            if (!@link($this->maintenance_marker_identity_path, $maintenance_path)) {
+                $code = $this->path_present($maintenance_path) ? self::ERROR_BUSY : self::ERROR_RETRYABLE_IO;
+                throw new RuntimeException(
+                    'Could not publish the staged apply maintenance marker: ' . $maintenance_path,
+                    $code
+                );
+            }
+            return;
+        }
+
+        $this->clear_private_maintenance_marker_path($this->next_maintenance_marker_link_path);
+        if ($owned_identity_path === $this->maintenance_marker_identity_path) {
+            $this->clear_private_maintenance_marker_path($this->previous_maintenance_marker_identity_path);
+            if (!@rename($this->maintenance_marker_identity_path, $this->previous_maintenance_marker_identity_path)) {
+                throw new RuntimeException(
+                    'Could not retain the current staged apply maintenance marker identity before refresh.',
+                    self::ERROR_RETRYABLE_IO
+                );
+            }
+        } else {
+            $this->clear_private_maintenance_marker_path($this->maintenance_marker_identity_path);
+        }
+
+        $this->publish_maintenance_marker_identity($marker);
+        if (!@link($this->maintenance_marker_identity_path, $this->next_maintenance_marker_link_path)) {
+            throw new RuntimeException(
+                'Could not retain the next staged apply maintenance marker identity before refresh.',
+                self::ERROR_RETRYABLE_IO
+            );
+        }
+        $confirmed_marker = $this->maintenance_marker_identity_for_target(
+            $maintenance_path,
+            $this->session_id,
+            [$this->previous_maintenance_marker_identity_path],
+            $owned_marker_contents
+        );
+        if (
+            $confirmed_marker === null
+            || $confirmed_marker['identity_path'] !== $this->previous_maintenance_marker_identity_path
+            || $confirmed_marker['contents'] !== $owned_marker_contents
+        ) {
+            throw new RuntimeException(
+                'The target maintenance marker changed before staged apply could refresh it: ' . $maintenance_path,
+                self::ERROR_BUSY
+            );
+        }
+        // Rename a complete hardlink over the stale owned marker. The new
+        // private identity remains behind, so later cleanup never trusts
+        // marker text alone and no crash can expose a partial marker.
+        if (!@rename($this->next_maintenance_marker_link_path, $maintenance_path)) {
+            $confirmed_marker = $this->maintenance_marker_identity_for_target(
+                $maintenance_path,
+                $this->session_id,
+                [$this->previous_maintenance_marker_identity_path],
+                $owned_marker_contents
+            );
+            $still_owned = $confirmed_marker !== null
+                && $confirmed_marker['identity_path'] === $this->previous_maintenance_marker_identity_path
+                && $confirmed_marker['contents'] === $owned_marker_contents;
+            throw new RuntimeException(
+                'Could not atomically refresh the staged apply maintenance marker: ' . $maintenance_path,
+                $still_owned ? self::ERROR_RETRYABLE_IO : self::ERROR_BUSY
+            );
+        }
+        $this->clear_private_maintenance_marker_path($this->previous_maintenance_marker_identity_path);
+    }
+
+    private function publish_maintenance_marker_identity(string $marker): void {
+        $temporary_path = $this->maintenance_marker_identity_path . '.tmp';
+        if ($this->path_present($temporary_path) && !@unlink($temporary_path)) {
+            throw new RuntimeException(
+                'Could not clear the staged apply maintenance marker temporary file: ' . $temporary_path,
+                self::ERROR_RETRYABLE_IO
+            );
+        }
+        $this->ensure_workspace_parent($temporary_path);
+        $handle = @fopen($temporary_path, 'x');
+        if ($handle === false) {
+            throw new RuntimeException(
+                'Could not create the staged apply maintenance marker temporary file: ' . $temporary_path,
+                self::ERROR_RETRYABLE_IO
+            );
+        }
+        $contents = "<?php\n\$upgrading = " . time() . ";\n" . $marker . "\n";
+        $write_error = null;
+        try {
+            if (fwrite($handle, $contents) !== strlen($contents) || !fflush($handle)) {
+                throw new RuntimeException(
+                    'Could not flush the staged apply maintenance marker temporary file: ' . $temporary_path,
+                    self::ERROR_RETRYABLE_IO
+                );
+            }
+        } catch (Throwable $exception) {
+            $write_error = $exception;
+        } finally {
+            fclose($handle);
+        }
+        if ($write_error !== null) {
+            @unlink($temporary_path);
+            throw $write_error;
+        }
+        if (!@rename($temporary_path, $this->maintenance_marker_identity_path)) {
+            @unlink($temporary_path);
+            throw new RuntimeException(
+                'Could not commit the staged apply maintenance marker identity: ' . $this->maintenance_marker_identity_path,
+                self::ERROR_RETRYABLE_IO
+            );
+        }
+        @chmod($this->maintenance_marker_identity_path, 0600);
+    }
+
+    private function remove_maintenance_marker(): void {
+        $maintenance_path = $this->target_path(self::MAINTENANCE_FILENAME);
+        if (!$this->path_present($maintenance_path)) {
+            return;
+        }
+        $owned_marker = $this->maintenance_marker_identity_for_target(
+            $maintenance_path,
+            $this->session_id,
+            [
+                $this->maintenance_marker_identity_path,
+                $this->previous_maintenance_marker_identity_path,
+            ]
+        );
+        if ($owned_marker === null) {
+            return;
+        }
+        $owned_identity_path = $owned_marker['identity_path'];
+        $confirmed_marker = $this->maintenance_marker_identity_for_target(
+            $maintenance_path,
+            $this->session_id,
+            [$owned_identity_path],
+            $owned_marker['contents']
+        );
+        if (
+            $confirmed_marker === null
+            || $confirmed_marker['identity_path'] !== $owned_identity_path
+            || $confirmed_marker['contents'] !== $owned_marker['contents']
+        ) {
+            return;
+        }
+        if (!@unlink($maintenance_path)) {
+            $confirmed_marker = $this->maintenance_marker_identity_for_target(
+                $maintenance_path,
+                $this->session_id,
+                [$owned_identity_path],
+                $owned_marker['contents']
+            );
+            if (
+                $confirmed_marker === null
+                || $confirmed_marker['identity_path'] !== $owned_identity_path
+                || $confirmed_marker['contents'] !== $owned_marker['contents']
+            ) {
+                return;
+            }
+            throw new RuntimeException(
+                'Could not remove the staged apply maintenance marker: ' . $maintenance_path,
+                self::ERROR_RETRYABLE_IO
+            );
+        }
+    }
+
+    /**
+     * @param string[] $identity_paths
+     * @return array{identity_path:string,contents:string}|null
+     */
+    private function maintenance_marker_identity_for_target(string $maintenance_path, string $session_id, array $identity_paths, ?string $expected_contents = null): ?array {
+        clearstatcache(true, $maintenance_path);
+        $before_stat = @lstat($maintenance_path);
+        if (
+            !is_array($before_stat)
+            || !isset($before_stat['dev'], $before_stat['ino'], $before_stat['mode'], $before_stat['size'], $before_stat['ctime'])
+            || !is_int($before_stat['dev'])
+            || !is_int($before_stat['ino'])
+            || !is_int($before_stat['mode'])
+            || !is_int($before_stat['size'])
+            || !is_int($before_stat['ctime'])
+            || ( $before_stat['mode'] & 0170000 ) !== 0100000
+            || $before_stat['size'] > self::MAX_MAINTENANCE_MARKER_BYTES
+        ) {
+            return null;
+        }
+
+        $matching_identity_path = null;
+        foreach ($identity_paths as $identity_path) {
+            clearstatcache(true, $identity_path);
+            $identity_stat = @lstat($identity_path);
+            if (
+                is_array($identity_stat)
+                && isset($identity_stat['dev'], $identity_stat['ino'], $identity_stat['mode'])
+                && is_int($identity_stat['dev'])
+                && is_int($identity_stat['ino'])
+                && is_int($identity_stat['mode'])
+                && ( $identity_stat['mode'] & 0170000 ) === 0100000
+                && $identity_stat['dev'] === $before_stat['dev']
+                && $identity_stat['ino'] === $before_stat['ino']
+            ) {
+                $matching_identity_path = $identity_path;
+                break;
+            }
+        }
+        if ($matching_identity_path === null) {
+            return null;
+        }
+
+        $contents = $this->read_maintenance_marker_contents($maintenance_path, 'staged apply maintenance marker');
+        if ($contents === null) {
+            return null;
+        }
+        if ($expected_contents !== null && $contents !== $expected_contents) {
+            return null;
+        }
+        clearstatcache(true, $maintenance_path);
+        clearstatcache(true, $matching_identity_path);
+        $after_stat = @lstat($maintenance_path);
+        $identity_stat = @lstat($matching_identity_path);
+        if (
+            !is_array($after_stat)
+            || !is_array($identity_stat)
+            || !isset($after_stat['dev'], $after_stat['ino'], $after_stat['mode'], $after_stat['size'], $after_stat['ctime'])
+            || !isset($identity_stat['dev'], $identity_stat['ino'], $identity_stat['mode'])
+            || $after_stat['dev'] !== $before_stat['dev']
+            || $after_stat['ino'] !== $before_stat['ino']
+            || $after_stat['mode'] !== $before_stat['mode']
+            || $after_stat['size'] !== $before_stat['size']
+            || $after_stat['ctime'] !== $before_stat['ctime']
+            || $identity_stat['dev'] !== $before_stat['dev']
+            || $identity_stat['ino'] !== $before_stat['ino']
+            || $identity_stat['mode'] !== $before_stat['mode']
+        ) {
+            return null;
+        }
+        $confirmed_contents = $this->read_maintenance_marker_contents($matching_identity_path, 'private staged apply maintenance marker identity');
+        if ($confirmed_contents === null) {
+            return null;
+        }
+        if (
+            $confirmed_contents !== $contents
+            || ( $expected_contents !== null && $confirmed_contents !== $expected_contents )
+            || preg_match(
+                '/\A<\?php\n\$upgrading = [0-9]+;\n\/\/ reprint-staged-apply-session:'
+                    . preg_quote($session_id, '/') . '\n\z/D',
+                $confirmed_contents
+            ) !== 1
+        ) {
+            return null;
+        }
+        clearstatcache(true, $maintenance_path);
+        clearstatcache(true, $matching_identity_path);
+        $final_stat = @lstat($maintenance_path);
+        $final_identity_stat = @lstat($matching_identity_path);
+        if (
+            !is_array($final_stat)
+            || !is_array($final_identity_stat)
+            || !isset($final_stat['dev'], $final_stat['ino'], $final_stat['mode'], $final_stat['size'], $final_stat['ctime'])
+            || !isset($final_identity_stat['dev'], $final_identity_stat['ino'], $final_identity_stat['mode'])
+            || $final_stat['dev'] !== $before_stat['dev']
+            || $final_stat['ino'] !== $before_stat['ino']
+            || $final_stat['mode'] !== $before_stat['mode']
+            || $final_stat['size'] !== $before_stat['size']
+            || $final_stat['ctime'] !== $before_stat['ctime']
+            || $final_identity_stat['dev'] !== $before_stat['dev']
+            || $final_identity_stat['ino'] !== $before_stat['ino']
+            || $final_identity_stat['mode'] !== $before_stat['mode']
+        ) {
+            return null;
+        }
+        return [
+            'identity_path' => $matching_identity_path,
+            'contents' => $confirmed_contents,
+        ];
+    }
+
+    private function read_maintenance_marker_contents(string $path, string $description): ?string {
+        clearstatcache(true, $path);
+        $stat = @lstat($path);
+        if (
+            !is_array($stat)
+            || !isset($stat['mode'], $stat['size'])
+            || !is_int($stat['mode'])
+            || !is_int($stat['size'])
+            || ( $stat['mode'] & 0170000 ) !== 0100000
+            || $stat['size'] < 0
+            || $stat['size'] > self::MAX_MAINTENANCE_MARKER_BYTES
+        ) {
+            return null;
+        }
+        $contents = @file_get_contents($path, false, null, 0, self::MAX_MAINTENANCE_MARKER_BYTES + 1);
+        if (!is_string($contents)) {
+            if ($this->path_present($path)) {
+                throw new RuntimeException('Could not read the ' . $description . ': ' . $path, self::ERROR_RETRYABLE_IO);
+            }
+            return null;
+        }
+        if (strlen($contents) > self::MAX_MAINTENANCE_MARKER_BYTES) {
+            return null;
+        }
+        return $contents;
+    }
+
+    private function clear_private_maintenance_marker_path(string $path): void {
+        if (!$this->path_present($path)) {
+            return;
+        }
+        if (is_dir($path) && !is_link($path)) {
+            throw new RuntimeException(
+                'Could not clear staged apply private maintenance marker path: ' . $path,
+                self::ERROR_RETRYABLE_IO
+            );
+        }
+        if (!@unlink($path)) {
+            throw new RuntimeException(
+                'Could not clear staged apply private maintenance marker path: ' . $path,
+                self::ERROR_RETRYABLE_IO
+            );
+        }
+    }
+
     private function move_session_to_discarding_directory(): void {
         if (is_dir($this->discarding_session_dir) || is_file($this->discard_state_path)) {
             throw new RuntimeException('The staged apply discard tombstone already exists: ' . $this->discarding_session_dir);
@@ -1179,6 +2067,9 @@ final class Site_Export_Staged_Apply {
             }
             $decoded['target'] = $target;
         }
+        if (in_array($type, ['file', 'symlink'], true) && array_key_exists('staged_identity', $decoded)) {
+            $this->require_valid_identity($decoded['staged_identity'], 'staged operation identity');
+        }
         return $decoded;
     }
 
@@ -1205,8 +2096,8 @@ final class Site_Export_Staged_Apply {
         if (!is_array($operation) || !is_string($operation['purpose'] ?? null) || !isset($operation['entry']) || !is_array($operation['entry'])) {
             throw new RuntimeException('The staged apply current operation is malformed: ' . $this->operation_path);
         }
-        if ($operation['purpose'] !== 'upload') {
-            throw new RuntimeException('The staged apply current operation is not an upload operation.');
+        if (!in_array($operation['purpose'], ['upload', 'commit'], true)) {
+            throw new RuntimeException('The staged apply current operation has an invalid purpose.');
         }
         $operation['entry'] = $this->deserialize_entry($operation['entry']);
         return $operation;
@@ -1246,7 +2137,7 @@ final class Site_Export_Staged_Apply {
         if ($stored_target_root !== $this->target_root || $stored_protected_paths !== $this->protected_paths) {
             throw new RuntimeException('The staged apply session configuration no longer matches its target or protected paths.');
         }
-        foreach (['target_root_dev', 'target_root_ino', 'request_generation', 'operation_count', 'journal_bytes'] as $field) {
+        foreach (['target_root_dev', 'target_root_ino', 'request_generation', 'operation_count', 'journal_bytes', 'commit_offset', 'commit_count'] as $field) {
             if (!isset($state[$field]) || !is_int($state[$field]) || $state[$field] < 0) {
                 throw new RuntimeException('The staged apply session state field ' . $field . ' must be a non-negative integer.');
             }
@@ -1261,8 +2152,17 @@ final class Site_Export_Staged_Apply {
             }
         }
         $phase = $state['phase'] ?? null;
-        if (!in_array($phase, ['uploading', 'failed', 'discarding'], true)) {
+        if (!in_array($phase, ['uploading', 'committing', 'complete', 'failed', 'discarding'], true)) {
             throw new RuntimeException('The staged apply session phase is invalid: ' . ( is_string($phase) ? $phase : gettype($phase) ) . '.');
+        }
+        if ($state['commit_offset'] > $state['journal_bytes'] || $state['commit_count'] > $state['operation_count']) {
+            throw new RuntimeException('The staged apply commit cursor exceeds its target-authored operation journal.');
+        }
+        if (in_array($phase, ['uploading', 'failed'], true) && ( $state['commit_offset'] !== 0 || $state['commit_count'] !== 0 )) {
+            throw new RuntimeException('The staged apply pre-commit phase contains a live target cursor.');
+        }
+        if ($phase === 'complete' && ( $state['commit_offset'] !== $state['journal_bytes'] || $state['commit_count'] !== $state['operation_count'] )) {
+            throw new RuntimeException('The completed staged apply session has an incomplete commit cursor.');
         }
         if (!array_key_exists('current_file', $state)) {
             throw new RuntimeException('The staged apply current file state is missing.');
@@ -1297,6 +2197,9 @@ final class Site_Export_Staged_Apply {
                 || ( !$restart_pending && $restart_previous_total_bytes !== null )
             ) {
                 throw new RuntimeException('The staged apply current file restart state is malformed.');
+            }
+            if (!in_array($phase, ['uploading', 'failed', 'discarding'], true)) {
+                throw new RuntimeException('The staged apply phase cannot retain a current file cursor.');
             }
         }
         $last_path_b64 = $state['last_path_b64'] ?? null;
@@ -1474,6 +2377,10 @@ final class Site_Export_Staged_Apply {
                 throw new RuntimeException('Refusing unsafe staged apply path: ' . $this->describe_path($path));
             }
         }
+        $first_segment = explode('/', $path, 2)[0];
+        if ($first_segment === self::MAINTENANCE_FILENAME) {
+            throw new RuntimeException('Refusing staged apply maintenance path: ' . $this->describe_path($path));
+        }
         foreach ($this->protected_paths as $protected_path) {
             if ($path === $protected_path || strpos($path, $protected_path . '/') === 0) {
                 throw new RuntimeException('Refusing protected staged apply path: ' . $this->describe_path($path));
@@ -1484,8 +2391,29 @@ final class Site_Export_Staged_Apply {
         }
     }
 
+    private function is_protected_ancestor(string $path): bool {
+        foreach ($this->protected_paths as $protected_path) {
+            if (strpos($protected_path, $path . '/') === 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private function staged_path(string $path): string {
         return $this->staged_dir . '/' . $path;
+    }
+
+    private function backup_path(string $path): string {
+        return $this->backup_dir . '/' . $path;
+    }
+
+    private function target_path(string $path): string {
+        return $this->join_path($this->target_root, $path);
+    }
+
+    private function join_path(string $root, string $path): string {
+        return $root === '/' ? '/' . $path : $root . '/' . $path;
     }
 
     private function path_present(string $path): bool {
@@ -1494,6 +2422,120 @@ final class Site_Export_Staged_Apply {
 
     private function describe_path(string $path): string {
         return 'base64:' . base64_encode($path);
+    }
+
+    private function move_to_backup(string $target, string $backup): bool {
+        $this->ensure_workspace_parent($backup);
+        $this->require_same_filesystem_for_rename($target, $backup, 'move target into backup');
+        return @rename($target, $backup);
+    }
+
+    private function ensure_workspace_parent(string $path): void {
+        $parent = dirname($path);
+        $session_prefix = $this->session_dir . '/';
+        if ($parent !== $this->session_dir && strpos($parent, $session_prefix) !== 0) {
+            throw new LogicException('A staged apply workspace path escaped its session directory: ' . $path);
+        }
+        $relative = $parent === $this->session_dir ? '' : substr($parent, strlen($session_prefix));
+        $current = $this->session_dir;
+        foreach ($relative === '' ? [] : explode('/', $relative) as $segment) {
+            $current .= '/' . $segment;
+            $stat = @lstat($current);
+            if (is_array($stat)) {
+                if (!$this->stat_is_directory($stat)) {
+                    throw new RuntimeException('Staged apply workspace parent is not a real directory: ' . $current);
+                }
+                continue;
+            }
+            if (!@mkdir($current, 0700)) {
+                throw new RuntimeException('Could not create staged apply workspace parent: ' . $current, self::ERROR_RETRYABLE_IO);
+            }
+        }
+    }
+
+    private function require_unfollowed_workspace_parents(string $path): void {
+        $parent = dirname($path);
+        $session_prefix = $this->session_dir . '/';
+        if ($parent !== $this->session_dir && strpos($parent, $session_prefix) !== 0) {
+            throw new LogicException('A staged apply workspace path escaped its session directory: ' . $path);
+        }
+        $relative = $parent === $this->session_dir ? '' : substr($parent, strlen($session_prefix));
+        $current = $this->session_dir;
+        foreach ($relative === '' ? [] : explode('/', $relative) as $segment) {
+            $current .= '/' . $segment;
+            $stat = @lstat($current);
+            if (!is_array($stat)) {
+                return;
+            }
+            if ($this->stat_is_directory($stat)) {
+                continue;
+            }
+            if (is_link($current)) {
+                throw new RuntimeException('Staged apply workspace parent became a symlink: ' . $current);
+            }
+            return;
+        }
+    }
+
+    private function require_same_filesystem_for_rename(string $source, string $destination, string $operation): void {
+        $source_stat = @lstat($source);
+        $destination_stat = @lstat(dirname($destination));
+        if (!is_array($source_stat) || !is_array($destination_stat) || !isset($source_stat['dev'], $destination_stat['dev'])) {
+            throw new RuntimeException('Could not determine filesystem devices to ' . $operation . '.', self::ERROR_RETRYABLE_IO);
+        }
+        if ( (int) $source_stat['dev'] !== (int) $destination_stat['dev']) {
+            throw new RuntimeException('Cannot atomically ' . $operation . ' across filesystem devices.');
+        }
+    }
+
+    /** @return array<string,int> */
+    private function require_path_identity(string $path, string $description): array {
+        $stat = @lstat($path);
+        if (!is_array($stat)) {
+            throw new RuntimeException('Could not read ' . $description . ' identity: ' . $path, self::ERROR_RETRYABLE_IO);
+        }
+        return $this->identity_from_stat($stat);
+    }
+
+    /** @param array<string,mixed> $stat @return array<string,int> */
+    private function identity_from_stat(array $stat): array {
+        $identity = [];
+        foreach (['dev', 'ino', 'mode', 'size', 'mtime', 'ctime'] as $field) {
+            if (!isset($stat[$field]) || !is_int($stat[$field])) {
+                throw new RuntimeException('A staged apply filesystem identity has no integer ' . $field . ' field.', self::ERROR_RETRYABLE_IO);
+            }
+            $identity[$field] = $stat[$field];
+        }
+        return $identity;
+    }
+
+    /** @param mixed $identity */
+    private function require_valid_identity($identity, string $description): void {
+        if (!is_array($identity)) {
+            throw new RuntimeException('The ' . $description . ' is malformed.');
+        }
+        foreach (['dev', 'ino', 'mode', 'size', 'mtime', 'ctime'] as $field) {
+            if (!isset($identity[$field]) || !is_int($identity[$field])) {
+                throw new RuntimeException('The ' . $description . ' has no integer ' . $field . ' field.');
+            }
+        }
+    }
+
+    /** @param mixed $expected */
+    private function require_identity_match(string $path, $expected, string $description, bool $ignore_ctime = false): void {
+        $this->require_valid_identity($expected, $description . ' identity');
+        $observed = $this->require_path_identity($path, $description);
+        foreach (['dev', 'ino', 'mode', 'size', 'mtime', 'ctime'] as $field) {
+            if ($ignore_ctime && $field === 'ctime') {
+                continue;
+            }
+            if ($observed[$field] !== $expected[$field]) {
+                throw new RuntimeException(
+                    'Cannot confirm ' . $description . ' at ' . $path . '; identity field ' . $field
+                    . ' expected ' . $expected[$field] . ', observed ' . $observed[$field] . '.'
+                );
+            }
+        }
     }
 
     /** @param array<string,mixed> $stat */
@@ -1712,6 +2754,20 @@ final class Site_Export_Staged_Apply {
                     . base64_encode($current) . '.'
                 );
             }
+        }
+    }
+
+    private static function require_same_filesystem(string $storage_dir, string $target_root): void {
+        $storage_stat = @stat($storage_dir);
+        $target_stat = @stat($target_root);
+        if (!is_array($storage_stat) || !is_array($target_stat) || !isset($storage_stat['dev'], $target_stat['dev'])) {
+            throw new RuntimeException('Could not determine staging and target filesystem devices.', self::ERROR_RETRYABLE_IO);
+        }
+        if ( (int) $storage_stat['dev'] !== (int) $target_stat['dev']) {
+            throw new RuntimeException(
+                'The staging device ' . $storage_stat['dev'] . ' and target device ' . $target_stat['dev']
+                . ' must match for atomic renames.'
+            );
         }
     }
 
