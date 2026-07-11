@@ -211,7 +211,12 @@ final class Site_Export_Staged_Artifacts {
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
             $staging_file_damage = $this->staging_file_damage($file_path, $committed);
             if ($staging_file_damage !== null) {
-                return $this->damaged_cursor_result($staging_file_damage);
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'staging_file_damaged',
+                    'detail' => $staging_file_damage,
+                    'committed_bytes' => 0,
+                ];
             }
 
             if ($offset + strlen($bytes) <= $committed) {
@@ -246,7 +251,12 @@ final class Site_Export_Staged_Artifacts {
             if ($file === false) {
                 $staging_file_damage = $this->staging_file_damage($file_path, $committed);
                 if ($staging_file_damage !== null) {
-                    return $this->damaged_cursor_result($staging_file_damage);
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'staging_file_damaged',
+                        'detail' => $staging_file_damage,
+                        'committed_bytes' => 0,
+                    ];
                 }
                 return [
                     'status' => 'rejected',
@@ -259,7 +269,12 @@ final class Site_Export_Staged_Artifacts {
             try {
                 $opened_staging_file_damage = $this->opened_staging_file_damage($file, $committed);
                 if ($opened_staging_file_damage !== null) {
-                    return $this->damaged_cursor_result($opened_staging_file_damage);
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'staging_file_damaged',
+                        'detail' => $opened_staging_file_damage,
+                        'committed_bytes' => 0,
+                    ];
                 }
 
                 // Discard any uncommitted tail from an interrupted earlier
@@ -418,9 +433,13 @@ final class Site_Export_Staged_Artifacts {
             $committed = $state['artifact_id'] === $artifact_id ? $state['committed_bytes'] : 0;
             $staging_file_damage = $this->staging_file_damage($file_path, $committed);
             if ($staging_file_damage !== null) {
-                $result = $this->damaged_cursor_result($staging_file_damage);
-                $result['path'] = null;
-                return $result;
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'staging_file_damaged',
+                    'detail' => $staging_file_damage,
+                    'committed_bytes' => 0,
+                    'path' => null,
+                ];
             }
 
             if (!file_exists($file_path)) {
@@ -460,9 +479,13 @@ final class Site_Export_Staged_Artifacts {
             if ($file === false) {
                 $staging_file_damage = $this->staging_file_damage($file_path, $committed);
                 if ($staging_file_damage !== null) {
-                    $result = $this->damaged_cursor_result($staging_file_damage);
-                    $result['path'] = null;
-                    return $result;
+                    return [
+                        'status' => 'rejected',
+                        'reason' => 'staging_file_damaged',
+                        'detail' => $staging_file_damage,
+                        'committed_bytes' => 0,
+                        'path' => null,
+                    ];
                 }
                 return [
                     'status' => 'rejected',
@@ -475,9 +498,13 @@ final class Site_Export_Staged_Artifacts {
             $opened_staging_file_damage = $this->opened_staging_file_damage($file, $committed);
             if ($opened_staging_file_damage !== null) {
                 fclose($file);
-                $result = $this->damaged_cursor_result($opened_staging_file_damage);
-                $result['path'] = null;
-                return $result;
+                return [
+                    'status' => 'rejected',
+                    'reason' => 'staging_file_damaged',
+                    'detail' => $opened_staging_file_damage,
+                    'committed_bytes' => 0,
+                    'path' => null,
+                ];
             }
 
             // Drop any uncommitted tail so the artifact holds committed bytes only.
@@ -739,16 +766,6 @@ final class Site_Export_Staged_Artifacts {
             return 'staging_file_shorter_than_cursor';
         }
         return null;
-    }
-
-    /** @return array{status:string,reason:string,detail:string,committed_bytes:int} */
-    private function damaged_cursor_result(string $damage): array {
-        return [
-            'status' => 'rejected',
-            'reason' => 'staging_file_damaged',
-            'detail' => $damage,
-            'committed_bytes' => 0,
-        ];
     }
 
     /**
