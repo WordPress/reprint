@@ -22,7 +22,6 @@
             "src/class-hmac-client.php",
             "src/class-hmac-server.php",
             "src/class-http-server.php",
-            "src/class-staged-artifacts.php",
             "src/class-staged-push-stream-protocol.php",
             "src/class-staged-endpoints.php",
             "src/class-staged-apply.php",

@@ -362,7 +362,7 @@
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-exporter",
-                "reference": "a35a27bbee52ec0fbb4e53b2e68dc6f8479e9247"
+                "reference": "a3fda5bec86ef2786a292b20ab5580eae16259c9"
             },
             "require": {
                 "php": ">=7.2",
@@ -384,7 +384,6 @@
                     "src/class-hmac-client.php",
                     "src/class-hmac-server.php",
                     "src/class-http-server.php",
-                    "src/class-staged-artifacts.php",
                     "src/class-staged-push-stream-protocol.php",
                     "src/class-staged-endpoints.php",
                     "src/class-staged-apply.php",
