@@ -421,6 +421,25 @@ final class StagedEndpointsTest extends TestCase {
         $this->assertSame('BBBBBBBB', file_get_contents($this->staging_dir . '/files/restarted.bin'));
     }
 
+    public function testOffsetZeroFrameRestartsAnArtifactWithADamagedCursor(): void
+    {
+        $endpoints = $this->makeEndpoints();
+        ( new Site_Export_Staged_Artifacts($this->staging_dir) )->append('damaged.bin', 0, 'AAAA');
+        file_put_contents($this->staging_dir . '/files/damaged.bin', 'A');
+
+        $damaged_status = $endpoints->status(['artifact_id' => base64_encode('damaged.bin')]);
+        $this->assertSame(0, $damaged_status['body']['committed_bytes']);
+        $this->assertSame('staging_file_shorter_than_cursor', $damaged_status['body']['damage']);
+        $this->assertSame(4, $damaged_status['body']['recorded_committed_bytes']);
+
+        $result = $this->push($endpoints, [
+            ['artifact_id' => 'damaged.bin', 'offset' => 0, 'bytes' => 'BBBB', 'total_bytes' => 4, 'final' => true],
+        ]);
+
+        $this->assertSame(200, $result['http_code'], (string) json_encode($result['body']));
+        $this->assertSame('BBBB', file_get_contents($this->staging_dir . '/files/damaged.bin'));
+    }
+
     public function testOffsetZeroFrameWithANewTotalRestartsAVerifiedArtifact(): void
     {
         $endpoints = $this->makeEndpoints();

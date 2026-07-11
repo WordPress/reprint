@@ -34,9 +34,10 @@ if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
  * resend with shifted boundaries. push_stream therefore compares the store's
  * committed offset with each frame first, skips the committed prefix of a
  * straddling mid-file frame, restarts an artifact when the sender begins it
- * again at offset 0 (the sender only does that when its source changed or
- * it cannot vouch for the staged prefix), and reports offset_gap with the
- * cursor only when a frame starts beyond the frontier.
+ * again at offset 0 and the store has existing or damaged state (the sender
+ * only does that when its source changed or it cannot vouch for the staged
+ * prefix), and reports offset_gap with the cursor only when a frame starts
+ * beyond the frontier.
  *
  * Rejections the chunk sizer must learn from are typed for it: a frame
  * over the frame cap is HTTP 413 with max_frame_bytes in the payload,
@@ -134,10 +135,10 @@ final class Site_Export_Staged_Endpoints {
      * A frame commits before the next frame is read. If the request dies after
      * a commit, the next request may replay from the last sender cursor or from
      * the beginning: verified artifacts replayed at their verified size are
-     * skipped, and an offset-0 frame for anything else that holds bytes
-     * restarts the artifact from zero — the sender only starts a file over
-     * when its source changed or it cannot vouch for the staged prefix, and
-     * appending one version behind another would corrupt the artifact.
+     * skipped, and an offset-0 frame for anything else with staged or damaged
+     * state restarts the artifact from zero — the sender only starts a file
+     * over when its source changed or it cannot vouch for the staged prefix,
+     * and appending one version behind another would corrupt the artifact.
      *
      * Behavior steps:
      * 1. Read one JSON header line and validate the frame before reading its
@@ -148,8 +149,8 @@ final class Site_Export_Staged_Endpoints {
      * 3. If the artifact is verified and the frame declares its verified size,
      *    consume the frame payload only to keep the stream aligned with the
      *    next JSON header.
-     * 4. If the frame starts at byte 0 and the artifact holds anything else,
-     *    discard the staged bytes and stage this frame fresh.
+     * 4. If the frame starts at byte 0 and the artifact has staged or damaged
+     *    state, discard that state and stage this frame fresh.
      * 5. If the artifact is partially committed and the frame starts mid-file,
      *    discard any replayed prefix bytes the store already has and append
      *    only the missing suffix, in bounded pieces so one frame cannot force
@@ -255,14 +256,18 @@ final class Site_Export_Staged_Endpoints {
             /**
              * Restart case.
              *
-             * An offset-0 frame for an artifact that already holds bytes means
-             * the sender is pushing the file over: its source changed since
-             * those bytes were staged, or it is replaying after a failure and
-             * cannot vouch for the staged prefix. Drop the staged bytes and
-             * stage this frame fresh — appending a new version behind an old
-             * prefix would build a file no version of the source ever was.
+             * An offset-0 frame for an artifact with staged or damaged state
+             * means the sender is pushing the file over: its source changed
+             * since those bytes were staged, or it is replaying after a
+             * failure and cannot vouch for the staged prefix. Drop the old
+             * state and stage this frame fresh — appending a new version
+             * behind an old prefix would build a file no version of the source
+             * ever was.
              */
-            if ($offset === 0 && ($status['verified'] || (int) $status['committed_bytes'] > 0)) {
+            if (
+                $offset === 0
+                && ( $status['verified'] || (int) $status['committed_bytes'] > 0 || isset($status['damage']) )
+            ) {
                 if (!$this->store->discard($artifact_id)) {
                     return $this->stream_rejected(423, 'busy', null, $cursor, $files_verified);
                 }

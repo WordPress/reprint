@@ -233,20 +233,51 @@ final class StagedArtifactsTest extends TestCase
         $this->assertSame('accepted', $store->append('artifact-1', 0, 'fresh')['status']);
     }
 
-    public function testShrunkenStagingFileIsZeroFilledBackToTheCursor(): void
+    public function testShrunkenStagingFileIsRejectedWithoutChangingIt(): void
     {
         $store = $this->makeStore();
         $store->append('artifact-1', 0, 'first');
 
         // The staging file drifts between requests: something shrinks it
-        // below the committed size. The cursor, not the file, is the
-        // authority — the next append zero-fills back to the committed size.
+        // below the committed size. Resuming at the cursor must not silently
+        // fill the missing committed bytes with zeroes.
         file_put_contents($this->staging_dir . '/files/artifact-1', 'fi');
 
-        $this->assertSame('accepted', $store->append('artifact-1', 5, 'second')['status']);
-        $verified = $store->finalize('artifact-1', 11);
-        $this->assertSame('verified', $verified['status']);
-        $this->assertSame("fi\0\0\0second", file_get_contents($verified['path']));
+        $result = $store->append('artifact-1', 5, 'second');
+
+        $this->assertSame(
+            ['rejected', 'io_error', 'staging_file_shorter_than_cursor', 0],
+            [$result['status'], $result['reason'], $result['detail'], $result['committed_bytes']]
+        );
+        $this->assertSame(
+            'staging_file_shorter_than_cursor',
+            $store->finalize('artifact-1', 5)['detail']
+        );
+        $this->assertSame('fi', file_get_contents($this->staging_dir . '/files/artifact-1'));
+        $this->assertSame(
+            [
+                'exists' => true,
+                'committed_bytes' => 0,
+                'verified' => false,
+                'damage' => 'staging_file_shorter_than_cursor',
+                'recorded_committed_bytes' => 5,
+            ],
+            $store->status('artifact-1')
+        );
+
+        unlink($this->staging_dir . '/files/artifact-1');
+        $missing = $store->status('artifact-1');
+        $this->assertSame(
+            [false, 0, 'staging_file_missing_at_cursor', 5],
+            [$missing['exists'], $missing['committed_bytes'], $missing['damage'], $missing['recorded_committed_bytes']]
+        );
+
+        mkdir($this->staging_dir . '/files/artifact-1');
+        $not_regular = $store->status('artifact-1');
+        $this->assertSame(
+            [true, 0, 'staging_file_not_regular', 5],
+            [$not_regular['exists'], $not_regular['committed_bytes'], $not_regular['damage'], $not_regular['recorded_committed_bytes']]
+        );
     }
 
     // ---------------------------------------------------------------
@@ -287,6 +318,66 @@ final class StagedArtifactsTest extends TestCase
         $verified = $store->finalize('artifact-1', 11);
         $this->assertSame('verified', $verified['status']);
         $this->assertSame('firstsecond', file_get_contents($verified['path']));
+    }
+
+    public function testRecordTempLinksCannotOverwriteOutsideFiles(): void
+    {
+        $store = $this->makeStore();
+        $temporary_path = $this->staging_dir . '/state.json.tmp';
+        $outside_symlink_target = $this->staging_dir . '-outside-symlink';
+        $outside_hardlink_target = $this->staging_dir . '-outside-hardlink';
+        $outside_verified_target = $this->staging_dir . '-outside-verified-temp';
+        mkdir($this->staging_dir, 0700, true);
+        file_put_contents($outside_symlink_target, 'symlink sentinel');
+        symlink($outside_symlink_target, $temporary_path);
+
+        try {
+            $this->assertSame('accepted', $store->append('artifact-1', 0, 'first')['status']);
+            $this->assertSame('symlink sentinel', file_get_contents($outside_symlink_target));
+
+            file_put_contents($outside_hardlink_target, 'hardlink sentinel');
+            link($outside_hardlink_target, $temporary_path);
+            $this->assertSame('accepted', $store->append('artifact-1', 5, 'second')['status']);
+            $this->assertSame('hardlink sentinel', file_get_contents($outside_hardlink_target));
+
+            file_put_contents($outside_verified_target, 'verified sentinel');
+            symlink($outside_verified_target, $this->staging_dir . '/verified.tmp');
+            $this->assertSame('verified', $store->finalize('artifact-1', 11)['status']);
+            $this->assertSame('verified sentinel', file_get_contents($outside_verified_target));
+        } finally {
+            @unlink($outside_symlink_target);
+            @unlink($outside_hardlink_target);
+            @unlink($outside_verified_target);
+        }
+    }
+
+    public function testVerifiedParentSymlinkCannotReachOutsideMarkers(): void
+    {
+        $store = $this->makeStore();
+        $store->append('a/artifact', 0, 'x');
+        $outside_directory = $this->staging_dir . '-outside-verified';
+        $outside_marker = $outside_directory . '/artifact';
+        $verified_parent = $this->staging_dir . '/verified/a';
+        mkdir($outside_directory, 0700, true);
+        mkdir(dirname($verified_parent), 0700, true);
+        file_put_contents($outside_marker, json_encode(['size' => 1]));
+        symlink($outside_directory, $verified_parent);
+
+        try {
+            $this->assertFalse($store->status('a/artifact')['verified']);
+
+            file_put_contents($outside_marker, 'outside sentinel');
+            $finalized = $store->finalize('a/artifact', 1);
+            $this->assertSame('persist_verified_record', $finalized['detail']);
+            $this->assertSame('outside sentinel', file_get_contents($outside_marker));
+
+            $this->assertFalse($store->discard('a/artifact'));
+            $this->assertSame('outside sentinel', file_get_contents($outside_marker));
+        } finally {
+            @unlink($verified_parent);
+            @unlink($outside_marker);
+            @rmdir($outside_directory);
+        }
     }
 
     public function testTornVerifiedRecordIsIgnoredAndRefinalizeRecovers(): void
@@ -355,6 +446,7 @@ final class StagedArtifactsTest extends TestCase
         $store->append('artifact-1', 0, 'first');
         unlink($this->staging_dir . '/files/artifact-1');
 
+        $this->assertSame(0, $store->status('artifact-1')['committed_bytes']);
         $this->assertTrue($store->discard('artifact-1'));
         $this->assertSame(0, $store->status('artifact-1')['committed_bytes']);
         $this->assertSame('accepted', $store->append('artifact-1', 0, 'fresh')['status']);
@@ -387,6 +479,25 @@ final class StagedArtifactsTest extends TestCase
             ['rejected', 'io_error', 'create_staging_dir'],
             [$blocked_by_file['status'], $blocked_by_file['reason'], $blocked_by_file['detail']]
         );
+    }
+
+    public function testDanglingArtifactSymlinksAreRejectedAndDiscarded(): void
+    {
+        $store = $this->makeStore();
+        $store->append('seed', 0, 'x');
+        $outside = $this->staging_dir . '-outside';
+        $files = $this->staging_dir . '/files';
+        symlink($outside . '-append', $files . '/dangling-append');
+        symlink($outside . '-finalize', $files . '/dangling-finalize');
+
+        $append = $store->append('dangling-append', 0, 'bad');
+        $finalize = $store->finalize('dangling-finalize', 0);
+        $this->assertSame('open_artifact_file', $append['detail']);
+        $this->assertSame('open_artifact_file', $finalize['detail']);
+        $this->assertTrue($store->discard('dangling-append'));
+        $this->assertFalse(is_link($files . '/dangling-append'));
+        $this->assertFileDoesNotExist($outside . '-append');
+        $this->assertFileDoesNotExist($outside . '-finalize');
     }
 
     public function testUnwritableStagingDirectoryIsATypedError(): void
@@ -472,6 +583,34 @@ final class StagedArtifactsTest extends TestCase
         // stages site files with the same names.
         $this->assertSame('accepted', $store->append('.htaccess', 0, 'site rules')['status']);
         $this->assertSame('site rules', file_get_contents($this->staging_dir . '/files/.htaccess'));
+    }
+
+    public function testWebGuardsNeverFollowPlantedSymlinks(): void
+    {
+        $outside_dir = $this->staging_dir . '-outside-web-guards';
+        $outside_htaccess = $outside_dir . '/created-through-htaccess';
+        $outside_index = $outside_dir . '/index-sentinel.php';
+        mkdir($this->staging_dir, 0700, true);
+        mkdir($outside_dir, 0700, true);
+        file_put_contents($outside_index, 'outside index sentinel');
+        symlink($outside_htaccess, $this->staging_dir . '/.htaccess');
+        symlink($outside_index, $this->staging_dir . '/index.php');
+
+        try {
+            $store = $this->makeStore();
+
+            $this->assertSame('accepted', $store->append('artifact-1', 0, 'bytes')['status']);
+            $this->assertFileDoesNotExist($outside_htaccess);
+            $this->assertSame('outside index sentinel', file_get_contents($outside_index));
+            $this->assertFalse(is_link($this->staging_dir . '/.htaccess'));
+            $this->assertTrue(is_file($this->staging_dir . '/.htaccess'));
+            $this->assertFalse(is_link($this->staging_dir . '/index.php'));
+            $this->assertTrue(is_file($this->staging_dir . '/index.php'));
+        } finally {
+            @unlink($outside_htaccess);
+            @unlink($outside_index);
+            @rmdir($outside_dir);
+        }
     }
 
     public function testSiteFilenamesThatLookLikeStagingRecordsStageVerbatim(): void
@@ -685,7 +824,7 @@ final class StagedArtifactsTest extends TestCase
         // the artifact unlink itself only needs write on files/.
         chmod($this->staging_dir, 0500);
         $this->assertFalse($store->discard('artifact-1'));
-        $this->assertSame(7, $store->status('artifact-1')['committed_bytes']);
+        $this->assertSame(0, $store->status('artifact-1')['committed_bytes']);
 
         chmod($this->staging_dir, 0700);
         $this->assertTrue($store->discard('artifact-1'));
