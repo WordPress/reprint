@@ -31,6 +31,8 @@ final class Site_Export_Staged_Apply_Session {
 
     private const MAX_PATH_BYTES = Site_Export_Staged_Push_Stream_Protocol::MAX_PATH_BYTES;
 
+    private const DISCARD_ENTRY_LIMIT = 256;
+
     /** @var string */
     private $target_root;
 
@@ -158,6 +160,114 @@ final class Site_Export_Staged_Apply_Session {
         $session->require_private_workspace();
         $session->read_state();
         return $session;
+    }
+
+    /**
+     * Removes one session in bounded calls without following staged links.
+     *
+     * The first call locks and renames the active session to a private
+     * tombstone, so no later upload can open it. Each call then removes at
+     * most DISCARD_ENTRY_LIMIT filesystem entries. False means the client
+     * must call again. A missing active session and tombstone means discard
+     * already finished.
+     *
+     * @param string $storage_dir Absolute directory that owns all apply sessions.
+     * @param string $session_id  Lowercase hexadecimal id returned by get_session_id().
+     * @return bool True when no session data remains, false when cleanup is pending.
+     */
+    public static function discard(string $storage_dir, string $session_id): bool {
+        $storage_dir = self::require_absolute_directory($storage_dir, 'staged apply storage directory', false, true);
+        $sessions_dir = $storage_dir . '/apply-sessions';
+        self::require_real_directory_path($sessions_dir, 'staged apply sessions directory', false);
+        if (!preg_match('/^[a-f0-9]{32}$/D', $session_id)) {
+            throw new InvalidArgumentException('The staged apply session id must be a 32-character lowercase hexadecimal value.');
+        }
+
+        $active_session_dir = $sessions_dir . '/' . $session_id;
+        $discarding_session_dir = $sessions_dir . '/.discarding-' . $session_id;
+        $active_session_stat = @lstat($active_session_dir);
+        $discarding_session_stat = @lstat($discarding_session_dir);
+        if (!is_array($active_session_stat) && !is_array($discarding_session_stat)) {
+            return true;
+        }
+        if (is_array($active_session_stat) && !self::stat_is_real_directory($active_session_stat)) {
+            throw new RuntimeException('The staged apply session path is not a real directory: ' . $active_session_dir);
+        }
+        if (is_array($discarding_session_stat) && !self::stat_is_real_directory($discarding_session_stat)) {
+            throw new RuntimeException('The staged apply discard tombstone is not a real directory: ' . $discarding_session_dir);
+        }
+        if (is_array($active_session_stat) && is_array($discarding_session_stat)) {
+            throw new RuntimeException('Both the active staged apply session and its discard tombstone exist: ' . $session_id . '.');
+        }
+
+        $session_dir = is_array($discarding_session_stat) ? $discarding_session_dir : $active_session_dir;
+        $lock_path = $session_dir . '/lock';
+        $lock_stat = @lstat($lock_path);
+        if (!is_array($lock_stat)) {
+            if ($session_dir === $discarding_session_dir && @rmdir($discarding_session_dir)) {
+                return true;
+            }
+            if ($session_dir === $discarding_session_dir) {
+                throw new RuntimeException('The staged apply discard tombstone has no lock and is not an empty removable directory: ' . $discarding_session_dir);
+            }
+            throw new RuntimeException('The staged apply session lock is missing: ' . $lock_path);
+        }
+        if (
+            !isset($lock_stat['mode'])
+            || !is_int($lock_stat['mode'])
+            || ( $lock_stat['mode'] & 0170000 ) !== 0100000
+        ) {
+            throw new RuntimeException('The staged apply discard lock must be a real regular file: ' . $lock_path);
+        }
+        $lock = @fopen($lock_path, 'r+b');
+        if ($lock === false) {
+            throw new RuntimeException('Could not open the staged apply discard lock: ' . $lock_path, self::ERROR_RETRYABLE_IO);
+        }
+
+        try {
+            if (!flock($lock, LOCK_EX | LOCK_NB)) {
+                throw new RuntimeException('The staged apply session is busy and cannot be discarded: ' . $session_id . '.', self::ERROR_BUSY);
+            }
+
+            // Another discard may have finished after this caller opened the
+            // old lock inode but before it acquired that lock.
+            $active_session_stat = @lstat($active_session_dir);
+            $discarding_session_stat = @lstat($discarding_session_dir);
+            if (!is_array($active_session_stat) && !is_array($discarding_session_stat)) {
+                return true;
+            }
+            if (is_array($active_session_stat) && !self::stat_is_real_directory($active_session_stat)) {
+                throw new RuntimeException('The staged apply session path is not a real directory: ' . $active_session_dir);
+            }
+            if (is_array($discarding_session_stat) && !self::stat_is_real_directory($discarding_session_stat)) {
+                throw new RuntimeException('The staged apply discard tombstone is not a real directory: ' . $discarding_session_dir);
+            }
+            if (is_array($active_session_stat) && is_array($discarding_session_stat)) {
+                throw new RuntimeException('Both the active staged apply session and its discard tombstone exist: ' . $session_id . '.');
+            }
+            if (is_array($active_session_stat)) {
+                if (!@rename($active_session_dir, $discarding_session_dir)) {
+                    throw new RuntimeException('Could not retire staged apply session before discarding it: ' . $session_id . '.', self::ERROR_RETRYABLE_IO);
+                }
+            }
+
+            // Reserve the last two removals for the lock and tombstone root.
+            $remaining_entries = self::DISCARD_ENTRY_LIMIT - 2;
+            if (!self::discard_directory_entries($discarding_session_dir, $remaining_entries, true)) {
+                return false;
+            }
+            $discard_lock_path = $discarding_session_dir . '/lock';
+            if (!@unlink($discard_lock_path)) {
+                throw new RuntimeException('Could not remove the staged apply discard lock: ' . $discard_lock_path, self::ERROR_RETRYABLE_IO);
+            }
+            if (!@rmdir($discarding_session_dir)) {
+                throw new RuntimeException('Could not remove the empty staged apply discard tombstone: ' . $discarding_session_dir, self::ERROR_RETRYABLE_IO);
+            }
+            return true;
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
     }
 
     /**
@@ -929,6 +1039,56 @@ final class Site_Export_Staged_Apply_Session {
         return isset($stat['mode'])
             && is_int($stat['mode'])
             && ( $stat['mode'] & 0170000 ) === 0040000;
+    }
+
+    /**
+     * Removes up to the caller's remaining entry budget below one directory.
+     *
+     * @param int  $remaining_entries Number of unlinks or directory removals left.
+     * @param bool $preserve_lock     Whether to leave this directory's lock entry.
+     * @return bool True when no removable entries remain below this directory.
+     */
+    private static function discard_directory_entries(string $directory_path, int &$remaining_entries, bool $preserve_lock = false): bool {
+        $directory = @opendir($directory_path);
+        if ($directory === false) {
+            throw new RuntimeException('Could not read staged apply discard directory: ' . $directory_path, self::ERROR_RETRYABLE_IO);
+        }
+        try {
+            while (true) {
+                $entry = readdir($directory);
+                if ($entry === false) {
+                    return true;
+                }
+                if ($entry === '.' || $entry === '..' || ( $preserve_lock && $entry === 'lock' )) {
+                    continue;
+                }
+                if ($remaining_entries === 0) {
+                    return false;
+                }
+
+                $entry_path = $directory_path . '/' . $entry;
+                $entry_stat = @lstat($entry_path);
+                if (!is_array($entry_stat)) {
+                    throw new RuntimeException('The staged apply discard entry disappeared during cleanup: ' . $entry_path, self::ERROR_RETRYABLE_IO);
+                }
+                if (self::stat_is_real_directory($entry_stat)) {
+                    if (!self::discard_directory_entries($entry_path, $remaining_entries)) {
+                        return false;
+                    }
+                    if ($remaining_entries === 0) {
+                        return false;
+                    }
+                    if (!@rmdir($entry_path)) {
+                        throw new RuntimeException('Could not remove staged apply discard directory: ' . $entry_path, self::ERROR_RETRYABLE_IO);
+                    }
+                } elseif (!@unlink($entry_path)) {
+                    throw new RuntimeException('Could not remove staged apply discard entry: ' . $entry_path, self::ERROR_RETRYABLE_IO);
+                }
+                --$remaining_entries;
+            }
+        } finally {
+            closedir($directory);
+        }
     }
 
     /** Requires a path's leaf to be a real regular file. */
