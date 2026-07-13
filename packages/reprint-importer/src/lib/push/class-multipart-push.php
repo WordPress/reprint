@@ -1,0 +1,976 @@
+<?php
+
+/**
+ * Local, resumable driver for the multipart staged-session protocol.
+ *
+ * The sender's disk files are deliberately small, streaming records: a
+ * source snapshot, a changed-path list, a delete-path list, and one session
+ * checkpoint. The checkpoint stores only target-confirmed byte counts. A
+ * request whose outcome is unknown is reconciled with target status before a
+ * retry; it never treats its own claimed offset as target truth.
+ */
+class MultipartPush
+{
+    private const SNAPSHOT_SORT_MEMORY_BYTES = 4 * 1024 * 1024;
+    private const DELETE_PART_BYTES = 256 * 1024;
+    private const MAX_PARTS_PER_REQUEST = 128;
+    private const MAX_PLAN_LINE_BYTES = 16384;
+
+    private string $base_url;
+    private string $source_root;
+    private string $state_dir;
+    private string $site_dir;
+    private string $session_path;
+    private string $snapshot_path;
+    private string $secret;
+    private bool $allow_http;
+    private bool $verbose;
+
+    /** @var PushJournal */
+    private $journal;
+
+    /** @param array<string,mixed> $options */
+    public function __construct(array $options)
+    {
+        foreach (['base_url', 'source_root', 'state_dir', 'secret'] as $required) {
+            if (!isset($options[$required]) || !is_string($options[$required]) || $options[$required] === '') {
+                throw new InvalidArgumentException('MultipartPush requires a non-empty ' . $required . ' option.');
+            }
+        }
+        $source_root = realpath($options['source_root']);
+        if ($source_root === false || !is_dir($source_root) || is_link($options['source_root'])) {
+            throw new InvalidArgumentException('push --source-root must name a real directory: ' . $options['source_root'] . '.');
+        }
+        $state_dir = rtrim($options['state_dir'], '/');
+        if ($state_dir === '' || $state_dir[0] !== '/') {
+            $state_dir = getcwd() . '/' . $state_dir;
+        }
+        if (!is_dir($state_dir) && !@mkdir($state_dir, 0700, true) && !is_dir($state_dir)) {
+            throw new RuntimeException('Could not create push state directory ' . $state_dir . '.');
+        }
+        $allow_http = $options['allow_http'] ?? false;
+        if (!is_bool($allow_http)) {
+            throw new InvalidArgumentException('allow_http must be a boolean.');
+        }
+        $this->base_url = $this->export_api_base_url($options['base_url']);
+        $this->source_root = $source_root === '/' ? '/' : rtrim($source_root, '/');
+        $this->state_dir = rtrim($state_dir, '/');
+        $this->secret = $options['secret'];
+        $this->allow_http = $allow_http;
+        $this->verbose = (bool) ($options['verbose'] ?? false);
+        $this->journal = new PushJournal($this->state_dir, $this->base_url);
+        $this->site_dir = dirname($this->journal->local_files_baseline_path);
+        $this->session_path = $this->site_dir . '/session.json';
+        $this->snapshot_path = $this->site_dir . '/current-local-files.jsonl';
+    }
+
+    /** @return array<string,mixed> */
+    public function run(bool $dry_run = false, bool $abort = false): array
+    {
+        if ($abort) {
+            return $this->abort();
+        }
+        $state = $this->read_state();
+        if ($state === null) {
+            $summary = $this->prepare_new_push();
+            if ($dry_run) {
+                return array_merge(['status' => 'dry_run'], $summary);
+            }
+            $state = [
+                'version' => 1,
+                'source_root' => $this->source_root,
+                'phase' => 'creating',
+                // Persist before the request: a lost create response retries
+                // the same server-derived target session, never creates two.
+                'create_token' => bin2hex(random_bytes(16)),
+                'session_id' => null,
+                'delete_offset' => 0,
+                'deletes_complete' => false,
+                'plan_offset' => 0,
+                'current' => null,
+                'sizer' => [],
+                'max_frame_bytes' => null,
+                'max_upload_parts' => null,
+                'summary' => $summary,
+            ];
+            $this->write_state($state);
+        } elseif (($state['source_root'] ?? null) !== $this->source_root) {
+            throw new RuntimeException('The active push belongs to source root ' . json_encode($state['source_root'] ?? null) . '. Use that root or abort it first.');
+        }
+
+        $client = $this->new_client(
+            is_array($state['sizer'] ?? null) ? $state['sizer'] : [],
+            is_numeric($state['max_frame_bytes'] ?? null) ? (int) $state['max_frame_bytes'] : null
+        );
+        if (($state['phase'] ?? null) === 'creating') {
+            $this->create_or_reopen_session($state, $client);
+        }
+
+        if (($state['phase'] ?? null) === 'uploading') {
+            $this->upload_deletes($state, $client);
+            $this->upload_changes($state, $client);
+            $state['phase'] = 'committing';
+            $state['sizer'] = $client->get_request_sizer_state();
+            $this->write_state($state);
+        }
+
+        if (($state['phase'] ?? null) === 'committing') {
+            $this->commit($state, $client);
+            $this->journal->capture_local_files_baseline($this->snapshot_path);
+            $summary = is_array($state['summary'] ?? null) ? $state['summary'] : [];
+            @unlink($this->session_path);
+            return array_merge(['status' => 'complete'], $summary);
+        }
+        throw new RuntimeException('Unknown multipart push phase ' . json_encode($state['phase'] ?? null) . '.');
+    }
+
+    /** @return array<string,mixed> */
+    public function status(): array
+    {
+        $state = $this->read_state();
+        if ($state === null) {
+            return ['status' => 'no_active_push'];
+        }
+        $session_id = $state['session_id'] ?? null;
+        if (!is_string($session_id)) {
+            return [
+                'status' => 'creating',
+                'phase' => $state['phase'] ?? 'creating',
+                'next_action' => 'rerun_push',
+            ];
+        }
+        $client = $this->new_client(
+            is_array($state['sizer'] ?? null) ? $state['sizer'] : [],
+            is_numeric($state['max_frame_bytes'] ?? null) ? (int) $state['max_frame_bytes'] : null
+        );
+        $response = $client->control_request('GET', 'staged_session_status', ['session_id' => $session_id]);
+        $response['local_phase'] = $state['phase'] ?? 'unknown';
+        $current = $state['current'] ?? null;
+        if (is_array($current) && is_string($current['path_b64'] ?? null)) {
+            $response['active_path_b64'] = $current['path_b64'];
+            $response['active_accepted_bytes'] = (int) ($current['accepted_bytes'] ?? 0);
+        }
+        $response['next_action'] = in_array($state['phase'] ?? null, ['committing'], true)
+            ? 'rerun_push'
+            : 'rerun_push_or_abort';
+        return $response;
+    }
+
+    /** @return array<string,mixed> */
+    public function abort(): array
+    {
+        $state = $this->read_state();
+        if ($state === null) {
+            return ['status' => 'no_active_push'];
+        }
+        $client = $this->new_client(
+            is_array($state['sizer'] ?? null) ? $state['sizer'] : [],
+            is_numeric($state['max_frame_bytes'] ?? null) ? (int) $state['max_frame_bytes'] : null
+        );
+        // A create response can be lost after the target has created its
+        // workspace. Reopen that deterministic create token before deleting
+        // the local checkpoint, otherwise --abort could orphan the target
+        // session it was meant to clean up.
+        if (!is_string($state['session_id'] ?? null)) {
+            if (($state['phase'] ?? null) !== 'creating') {
+                throw new RuntimeException('Local push checkpoint has no target session id for phase ' . json_encode($state['phase'] ?? null) . '.');
+            }
+            $this->create_or_reopen_session($state, $client);
+        }
+        $response = $client->control_request('POST', 'staged_session_discard', [
+            'session_id' => $this->session_id_from_state($state),
+        ]);
+        if (($response['reason'] ?? null) === 'commit_required') {
+            throw new RuntimeException(
+                'Push commit has begun on the target. Re-run push to finish it; --abort cannot discard a live mutation.'
+            );
+        }
+        $this->require_control_status($response, 'discarded');
+        if (!@unlink($this->session_path)) {
+            throw new RuntimeException('Could not remove local push session checkpoint ' . $this->session_path . '.');
+        }
+        return ['status' => 'aborted'];
+    }
+
+    /** @param array<string,mixed> $state */
+    private function create_or_reopen_session(array &$state, MultipartPushStreamClient $client): void
+    {
+        $create_token = $state['create_token'] ?? null;
+        if (!is_string($create_token) || preg_match('/^[a-f0-9]{32}$/D', $create_token) !== 1) {
+            throw new RuntimeException('Push session checkpoint has no valid create token.');
+        }
+        $response = $client->control_request('POST', 'staged_session_create', ['create_token' => $create_token]);
+        $this->require_control_status($response, 'created');
+        $session_id = $response['session_id'] ?? null;
+        if (!is_string($session_id) || preg_match('/^[a-f0-9]{32}$/D', $session_id) !== 1) {
+            throw new RuntimeException('Target create response has no valid session_id.');
+        }
+        $max_frame_bytes = $response['max_frame_bytes'] ?? null;
+        if (!is_numeric($max_frame_bytes) || (int) $max_frame_bytes <= 0) {
+            throw new RuntimeException('Target create response has no positive max_frame_bytes limit.');
+        }
+        $max_upload_parts = $response['max_upload_parts'] ?? null;
+        if (!is_numeric($max_upload_parts) || (int) $max_upload_parts <= 0) {
+            throw new RuntimeException('Target create response has no positive max_upload_parts limit.');
+        }
+        $state['session_id'] = $session_id;
+        $state['phase'] = 'uploading';
+        $state['max_frame_bytes'] = (int) $max_frame_bytes;
+        $state['max_upload_parts'] = (int) $max_upload_parts;
+        $client->apply_reported_limits([$response['post_max_bytes'] ?? null]);
+        $client->set_max_part_bytes($state['max_frame_bytes']);
+        $state['sizer'] = $client->get_request_sizer_state();
+        $this->write_state($state);
+    }
+
+    /** @return array{changed:int,deleted:int} */
+    private function prepare_new_push(): array
+    {
+        if (!is_dir($this->site_dir) && !@mkdir($this->site_dir, 0700, true) && !is_dir($this->site_dir)) {
+            throw new RuntimeException('Could not create push state directory ' . $this->site_dir . '.');
+        }
+        $temporary = $this->snapshot_path . '.tmp';
+        $handle = @fopen($temporary, 'wb');
+        if ($handle === false) {
+            throw new RuntimeException('Could not write local push snapshot ' . $temporary . '.');
+        }
+        try {
+            $this->scan_directory($this->source_root, '', $handle, null);
+        } finally {
+            fclose($handle);
+        }
+        (new ExternalMergeSort(function (string $line): ?string {
+            $entry = json_decode($line, true);
+            if (!is_array($entry) || !isset($entry['path']) || !is_string($entry['path'])) {
+                return null;
+            }
+            $path = base64_decode($entry['path'], true);
+            return $path === false ? null : $path;
+        }, self::SNAPSHOT_SORT_MEMORY_BYTES, true, $this->site_dir))->sort($temporary, $this->snapshot_path);
+        if (is_file($temporary)) {
+            @unlink($temporary);
+        }
+        return $this->journal->diff_local_files($this->snapshot_path);
+    }
+
+    /** @param resource $handle */
+    private function scan_directory(string $directory, string $relative_path, $handle, ?int $directory_ctime): void
+    {
+        $entries = @scandir($directory);
+        if (!is_array($entries)) {
+            throw new RuntimeException('Could not scan source directory ' . $directory . '.');
+        }
+        $children = [];
+        foreach ($entries as $entry) {
+            if ($entry !== '.' && $entry !== '..') {
+                $children[] = $entry;
+            }
+        }
+        if ($relative_path !== '' && $children === []) {
+            $this->write_snapshot_entry($handle, $relative_path, 'directory', 0, $directory_ctime ?? 0);
+            return;
+        }
+        if ($relative_path !== '') {
+            // Non-empty directories are not positive upload operations: their
+            // children create them. Keep an existence-only baseline marker so
+            // deleting a whole non-empty directory also removes the now-empty
+            // directory on the target.
+            $this->write_snapshot_entry($handle, $relative_path, 'tree-directory', 0, $directory_ctime ?? 0);
+        }
+        foreach ($children as $entry) {
+            $path = $relative_path === '' ? $entry : $relative_path . '/' . $entry;
+            $this->validate_relative_path($path);
+            $absolute_path = $directory . '/' . $entry;
+            clearstatcache(true, $absolute_path);
+            $stat = @lstat($absolute_path);
+            if (!is_array($stat) || !isset($stat['mode'], $stat['ctime'], $stat['size'])) {
+                throw new RuntimeException('Could not stat source path ' . $this->display_path($path) . '.');
+            }
+            $type_bits = ((int) $stat['mode']) & 0170000;
+            if ($type_bits === 0040000) {
+                $this->scan_directory($absolute_path, $path, $handle, (int) $stat['ctime']);
+            } elseif ($type_bits === 0100000) {
+                $this->write_snapshot_entry($handle, $path, 'file', (int) $stat['size'], (int) $stat['ctime']);
+            } elseif ($type_bits === 0120000) {
+                $target = @readlink($absolute_path);
+                if (!is_string($target)) {
+                    throw new RuntimeException('Could not read source symlink ' . $this->display_path($path) . '.');
+                }
+                $this->write_snapshot_entry($handle, $path, 'symlink', (int) $stat['size'], (int) $stat['ctime'], $target);
+            } else {
+                throw new RuntimeException('Source path ' . $this->display_path($path) . ' has an unsupported filesystem type.');
+            }
+        }
+    }
+
+    /** @param resource $handle */
+    private function write_snapshot_entry($handle, string $path, string $type, int $size, int $ctime, ?string $target = null): void
+    {
+        $entry = [
+            'path' => base64_encode($path),
+            'type' => $type,
+            'size' => $size,
+            'ctime' => $ctime,
+        ];
+        if ($target !== null) {
+            $entry['target'] = base64_encode($target);
+        }
+        $line = json_encode($entry, JSON_UNESCAPED_SLASHES);
+        if ($line === false || fwrite($handle, $line . "\n") !== strlen($line) + 1) {
+            throw new RuntimeException('Could not write local push snapshot entry for ' . $this->display_path($path) . '.');
+        }
+    }
+
+    /** @param array<string,mixed> $state */
+    private function upload_deletes(array &$state, MultipartPushStreamClient $client): void
+    {
+        if (!empty($state['deletes_complete'])) {
+            return;
+        }
+        while (true) {
+            $start = (int) ($state['delete_offset'] ?? 0);
+            [$payload, $end] = $this->read_delete_part($start, $this->maximum_part_bytes($state));
+            if ($payload === '') {
+                $state['deletes_complete'] = true;
+                $this->write_state($state);
+                return;
+            }
+            $session_id = $this->session_id_from_state($state);
+            if (!$client->start_upload_request($session_id)) {
+                throw new RuntimeException('Could not open delete-list upload: ' . $client->get_last_error());
+            }
+            $sent = $client->send_part(['type' => 'delete-list', 'payload' => $payload]);
+            $result = $client->finish_request();
+            if (!$sent || $result['status'] !== 'complete') {
+                $this->handle_unknown_upload_result($state, $client, $result, null);
+                continue;
+            }
+            $accepted = $result['response']['accepted'] ?? null;
+            if (!is_array($accepted) || !isset($accepted[0]) || ($accepted[0]['type'] ?? null) !== 'delete-list') {
+                throw new RuntimeException('Target did not confirm the delete-list part it accepted.');
+            }
+            $state['delete_offset'] = $end;
+            $state['sizer'] = $client->get_request_sizer_state();
+            $this->write_state($state);
+        }
+    }
+
+    /** @return array{0:string,1:int} */
+    private function read_delete_part(int $offset, int $maximum_bytes): array
+    {
+        if (!is_file($this->journal->local_paths_to_delete)) {
+            return ['', $offset];
+        }
+        $handle = @fopen($this->journal->local_paths_to_delete, 'rb');
+        if ($handle === false || fseek($handle, $offset, SEEK_SET) !== 0) {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+            throw new RuntimeException('Could not resume the local delete list at byte ' . $offset . '.');
+        }
+        $payload = '';
+        $end = $offset;
+        try {
+            while (($line = fgets($handle, self::MAX_PLAN_LINE_BYTES + 1)) !== false) {
+                if (strlen($line) > self::MAX_PLAN_LINE_BYTES || substr($line, -1) !== "\n") {
+                    throw new RuntimeException('Local delete list contains an oversized or incomplete path record.');
+                }
+                $entry = json_decode($line, true);
+                $path = is_array($entry) && isset($entry['path']) && is_string($entry['path']) ? base64_decode($entry['path'], true) : false;
+                if ($path === false || $path === '') {
+                    throw new RuntimeException('Local delete list contains an invalid path record.');
+                }
+                $record = $path . "\0";
+                $part_limit = min(self::DELETE_PART_BYTES, $maximum_bytes);
+                if (strlen($record) > $part_limit) {
+                    throw new RuntimeException(
+                        'Delete path ' . $this->display_path($path) . ' cannot fit inside the target multipart part limit of '
+                        . $part_limit . ' bytes.'
+                    );
+                }
+                if ($payload !== '' && strlen($payload) + strlen($record) > $part_limit) {
+                    fseek($handle, -strlen($line), SEEK_CUR);
+                    break;
+                }
+                $payload .= $record;
+                $end = ftell($handle);
+            }
+        } finally {
+            fclose($handle);
+        }
+        return [$payload, $end];
+    }
+
+    /** @param array<string,mixed> $state */
+    private function upload_changes(array &$state, MultipartPushStreamClient $client): void
+    {
+        while ($this->read_plan_entry((int) ($state['plan_offset'] ?? 0)) !== null) {
+            $session_id = $this->session_id_from_state($state);
+            if (!$client->start_upload_request($session_id)) {
+                throw new RuntimeException('Could not open multipart upload: ' . $client->get_last_error());
+            }
+            $sent = [];
+            $working_offset = (int) $state['plan_offset'];
+            $working_file = null;
+            while (count($sent) < $this->maximum_upload_parts($state) && !$client->should_finish_request()) {
+                $entry = $this->read_plan_entry($working_offset);
+                if ($entry === null) {
+                    break;
+                }
+                $path = $entry['path'];
+                if ($entry['type'] === 'file') {
+                    $file = $this->prepare_file_part($state, $path, $working_file);
+                    if ($file['restart_session']) {
+                        $this->finish_or_discard_open_request($client);
+                        $this->restart_for_structural_source_change($state);
+                        return;
+                    }
+                    $payload_limit = $client->next_file_body_bytes($path, $file['size'], $file['offset']);
+                    if ($payload_limit === 0) {
+                        break;
+                    }
+                    $payload = $this->read_file_piece($file['absolute_path'], $file['offset'], $payload_limit);
+                    if ($payload === '' && $file['size'] !== 0) {
+                        $this->finish_or_discard_open_request($client);
+                        $this->restart_for_structural_source_change($state);
+                        return;
+                    }
+                    $after_read = $this->regular_file_stat($file['absolute_path']);
+                    if ($after_read === null) {
+                        $this->finish_or_discard_open_request($client);
+                        $this->restart_for_structural_source_change($state);
+                        return;
+                    }
+                    $next_file_offset = $file['offset'] + strlen($payload);
+                    $complete = $next_file_offset === $file['size'];
+                    if (!$client->send_part([
+                        'type' => 'file',
+                        'path' => $path,
+                        'total_bytes' => $file['size'],
+                        'offset' => $file['offset'],
+                        'payload' => $payload,
+                    ])) {
+                        break;
+                    }
+                    $sent[] = [
+                        'type' => 'file',
+                        'path' => $path,
+                        'plan_offset' => $working_offset,
+                        'next_plan_offset' => $entry['next_offset'],
+                        'fingerprint' => $file['fingerprint'],
+                        'source_changed' => $after_read !== $file['fingerprint'],
+                        'replacement_fingerprint' => $after_read,
+                    ];
+                    if ($after_read !== $file['fingerprint']) {
+                        // Finish this request so the confirmed old prefix can
+                        // be recorded as stale, then restart this one file at
+                        // offset zero on the next request.
+                        break;
+                    }
+                    $working_file = [
+                        'path' => $path,
+                        'offset' => $next_file_offset,
+                        'size' => $file['size'],
+                        'fingerprint' => $file['fingerprint'],
+                    ];
+                    if ($complete) {
+                        $working_offset = $entry['next_offset'];
+                        $working_file = null;
+                    }
+                    continue;
+                }
+
+                $part = $this->prepare_metadata_part($entry);
+                if ($part === null) {
+                    $this->finish_or_discard_open_request($client);
+                    $this->restart_for_structural_source_change($state);
+                    return;
+                }
+                if (!$client->send_part($part)) {
+                    break;
+                }
+                $sent[] = [
+                    'type' => $entry['type'],
+                    'path' => $path,
+                    'plan_offset' => $working_offset,
+                    'next_plan_offset' => $entry['next_offset'],
+                ];
+                $working_offset = $entry['next_offset'];
+            }
+            $result = $client->finish_request();
+            if ($sent === []) {
+                if ($result['status'] === 'complete') {
+                    throw new RuntimeException('Multipart request could not fit one upload part inside its request-body budget.');
+                }
+                $this->handle_unknown_upload_result($state, $client, $result, null);
+                continue;
+            }
+            if ($result['status'] !== 'complete') {
+                $this->handle_unknown_upload_result($state, $client, $result, $sent[0]);
+                continue;
+            }
+            $this->apply_upload_response($state, $sent, $result['response']);
+            $state['sizer'] = $client->get_request_sizer_state();
+            $this->write_state($state);
+        }
+    }
+
+    /** @param array<string,mixed> $state @return array<string,mixed> */
+    private function prepare_file_part(array &$state, string $path, ?array $working_file): array
+    {
+        $absolute_path = $this->source_path($path);
+        $stat = $this->regular_file_stat($absolute_path);
+        if ($stat === null) {
+            return ['restart_session' => true];
+        }
+        $fingerprint = ['size' => $stat['size'], 'ctime' => $stat['ctime']];
+        if ($working_file !== null) {
+            if ($working_file['path'] !== $path || $working_file['fingerprint'] !== $fingerprint) {
+                return ['restart_session' => true];
+            }
+            return [
+                'restart_session' => false,
+                'absolute_path' => $absolute_path,
+                'size' => $stat['size'],
+                'offset' => $working_file['offset'],
+                'fingerprint' => $fingerprint,
+            ];
+        }
+        $current = $state['current'] ?? null;
+        $offset = 0;
+        if (is_array($current) && ($current['path_b64'] ?? null) === base64_encode($path) && ($current['fingerprint'] ?? null) === $fingerprint) {
+            $offset = (int) ($current['accepted_bytes'] ?? 0);
+        } else {
+            // Persist the fingerprint before bytes leave the process. If the
+            // response is lost, status can safely decide whether its staged
+            // bytes belong to this exact source version.
+            $state['current'] = [
+                'path_b64' => base64_encode($path),
+                'accepted_bytes' => 0,
+                'fingerprint' => $fingerprint,
+            ];
+            $this->write_state($state);
+        }
+        if ($offset < 0 || $offset > $stat['size']) {
+            $offset = 0;
+            $state['current']['accepted_bytes'] = 0;
+            $this->write_state($state);
+        }
+        return [
+            'restart_session' => false,
+            'absolute_path' => $absolute_path,
+            'size' => $stat['size'],
+            'offset' => $offset,
+            'fingerprint' => $fingerprint,
+        ];
+    }
+
+    /** @param array<string,mixed> $entry @return array<string,mixed>|null */
+    private function prepare_metadata_part(array $entry): ?array
+    {
+        $path = $entry['path'];
+        $absolute_path = $this->source_path($path);
+        clearstatcache(true, $absolute_path);
+        $stat = @lstat($absolute_path);
+        if (!is_array($stat)) {
+            return null;
+        }
+        $type_bits = ((int) ($stat['mode'] ?? 0)) & 0170000;
+        if ($entry['type'] === 'directory') {
+            $entries = @scandir($absolute_path);
+            if ($type_bits !== 0040000 || !is_array($entries) || count(array_diff($entries, ['.', '..'])) !== 0) {
+                return null;
+            }
+            return ['type' => 'directory', 'path' => $path, 'payload' => ''];
+        }
+        if ($entry['type'] === 'symlink') {
+            $target = $type_bits === 0120000 ? @readlink($absolute_path) : false;
+            if (!is_string($target) || $target === '') {
+                return null;
+            }
+            return ['type' => 'symlink', 'path' => $path, 'target' => $target, 'payload' => ''];
+        }
+        throw new RuntimeException('Local push plan has unsupported type ' . json_encode($entry['type']) . '.');
+    }
+
+    /** @param array<string,mixed> $state @param array<int,array<string,mixed>> $sent @param array<string,mixed>|null $response */
+    private function apply_upload_response(array &$state, array $sent, ?array $response): void
+    {
+        $accepted = is_array($response['accepted'] ?? null) ? $response['accepted'] : null;
+        if (!is_array($accepted) || count($accepted) !== count($sent)) {
+            throw new RuntimeException('Target upload response did not confirm every sent multipart part.');
+        }
+        foreach ($sent as $index => $descriptor) {
+            $confirmation = $accepted[$index];
+            if (!is_array($confirmation) || ($confirmation['type'] ?? null) !== $descriptor['type']) {
+                throw new RuntimeException('Target upload response changed the type of a sent multipart part.');
+            }
+            if ($descriptor['type'] === 'file') {
+                if (($confirmation['path_b64'] ?? null) !== base64_encode($descriptor['path'])) {
+                    throw new RuntimeException('Target upload response confirmed a different file path.');
+                }
+                $accepted_bytes = $confirmation['accepted_bytes'] ?? null;
+                if (
+                    !is_numeric($accepted_bytes)
+                    || (int) $accepted_bytes < 0
+                    || (int) $accepted_bytes > (int) $descriptor['fingerprint']['size']
+                ) {
+                    throw new RuntimeException('Target upload response has no valid accepted byte count.');
+                }
+                $state['current'] = [
+                    'path_b64' => base64_encode($descriptor['path']),
+                    'accepted_bytes' => (int) $accepted_bytes,
+                    'fingerprint' => $descriptor['fingerprint'],
+                ];
+                if (!empty($descriptor['source_changed'])) {
+                    // The bytes just accepted may belong to a source version
+                    // that changed while this request was moving. Leave the
+                    // logical path pending and force its next part to restart
+                    // at zero; never append the new version to this prefix.
+                    $state['current'] = [
+                        'path_b64' => base64_encode($descriptor['path']),
+                        'accepted_bytes' => 0,
+                        'fingerprint' => $descriptor['replacement_fingerprint'],
+                    ];
+                    continue;
+                }
+                if (($confirmation['state'] ?? null) === 'complete') {
+                    if ((int) $accepted_bytes !== (int) $descriptor['fingerprint']['size']) {
+                        throw new RuntimeException('Target marked a file complete at a byte count different from its source size.');
+                    }
+                    $state['plan_offset'] = $descriptor['next_plan_offset'];
+                    $state['current'] = null;
+                }
+                continue;
+            }
+            if (($confirmation['path_b64'] ?? null) !== base64_encode($descriptor['path']) || ($confirmation['state'] ?? null) !== 'complete') {
+                throw new RuntimeException('Target did not confirm completed ' . $descriptor['type'] . ' ' . $this->display_path($descriptor['path']) . '.');
+            }
+            $state['plan_offset'] = $descriptor['next_plan_offset'];
+        }
+    }
+
+    /** @param array<string,mixed> $state @param array<string,mixed> $result @param array<string,mixed>|null $first_sent */
+    private function handle_unknown_upload_result(array &$state, MultipartPushStreamClient $client, array $result, ?array $first_sent): void
+    {
+        if ($result['status'] === 'failed') {
+            throw new RuntimeException('Multipart upload failed: ' . ($result['reason'] ?? 'unknown') . '. ' . ($result['detail'] ?? ''));
+        }
+        // A retry has no sender-confirmed outcome. Ask the target for only
+        // the current path before reusing a persisted file cursor.
+        if ($first_sent !== null) {
+            $this->recover_first_sent_status($state, $client, $first_sent);
+        }
+        $state['sizer'] = $client->get_request_sizer_state();
+        $this->write_state($state);
+    }
+
+    /** @param array<string,mixed> $state @param array<string,mixed> $sent */
+    private function recover_first_sent_status(array &$state, MultipartPushStreamClient $client, array $sent): void
+    {
+        $session_id = $this->session_id_from_state($state);
+        $response = $client->control_request('GET', 'staged_session_status', [
+            'session_id' => $session_id,
+            'path' => base64_encode($sent['path']),
+        ]);
+        $this->require_control_status($response, 'ok');
+        $paths = $response['paths'] ?? null;
+        $target = is_array($paths) && isset($paths[0]) && is_array($paths[0]) ? $paths[0] : null;
+        if ($target === null || ($target['path_b64'] ?? null) !== base64_encode($sent['path'])) {
+            throw new RuntimeException('Target status did not return the requested path.');
+        }
+        if ($sent['type'] === 'file') {
+            $current = $state['current'] ?? null;
+            if (!is_array($current) || ($current['path_b64'] ?? null) !== base64_encode($sent['path'])) {
+                return;
+            }
+            $current_fingerprint = $this->regular_file_stat($this->source_path($sent['path']));
+            if ($current_fingerprint === null) {
+                $this->restart_for_structural_source_change($state);
+                return;
+            }
+            if ($current_fingerprint !== ($sent['fingerprint'] ?? null)) {
+                // The target may have accepted old-version bytes before the
+                // response was lost. Do not call a completed old version the
+                // final source: the next request starts this path at zero.
+                $state['current'] = [
+                    'path_b64' => base64_encode($sent['path']),
+                    'accepted_bytes' => 0,
+                    'fingerprint' => $current_fingerprint,
+                ];
+                return;
+            }
+            if (($target['state'] ?? null) === 'complete') {
+                if ((int) ($target['accepted_bytes'] ?? -1) !== (int) $current_fingerprint['size']) {
+                    throw new RuntimeException('Target status marked a file complete at a byte count different from its source size.');
+                }
+                $state['plan_offset'] = $sent['next_plan_offset'];
+                $state['current'] = null;
+                return;
+            }
+            if (($target['state'] ?? null) === 'partial') {
+                $accepted_bytes = $target['accepted_bytes'] ?? null;
+                if (!is_numeric($accepted_bytes) || (int) $accepted_bytes < 0 || (int) $accepted_bytes > (int) $current_fingerprint['size']) {
+                    throw new RuntimeException('Target status has no valid partial byte count.');
+                }
+                $state['current']['accepted_bytes'] = (int) $accepted_bytes;
+            }
+            return;
+        }
+        if (($target['state'] ?? null) === 'complete') {
+            $state['plan_offset'] = $sent['next_plan_offset'];
+        }
+    }
+
+    /** @param array<string,mixed> $state */
+    private function restart_for_structural_source_change(array &$state): void
+    {
+        $this->log('Source changed structurally during push; discarding its private target session and rebuilding the plan.');
+        $session_id = $this->session_id_from_state($state);
+        $client = $this->new_client(
+            is_array($state['sizer'] ?? null) ? $state['sizer'] : [],
+            is_numeric($state['max_frame_bytes'] ?? null) ? (int) $state['max_frame_bytes'] : null
+        );
+        $response = $client->control_request('POST', 'staged_session_discard', ['session_id' => $session_id]);
+        $this->require_control_status($response, 'discarded');
+        @unlink($this->session_path);
+        // The caller returns to its outer invocation; a later `push` builds a
+        // fresh normalized tree rather than mixing two source snapshots.
+        throw new RuntimeException('Source changed structurally during push. Its staged session was discarded; run push again.');
+    }
+
+    private function finish_or_discard_open_request(MultipartPushStreamClient $client): void
+    {
+        try {
+            $client->finish_request();
+        } catch (Throwable $exception) {
+            // The target session remains private and restart_for_* discards it
+            // below; the original source-change error is more actionable.
+        }
+    }
+
+    /** @param array<string,mixed> $state */
+    private function commit(array &$state, MultipartPushStreamClient $client): void
+    {
+        $session_id = $this->session_id_from_state($state);
+        do {
+            $response = $client->control_request('POST', 'staged_session_commit', ['session_id' => $session_id]);
+            $this->require_control_status($response, 'ok');
+            $this->log('Commit phase ' . ($response['phase'] ?? 'unknown') . ', ' . (int) ($response['files_remaining'] ?? 0) . ' live entries remaining.');
+        } while (!empty($response['send_next_request']));
+    }
+
+    /** @return array<string,mixed>|null */
+    private function read_plan_entry(int $offset): ?array
+    {
+        if (!is_file($this->journal->local_paths_to_push)) {
+            return null;
+        }
+        $handle = @fopen($this->journal->local_paths_to_push, 'rb');
+        if ($handle === false || fseek($handle, $offset, SEEK_SET) !== 0) {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+            throw new RuntimeException('Could not resume local changed-path list at byte ' . $offset . '.');
+        }
+        try {
+            $line = fgets($handle, self::MAX_PLAN_LINE_BYTES + 1);
+            if ($line === false) {
+                return null;
+            }
+            if (strlen($line) > self::MAX_PLAN_LINE_BYTES || substr($line, -1) !== "\n") {
+                throw new RuntimeException('Local changed-path list contains an oversized or incomplete path record.');
+            }
+            $entry = json_decode($line, true);
+            $path = is_array($entry) && isset($entry['path']) && is_string($entry['path']) ? base64_decode($entry['path'], true) : false;
+            if ($path === false || $path === '') {
+                throw new RuntimeException('Local changed-path list contains an invalid path record.');
+            }
+            $type = $entry['type'] ?? null;
+            if (!is_string($type) || !in_array($type, ['file', 'directory', 'symlink'], true)) {
+                throw new RuntimeException('Local changed-path list contains no supported logical type for ' . $this->display_path($path) . '.');
+            }
+            return [
+                'path' => $path,
+                'type' => $type,
+                'next_offset' => ftell($handle),
+            ];
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    /** @return array{size:int,ctime:int}|null */
+    private function regular_file_stat(string $path): ?array
+    {
+        clearstatcache(true, $path);
+        $stat = @lstat($path);
+        if (!is_array($stat) || (((int) ($stat['mode'] ?? 0)) & 0170000) !== 0100000) {
+            return null;
+        }
+        return ['size' => (int) $stat['size'], 'ctime' => (int) $stat['ctime']];
+    }
+
+    private function read_file_piece(string $path, int $offset, int $maximum_bytes): string
+    {
+        $handle = @fopen($path, 'rb');
+        if ($handle === false || fseek($handle, $offset, SEEK_SET) !== 0) {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+            throw new RuntimeException('Could not read source file at offset ' . $offset . ': ' . $path . '.');
+        }
+        try {
+            $piece = fread($handle, $maximum_bytes);
+            if ($piece === false) {
+                throw new RuntimeException('Could not read source file ' . $path . '.');
+            }
+            return $piece;
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    /** @param array<string,mixed> $state */
+    private function session_id_from_state(array $state): string
+    {
+        $session_id = $state['session_id'] ?? null;
+        if (!is_string($session_id) || preg_match('/^[a-f0-9]{32}$/D', $session_id) !== 1) {
+            throw new RuntimeException('Local push session checkpoint has no target-issued session id.');
+        }
+        return $session_id;
+    }
+
+    /** @return array<string,mixed>|null */
+    private function read_state(): ?array
+    {
+        if (!is_file($this->session_path)) {
+            return null;
+        }
+        $contents = @file_get_contents($this->session_path);
+        $state = is_string($contents) ? json_decode($contents, true) : null;
+        if (!is_array($state)) {
+            throw new RuntimeException('Local push session checkpoint is not valid JSON: ' . $this->session_path . '.');
+        }
+        return $state;
+    }
+
+    /** @param array<string,mixed> $state */
+    private function write_state(array $state): void
+    {
+        if (!is_dir($this->site_dir) && !@mkdir($this->site_dir, 0700, true) && !is_dir($this->site_dir)) {
+            throw new RuntimeException('Could not create push session directory ' . $this->site_dir . '.');
+        }
+        $encoded = json_encode($state, JSON_UNESCAPED_SLASHES);
+        if ($encoded === false) {
+            throw new RuntimeException('Could not encode local push session checkpoint.');
+        }
+        $temporary = $this->session_path . '.tmp';
+        $handle = @fopen($temporary, 'wb');
+        if ($handle === false) {
+            throw new RuntimeException('Could not write local push session checkpoint.');
+        }
+        try {
+            if (fwrite($handle, $encoded) !== strlen($encoded) || !fflush($handle)) {
+                throw new RuntimeException('Could not flush local push session checkpoint.');
+            }
+        } finally {
+            fclose($handle);
+        }
+        if (!@rename($temporary, $this->session_path)) {
+            @unlink($temporary);
+            throw new RuntimeException('Could not publish local push session checkpoint.');
+        }
+    }
+
+    private function new_client(array $sizer_state, ?int $max_part_bytes = null): MultipartPushStreamClient
+    {
+        $options = [
+            'base_url' => $this->base_url,
+            'allow_http' => $this->allow_http,
+            'hmac_client' => new Site_Export_HMAC_Client($this->secret),
+            'request_sizer' => new PushRequestSizer([], $sizer_state),
+        ];
+        if ($max_part_bytes !== null) {
+            $options['max_part_bytes'] = $max_part_bytes;
+        }
+        return new MultipartPushStreamClient($options);
+    }
+
+    /** @param array<string,mixed> $state */
+    private function maximum_part_bytes(array $state): int
+    {
+        $maximum = $state['max_frame_bytes'] ?? null;
+        if (!is_numeric($maximum) || (int) $maximum <= 0) {
+            throw new RuntimeException('Local push session checkpoint has no positive target max_frame_bytes limit.');
+        }
+        return (int) $maximum;
+    }
+
+    /** @param array<string,mixed> $state */
+    private function maximum_upload_parts(array $state): int
+    {
+        $maximum = $state['max_upload_parts'] ?? self::MAX_PARTS_PER_REQUEST;
+        if (!is_numeric($maximum) || (int) $maximum <= 0) {
+            throw new RuntimeException('Local push session checkpoint has no positive target max_upload_parts limit.');
+        }
+        return min(self::MAX_PARTS_PER_REQUEST, (int) $maximum);
+    }
+
+    /** @param array<string,mixed> $response */
+    private function require_control_status(array $response, string $expected_status): void
+    {
+        if (($response['status'] ?? null) !== $expected_status) {
+            throw new RuntimeException(
+                'Push control request expected status ' . $expected_status . ', received '
+                . json_encode($response['status'] ?? null) . ': ' . (string) ($response['detail'] ?? $response['reason'] ?? '')
+            );
+        }
+    }
+
+    private function source_path(string $relative_path): string
+    {
+        $this->validate_relative_path($relative_path);
+        return ($this->source_root === '/' ? '' : $this->source_root) . '/' . $relative_path;
+    }
+
+    private function validate_relative_path(string $path): void
+    {
+        if ($path === '' || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
+            throw new RuntimeException('Source path cannot be sent safely: ' . $this->display_path($path) . '.');
+        }
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                throw new RuntimeException('Source path cannot be sent safely: ' . $this->display_path($path) . '.');
+            }
+        }
+        if ($path === '.maintenance' || strpos($path, '.maintenance/') === 0) {
+            throw new RuntimeException('Source path .maintenance is reserved for target commit maintenance mode.');
+        }
+    }
+
+    private function display_path(string $path): string
+    {
+        return base64_encode($path);
+    }
+
+    private function log(string $message): void
+    {
+        if ($this->verbose) {
+            fwrite(STDERR, '[push] ' . $message . "\n");
+        }
+    }
+
+    private function export_api_base_url(string $base_url): string
+    {
+        $base_url = rtrim($base_url, '?&');
+        $query = parse_url($base_url, PHP_URL_QUERY);
+        if (is_string($query)) {
+            parse_str($query, $parameters);
+            if (array_key_exists('reprint-api', $parameters) || array_key_exists('site-export-api', $parameters)) {
+                return $base_url;
+            }
+        }
+        return $base_url . (strpos($base_url, '?') === false ? '?' : '&') . 'reprint-api=1';
+    }
+}

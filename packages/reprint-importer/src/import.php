@@ -56,24 +56,12 @@ require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 // Typed state objects for the persisted import state.
 require_once __DIR__ . '/lib/state/class-import-state.php';
 
-// Shared staged push stream framing used by the sender and the target endpoint.
-if (!class_exists('Site_Export_Staged_Push_Stream_Protocol')) {
-    foreach ([
-        __DIR__ . '/../../reprint-exporter/src/class-staged-push-stream-protocol.php',
-        __DIR__ . '/../../../vendor/wp-php-toolkit/reprint-exporter/src/class-staged-push-stream-protocol.php',
-    ] as $staged_push_stream_protocol_path) {
-        if (file_exists($staged_push_stream_protocol_path)) {
-            require_once $staged_push_stream_protocol_path;
-            break;
-        }
-    }
-}
-
-// Adaptive sizing for staged push request bodies
+// Multipart push keeps the local baseline and plans on disk, and streams one
+// bounded part at a time through a caller-driven curl upload.
+require_once __DIR__ . '/lib/push/class-push-journal.php';
 require_once __DIR__ . '/lib/upload/class-push-request-sizer.php';
-
-// One-request push streams into the target's staged artifact store
-require_once __DIR__ . '/lib/upload/class-staged-push-stream-client.php';
+require_once __DIR__ . '/lib/upload/class-multipart-push-stream-client.php';
+require_once __DIR__ . '/lib/push/class-multipart-push.php';
 
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
@@ -245,316 +233,23 @@ function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn, i
 
 
 /**
- * Streaming multipart parser.
- * Parses multipart/mixed responses incrementally without buffering entire response.
+ * Pull responses still use their callback-oriented parser. It belongs to the
+ * exporter package beside the caller-driven request reader so boundary and
+ * Content-Length parsing do not fork between the two directions.
  */
-class MultipartStreamParser
+if (!class_exists('Site_Export_Multipart_Stream_Parser')) {
+    $multipart_parser_source = __DIR__ . '/../../reprint-exporter/src/class-multipart-stream-parser.php';
+    if (is_file($multipart_parser_source)) {
+        require_once $multipart_parser_source;
+    }
+}
+if (!class_exists('Site_Export_Multipart_Stream_Parser', false)) {
+    throw new RuntimeException('The Reprint exporter multipart parser is not installed. Refresh the exporter package.');
+}
+
+/** Backward-compatible pull-response name used by the importer. */
+class MultipartStreamParser extends Site_Export_Multipart_Stream_Parser
 {
-    private const MAX_BUFFER_SIZE = 64 * 1024 * 1024; // 64MB
-    private const STATE_BOUNDARY = 0;
-    private const STATE_HEADERS = 1;
-    private const STATE_BODY = 2;
-
-    private $boundary;
-    private $boundary_length;
-    private $buffer = "";
-    private $state = self::STATE_BOUNDARY;
-    private $current_headers = [];
-    private $body_length = 0;
-    private $body_target = null;
-    private $chunk_handler;
-
-    public function __construct(string $boundary, callable $chunk_handler)
-    {
-        $this->boundary = "--" . $boundary;
-        $this->boundary_length = strlen($this->boundary);
-        $this->chunk_handler = $chunk_handler;
-    }
-
-    /**
-     * Feed data to parser. Called by curl write callback.
-     */
-    public function feed(string $data): void
-    {
-        $this->buffer .= $data;
-        if (strlen($this->buffer) > self::MAX_BUFFER_SIZE) {
-            throw new RuntimeException(
-                "Multipart parser buffer exceeded 64MB — response may be malformed (missing boundary delimiter)."
-            );
-        }
-        $this->parse();
-    }
-
-    /**
-     * Parse buffered data.
-     */
-    private function parse(): void
-    {
-        while (true) {
-            if ($this->state === self::STATE_BOUNDARY) {
-                if (!$this->parse_boundary()) {
-                    break;
-                }
-            } elseif ($this->state === self::STATE_HEADERS) {
-                if (!$this->parse_headers()) {
-                    break;
-                }
-            } elseif ($this->state === self::STATE_BODY) {
-                if (!$this->parse_body()) {
-                    break;
-                }
-            }
-        }
-    }
-
-    /**
-     * Parse boundary. Returns true if boundary found and consumed.
-     */
-    private function parse_boundary(): bool
-    {
-        // Look for boundary
-        $pos = strpos($this->buffer, $this->boundary);
-        if ($pos === false) {
-            // Keep only last boundary_length bytes in case boundary is split
-            if (strlen($this->buffer) > $this->boundary_length) {
-                $this->buffer = substr($this->buffer, -$this->boundary_length);
-            }
-            return false;
-        }
-
-        // Check if this is the closing boundary (--boundary--)
-        $after_boundary = $pos + $this->boundary_length;
-        if ($after_boundary + 2 <= strlen($this->buffer)) {
-            $next_chars = substr($this->buffer, $after_boundary, 2);
-            if ($next_chars === "--") {
-                // Closing boundary - done
-                $this->buffer = "";
-                return false;
-            }
-        }
-
-        // Find end of line after boundary (\r\n or \n)
-        $line_end = $this->find_line_end($after_boundary);
-        if ($line_end === false) {
-            return false; // Need more data
-        }
-
-        // Consume boundary line
-        $this->buffer = substr($this->buffer, $line_end);
-        $this->state = self::STATE_HEADERS;
-        $this->current_headers = [];
-        return true;
-    }
-
-    /**
-     * Parse headers. Returns true if all headers parsed.
-     */
-    private function parse_headers(): bool
-    {
-        while (true) {
-            // Check for blank line (end of headers)
-            if (strlen($this->buffer) >= 2) {
-                if ($this->buffer[0] === "\r" && $this->buffer[1] === "\n") {
-                    // \r\n - blank line
-                    $this->buffer = substr($this->buffer, 2);
-                    $this->prepare_body();
-                    return true;
-                } elseif ($this->buffer[0] === "\n") {
-                    // \n - blank line
-                    $this->buffer = substr($this->buffer, 1);
-                    $this->prepare_body();
-                    return true;
-                }
-            }
-
-            // Find end of line
-            $line_end = $this->find_line_end(0);
-            if ($line_end === false) {
-                return false; // Need more data
-            }
-
-            // Extract header line
-            $line = substr($this->buffer, 0, $line_end);
-            $this->buffer = substr($this->buffer, $line_end);
-
-            // Trim line endings
-            $line = rtrim($line, "\r\n");
-
-            if ($line === "") {
-                // Blank line - end of headers
-                $this->prepare_body();
-                return true;
-            }
-
-            // Parse header (find first colon)
-            $colon_pos = strpos($line, ":");
-            if ($colon_pos !== false) {
-                $name = substr($line, 0, $colon_pos);
-                $value = substr($line, $colon_pos + 1);
-
-                // Trim spaces
-                $name = trim($name);
-                $value = ltrim($value); // Only left trim value
-
-                // Store header (lowercase key)
-                $key = strtolower($name);
-                $this->current_headers[$key] = $value;
-            }
-        }
-    }
-
-    /**
-     * Prepare for body parsing.
-     */
-    private function prepare_body(): void
-    {
-        $this->state = self::STATE_BODY;
-        $this->body_length = 0;
-
-        // Determine target length if Content-Length is specified
-        $this->body_target = isset($this->current_headers["content-length"])
-            ? (int) $this->current_headers["content-length"]
-            : null;
-    }
-
-    /**
-     * Parse body. Returns true if body complete.
-     */
-    private function parse_body(): bool
-    {
-        // If we know the content length, read exactly that many bytes
-        if ($this->body_target !== null) {
-            $remaining = $this->body_target - $this->body_length;
-
-            if (strlen($this->buffer) < $remaining) {
-                // Need more data
-                if (strlen($this->buffer) > 0) {
-                    // Process what we have
-                    $this->emit_body_chunk(substr($this->buffer, 0));
-                    $this->body_length += strlen($this->buffer);
-                    $this->buffer = "";
-                }
-                return false;
-            }
-
-            // We have enough data
-            $body_data = substr($this->buffer, 0, $remaining);
-            $this->buffer = substr($this->buffer, $remaining);
-
-            $this->emit_body_chunk($body_data);
-            $this->body_length += strlen($body_data);
-
-            // Skip trailing \r\n after body
-            $this->skip_crlf();
-
-            // Complete - move to next boundary
-            $this->state = self::STATE_BOUNDARY;
-            $this->emit_chunk_complete();
-            return true;
-        }
-
-        // No content-length - read until next boundary
-        // Look for boundary in buffer
-        $boundary_pos = strpos($this->buffer, "\r\n" . $this->boundary);
-        if ($boundary_pos === false) {
-            $boundary_pos = strpos($this->buffer, "\n" . $this->boundary);
-        }
-
-        if ($boundary_pos === false) {
-            // No boundary yet - process all but last boundary_length+2 bytes
-            $safe_length = strlen($this->buffer) - $this->boundary_length - 2;
-            if ($safe_length > 0) {
-                $body_data = substr($this->buffer, 0, $safe_length);
-                $this->buffer = substr($this->buffer, $safe_length);
-                $this->emit_body_chunk($body_data);
-                $this->body_length += strlen($body_data);
-            }
-            return false;
-        }
-
-        // Found boundary - emit remaining body
-        $body_data = substr($this->buffer, 0, $boundary_pos);
-        $this->buffer = substr($this->buffer, $boundary_pos);
-
-        $this->emit_body_chunk($body_data);
-        $this->body_length += strlen($body_data);
-
-        // Skip \r\n before boundary
-        $this->skip_crlf();
-
-        // Complete - move to next boundary
-        $this->state = self::STATE_BOUNDARY;
-        $this->emit_chunk_complete();
-        return true;
-    }
-
-    /**
-     * Skip \r\n or \n at start of buffer.
-     */
-    private function skip_crlf(): void
-    {
-        if (
-            strlen($this->buffer) >= 2 &&
-            $this->buffer[0] === "\r" &&
-            $this->buffer[1] === "\n"
-        ) {
-            $this->buffer = substr($this->buffer, 2);
-        } elseif (strlen($this->buffer) >= 1 && $this->buffer[0] === "\n") {
-            $this->buffer = substr($this->buffer, 1);
-        }
-    }
-
-    /**
-     * Find line end position (\r\n or \n) starting from offset.
-     * Returns position after line ending, or false if not found.
-     */
-    /** @return int|false */
-    private function find_line_end(int $offset)
-    {
-        $len = strlen($this->buffer);
-
-        for ($i = $offset; $i < $len; $i++) {
-            if ($this->buffer[$i] === "\n") {
-                return $i + 1;
-            }
-            if (
-                $this->buffer[$i] === "\r" &&
-                $i + 1 < $len &&
-                $this->buffer[$i + 1] === "\n"
-            ) {
-                return $i + 2;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Emit body chunk to handler.
-     */
-    private function emit_body_chunk(string $data): void
-    {
-        if ($data === "") {
-            return;
-        }
-
-        ($this->chunk_handler)([
-            "type" => "body",
-            "headers" => $this->current_headers,
-            "data" => $data,
-        ]);
-    }
-
-    /**
-     * Emit chunk complete to handler.
-     */
-    private function emit_chunk_complete(): void
-    {
-        ($this->chunk_handler)([
-            "type" => "complete",
-            "headers" => $this->current_headers,
-        ]);
-    }
 }
 
 /**
@@ -1635,6 +1330,8 @@ class ImportClient
             "preflight-assert",
             "flat-docroot",
             "apply-runtime",
+            "push",
+            "push-status",
         ];
 
         if (!$command) {
@@ -1647,6 +1344,36 @@ class ImportClient
             throw new InvalidArgumentException(
                 "Invalid command: {$command}. Valid commands: " . implode(", ", $valid_commands),
             );
+        }
+
+        if ($command === "push" || $command === "push-status") {
+            $secret = $options['secret'] ?? null;
+            if (!is_string($secret) || $secret === '') {
+                throw new InvalidArgumentException("{$command} requires --secret=TOKEN.");
+            }
+            if ($command === 'push' && (!isset($options['source_root']) || !is_string($options['source_root']) || $options['source_root'] === '')) {
+                throw new InvalidArgumentException('push requires --source-root=DIR.');
+            }
+            $push = new MultipartPush([
+                'base_url' => $this->remote_url,
+                // push-status never scans this directory. Give the shared
+                // state reader a real harmless root so status also works
+                // before --state-dir has been created by a first push.
+                'source_root' => $command === 'push' ? $options['source_root'] : getcwd(),
+                'state_dir' => $this->state_dir,
+                'secret' => $secret,
+                'allow_http' => (bool) ($options['allow_http'] ?? false),
+                'verbose' => $this->verbose_mode,
+            ]);
+            $result = $command === 'push-status'
+                ? $push->status()
+                : $push->run((bool) ($options['dry_run'] ?? false), $abort);
+            $encoded = json_encode($result, JSON_UNESCAPED_SLASHES);
+            if ($encoded === false) {
+                throw new RuntimeException('Could not encode push result.');
+            }
+            fwrite(STDOUT, $encoded . "\n");
+            return;
         }
 
         // High-level pulls persist resume state before they enter the stage
@@ -11810,7 +11537,7 @@ if (
             'type' => 'value',
             'target' => 'state_dir',
             'placeholder' => 'DIR',
-            'help' => 'Directory for import state files and SQL dumps',
+            'help' => 'Directory for local import or push state',
             'help_section' => 'required',
             'commands' => [],
         ],
@@ -11833,7 +11560,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert', 'push', 'push-status'],
         ],
         [
             'name' => 'abort',
@@ -11841,7 +11568,7 @@ if (
             'target' => 'abort',
             'help' => 'Abort current sync and exit (preserves downloaded files)',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'push'],
         ],
         [
             'name' => 'verbose',
@@ -11850,7 +11577,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime', 'push', 'push-status'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -11860,6 +11587,31 @@ if (
             'help' => 'Do not follow symlinks pointing outside root directories',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'files-pull'],
+        ],
+        [
+            'name' => 'allow-http',
+            'type' => 'flag',
+            'target' => 'allow_http',
+            'help' => 'Allow a plaintext HTTP push target (TLS normally protects unsigned upload bodies)',
+            'help_section' => 'global',
+            'commands' => ['push', 'push-status'],
+        ],
+
+        // ── push options ────────────────────────────────────────
+        [
+            'name' => 'source-root',
+            'type' => 'value',
+            'target' => 'source_root',
+            'placeholder' => 'DIR',
+            'help' => 'Local tree to push to the target',
+            'commands' => ['push'],
+        ],
+        [
+            'name' => 'dry-run',
+            'type' => 'flag',
+            'target' => 'dry_run',
+            'help' => 'Scan and report changed/deleted paths without creating a target session',
+            'commands' => ['push'],
         ],
         [
             'name' => 'follow-symlinks',
@@ -12689,6 +12441,36 @@ if (
                 "    --target-user=root --target-db=wp_local \\\n" .
                 "    --new-site-url=http://localhost:8881\n",
         ],
+        "push" => [
+            "level" => "high",
+            "short" => "Push a local WordPress tree through a resumable staged session",
+            "usage" => "reprint push <target-url> --source-root=DIR --state-dir=DIR --secret=TOKEN [--dry-run] [--abort] [--allow-http] [--verbose]",
+            "description" =>
+                "Builds a local on-disk snapshot, compares it with the last successful\n" .
+                "push baseline, then streams changed files, symlinks, empty directories,\n" .
+                "and deletes to one private target session. The target prepares and swaps\n" .
+                "the result only after upload completes. Re-run the same command after an\n" .
+                "interruption; it resumes from target-confirmed staging state.\n",
+            "extra" =>
+                "Examples:\n" .
+                "  reprint push https://example.com --source-root=./wordpress \\\n" .
+                "    --state-dir=./push-state --secret=TOKEN\n" .
+                "\n" .
+                "  reprint push https://example.com --source-root=./wordpress \\\n" .
+                "    --state-dir=./push-state --secret=TOKEN --dry-run\n" .
+                "\n" .
+                "  reprint push https://example.com --source-root=./wordpress \\\n" .
+                "    --state-dir=./push-state --secret=TOKEN --abort\n",
+        ],
+        "push-status" => [
+            "level" => "low",
+            "short" => "Show target-confirmed state for the active local push",
+            "usage" => "reprint push-status <target-url> --state-dir=DIR --secret=TOKEN [--allow-http]",
+            "description" =>
+                "Reads the active local push checkpoint and asks the target for that\n" .
+                "session's phase. It does not scan the source tree or modify the target.\n",
+            "extra" => null,
+        ],
         "install-exporter" => [
             "level" => "high",
             "short" => "Show how to install the exporter plugin on your site",
@@ -12995,6 +12777,19 @@ if (
         exit(1);
     }
 
+    // Constructing ImportClient creates --state-dir. Validate push-only
+    // requirements first so a typo does not leave resumable-looking state.
+    if (($command === 'push' || $command === 'push-status')
+        && (!isset($options['secret']) || !is_string($options['secret']) || $options['secret'] === '')) {
+        fwrite(STDERR, "Error: {$command} requires --secret=TOKEN\n");
+        exit(1);
+    }
+    if ($command === 'push'
+        && (!isset($options['source_root']) || !is_string($options['source_root']) || $options['source_root'] === '')) {
+        fwrite(STDERR, "Error: push requires --source-root=DIR\n");
+        exit(1);
+    }
+
     // apply-runtime accepts --flat-document-root as an alternative to --fs-root.
     $flat_document_root = $options["flat_document_root"] ?? null;
     if ($fs_root && $flat_document_root) {
@@ -13002,7 +12797,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$fs_root && !$flat_document_root && $command !== "import-metadata") {
+    if (!$fs_root && !$flat_document_root && !in_array($command, ["import-metadata", "push", "push-status"], true)) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);

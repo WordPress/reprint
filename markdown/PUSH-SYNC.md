@@ -1,251 +1,305 @@
-# Push Sync
+# Multipart staged push
 
-Push local changes to a remote WordPress site: files and database, driven
-entirely from the local machine, resumable at every step, never leaving the
-remote half-applied. This document is the agreed design; the delivery plan at
-the end maps it to a PR stack.
+Reprint push deploys a local file tree to a WordPress target. It is a
+local-wins, file-only deployment mechanism: database push and upload gzip are
+out of scope. Upload gzip remains a pull-response feature. A resumable push
+uses raw bytes and a per-part Content-Length; gzip would need separate wire and
+source byte counts plus resumable inflation semantics.
 
-## Shape of a push
+The sender computes a normalized final-tree delta against its own last
+successful baseline. Every logical path appears at most once as a file, an
+explicit empty directory, a symlink, or a delete. A file can occupy many
+multipart parts and a network retry can resend bytes, but neither is another
+logical change.
 
-1. The local machine knows what changed locally since its last push to this
-   remote (files, deletions, database rows), by comparing against the local
-   baselines it stored at the end of that push.
-2. It shows a summary of local uploads and deletions. The user confirms that
-   local should win for those paths and rows.
-3. It transfers everything into a staging area on the remote — file bytes,
-   a deletion manifest, and (phase two) the database diff. The transfer is
-   resumable at byte granularity.
-4. It drives the apply step with repeated commands until done. The remote
-   moves staged files into place, executes deletions, applies the database
-   diff, and fixes symlinks — inside a maintenance window that lasts seconds,
-   not the length of the transfer.
-5. It stores the current local indexes as the new local baselines. The push is
-   complete only after this step; a crashed push is re-driven from the top and
-   converges.
+## Sender state and resume
 
-Both sides act only when the local machine calls: no worker, no polling, no
-sessions. The remote is a passive authenticated API.
+For each target URL, the sender keeps an on-disk current snapshot, positive
+change list, delete list, active session checkpoint, and successful baseline:
 
-## Peers and packages
+~~~
+<state-dir>/push/<target>/
+  current-local-files.jsonl
+  local-paths-to-push.jsonl
+  local-paths-to-delete.jsonl
+  session.json
+  last-sync-local-files.jsonl
+~~~
 
-There is one package: Reprint. Every peer ships the same code with three
-capabilities:
+The JSONL files carry base64 paths because file names are arbitrary bytes. The
+active checkpoint stores the target-issued session ID and only byte offsets
+that the target has confirmed. It also stores a source fingerprint, size and
+ctime, for a partial file. Before resuming, the sender reads the file again:
+matching fingerprints permit the target-confirmed offset; a mismatch restarts
+that file at offset zero. It never appends new-version bytes to an old staged
+prefix.
 
-- **serve** — index and fetch endpoints (today's export surface),
-- **apply** — staging store, apply engine, database batch,
-- **drive** — the CLI that runs syncs.
+An interrupted response is an unknown outcome, not a successful upload. The
+sender asks status for the affected path and persists the result derived from
+the target staging tree. It advances the local baseline only after commit
+reports complete, by atomically publishing the snapshot used to make the plan.
+A source change after a snapshot was made therefore remains a delta for the
+next push rather than being silently called deployed.
 
-"Reprint lite" is a serve-only build for peers that only ever get pulled
-from. The WordPress plugin ships the full package.
+The token is deliberately small rather than a content hash. A same-size edit
+within the filesystem ctime resolution can escape it; the snapshot diff is the
+deeper safety net on the next run.
 
-## Transport and authentication
+## Endpoint vocabulary and authentication
 
-HTTPS is required. `--force-http` opts out explicitly, and its help text says
-what it gives up: over plain HTTP an active attacker can read and modify
-transferred content; the flag only keeps the shared secret off the wire and
-limits replay.
+Push uses the existing ?endpoint= router and signed HMAC envelope. The method
+and complete request target, including query parameters, are authenticated
+before the upload handler opens php://input.
 
-Every request carries an HMAC signature over exactly four values — the
-HTTP method, the URL's path and query, a timestamp, and a random nonce. Payloads are not signed and not hashed: TLS already
-guarantees their integrity, and signing streams was the single biggest source
-of buffering pain. Signing cost is constant per request regardless of payload
-size. The secret travels in no URL and no body, so it never lands in an
-access log.
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| POST | staged_session_create | Create or reopen the deterministic server-owned session for a create token. |
+| POST | staged_session_upload | Stream multipart parts into that session. |
+| GET | staged_session_status | Report target-derived state for explicitly named paths. |
+| POST | staged_session_commit | Prepare and switch durable staged changes until complete. |
+| POST | staged_session_discard | Remove an upload-only workspace. |
 
-## Change detection: local machine compared against itself
+The old artifact, JSON-line, push, and advance routes are not aliases and are
+not a second protocol. Create reports target-owned per-part and per-request
+limits. Ordinary preflight also exposes a server-derived staged_push capability
+object: availability, filesystem suitability, and safe limits, but never the
+shared secret. This discovers a bad staging mount before a session exists.
 
-ctime is machine-local, so push never compares a local timestamp to a remote
-one. It only answers "what changed locally since my last successful push to
-this remote" by comparing the current local indexes against local baselines.
+Status accepts one or a small bounded set of base64 paths. For each it reports
+missing, partial with actual staged bytes, or complete with type and size. It
+never echoes an uploader's claimed offset as truth and does not scan the whole
+workspace.
 
-The local machine keeps one set of baselines **per remote site**, overwritten
-after each successful apply:
+## Multipart upload
 
-    <state-dir>/push/<site>/last-sync-local-files.jsonl
-    <state-dir>/push/<site>/last-sync-local-rows.jsonl   (phase two)
+One bounded HTTP request contains many raw multipart/mixed parts:
 
-Each file baseline is a copy of a local file index in the `.import-index.jsonl`
-format the pull path already reads and writes — one JSON object per line,
-sorted by path.
+~~~
+Content-Type: multipart/mixed; boundary=<fresh-boundary>
+~~~
 
-The first push to a site has no baselines: every current local file counts as
-changed, and no local deletion can be detected yet.
+Every part has Content-Length. The outer request can use transfer streaming
+without an overall Content-Length. Paths and symlink targets remain base64 in
+headers; bodies are raw bytes.
 
-Push is intentionally local-wins. If a developer edited the remote site
-outside Reprint, a later push of the same path or row overwrites that remote
-edit. This keeps push as a simple deployment tool instead of a conflict
-manager.
+| Meaning | Header |
+| --- | --- |
+| part type | X-Chunk-Type |
+| file path, total bytes, offset | X-File-Path, X-File-Size, X-Chunk-Offset |
+| empty directory path | X-Directory-Path |
+| symlink path and target | X-Symlink-Path, X-Symlink-Target |
 
-## Deletions
+Pull-only fields such as X-Cursor, ctime, X-Chunk-Size, and first/last chunk
+flags do not travel in push. A file part completes exactly when:
 
-Local deletions since the last push come out of the baseline comparison. They
-travel as a deletion manifest — itself a staged artifact, uploaded through
-the same store as file bytes — and the apply step executes the unlinks inside
-the same window as the moves.
+~~~
+X-Chunk-Offset + Content-Length == X-File-Size
+~~~
 
-The manifest is staged at one reserved artifact id, `.reprint/deletions.jsonl`,
-whose content is the `local-paths-to-delete.jsonl` the journal produces. To
-keep that namespace trustworthy, the exporter refuses any sender-named
-artifact under the top-level `.reprint/` segment except that one id — on the
-push stream and on the `finalize`/`status`/`discard` control routes alike
-(`reserved_artifact_id`, HTTP 400). So a site that happens to hold a
-`.reprint/` file cannot overwrite the manifest, and apply can trust that
-everything under `.reprint/` is reprint's own. The staging code that actually
-writes the manifest lands with the push command; this reservation is in place
-ahead of it so the namespace is clean from the first push.
+The sender accounts for MIME delimiters and part headers as well as payload
+bytes when sizing a request. Its file-read chunk is a separate, small
+in-memory limit. A short source read produces a smaller valid part rather than
+a promised byte count that cannot be fulfilled. A 413 permanently lowers the
+learned request ceiling; an accepted empty request does not count as evidence
+that it is safe to grow the ceiling.
 
-## The staging store
+Deletes travel in the one extra part type:
 
-The staging area is `Site_Export_Staged_Artifacts` as built: artifact bytes
-at plain target-relative paths under `files/`, a cursor in `state.json`
-(replaced by writing a temp file and renaming it, so readers never see a
-half-written record), one small verified marker per finished artifact under
-`verified/`, and one `lock` file. The caller
-drives the loop — one `append()` per buffer, individually committed, so the
-transfer can stop after any step and resume from `committed_bytes` in a new
-request. `finalize()` checks the assembled size against the size declared in
-the plan; nothing re-reads or hashes artifacts. A missing, shortened, or
-non-regular file behind the cursor is damaged staging, not a valid resume
-point: status reports a zero frontier, a mid-file frame ends the request with
-`staging_file_damaged` before its payload is read, and a later offset-zero push
-replaces the damaged state.
+~~~
+X-Chunk-Type: delete-list
+Content-Type: application/octet-stream
+Content-Length: <N>
 
-Driver rule: **a discard that did not return true must be retried until it
-does** so all stale bytes are eventually removed. Discard invalidates cursor
-and verification records before unlinking the artifact, so an interrupted
-discard may leave untrusted bytes behind but never metadata authorizing bytes
-that were already removed. A fresh offset-zero upload safely replaces such an
-orphan.
+<target-relative-path>\0<target-relative-path>\0
+~~~
 
-## Where reprint stores its own data on the remote
+The target validates paths one at a time and appends base64 records to its
+private delete list. This is not a positive-change journal: a missing path in
+the staged tree can mean either unchanged or deleted, so deletes need their own
+durable representation.
 
-The remote is configured with one storage path for everything reprint keeps:
-the staging area and any apply bookkeeping. Preferably outside the document
-root. When the host only allows writing inside the document root:
+## Caller-driven streaming
 
-- the file indexer never lists anything under it. `storage_path` is the
-  server's own setting, so every index request knows it — including a
-  pulling peer's, which never scans this site's staging data,
-- the deletion step refuses to touch anything under it,
-- an `.htaccess` (deny-all) and an empty `index.php` are written into
-  it. That is all that can be done from inside the directory: Apache
-  honors the deny rules, nginx ignores both files and loses nothing by
-  their presence. Do not keep this directory inside the document root
-  unless the host offers nowhere else to write.
+The upload processor is shaped like WP_HTML_Tag_Processor: the endpoint owns
+the outer loop and the session owns one current part. There are no callbacks
+into the endpoint and no buffered request body.
 
-## Apply
+~~~php
+$session->accept_upload($input);
+try {
+    while ($session->next_change()) {
+    }
+} finally {
+    $session->finish_upload();
+}
+~~~
 
-Remote-side, journaled, idempotent, driven by repeated commands until done.
-Order:
+The input is Site_Export_Multipart_Stream_Input, a strict,
+boundary-validated reader over php://input. It requires a Content-Length on
+every part, bounds headers, retains only a small current body piece, and
+refuses to move to another part until the current one is drained. A malformed
+header, truncated body, invalid path, or offset gap throws before any later
+part is read. finish_upload() releases the session lock even after failure;
+completed staging stays durable.
 
-1. **Copy-first, outside maintenance:** static assets (uploads, media) move
-   to their final paths; PHP, plugins, and themes are materialized as `.new`
-   siblings next to their targets. The site runs normally throughout.
-2. **Maintenance on.** We write the `.maintenance` file ourselves, and since
-   WordPress executes that file, ours whitelists reprint API requests
-   (`$upgrading = 0` for us, `time()` for everyone else). WordPress's own
-   rule that a `.maintenance` file older than 10 minutes is ignored stays
-   intact, so an interrupted apply can never leave the site down for good.
-3. **Swap:** journaled `.new`/`.bak` renames, deletion unlinks, the database
-   batch, symlink fixes. The window contains renames and a row batch —
-   seconds, independent of payload size.
-4. **Maintenance off**, local baselines updated by the driver after apply
-   completes.
+The older callback-oriented MultipartStreamParser was extracted into the
+exporter package as Site_Export_Multipart_Stream_Parser, where the importer
+keeps a backwards-compatible adapter for pull responses. It retains pull's
+optional-length behavior. The request reader is deliberately separate: push
+never inherits that fallback or its large emergency buffer.
 
-If the driver dies mid-apply: WordPress stops honoring the `.maintenance`
-file after 10 minutes on its own, the journal is resumable by the next apply
-command, and any authenticated push request that notices an unfinished
-journal finishes it before doing its own work — no worker or cron needed.
+On the sender, MultipartPushStreamClient holds one cURL multi handle across
+requests and uses CURL_READFUNC_PAUSE. send_part() pumps cURL until the
+complete part has been handed to the network; it never collects future parts
+in a request string. This requires PHP 8.1 or newer at runtime. Timeouts are
+per phase and progress based: connect, upload stall, and response wait, not a
+total-transfer deadline. Plain HTTP is rejected unless the caller opts into
+--allow-http for local development.
 
-**The reprint plugin's own directory is never touched by apply.** It is
-excluded from swaps and deletions and reported as excluded in the summary.
-Updating reprint itself is a separate concern, never part of a sync.
+The target may stop only between completed parts at its part cap and returns
+send_next_request: true; the sender uses the same cap and starts a fresh
+request. It does not resume a PHP parser object. A later request starts a new
+reader and resumes entirely from durable files.
 
-## Escape hatch: apply without booting WordPress
+## Target workspace
 
-Normally the endpoint runs through the WordPress boot because it is
-convenient. But an apply step can break that boot — a fatal in a half-swapped
-plugin — so the same endpoint is also reachable as a standalone PHP file that
-never loads WordPress: it reads database credentials from `wp-config.php`
-directly and operates on the filesystem and database with reprint's own code.
-The driver falls back to it automatically when the normal route stops
-answering sensibly. This is what makes apply failures recoverable from the
-outside instead of requiring SSH.
+Each server-owned session has this private shape:
 
-## Database diff (phase two)
+~~~
+apply-sessions/<session-id>/
+  session.json       immutable session metadata
+  lock               excludes concurrent requests to this session
+  work/
+    files/           complete staged files, directories, and symlinks
+    partial/         incomplete file bytes
+    deletes.jsonl    accepted delete paths
+    prepared/        complete candidate deployment roots
+    backups/         live entries moved aside during switching
+    maintenance.php  private identity for this session marker
+  commit.json         derived action order, phase, indexes, and transition intent
+~~~
 
-The database is pushed as a diff — INSERT, UPDATE, DELETE — never as a dump
-that replaces tables. The mechanics mirror the file design:
+session.json never becomes upload progress. There is no state.json, no
+positive-change journal, and no full-journal replay. work/files plus
+deletes.jsonl are the authoritative later commit plan. Once upload closes,
+commit.json records only the derived execution order and current transition;
+it cannot recreate a positive change without work/files. The only tail repair
+is dropping an incomplete final JSONL delete record after a killed upload.
 
-- A **row index** — `(table, primary key, row hash)` — plays the role
-  `(path, ctime, size)` plays for files. The local machine keeps the row
-  index from the last push as a baseline; diffing against it yields the
-  upsert and delete sets.
-- Push is local-wins for rows too. Rows changed on the remote outside Reprint
-  are overwritten when the local diff touches the same primary key.
-- The diff stream passes through the URL rewriter in the local-to-remote
-  direction before staging.
-- Volatile rows are excluded by default (transients, sessions, cron), the
-  same way volatile files are handled in pull.
-- The batch executes inside the apply maintenance window, bounded and
-  resumable like every other step.
+For a file part, lstat() on the corresponding work/partial file is the resume
+truth:
 
-## Accepted limitations
+- a missing file accepts offset zero;
+- an offset matching its actual regular-file size appends;
+- offset zero discards a partial or completed staged version and restarts;
+- every other offset is rejected.
 
-Stated here so nobody rediscovers them as surprises:
+When the actual size reaches the declared total, the target renames the file
+into work/files. Directories and symlinks are complete atomically and stage
+there directly. Only work/files entries are commit-ready.
 
-- **Same-size corruption is invisible.** Transfers are verified by byte
-  count only. Corruption that preserves length passes. We decided detection
-  is not worth hashing multi-gigabyte artifacts inside PHP time limits.
-- **Remote edits are overwritten.** Push is a local-wins deployment tool, not
-  a bidirectional conflict resolver. Developers who edit the remote site
-  outside Reprint are responsible for pulling or preserving those changes
-  before pushing over them.
-- **Shell and cron can write during the maintenance window.** Maintenance
-  blocks web requests; it cannot block SSH or system cron.
-## Delivery plan
+### Filesystem requirement
 
-Files first, database second, each PR small and stacked in this order:
+For now, session storage and the target root must be on one filesystem. Create
+checks their device numbers before it creates a workspace; staging and commit
+also reject an affected mounted subtree. Reprint never falls back to a
+cross-device mv, copy-and-delete, or non-atomic replacement. If the default
+temporary staging directory is on another device, define
+SITE_EXPORT_STAGING_DIR to a durable directory on ABSPATH's filesystem.
 
-1. **Design doc** — this file.
-2. **Envelope auth** — headers-only HMAC for data routes: the
-   X-Auth-Content-Hash header carries the literal string UNSIGNED-PAYLOAD,
-   and the signature covers the method and request target instead of a
-   body hash.
-3. **Staged artifact store** — the store itself (PR #317, which succeeded
-   the closed #298).
-4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
-   the configured storage path; web guards for inside-docroot placement.
-5. **Push journal and local diff** — per-site local baselines, capture and
-   overwrite logic, local change and deletion detection.
-6. **Push stream endpoint** — the store's HTTP surface plus a sender that
-   streams framed chunks for many files through one authenticated request;
-   deletion manifest staged; `--force-http` with honest help text (the first
-   push networking this flag can gate). Decisions this slice locked in:
-   sending streams through libcurl's pause mechanism, which PHP's curl
-   extension supports from 8.1 — so `reprint push` requires PHP 8.1+ (pull
-   keeps 7.4+; the full story is
-   https://github.com/WordPress/reprint/issues/327) — and artifact ids
-   travel base64-encoded in frames, response cursors, and control-plane
-   parameters, because file paths are arbitrary bytes and JSON strings must
-   be UTF-8.
-7. **Package unification** — importer and exporter become one Reprint
-   package (lite = serve-only build). Placed here because apply is the
-   first piece that needs import-side code running on the remote.
-8. **Apply engine, files** — journaled swaps, copy-first, the whitelisted
-   maintenance file, unfinished-journal completion. Reuses the apply code
-   already built in PR #277 (the journaled `.new`/`.bak` swaps and the
-   copy-first flow); the relay around that code is dropped.
-9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
-10. **Row index and database diff** — the local row index, row baseline,
-    diff generation and URL rewrite, the apply batch.
-11. **`reprint push`** — the one command that orchestrates plan, confirm,
-    transfer, apply, resume.
-12. **Budgets and resumable limits** — push requests stay bounded by two
-    budgets of different dimensions: the fixed chunk (the sender's in-memory
-    unit of one read) and the host-learned request body budget that
-    PushRequestSizer sizes from reported php.ini limits and 413s, plus a
-    wall-clock budget per request; any endpoint that stops after durable work
-    returns the exact committed state the driver needs to retry. The apply step
-    gets the main budgeted loop: process until a deadline or operation limit,
-    return progress, and let the driver re-enter until complete.
+The session storage path is automatically protected if it lies under the
+target, as are .maintenance and the installed Reprint plugin. A push cannot
+stage, delete, or replace those paths. Target and workspace inspection uses
+lstat() and refuses symlinked parents rather than following them.
+
+## Commit, maintenance, and recovery
+
+The first commit claims a target-wide coordinator, writes commit.json, and
+closes upload. Only one session may prepare or mutate a target at a time. The
+caller repeats commit while send_next_request is true; the target advances a
+configured number of durable deployment actions per request. Candidate file
+copies use bounded pieces, while a deployment action remains the scheduling
+unit for commit progress.
+
+An affected child of wp-content/plugins or wp-content/themes is one atomic
+deployment unit. If its final type is a directory, preparation makes a
+complete candidate below work/prepared: it starts from the live directory,
+overlays completed staged files, directories, symlinks, and deletes, then
+switches the candidate as a whole. A new directory starts entirely from
+staging. Symlinks inside a candidate are recreated as links and are never
+traversed.
+
+The rule is narrower for the root itself: when the final unit is a file or a
+symlink, preparation stages and replaces that single entry. It does not
+reconstruct a symlink referent. A deleted unit is removed instead. Other paths
+are prepared and replaced as individual entries, except a structural
+file/directory transition builds the smallest required private replacement
+tree. Current code keeps maintenance on for every visible replacement,
+including static paths; it does not claim a pre-maintenance static-file
+optimization.
+
+At the start of preparation, the target captures the expected live identity
+and a recursive lstat fingerprint of a directory's descendants. After the
+private candidate is complete, it records those values with the prepared
+identity and checks them again before switching. This catches a rewritten or
+added child whose parent directory identity alone would not reveal the change.
+Like the sender's size-plus-ctime token, a same-size in-place rewrite within
+the filesystem timestamp resolution remains an honest stat-based detection
+gap. Before a live rename, commit.json records the private backup location too.
+Switching is then:
+
+1. rename the old live entry to work/backups, when present;
+2. rename the complete prepared entry into its live name;
+3. persist the completed transition only after the replacement is visible.
+
+PHP cannot atomically exchange two non-empty directories. The two renames can
+briefly leave a path absent, so the switching phase owns a WordPress
+.maintenance marker. A foreign marker stops the commit. Each request checks
+and refreshes the session-owned marker; cleanup removes it only when it still
+belongs to this session. If cleanup fails, the session remains retryable with
+maintenance intact.
+
+After a crash, recovery consults the transition intent and observed live,
+prepared, and backup identities. It continues only when inode/device evidence
+proves which rename happened; an unexpected external replacement is terminal,
+not guessed through. A corrupt checkpoint is terminal as well; discard refuses
+to assume that it was still upload-only. Backups remain private until all
+switches have durable checkpoints. Site_Export_Staged_Session_Recovery_Server::serve($options)
+is a small non-WordPress bootstrap exposing the same authenticated status,
+commit, and discard endpoints for a host emergency route. It is the escape
+hatch if a broken plugin or theme prevents normal WordPress boot.
+
+## CLI
+
+The public surface stays deliberately small:
+
+~~~sh
+reprint push <target-url> \
+  --source-root=DIR --state-dir=DIR --secret=TOKEN \
+  [--dry-run] [--abort] [--allow-http] [--verbose]
+
+reprint push-status <target-url> \
+  --state-dir=DIR --secret=TOKEN [--allow-http] [--verbose]
+~~~
+
+push resumes an existing compatible local session by default. --dry-run builds
+and reports the local plan without creating a target session or publishing a
+baseline. --abort removes local state only after target discard confirms; once
+live switching began it refuses and tells the operator to rerun normal push.
+push-status does not require a source root, does not scan a tree, and never
+creates a session.
+
+There are intentionally no public push-upload, push-commit, push-discard,
+push-resume, or target/session tuning flags. Those are protocol operations,
+not deployment commands.
+
+## Verification focus
+
+Tests use real php -S endpoints, CLI processes, cURL, and temporary trees for
+sender/target behavior. Focused unit tests cover multipart boundary and length
+handling, path and symlink safety, partial-file rules, target-confirmed
+cursors, candidate construction, maintenance ownership, two-rename recovery,
+request-size learning, and the local baseline. Raw TCP tests prove that a part
+reaches the network before send_part() returns. Linux CI mounts a separate
+temporary filesystem and verifies that cross-device session creation is
+rejected before any live mutation.

@@ -13,7 +13,7 @@
  *
  * - Remote-reported request limits (post_max_size, upload_max_filesize, and
  *   similar) establish the session ceiling, minus a safety margin for host
- *   quirks and the frame that may straddle the budget edge. A reverse proxy
+ *   quirks and the multipart part that may straddle the budget edge. A reverse proxy
  *   or CDN may still reject earlier, so the ceiling is an upper bound, not a
  *   guarantee.
  * - Without a useful reported limit, request bodies start at a conservative
@@ -22,7 +22,7 @@
  *   reports a larger limit. The body streams through chunk by chunk, so this
  *   is not a memory bound — it only keeps single requests from growing
  *   without end. The in-memory unit is the much smaller chunk the client
- *   reads per frame; that is unrelated to this class.
+ *   reads per multipart part; that is unrelated to this class.
  * - Accepted requests double the size toward the ceiling.
  * - The two rejection kinds back off differently because they carry different
  *   evidence. A rejection known to be size-related — HTTP 413 or a structured
@@ -80,7 +80,7 @@ class PushRequestSizer
             // bound — it only keeps single requests from growing without end.
             "max_bytes" => 1024 * 1024 * 1024,
             // Fraction of a reported limit usable for the request body; the
-            // rest absorbs headers, frame metadata, and host quirks.
+            // rest absorbs MIME delimiters, part headers, and host quirks.
             "limit_safety_ratio" => 0.9,
             // Successful requests required after a failure before growing again.
             "growth_holdoff_successes" => 3,
@@ -178,9 +178,8 @@ class PushRequestSizer
      * structured request_too_large response.
      *
      * The failed size caps the session ceiling so growth cannot retry it.
-     * When the server reported its actual limit — the staged_push endpoint's
-     * 413 carries max_frame_bytes, which it derives from its request-size
-     * limits — the ceiling drops below that limit directly instead of
+     * When the server reports its actual entity-body limit, the ceiling drops
+     * below that limit directly instead of
      * probing downward.
      *
      * @param int|null $reported_max_bytes Server-reported request limit, if any.

@@ -36,9 +36,34 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl
 
       - run: composer install --no-interaction --prefer-dist
 
       - name: Run tests
         run: composer test
+
+  push-cross-filesystem:
+    name: Push cross-filesystem refusal
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl
+
+      - run: composer install --no-interaction --prefer-dist
+
+      - name: Provision a distinct staging filesystem
+        run: |
+          mkdir -p "$RUNNER_TEMP/reprint-other-filesystem"
+          sudo mount -t tmpfs -o size=32m tmpfs "$RUNNER_TEMP/reprint-other-filesystem"
+          echo "REPRINT_TEST_OTHER_FILESYSTEM=$RUNNER_TEMP/reprint-other-filesystem" >> "$GITHUB_ENV"
+
+      - name: Refuse cross-device staged sessions
+        run: vendor/bin/phpunit --configuration tests/phpunit.xml --testdox tests/Import/MultipartPushTest.php

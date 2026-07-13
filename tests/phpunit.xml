@@ -30,8 +30,9 @@
             <file>FileIndexSkipDefaultsTest.php</file>
             <file>HmacServerTest.php</file>
             <file>SiteExportSecretTest.php</file>
-            <file>StagedArtifactsTest.php</file>
-            <file>StagedEndpointsTest.php</file>
+            <file>MultipartStreamInputTest.php</file>
+            <file>StagedApplySessionTest.php</file>
+            <file>MultipartSessionEndpointsTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">
             <file>NaiveQueryStreamTest.php</file>

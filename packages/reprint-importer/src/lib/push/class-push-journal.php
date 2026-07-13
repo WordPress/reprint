@@ -11,7 +11,9 @@
  *
  * The baseline is a copy of a file index in the same format as
  * .import-index.jsonl: one JSON object per line with a base64-encoded path
- * plus ctime, size, and type, sorted by decoded path. The push driver
+ * plus ctime, size, and type, sorted by decoded path. Non-empty directories
+ * use a private `tree-directory` marker: it is never uploaded, but lets a
+ * later diff remove a vanished directory after its last child goes. The push driver
  * captures it at the end of a successful push. A capture writes a
  * temporary file and renames it into place, so a killed process never
  * leaves a truncated baseline for the next push to trust — until the
@@ -30,11 +32,12 @@
  * The diff parses one JSON line at a time from each input. Ordering compares
  * decoded paths; two entries with the same path count as unchanged when their
  * decoded JSON objects match, so JSON field order or escaping changes do not
- * affect the diff. Output lines carry only the base64 path, producing the
- * .import-download-list.jsonl shape: one {"path": <base64>} object per line.
- * The lists carry no sizes or types on purpose — the files are local, so the
- * upload step reads the filesystem when it stages them instead of trusting a
- * snapshot that may already be stale.
+ * affect the diff. Changed-path output carries the current snapshot entry
+ * (path, type, size, ctime, and symlink target where relevant); private
+ * tree-directory markers never appear in that list. Delete output
+ * carries just a base64 path. The sender still lstat()s immediately before upload; these
+ * fields are the normalized logical-change type, not source truth after the
+ * plan was written.
  *
  * With no baseline yet — the first push to a site — every current entry
  * counts as changed and no deletion can be detected.
@@ -173,6 +176,10 @@ class PushJournal
 
         $changed = 0;
         $deleted = 0;
+        /** @var string[] $deleted_tree_roots */
+        $deleted_tree_roots = [];
+        /** @var string[] $positive_replacement_roots */
+        $positive_replacement_roots = [];
         $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
         $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
         while ($current_entry !== null || $baseline_entry !== null) {
@@ -189,31 +196,56 @@ class PushJournal
 
             if ($order < 0) {
                 // Only in the current index: new since the last push.
-                $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
-                    throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
+                if (!$this->is_tree_directory($current_entry)) {
+                    $out = json_encode($current_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                    if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
+                        throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
+                    }
+                    $changed++;
+                    $positive_replacement_roots[] = $current_path;
                 }
-                $changed++;
                 $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
             } elseif ($order > 0) {
                 // Only in the baseline: deleted since the last push.
-                $out = json_encode(["path" => $baseline_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                if (fwrite($paths_to_delete_handle, $out) !== strlen($out)) {
-                    throw new RuntimeException("Short write on local_paths_to_delete, is the disk full?");
+                if (!$this->is_below_a_root($baseline_path, $deleted_tree_roots)
+                    && !$this->is_below_a_root($baseline_path, $positive_replacement_roots)) {
+                    $out = json_encode(["path" => $baseline_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                    if (fwrite($paths_to_delete_handle, $out) !== strlen($out)) {
+                        throw new RuntimeException("Short write on local_paths_to_delete, is the disk full?");
+                    }
+                    $deleted++;
+                    if ($this->is_tree_directory($baseline_entry)) {
+                        $deleted_tree_roots[] = $baseline_path;
+                    }
                 }
-                $deleted++;
                 $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
             } else {
                 // Same path on both sides. Decoded JSON array comparison keeps
                 // field order and slash escaping out of change detection. A
                 // writer field change would mark everything changed once (a
                 // wasted re-upload, never a missed one).
-                if ($current_entry != $baseline_entry) {
-                    $out = json_encode(["path" => $current_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                if ($this->is_tree_directory($current_entry) && $this->is_tree_directory($baseline_entry)) {
+                    // A non-empty directory still exists. Its ctime changes
+                    // with child entries, but it is not an upload operation.
+                } elseif ($current_entry != $baseline_entry && $this->is_tree_directory($current_entry)) {
+                    // A file or link becoming a non-empty directory needs a
+                    // delete of the old root; staged children construct the
+                    // replacement directory tree.
+                    if (!$this->is_tree_directory($baseline_entry) && ($baseline_entry['type'] ?? null) !== 'directory') {
+                        $out = json_encode(["path" => $baseline_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                        if (fwrite($paths_to_delete_handle, $out) !== strlen($out)) {
+                            throw new RuntimeException("Short write on local_paths_to_delete, is the disk full?");
+                        }
+                        $deleted++;
+                        $deleted_tree_roots[] = $baseline_path;
+                    }
+                } elseif ($current_entry != $baseline_entry) {
+                    $out = json_encode($current_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
                     if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
                         throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
                     }
                     $changed++;
+                    $positive_replacement_roots[] = $current_path;
                 }
                 $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
                 $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
@@ -232,6 +264,23 @@ class PushJournal
         }
 
         return ["changed" => $changed, "deleted" => $deleted];
+    }
+
+    /** @param array<string,mixed> $entry */
+    private function is_tree_directory(array $entry): bool
+    {
+        return ($entry['type'] ?? null) === 'tree-directory';
+    }
+
+    /** @param string[] $roots */
+    private function is_below_a_root(string $path, array $roots): bool
+    {
+        foreach ($roots as $root) {
+            if ($path !== $root && strpos($path, $root . '/') === 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

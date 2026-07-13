@@ -2162,6 +2162,12 @@ function endpoint_preflight(array $config): array
         "wp_content" => $wp_content,
         "database" => $db,
     ];
+    if (isset($config['staged_push']) && is_array($config['staged_push'])) {
+        // HTTP_Server derives this from the target's own staged-session
+        // configuration. It is advisory for push and must not change the
+        // preflight result used by existing pull clients.
+        $response['staged_push'] = $config['staged_push'];
+    }
 
     header("Content-Type: application/json");
     $json = json_encode($response);

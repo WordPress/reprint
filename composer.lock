@@ -358,11 +358,11 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-f26d/exporter-php-72-support",
+            "version": "dev-feature/multipart-push-sync",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
-                "reference": "20a5cb0a822b98cafe39173c563a28ab9267786c"
+                "reference": "3f9b3966318182adf43d24728505e4ff7abe1df0"
             },
             "require": {
                 "php": ">=7.2",
@@ -384,9 +384,11 @@
                     "src/class-hmac-client.php",
                     "src/class-hmac-server.php",
                     "src/class-http-server.php",
-                    "src/class-staged-artifacts.php",
-                    "src/class-staged-push-stream-protocol.php",
+                    "src/class-multipart-stream-parser.php",
+                    "src/class-multipart-stream-input.php",
+                    "src/class-staged-apply-session.php",
                     "src/class-staged-endpoints.php",
+                    "src/class-staged-session-recovery-server.php",
                     "src/class-sqlite-driver-pdo.php",
                     "src/class-wpdb-driver-pdo.php"
                 ],
@@ -406,7 +408,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-importer",
-            "version": "dev-f26d/exporter-php-72-support",
+            "version": "dev-feature/multipart-push-sync",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-importer",

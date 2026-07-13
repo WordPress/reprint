@@ -1,0 +1,226 @@
+<?php
+
+use PHPUnit\Framework\TestCase;
+
+final class MultipartSessionEndpointsTest extends TestCase {
+
+    private const SECRET = 'multipart-endpoint-test-secret';
+
+    private string $root;
+    private string $target;
+    private string $storage;
+
+    protected function setUp(): void {
+        $this->root = sys_get_temp_dir() . '/multipart-endpoint-' . bin2hex(random_bytes(8));
+        $this->target = $this->root . '/target';
+        $this->storage = $this->root . '/storage';
+        mkdir($this->target, 0700, true);
+        mkdir($this->storage, 0700, true);
+    }
+
+    protected function tearDown(): void {
+        $this->remove_tree($this->root);
+    }
+
+    public function testCreateIsIdempotentAndStatusOnlyReportsRequestedPaths(): void {
+        $endpoints = $this->endpoints();
+        $token = str_repeat('a', 32);
+        $create_uri = '/?endpoint=staged_session_create&create_token=' . $token;
+        $first = $endpoints->session_create(['create_token' => $token], $this->headers('POST', $create_uri));
+        $second = $endpoints->session_create(['create_token' => $token], $this->headers('POST', $create_uri));
+
+        $this->assertSame(201, $first['http_code']);
+        $this->assertSame('created', $first['body']['status']);
+        $this->assertSame($first['body']['session_id'], $second['body']['session_id']);
+
+        $path = base64_encode('only-this-path.txt');
+        $status_uri = '/?endpoint=staged_session_status&session_id=' . $first['body']['session_id'] . '&path=' . rawurlencode($path);
+        $status = $endpoints->session_status(
+            ['session_id' => $first['body']['session_id'], 'path' => $path],
+            $this->headers('GET', $status_uri)
+        );
+        $this->assertSame('ok', $status['body']['status']);
+        $this->assertSame([[
+            'path_b64' => $path,
+            'state' => 'missing',
+            'accepted_bytes' => 0,
+        ]], $status['body']['paths']);
+    }
+
+    public function testBadEnvelopeIsRejectedBeforeTheHttpServerReadsTheBody(): void {
+        $reads = 0;
+        $server = new Site_Export_HTTP_Server([
+            'body_reader' => static function () use (&$reads): string {
+                ++$reads;
+                return 'must not be read';
+            },
+            'staged' => $this->options(),
+        ]);
+        ob_start();
+        try {
+            $server->handle_request([
+                'get' => ['endpoint' => 'staged_session_upload', 'session_id' => str_repeat('b', 32)],
+                'post' => [],
+                'server' => [
+                    'REQUEST_METHOD' => 'POST',
+                    'REQUEST_URI' => '/?endpoint=staged_session_upload&session_id=' . str_repeat('b', 32),
+                    'CONTENT_TYPE' => 'multipart/mixed; boundary=x',
+                ],
+            ]);
+            $body = ob_get_clean();
+        } catch (Throwable $exception) {
+            ob_end_clean();
+            throw $exception;
+        }
+
+        $this->assertSame(0, $reads);
+        $decoded = json_decode((string) $body, true);
+        $this->assertIsArray($decoded);
+        $this->assertSame('auth_failed', $decoded['reason']);
+    }
+
+    public function testPreflightReceivesOnlyTheServerDerivedPushCapability(): void {
+        $reported = null;
+        $server = new Site_Export_HTTP_Server([
+            'handlers' => [
+                'preflight' => static function (array $config) use (&$reported): void {
+                    $reported = $config['staged_push'] ?? null;
+                },
+            ],
+            'staged' => $this->options(),
+        ]);
+        $server->handle_request([
+            'get' => ['endpoint' => 'preflight', 'staged_push' => 'untrusted'],
+            'post' => [],
+            'server' => ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/?endpoint=preflight'],
+        ]);
+
+        $this->assertIsArray($reported);
+        $this->assertTrue($reported['available']);
+        $this->assertTrue($reported['filesystem_ok']);
+        $this->assertSame(1024, $reported['max_frame_bytes']);
+        $this->assertArrayNotHasKey('secret', $reported);
+    }
+
+    public function testUploadStopsAtTheConfiguredPartCapBetweenDurableParts(): void {
+        $options = $this->options();
+        $options['max_upload_parts'] = 1;
+        $endpoints = new Site_Export_Staged_Endpoints($options);
+        $token = str_repeat('d', 32);
+        $create_uri = '/?endpoint=staged_session_create&create_token=' . $token;
+        $created = $endpoints->session_create(['create_token' => $token], $this->headers('POST', $create_uri));
+        $session_id = $created['body']['session_id'];
+        $this->assertIsString($session_id);
+
+        $boundary = 'part-cap';
+        $body = '--' . $boundary . "\r\n"
+            . "X-Chunk-Type: directory\r\n"
+            . 'X-Directory-Path: ' . base64_encode('first-empty') . "\r\n"
+            . "Content-Length: 0\r\n\r\n\r\n"
+            . '--' . $boundary . "\r\n"
+            . "X-Chunk-Type: directory\r\n"
+            . 'X-Directory-Path: ' . base64_encode('must-wait') . "\r\n"
+            . "Content-Length: 0\r\n\r\n\r\n"
+            . '--' . $boundary . "--\r\n";
+        $input = fopen('php://temp', 'w+b');
+        fwrite($input, $body);
+        rewind($input);
+        $upload_uri = '/?endpoint=staged_session_upload&session_id=' . $session_id;
+        $headers = $this->headers('POST', $upload_uri);
+        $headers['Content-Type'] = 'multipart/mixed; boundary=' . $boundary;
+        try {
+            $response = $endpoints->session_upload(['session_id' => $session_id], $headers, $input);
+        } finally {
+            fclose($input);
+        }
+
+        $this->assertSame(200, $response['http_code']);
+        $this->assertTrue($response['body']['send_next_request']);
+        $this->assertCount(1, $response['body']['accepted']);
+        $status_uri = '/?endpoint=staged_session_status&session_id=' . $session_id
+            . '&paths=' . rawurlencode(json_encode([base64_encode('first-empty'), base64_encode('must-wait')]));
+        $status = $endpoints->session_status(
+            ['session_id' => $session_id],
+            $this->headers('GET', $status_uri)
+        );
+        $this->assertSame('complete', $status['body']['paths'][0]['state']);
+        $this->assertSame('missing', $status['body']['paths'][1]['state']);
+    }
+
+    public function testStandaloneRecoveryServerUsesTheNormalStatusSemanticsWithoutWordPress(): void {
+        $endpoints = $this->endpoints();
+        $token = str_repeat('c', 32);
+        $create_uri = '/?endpoint=staged_session_create&create_token=' . $token;
+        $created = $endpoints->session_create(['create_token' => $token], $this->headers('POST', $create_uri));
+        $session_id = $created['body']['session_id'];
+        $this->assertIsString($session_id);
+        $path = base64_encode('recoverable.txt');
+        $status_uri = '/?endpoint=staged_session_status&session_id=' . $session_id . '&path=' . rawurlencode($path);
+
+        $old_get = $_GET;
+        $old_server = $_SERVER;
+        $_GET = ['endpoint' => 'staged_session_status', 'session_id' => $session_id, 'path' => $path];
+        $_SERVER = $this->headers('GET', $status_uri);
+        ob_start();
+        try {
+            Site_Export_Staged_Session_Recovery_Server::serve($this->options());
+            $body = ob_get_clean();
+        } catch (Throwable $exception) {
+            ob_end_clean();
+            throw $exception;
+        } finally {
+            $_GET = $old_get;
+            $_SERVER = $old_server;
+        }
+
+        $response = json_decode((string) $body, true);
+        $this->assertIsArray($response);
+        $this->assertSame('ok', $response['status']);
+        $this->assertSame([[
+            'path_b64' => $path,
+            'state' => 'missing',
+            'accepted_bytes' => 0,
+        ]], $response['paths']);
+    }
+
+    private function endpoints(): Site_Export_Staged_Endpoints {
+        return new Site_Export_Staged_Endpoints($this->options());
+    }
+
+    /** @return array<string,mixed> */
+    private function options(): array {
+        return [
+            'staging_dir' => $this->storage,
+            'secret' => self::SECRET,
+            'apply_target_root' => $this->target,
+            'apply_sessions_enabled' => true,
+            'max_frame_bytes' => 1024,
+        ];
+    }
+
+    /** @return array<string,string> */
+    private function headers(string $method, string $request_uri): array {
+        $headers = (new Site_Export_HMAC_Client(self::SECRET))->get_envelope_auth_headers($method, 'http://example.test' . $request_uri);
+        $server = ['REQUEST_METHOD' => $method, 'REQUEST_URI' => $request_uri];
+        foreach ($headers as $name => $value) {
+            $server['HTTP_' . strtoupper(str_replace('-', '_', $name))] = $value;
+        }
+        return $server;
+    }
+
+    private function remove_tree(string $path): void {
+        if (is_link($path) || is_file($path)) {
+            @unlink($path);
+            return;
+        }
+        if (!is_dir($path)) {
+            return;
+        }
+        foreach (scandir($path) ?: [] as $entry) {
+            if ($entry !== '.' && $entry !== '..') {
+                $this->remove_tree($path . '/' . $entry);
+            }
+        }
+        @rmdir($path);
+    }
+}

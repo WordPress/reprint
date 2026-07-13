@@ -180,24 +180,44 @@ function _site_export_default_authenticate(): void {
 }
 
 /**
- * Server-side options for the staged artifact endpoints.
+ * Server-side options for multipart staged-session endpoints.
  *
- * The staging directory must live outside the web-served tree, and WordPress
- * has no guaranteed writable directory there, so the default sits under the
- * system temp dir, keyed by ABSPATH so co-hosted sites do not share staging
- * state. A host that cleans its temp dir only costs a transfer its progress —
- * artifacts re-upload from offset 0. Define SITE_EXPORT_STAGING_DIR to pick a
- * durable location instead.
+ * The staging directory needs to be writable and on the same filesystem as
+ * ABSPATH: commit uses same-device renames for atomic replacement and refuses
+ * a cross-device layout instead of silently copying live code. The default is
+ * a system-temp subdirectory keyed by ABSPATH so co-hosted sites do not share
+ * state. If that temp filesystem is separate, define SITE_EXPORT_STAGING_DIR
+ * to a durable directory on ABSPATH's filesystem before using push. A host
+ * that cleans its staging directory only loses in-progress upload state.
  */
 function _site_export_staged_options(): array {
     $staging_dir = defined('SITE_EXPORT_STAGING_DIR')
         ? SITE_EXPORT_STAGING_DIR
         : rtrim(sys_get_temp_dir(), '/') . '/reprint-staging-' . md5(ABSPATH);
 
+    $target_root = realpath(ABSPATH);
+    $protected_paths = [];
+    $plugin_dir = realpath(SITE_EXPORT_PLUGIN_DIR);
+    if (is_string($target_root) && is_string($plugin_dir)) {
+        $target_prefix = rtrim($target_root, '/') . '/';
+        if (strpos($plugin_dir . '/', $target_prefix) === 0) {
+            $protected_paths[] = rtrim(substr($plugin_dir, strlen($target_prefix)), '/');
+        }
+        $configured_staging_dir = realpath($staging_dir);
+        if (is_string($configured_staging_dir) && strpos($configured_staging_dir . '/', $target_prefix) === 0) {
+            $protected_paths[] = rtrim(substr($configured_staging_dir, strlen($target_prefix)), '/');
+        }
+    }
+
     return [
         'staging_dir' => $staging_dir,
         'secret' => _site_export_get_shared_secret(),
         'timestamp_tolerance' => SITE_EXPORT_TIMESTAMP_TOLERANCE,
+        'apply_target_root' => is_string($target_root) ? $target_root : ABSPATH,
+        'apply_protected_paths' => array_values(array_filter($protected_paths, static function ($path): bool {
+            return is_string($path) && $path !== '';
+        })),
+        'apply_sessions_enabled' => true,
     ];
 }
 
@@ -272,18 +292,17 @@ function _site_export_handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    // staged_upload authenticates inside its handler: the default handler
-    // here buffers the whole request body to hash it, which a chunk upload
-    // cannot afford. The upload route verifies the signed headers first and
-    // hashes the body as it streams. A custom authenticate callable still
-    // runs for every endpoint — its embedder owns that tradeoff.
+    // Multipart session routes authenticate inside their handlers before
+    // php://input is opened. Default body-HMAC authentication would buffer
+    // their request body and defeat streaming. A custom authenticate callable
+    // still runs for every endpoint — its embedder owns that tradeoff.
     // filter_input, not WP sanitizers: lib.php also runs without WordPress
     // bootstrapped (hosts that route the API from their own index.php).
     $endpoint = (string) filter_input(INPUT_GET, 'endpoint');
     $authenticate = $options['authenticate'] ?? null;
     if ($authenticate !== null) {
         $authenticate();
-    } elseif ($endpoint !== 'staged_upload') {
+    } elseif (!Site_Export_HTTP_Server::is_staged_session_endpoint($endpoint)) {
         _site_export_default_authenticate();
     }
 

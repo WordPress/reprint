@@ -115,10 +115,14 @@ final class PushJournalTest extends TestCase
         );
         $this->assertSame([], $this->listPaths($journal->local_paths_to_delete));
 
-        // Pin the exact bytes: one {"path": <base64>} object per line, the
-        // .import-download-list.jsonl shape.
+        // Push plans retain the normalized entry type. The sender re-stats
+        // before reading it, but does not rescan the complete snapshot for
+        // every planned path just to rediscover its logical type.
         $firstLine = strtok((string) file_get_contents($journal->local_paths_to_push), "\n");
-        $this->assertSame('{"path":"' . base64_encode('index.php') . '"}', $firstLine);
+        $this->assertSame(
+            '{"path":"' . base64_encode('index.php') . '","ctime":100,"size":10,"type":"file"}',
+            $firstLine
+        );
     }
 
     public function testUnchangedIndexProducesEmptyLists(): void
@@ -313,7 +317,8 @@ final class PushJournalTest extends TestCase
     }
 
     /**
-     * Decode a {"path": <base64>} JSONL list.
+     * Decode paths from either the full changed-entry list or the compact
+     * delete list.
      *
      * @return list<string>
      */

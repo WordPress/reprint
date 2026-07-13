@@ -7,6 +7,15 @@ use function WordPress\Reprint\Exporter\parse_size;
  */
 final class Site_Export_HTTP_Server {
 
+    /** Envelope-authenticated routes whose parameters live in the URI. */
+    public const STAGED_SESSION_ENDPOINTS = [
+        'staged_session_create',
+        'staged_session_upload',
+        'staged_session_status',
+        'staged_session_commit',
+        'staged_session_discard',
+    ];
+
     /** @var array<string, callable> */
     private $handlers;
 
@@ -22,6 +31,9 @@ final class Site_Export_HTTP_Server {
     /** @var string|null */
     private $default_directory;
 
+    /** @var Site_Export_Staged_Endpoints|null */
+    private $staged_endpoints;
+
     /** @var string[] Endpoints dispatched without a resource budget. */
     private $no_budget_endpoints = ['preflight'];
 
@@ -34,9 +46,11 @@ final class Site_Export_HTTP_Server {
         };
         $this->cursor_header_name = $options['cursor_header_name'] ?? 'HTTP_X_EXPORT_CURSOR';
         $this->default_directory = $options['default_directory'] ?? null;
+        $this->staged_endpoints = null;
 
         if (isset($options['staged']) && is_array($options['staged'])) {
-            $this->register_staged_handlers(new Site_Export_Staged_Endpoints($options['staged']));
+            $this->staged_endpoints = new Site_Export_Staged_Endpoints($options['staged']);
+            $this->register_staged_handlers($this->staged_endpoints);
         }
     }
 
@@ -44,13 +58,17 @@ final class Site_Export_HTTP_Server {
         $server = $request['server'] ?? $_SERVER;
         $get = $request['get'] ?? $_GET;
         $post = $request['post'] ?? $_POST;
+        if (!$this->pre_authenticate_staged_query($get, $server)) {
+            return;
+        }
         if (array_key_exists('body', $request)) {
             $body = (string) $request['body'];
         } else {
             $endpoint = (string) ( $get['endpoint'] ?? $post['endpoint'] ?? '' );
-            // Data-plane staged routes carry raw bytes and must only be read
-            // by their handlers. Other JSON requests still feed config parsing.
-            $body = $endpoint !== 'staged_push' && $this->is_json_content_type($server)
+            // Session routes authenticate their signed request target before
+            // any untrusted body is opened. Upload owns its raw stream; the
+            // control routes intentionally have no JSON request body.
+            $body = !self::is_staged_session_endpoint($endpoint) && $this->is_json_content_type($server)
                 ? call_user_func($this->body_reader)
                 : '';
         }
@@ -61,7 +79,52 @@ final class Site_Export_HTTP_Server {
             $body
         );
         $config = $this->normalize_config($config, $server);
+        if (($config['endpoint'] ?? null) === 'preflight' && $this->staged_endpoints !== null) {
+            // This is server-derived configuration, not a client option. The
+            // report lets an operator see why a push would be refused before
+            // it creates its first private session.
+            $config['staged_push'] = $this->staged_endpoints->get_preflight_capability();
+        }
         $this->dispatch($config);
+    }
+
+    public static function is_staged_session_endpoint(string $endpoint): bool {
+        return in_array($endpoint, self::STAGED_SESSION_ENDPOINTS, true);
+    }
+
+    /**
+     * Keep authentication ahead of body parsing for every session route.
+     *
+     * A session endpoint is valid only when it appears in the query string:
+     * the endpoint selector is part of the request target the envelope signs.
+     * Returning false means a JSON error has already been emitted.
+     *
+     * @param array<string,mixed> $get
+     * @param array<string,mixed> $server
+     */
+    private function pre_authenticate_staged_query(array $get, array $server): bool {
+        $endpoint = $get['endpoint'] ?? null;
+        if (!is_string($endpoint) || !self::is_staged_session_endpoint($endpoint)) {
+            return true;
+        }
+        if ($this->staged_endpoints === null) {
+            self::emit_json_response([
+                'http_code' => 404,
+                'body' => [
+                    'status' => 'error',
+                    'reason' => 'staged_sessions_not_configured',
+                    'detail' => 'Staged session endpoints are not configured on this server.',
+                    'send_next_request' => false,
+                ],
+            ]);
+            return false;
+        }
+        $response = $this->staged_endpoints->pre_authenticate_envelope($server, $endpoint);
+        if ($response === null) {
+            return true;
+        }
+        self::emit_json_response($response);
+        return false;
     }
 
     /**
@@ -306,18 +369,22 @@ final class Site_Export_HTTP_Server {
     }
 
     /**
-     * Wire the staged artifact routes to the shared dispatcher.
+     * Wire the multipart session routes to the shared dispatcher.
      *
-     * Explicitly-passed handlers win over these, matching how the
-     * handlers option replaces the default map.
+     * Explicitly-passed handlers win over these, matching how the handlers
+     * option replaces the default map. The old staged artifact routes are not
+     * registered: there is one push protocol, not a compatibility fork.
      */
     private function register_staged_handlers(Site_Export_Staged_Endpoints $endpoints): void {
         $routes = [
-            'staged_push' => static function (array $config) use ($endpoints): void {
+            'staged_session_create' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->session_create($config, $_SERVER));
+            },
+            'staged_session_upload' => static function (array $config) use ($endpoints): void {
                 $input = @fopen('php://input', 'rb');
                 try {
                     self::emit_json_response(
-                        $endpoints->push_stream($config, $_SERVER, $input === false ? null : $input)
+                        $endpoints->session_upload($config, $_SERVER, $input === false ? null : $input)
                     );
                 } finally {
                     if (is_resource($input)) {
@@ -325,14 +392,14 @@ final class Site_Export_HTTP_Server {
                     }
                 }
             },
-            'staged_finalize' => static function (array $config) use ($endpoints): void {
-                self::emit_json_response($endpoints->finalize($config, $_SERVER));
+            'staged_session_status' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->session_status($config, $_SERVER));
             },
-            'staged_status' => static function (array $config) use ($endpoints): void {
-                self::emit_json_response($endpoints->status($config));
+            'staged_session_commit' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->session_commit($config, $_SERVER));
             },
-            'staged_discard' => static function (array $config) use ($endpoints): void {
-                self::emit_json_response($endpoints->discard($config, $_SERVER));
+            'staged_session_discard' => static function (array $config) use ($endpoints): void {
+                self::emit_json_response($endpoints->session_discard($config, $_SERVER));
             },
         ];
 
