@@ -258,16 +258,12 @@ final class Site_Export_Staged_Apply_Session {
                 throw new InvalidArgumentException('Multipart push part requires an X-Chunk-Type header.');
             }
             if ($type === 'file') {
-                $this->require_allowed_part_headers($headers, ['content-length', 'content-type', 'x-chunk-type', 'x-file-path', 'x-file-size', 'x-chunk-offset']);
-                $this->stage_file_part($headers);
+                $this->stage_file_part($headers, $part_bytes);
             } elseif ($type === 'directory') {
-                $this->require_allowed_part_headers($headers, ['content-length', 'content-type', 'x-chunk-type', 'x-directory-path']);
-                $this->stage_directory_part($headers);
+                $this->stage_directory_part($headers, $part_bytes);
             } elseif ($type === 'symlink') {
-                $this->require_allowed_part_headers($headers, ['content-length', 'content-type', 'x-chunk-type', 'x-symlink-path', 'x-symlink-target']);
-                $this->stage_symlink_part($headers);
+                $this->stage_symlink_part($headers, $part_bytes);
             } elseif ($type === 'delete-list') {
-                $this->require_allowed_part_headers($headers, ['content-length', 'content-type', 'x-chunk-type']);
                 $this->stage_delete_list_part($headers);
             } else {
                 throw new InvalidArgumentException('Unsupported multipart X-Chunk-Type ' . json_encode($type) . '.');
@@ -368,11 +364,15 @@ final class Site_Export_Staged_Apply_Session {
      * A file becomes commit-visible only after its declared total size has
      * been written and the partial file is renamed into work/files/.
      */
-    private function stage_file_part(array $headers): void {
+    private function stage_file_part(array $headers, int $part_bytes): void {
+        foreach ($headers as $name => $unused) {
+            if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type', 'x-file-path', 'x-file-size', 'x-chunk-offset'], true)) {
+                throw new InvalidArgumentException('Multipart file part does not allow header ' . json_encode($name) . '.');
+            }
+        }
         $path = $this->decode_path_header($headers, 'x-file-path');
         $total_bytes = $this->require_non_negative_header($headers, 'x-file-size');
         $offset = $this->require_non_negative_header($headers, 'x-chunk-offset');
-        $part_bytes = $this->require_non_negative_header($headers, 'content-length');
         if ($offset > $total_bytes || $part_bytes > $total_bytes - $offset) {
             throw new InvalidArgumentException(
                 'File part for ' . $this->describe_path($path) . ' declares offset ' . $offset
@@ -451,9 +451,16 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /** Replaces a staged path with an explicitly empty final directory. */
-    private function stage_directory_part(array $headers): void {
+    private function stage_directory_part(array $headers, int $part_bytes): void {
+        foreach ($headers as $name => $unused) {
+            if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type', 'x-directory-path'], true)) {
+                throw new InvalidArgumentException('Multipart directory part does not allow header ' . json_encode($name) . '.');
+            }
+        }
         $path = $this->decode_path_header($headers, 'x-directory-path');
-        $this->require_empty_body($headers, 'directory');
+        if ($part_bytes !== 0) {
+            throw new InvalidArgumentException('Multipart directory part must have Content-Length 0.');
+        }
         $target = $this->private_path($this->files_dir, $path);
         $this->ensure_private_parent($target);
         // A directory part represents an explicitly empty final directory,
@@ -466,13 +473,20 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /** Replaces a staged path with a symlink preserving its literal target. */
-    private function stage_symlink_part(array $headers): void {
+    private function stage_symlink_part(array $headers, int $part_bytes): void {
+        foreach ($headers as $name => $unused) {
+            if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type', 'x-symlink-path', 'x-symlink-target'], true)) {
+                throw new InvalidArgumentException('Multipart symlink part does not allow header ' . json_encode($name) . '.');
+            }
+        }
         $path = $this->decode_path_header($headers, 'x-symlink-path');
         $target_value = $this->decode_path_header($headers, 'x-symlink-target', false);
         if ($target_value === '' || strpos($target_value, "\0") !== false || strlen($target_value) > self::MAX_PATH_BYTES) {
             throw new InvalidArgumentException('Symlink target for ' . $this->describe_path($path) . ' is invalid.');
         }
-        $this->require_empty_body($headers, 'symlink');
+        if ($part_bytes !== 0) {
+            throw new InvalidArgumentException('Multipart symlink part must have Content-Length 0.');
+        }
         $target = $this->private_path($this->files_dir, $path);
         $this->ensure_private_parent($target);
         $this->remove_entry($target);
@@ -489,7 +503,11 @@ final class Site_Export_Staged_Apply_Session {
      * request repairs that tail before accepting or reporting session state.
      */
     private function stage_delete_list_part(array $headers): void {
-        $this->require_non_negative_header($headers, 'content-length');
+        foreach ($headers as $name => $unused) {
+            if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type'], true)) {
+                throw new InvalidArgumentException('Multipart delete-list part does not allow header ' . json_encode($name) . '.');
+            }
+        }
         $handle = @fopen($this->deletes_path, 'ab');
         if ($handle === false) {
             throw new RuntimeException('Could not open the staged delete list.', self::ERROR_RETRYABLE_IO);
@@ -887,7 +905,7 @@ final class Site_Export_Staged_Apply_Session {
         }
 
         if (
-            !$this->identities_match($this->path_identity($live_path), $expected_live)
+            $this->path_identity($live_path) !== $expected_live
             || $this->tree_fingerprint($live_path) !== $expected_live_tree
         ) {
             throw new RuntimeException(
@@ -1084,7 +1102,7 @@ final class Site_Export_Staged_Apply_Session {
             }
 
             if ($expected_live === null) {
-                if ($stage === 'prepared' && $live === null && $this->identities_match($candidate, $prepared) && $backup === null) {
+                if ($stage === 'prepared' && $live === null && $candidate === $prepared && $backup === null) {
                     $this->ensure_target_parent($live_path);
                     $this->rename_same_filesystem($prepared_path, $live_path, 'install prepared entry');
                     $this->record_transition_stage($state, 'installed', null, $this->path_identity($live_path));
@@ -1098,14 +1116,14 @@ final class Site_Export_Staged_Apply_Session {
                     $this->record_transition_stage($state, 'installed', null, $live);
                     continue;
                 }
-                if ($stage === 'installed' && $this->identities_match($live, $installed) && $candidate === null && $backup === null) {
+                if ($stage === 'installed' && $live === $installed && $candidate === null && $backup === null) {
                     return;
                 }
                 throw new RuntimeException('Install transition has unexpected live, prepared, or backup state.', self::ERROR_LIVE_TREE_CHANGED);
             }
 
             if ($prepared === null) {
-                if ($stage === 'prepared' && $this->identities_match($live, $expected_live) && $backup === null && $candidate === null) {
+                if ($stage === 'prepared' && $live === $expected_live && $backup === null && $candidate === null) {
                     $this->ensure_target_parent($live_path);
                     $this->ensure_private_parent($backup_path);
                     $this->rename_same_filesystem($live_path, $backup_path, 'move deleted entry into backup');
@@ -1116,34 +1134,34 @@ final class Site_Export_Staged_Apply_Session {
                     $this->record_transition_stage($state, 'backup', $backup, null);
                     continue;
                 }
-                if ($stage === 'backup' && $live === null && $this->identities_match($backup, $backup_expected) && $candidate === null) {
+                if ($stage === 'backup' && $live === null && $backup === $backup_expected && $candidate === null) {
                     return;
                 }
                 throw new RuntimeException('Delete transition has unexpected live, prepared, or backup state.', self::ERROR_LIVE_TREE_CHANGED);
             }
 
-            if ($stage === 'prepared' && $this->identities_match($live, $expected_live) && $backup === null && $this->identities_match($candidate, $prepared)) {
+            if ($stage === 'prepared' && $live === $expected_live && $backup === null && $candidate === $prepared) {
                 $this->ensure_target_parent($live_path);
                 $this->ensure_private_parent($backup_path);
                 $this->rename_same_filesystem($live_path, $backup_path, 'move replaced entry into backup');
                 $this->record_transition_stage($state, 'backup', $this->path_identity($backup_path), null);
                 continue;
             }
-            if ($stage === 'prepared' && $live === null && $this->same_physical_entry($backup, $expected_live) && $this->identities_match($candidate, $prepared)) {
+            if ($stage === 'prepared' && $live === null && $this->same_physical_entry($backup, $expected_live) && $candidate === $prepared) {
                 $this->record_transition_stage($state, 'backup', $backup, null);
                 continue;
             }
-            if ($stage === 'backup' && $live === null && $this->identities_match($backup, $backup_expected) && $this->identities_match($candidate, $prepared)) {
+            if ($stage === 'backup' && $live === null && $backup === $backup_expected && $candidate === $prepared) {
                 $this->ensure_target_parent($live_path);
                 $this->rename_same_filesystem($prepared_path, $live_path, 'install replacement entry');
                 $this->record_transition_stage($state, 'installed', $backup_expected, $this->path_identity($live_path));
                 continue;
             }
-            if ($stage === 'backup' && $this->same_physical_entry($live, $prepared) && $this->identities_match($backup, $backup_expected) && $candidate === null) {
+            if ($stage === 'backup' && $this->same_physical_entry($live, $prepared) && $backup === $backup_expected && $candidate === null) {
                 $this->record_transition_stage($state, 'installed', $backup_expected, $live);
                 continue;
             }
-            if ($stage === 'installed' && $this->identities_match($live, $installed) && $this->identities_match($backup, $backup_expected) && $candidate === null) {
+            if ($stage === 'installed' && $live === $installed && $backup === $backup_expected && $candidate === null) {
                 return;
             }
             throw new RuntimeException('Replacement transition has unexpected live, prepared, or backup state.', self::ERROR_LIVE_TREE_CHANGED);
@@ -1271,7 +1289,7 @@ final class Site_Export_Staged_Apply_Session {
             || $private_identity === null
             || $identity['type'] !== 'file'
             || $private_identity['type'] !== 'file'
-            || !$this->identities_match($identity, $private_identity)
+            || $identity !== $private_identity
             || (int) $identity['size'] > 512
         ) {
             return false;
@@ -1820,7 +1838,7 @@ final class Site_Export_Staged_Apply_Session {
             return;
         }
         $entries = @scandir($path);
-        if (!is_array($entries) || !$this->identities_match($this->path_identity($path), $identity)) {
+        if (!is_array($entries) || $this->path_identity($path) !== $identity) {
             throw new RuntimeException('Live directory changed while it was being fingerprinted: ' . $path . '.', self::ERROR_LIVE_TREE_CHANGED);
         }
         $children = [];
@@ -1839,11 +1857,6 @@ final class Site_Export_Staged_Apply_Session {
             $child_relative_path = $relative_path === '' ? $entry : $relative_path . '/' . $entry;
             $this->append_tree_fingerprint($context, $child_path, $child_relative_path, $child_identity, $root_device);
         }
-    }
-
-    /** @param array<string,mixed>|null $left @param array<string,mixed>|null $right */
-    private function identities_match(?array $left, ?array $right): bool {
-        return $left === $right;
     }
 
     /** Recursively removes an entry without following symlinks. */
@@ -2116,22 +2129,6 @@ final class Site_Export_Staged_Apply_Session {
             throw new InvalidArgumentException('Multipart push header ' . $header . ' exceeds this server\'s integer range: ' . $value . '.');
         }
         return (int) $value;
-    }
-
-    /** @param array<string,string> $headers @param string[] $allowed_headers */
-    private function require_allowed_part_headers(array $headers, array $allowed_headers): void {
-        foreach ($headers as $name => $value) {
-            if (!in_array($name, $allowed_headers, true)) {
-                throw new InvalidArgumentException('Multipart push part type ' . json_encode($headers['x-chunk-type'] ?? null)
-                    . ' does not allow header ' . json_encode($name) . '.');
-            }
-        }
-    }
-
-    private function require_empty_body(array $headers, string $type): void {
-        if ($this->require_non_negative_header($headers, 'content-length') !== 0) {
-            throw new InvalidArgumentException('Multipart ' . $type . ' part must have Content-Length 0.');
-        }
     }
 
     /** Returns the complete plugin or theme root containing a changed path. */
