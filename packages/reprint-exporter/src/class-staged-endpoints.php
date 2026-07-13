@@ -195,7 +195,14 @@ final class Site_Export_Staged_Endpoints {
         return $capability;
     }
 
-    /** @return array{http_code:int,body:array} */
+    /**
+     * Creates or reopens the deterministic session derived from a signed token.
+     *
+     * Replaying a request after a lost response therefore finds the same
+     * workspace instead of orphaning one session and creating another.
+     *
+     * @return array{http_code:int,body:array}
+     */
     public function session_create(array $config, array $headers): array {
         if (($method = $this->require_method($headers, 'POST')) !== null) {
             return $method;
@@ -296,7 +303,11 @@ final class Site_Export_Staged_Endpoints {
         });
     }
 
-    /** @return array{http_code:int,body:array} */
+    /**
+     * Reports only workspace-derived state for the requested paths.
+     *
+     * @return array{http_code:int,body:array}
+     */
     public function session_status(array $config, array $headers): array {
         if (($method = $this->require_method($headers, 'GET')) !== null) {
             return $method;
@@ -315,7 +326,11 @@ final class Site_Export_Staged_Endpoints {
         });
     }
 
-    /** @return array{http_code:int,body:array} */
+    /**
+     * Advances a commit by the configured number of deployment actions.
+     *
+     * @return array{http_code:int,body:array}
+     */
     public function session_commit(array $config, array $headers): array {
         if (($method = $this->require_method($headers, 'POST')) !== null) {
             return $method;
@@ -331,7 +346,11 @@ final class Site_Export_Staged_Endpoints {
         });
     }
 
-    /** @return array{http_code:int,body:array} */
+    /**
+     * Discards private work unless live mutation has already begun.
+     *
+     * @return array{http_code:int,body:array}
+     */
     public function session_discard(array $config, array $headers): array {
         if (($method = $this->require_method($headers, 'POST')) !== null) {
             return $method;
@@ -353,7 +372,12 @@ final class Site_Export_Staged_Endpoints {
         });
     }
 
-    /** @return array{http_code:int,body:array}|null */
+    /**
+     * Verifies that the HTTP method, endpoint, and parameters were signed as
+     * the exact request target before any upload body is opened.
+     *
+     * @return array{http_code:int,body:array}|null
+     */
     private function require_envelope_auth(array $headers, string $endpoint): ?array {
         if ($this->secret === null || $this->secret === '') {
             return $this->rejected(503, 'not_configured', 'The shared secret is not configured.');
@@ -378,6 +402,7 @@ final class Site_Export_Staged_Endpoints {
         }
     }
 
+    /** Opens the URI's signed session only when any dispatcher copy agrees. */
     private function open_session(array $config, array $headers): Site_Export_Staged_Apply_Session {
         $this->require_apply_configuration();
         $session_id = $this->session_id_from_headers($headers);
@@ -399,7 +424,12 @@ final class Site_Export_Staged_Endpoints {
         return $session_id;
     }
 
-    /** @param array<string,mixed> $parameters @return string[] */
+    /**
+     * Decodes the bounded path set whose workspace state may be exposed.
+     *
+     * @param array<string,mixed> $parameters
+     * @return string[]
+     */
     private function status_paths(array $parameters): array {
         $encoded_paths = [];
         if (isset($parameters['path'])) {
@@ -429,7 +459,11 @@ final class Site_Export_Staged_Endpoints {
         return $paths;
     }
 
-    /** @param array<string,mixed> $config */
+    /**
+     * Rejects an unsigned dispatcher override of a signed URI parameter.
+     *
+     * @param array<string,mixed> $config
+     */
     private function require_matching_config_parameter(array $config, string $name, string $signed_value): void {
         if (array_key_exists($name, $config) && $config[$name] !== $signed_value) {
             throw new InvalidArgumentException('Request parameter ' . $name . ' must match its signed request-target value.');
@@ -460,6 +494,7 @@ final class Site_Export_Staged_Endpoints {
         return $this->rejected(405, 'method_not_allowed', 'Expected ' . $expected_method . '; received ' . ($actual_method === '' ? 'no method' : $actual_method) . '.');
     }
 
+    /** Finds a header across raw, normalized, and HTTP_ SAPI key forms. */
     private function header(array $headers, string $name): ?string {
         $server_name = strtoupper(str_replace('-', '_', $name));
         foreach ($headers as $key => $value) {
@@ -478,6 +513,8 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
+     * Converts session exceptions into the protocol's stable HTTP reasons.
+     *
      * @param callable():array{http_code:int,body:array} $callback
      * @return array{http_code:int,body:array}
      */

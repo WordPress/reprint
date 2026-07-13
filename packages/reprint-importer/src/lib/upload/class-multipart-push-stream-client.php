@@ -40,7 +40,14 @@ class MultipartPushStreamClient
     private int $parts_sent = 0;
     private ?string $last_error = null;
 
-    /** @param array<string,mixed> $options */
+    /**
+     * Configures one reusable connection context and its per-phase timeouts.
+     *
+     * Construction fails on PHP versions whose curl binding cannot pause a
+     * read callback without terminating the upload.
+     *
+     * @param array<string,mixed> $options
+     */
     public function __construct(array $options)
     {
         if (PHP_VERSION_ID < 80100) {
@@ -271,6 +278,7 @@ class MultipartPushStreamClient
         return max(0, min($this->chunk_bytes, $this->max_part_bytes, $remaining));
     }
 
+    /** Indicates whether the current request has ended or exhausted its body budget. */
     public function should_finish_request(): bool
     {
         if ($this->curl_handle === null) {
@@ -352,7 +360,14 @@ class MultipartPushStreamClient
         return $this->result('complete', null, null, $decoded);
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Sends one signed control request and decodes its JSON response.
+     *
+     * Control calls use a no-progress timeout rather than a total-transfer
+     * deadline and refuse redirects so signatures are never replayed elsewhere.
+     *
+     * @return array<string,mixed>
+     */
     public function control_request(string $method, string $endpoint, array $parameters = []): array
     {
         $method = strtoupper($method);
@@ -412,6 +427,7 @@ class MultipartPushStreamClient
         return $this->request_sizer->get_state();
     }
 
+    /** Applies target-reported entity-body ceilings to future requests. */
     public function apply_reported_limits(array $limits): void
     {
         $this->request_sizer->apply_reported_limits($limits);
@@ -434,7 +450,11 @@ class MultipartPushStreamClient
         return $this->last_error;
     }
 
-    /** @return array<string,string> */
+    /**
+     * Encodes and validates the protocol headers for one already-read payload.
+     *
+     * @return array<string,string>
+     */
     private function part_headers(array $part, int $payload_bytes): array
     {
         if ($payload_bytes > $this->max_part_bytes) {
@@ -503,6 +523,7 @@ class MultipartPushStreamClient
         return strlen('--' . $this->boundary . "--\r\n");
     }
 
+    /** Consumes one pending upload field and advances the stall-progress counter. */
     private function consume_string(string $property, int $length): string
     {
         $value = $this->$property;
@@ -512,6 +533,7 @@ class MultipartPushStreamClient
         return $piece;
     }
 
+    /** Advances libcurl once and records terminal transfer state. */
     private function pump_transfer(): void
     {
         do {

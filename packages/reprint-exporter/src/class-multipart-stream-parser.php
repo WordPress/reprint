@@ -1,8 +1,11 @@
 <?php
 
 /**
- * Streaming multipart parser.
- * Parses multipart/mixed responses incrementally without buffering entire response.
+ * Incrementally parses multipart/mixed response bytes.
+ *
+ * feed() may split a boundary, header, or body at any byte. Complete body
+ * bytes are emitted immediately through the callback; the parser retains only
+ * the undecidable tail needed to continue when the next fragment arrives.
  */
 class Site_Export_Multipart_Stream_Parser
 {
@@ -20,6 +23,10 @@ class Site_Export_Multipart_Stream_Parser
     private $body_target = null;
     private $chunk_handler;
 
+    /**
+     * @param callable(array<string,mixed>):void $chunk_handler Receives body
+     *     fragments and one completion event for each MIME part.
+     */
     public function __construct(string $boundary, callable $chunk_handler)
     {
         $this->boundary = "--" . $boundary;
@@ -27,9 +34,7 @@ class Site_Export_Multipart_Stream_Parser
         $this->chunk_handler = $chunk_handler;
     }
 
-    /**
-     * Feed data to parser. Called by curl write callback.
-     */
+    /** Consumes one arbitrary response fragment and emits every complete event. */
     public function feed(string $data): void
     {
         $this->buffer .= $data;
@@ -41,9 +46,7 @@ class Site_Export_Multipart_Stream_Parser
         $this->parse();
     }
 
-    /**
-     * Parse buffered data.
-     */
+    /** Advances until the buffered bytes cannot complete the next state. */
     private function parse(): void
     {
         while (true) {
@@ -63,9 +66,7 @@ class Site_Export_Multipart_Stream_Parser
         }
     }
 
-    /**
-     * Parse boundary. Returns true if boundary found and consumed.
-     */
+    /** Consumes one boundary line, retaining a split delimiter for the next feed. */
     private function parse_boundary(): bool
     {
         // Look for boundary
@@ -102,9 +103,7 @@ class Site_Export_Multipart_Stream_Parser
         return true;
     }
 
-    /**
-     * Parse headers. Returns true if all headers parsed.
-     */
+    /** Consumes complete header lines and enters body state at the blank line. */
     private function parse_headers(): bool
     {
         while (true) {
@@ -159,9 +158,7 @@ class Site_Export_Multipart_Stream_Parser
         }
     }
 
-    /**
-     * Prepare for body parsing.
-     */
+    /** Selects declared-length framing when present, or boundary framing otherwise. */
     private function prepare_body(): void
     {
         $this->state = self::STATE_BODY;
@@ -173,9 +170,7 @@ class Site_Export_Multipart_Stream_Parser
             : null;
     }
 
-    /**
-     * Parse body. Returns true if body complete.
-     */
+    /** Emits decidable body bytes and returns true only when the part is complete. */
     private function parse_body(): bool
     {
         // If we know the content length, read exactly that many bytes
@@ -244,9 +239,7 @@ class Site_Export_Multipart_Stream_Parser
         return true;
     }
 
-    /**
-     * Skip \r\n or \n at start of buffer.
-     */
+    /** Consumes the MIME line ending between a body and its next boundary. */
     private function skip_crlf(): void
     {
         if (
@@ -261,10 +254,10 @@ class Site_Export_Multipart_Stream_Parser
     }
 
     /**
-     * Find line end position (\r\n or \n) starting from offset.
-     * Returns position after line ending, or false if not found.
+     * Finds the first line ending at or after an offset.
+     *
+     * @return int|false Position after the line ending, or false when incomplete.
      */
-    /** @return int|false */
     private function find_line_end(int $offset)
     {
         $len = strlen($this->buffer);
@@ -285,9 +278,7 @@ class Site_Export_Multipart_Stream_Parser
         return false;
     }
 
-    /**
-     * Emit body chunk to handler.
-     */
+    /** Emits one non-empty body fragment with its part headers. */
     private function emit_body_chunk(string $data): void
     {
         if ($data === "") {
@@ -301,9 +292,7 @@ class Site_Export_Multipart_Stream_Parser
         ]);
     }
 
-    /**
-     * Emit chunk complete to handler.
-     */
+    /** Signals that the current part body has been emitted completely. */
     private function emit_chunk_complete(): void
     {
         ($this->chunk_handler)([

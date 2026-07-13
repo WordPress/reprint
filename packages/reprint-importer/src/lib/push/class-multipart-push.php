@@ -64,7 +64,14 @@ class MultipartPush
         $this->snapshot_path = $this->site_dir . '/current-local-files.jsonl';
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Resumes or completes the local scan, upload, and commit lifecycle.
+     *
+     * Dry runs build the same disk-backed snapshot and plans without creating
+     * a target session. Abort delegates to abort() before any new work begins.
+     *
+     * @return array<string,mixed>
+     */
     public function run(bool $dry_run = false, bool $abort = false): array
     {
         if ($abort) {
@@ -124,7 +131,11 @@ class MultipartPush
         throw new RuntimeException('Unknown multipart push phase ' . json_encode($state['phase'] ?? null) . '.');
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Combines the local phase with target-derived session status.
+     *
+     * @return array<string,mixed>
+     */
     public function status(): array
     {
         $state = $this->read_state();
@@ -156,7 +167,14 @@ class MultipartPush
         return $response;
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Discards private target work that has not begun live mutation.
+     *
+     * A session that has begun live mutation must be resumed to completion
+     * and is deliberately not removable through this path.
+     *
+     * @return array<string,mixed>
+     */
     public function abort(): array
     {
         $state = $this->read_state();
@@ -192,7 +210,14 @@ class MultipartPush
         return ['status' => 'aborted'];
     }
 
-    /** @param array<string,mixed> $state */
+    /**
+     * Creates or reopens the target session for the persisted create token.
+     *
+     * The token is stored before its first request, so a lost response can be
+     * retried without creating a second workspace.
+     *
+     * @param array<string,mixed> $state
+     */
     private function create_or_reopen_session(array &$state, MultipartPushStreamClient $client): void
     {
         $create_token = $state['create_token'] ?? null;
@@ -223,7 +248,11 @@ class MultipartPush
         $this->write_state($state);
     }
 
-    /** @return array{changed:int,deleted:int} */
+    /**
+     * Writes a sorted source snapshot and disk-backed changed/delete plans.
+     *
+     * @return array{changed:int,deleted:int}
+     */
     private function prepare_new_push(): array
     {
         if (!is_dir($this->site_dir) && !@mkdir($this->site_dir, 0700, true) && !is_dir($this->site_dir)) {
@@ -253,7 +282,12 @@ class MultipartPush
         return $this->journal->diff_local_files($this->snapshot_path);
     }
 
-    /** @param resource $handle */
+    /**
+     * Scans without following links and records only uploadable leaves, empty
+     * directories, and existence markers for non-empty directory trees.
+     *
+     * @param resource $handle
+     */
     private function scan_directory(string $directory, string $relative_path, $handle, ?int $directory_ctime): void
     {
         $entries = @scandir($directory);
@@ -321,7 +355,11 @@ class MultipartPush
         }
     }
 
-    /** @param array<string,mixed> $state */
+    /**
+     * Sends bounded delete-list parts and persists only target-confirmed offsets.
+     *
+     * @param array<string,mixed> $state
+     */
     private function upload_deletes(array &$state, MultipartPushStreamClient $client): void
     {
         if (!empty($state['deletes_complete'])) {
@@ -355,7 +393,11 @@ class MultipartPush
         }
     }
 
-    /** @return array{0:string,1:int} */
+    /**
+     * Reads complete delete records up to one bounded MIME-part payload.
+     *
+     * @return array{0:string,1:int}
+     */
     private function read_delete_part(int $offset, int $maximum_bytes): array
     {
         if (!is_file($this->journal->local_paths_to_delete)) {
@@ -401,7 +443,15 @@ class MultipartPush
         return [$payload, $end];
     }
 
-    /** @param array<string,mixed> $state */
+    /**
+     * Drives caller-paced multipart requests from the disk-backed change plan.
+     *
+     * Each body piece is read immediately before send_part(). Local cursors
+     * advance only after the target confirms the corresponding durable part;
+     * an unknown response is reconciled through status before reuse.
+     *
+     * @param array<string,mixed> $state
+     */
     private function upload_changes(array &$state, MultipartPushStreamClient $client): void
     {
         while ($this->read_plan_entry((int) ($state['plan_offset'] ?? 0)) !== null) {
@@ -515,7 +565,17 @@ class MultipartPush
         }
     }
 
-    /** @param array<string,mixed> $state @return array<string,mixed> */
+    /**
+     * Selects the persisted file offset whose source token still matches.
+     *
+     * A persisted cursor is reusable only with the same size-and-ctime
+     * fingerprint. The fingerprint is checkpointed before any bytes leave.
+     * A same-size rewrite within one ctime tick remains indistinguishable; the
+     * next snapshot diff is the deeper change-detection net.
+     *
+     * @param array<string,mixed> $state
+     * @return array<string,mixed>
+     */
     private function prepare_file_part(array &$state, string $path, ?array $working_file): array
     {
         $absolute_path = $this->source_path($path);
@@ -565,7 +625,12 @@ class MultipartPush
         ];
     }
 
-    /** @param array<string,mixed> $entry @return array<string,mixed>|null */
+    /**
+     * Revalidates a directory or symlink immediately before sending it.
+     *
+     * @param array<string,mixed> $entry
+     * @return array<string,mixed>|null Null when the source changed structurally.
+     */
     private function prepare_metadata_part(array $entry): ?array
     {
         $path = $entry['path'];
@@ -593,7 +658,13 @@ class MultipartPush
         throw new RuntimeException('Local push plan has unsupported type ' . json_encode($entry['type']) . '.');
     }
 
-    /** @param array<string,mixed> $state @param array<int,array<string,mixed>> $sent @param array<string,mixed>|null $response */
+    /**
+     * Advances local cursors from an ordered, target-confirmed part list.
+     *
+     * @param array<string,mixed> $state
+     * @param array<int,array<string,mixed>> $sent
+     * @param array<string,mixed>|null $response
+     */
     private function apply_upload_response(array &$state, array $sent, ?array $response): void
     {
         $accepted = is_array($response['accepted'] ?? null) ? $response['accepted'] : null;
@@ -650,7 +721,13 @@ class MultipartPush
         }
     }
 
-    /** @param array<string,mixed> $state @param array<string,mixed> $result @param array<string,mixed>|null $first_sent */
+    /**
+     * Handles a failed or indeterminate upload without trusting sender offsets.
+     *
+     * @param array<string,mixed> $state
+     * @param array<string,mixed> $result
+     * @param array<string,mixed>|null $first_sent
+     */
     private function handle_unknown_upload_result(array &$state, MultipartPushStreamClient $client, array $result, ?array $first_sent): void
     {
         if ($result['status'] === 'failed') {
@@ -665,7 +742,12 @@ class MultipartPush
         $this->write_state($state);
     }
 
-    /** @param array<string,mixed> $state @param array<string,mixed> $sent */
+    /**
+     * Reconciles the first indeterminate part with target workspace state.
+     *
+     * @param array<string,mixed> $state
+     * @param array<string,mixed> $sent
+     */
     private function recover_first_sent_status(array &$state, MultipartPushStreamClient $client, array $sent): void
     {
         $session_id = $this->session_id_from_state($state);
@@ -722,7 +804,11 @@ class MultipartPush
         }
     }
 
-    /** @param array<string,mixed> $state */
+    /**
+     * Discards a snapshot-stale target workspace and requires a fresh scan.
+     *
+     * @param array<string,mixed> $state
+     */
     private function restart_for_structural_source_change(array &$state): void
     {
         $this->log('Source changed structurally during push; discarding its private target session and rebuilding the plan.');
@@ -739,6 +825,12 @@ class MultipartPush
         throw new RuntimeException('Source changed structurally during push. Its staged session was discarded; run push again.');
     }
 
+    /**
+     * Best-effort closes an open request before its whole session is discarded.
+     *
+     * The later structural-change error is more useful than a secondary
+     * transport failure from this cleanup attempt.
+     */
     private function finish_or_discard_open_request(MultipartPushStreamClient $client): void
     {
         try {
@@ -749,7 +841,11 @@ class MultipartPush
         }
     }
 
-    /** @param array<string,mixed> $state */
+    /**
+     * Drives bounded target commit calls until every deployment action is durable.
+     *
+     * @param array<string,mixed> $state
+     */
     private function commit(array &$state, MultipartPushStreamClient $client): void
     {
         $session_id = $this->session_id_from_state($state);
@@ -760,7 +856,11 @@ class MultipartPush
         } while (!empty($response['send_next_request']));
     }
 
-    /** @return array<string,mixed>|null */
+    /**
+     * Reads one changed-path record at a resumable byte offset.
+     *
+     * @return array<string,mixed>|null
+     */
     private function read_plan_entry(int $offset): ?array
     {
         if (!is_file($this->journal->local_paths_to_push)) {
@@ -800,7 +900,11 @@ class MultipartPush
         }
     }
 
-    /** @return array{size:int,ctime:int}|null */
+    /**
+     * Returns the size-and-ctime source token stored beside a resumable cursor.
+     *
+     * @return array{size:int,ctime:int}|null
+     */
     private function regular_file_stat(string $path): ?array
     {
         clearstatcache(true, $path);
@@ -811,6 +915,7 @@ class MultipartPush
         return ['size' => (int) $stat['size'], 'ctime' => (int) $stat['ctime']];
     }
 
+    /** Reads at most one configured in-memory piece at an exact source offset. */
     private function read_file_piece(string $path, int $offset, int $maximum_bytes): string
     {
         $handle = @fopen($path, 'rb');
@@ -855,7 +960,11 @@ class MultipartPush
         return $state;
     }
 
-    /** @param array<string,mixed> $state */
+    /**
+     * Atomically replaces the local session checkpoint after a flushed write.
+     *
+     * @param array<string,mixed> $state
+     */
     private function write_state(array $state): void
     {
         if (!is_dir($this->site_dir) && !@mkdir($this->site_dir, 0700, true) && !is_dir($this->site_dir)) {
@@ -883,6 +992,7 @@ class MultipartPush
         }
     }
 
+    /** Builds a client seeded with the checkpoint's learned request sizing. */
     private function new_client(array $sizer_state, ?int $max_part_bytes = null): MultipartPushStreamClient
     {
         $options = [
@@ -934,6 +1044,7 @@ class MultipartPush
         return ($this->source_root === '/' ? '' : $this->source_root) . '/' . $relative_path;
     }
 
+    /** Rejects path traversal and the target-owned maintenance marker. */
     private function validate_relative_path(string $path): void
     {
         if ($path === '' || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
@@ -961,6 +1072,7 @@ class MultipartPush
         }
     }
 
+    /** Adds the exporter API selector without replacing an existing query. */
     private function export_api_base_url(string $base_url): string
     {
         $base_url = rtrim($base_url, '?&');

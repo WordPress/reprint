@@ -23,7 +23,11 @@ final class Site_Export_Staged_Session_Recovery_Server {
         'staged_session_discard',
     ];
 
-    /** @param array<string,mixed> $staged_options */
+    /**
+     * Authenticates and dispatches one control request without booting WordPress.
+     *
+     * @param array<string,mixed> $staged_options
+     */
     public static function serve(array $staged_options): void {
         $endpoint = $_GET['endpoint'] ?? null;
         if (!is_string($endpoint) || !in_array($endpoint, self::ENDPOINTS, true)) {
