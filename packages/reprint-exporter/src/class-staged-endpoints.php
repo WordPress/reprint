@@ -12,54 +12,143 @@ if (!class_exists('Site_Export_Staged_Apply_Session', false)) {
 }
 
 /**
- * The authenticated target half of multipart push.
+ * Serves the authenticated target-side lifecycle for staged multipart pushes.
  *
- * Routes authenticate their signed request target before this class opens a
- * multipart body. The workspace, not a sender cursor, is the durable source
- * of upload truth; control calls expose only state derived from that tree.
+ * One instance is configured by the target and exposes five signed operations:
+ *
+ * - `staged_session_create` derives an idempotent session id from a signed
+ *   create token and initializes private storage.
+ * - `staged_session_upload` streams many Content-Length MIME parts into that
+ *   workspace and reports only bytes which the target durably accepted.
+ * - `staged_session_status` reconciles a bounded set of sender paths against
+ *   the workspace after a lost or ambiguous upload response.
+ * - `staged_session_commit` advances bounded prepare, live-switch, and cleanup
+ *   work until `send_next_request` becomes false.
+ * - `staged_session_discard` removes private work only before live mutation.
+ *
+ * HMAC authentication covers the HTTP method and exact request target,
+ * including endpoint and session parameters. The router must call
+ * pre_authenticate_envelope() before opening `php://input`; session_upload()
+ * repeats that authentication defensively before constructing the streaming
+ * multipart reader. This prevents an unauthenticated request from making the
+ * target spend time or storage parsing a large body.
+ *
+ * Endpoint methods return an HTTP-neutral envelope instead of emitting output:
+ *
+ *     $result = $endpoints->session_status($route_parameters, $_SERVER);
+ *     http_response_code($result['http_code']);
+ *     echo json_encode($result['body']);
+ *
+ * The private workspace, not any sender cursor, is the durable upload source
+ * of truth. Upload responses and status probes are built from state already
+ * persisted below the target's staging directory. A sender can therefore
+ * retry an idempotent create, resume at a target-confirmed file offset, or
+ * continue a crash-interrupted commit without asking this class to remember
+ * the sender's proposed plan.
  */
 final class Site_Export_Staged_Endpoints {
 
+    /**
+     * Default maximum Content-Length of one MIME part: 4 MiB.
+     *
+     * This is a frame/body-piece policy, not the maximum HTTP request body.
+     * Many bounded parts may travel in one request up to the remote stack's
+     * entity-body limit.
+     */
     private const DEFAULT_MAX_FRAME_BYTES = 4194304;
 
+    /**
+     * Default number of prepare or live-switch actions performed per commit request.
+     *
+     * Bounding work lets ordinary PHP HTTP runtimes checkpoint and return
+     * before their execution limits while the sender drives later requests.
+     */
     private const DEFAULT_COMMIT_STEPS = 8;
 
+    /**
+     * Default maximum complete MIME parts accepted from one upload request.
+     *
+     * The endpoint pauses only between durable parts, never midway through a
+     * body, so this cap limits per-request metadata and response cardinality.
+     */
     private const DEFAULT_MAX_UPLOAD_PARTS = 128;
 
+    /**
+     * Maximum paths whose target-derived state one status request may expose.
+     *
+     * Status exists to reconcile the first ambiguous sent part, not to list a
+     * workspace or mirror the sender's complete plan.
+     */
     private const MAX_STATUS_PATHS = 32;
 
-    /** @var string */
+    /**
+     * Server-owned private root in which apply-session workspaces are stored.
+     *
+     * @var string
+     */
     private $staging_dir;
 
-    /** @var string|null */
+    /**
+     * Shared HMAC secret, or null when signed endpoints are unavailable.
+     *
+     * The value is never included in capability or endpoint responses.
+     *
+     * @var string|null
+     */
     private $secret;
 
-    /** @var string|null */
+    /**
+     * Live site root changed by commit, or null until apply is configured.
+     *
+     * @var string|null
+     */
     private $apply_target_root;
 
-    /** @var string[] */
+    /**
+     * Target-relative paths which staged sessions may not replace or traverse.
+     *
+     * @var string[]
+     */
     private $apply_protected_paths;
 
-    /** @var bool */
+    /** @var bool Whether create, upload, status, commit, and discard are enabled. */
     private $apply_sessions_enabled;
 
-    /** @var int */
+    /** @var int Allowed HMAC timestamp skew in seconds. */
     private $timestamp_tolerance;
 
-    /** @var int */
+    /** @var int Maximum declared body bytes accepted for one MIME part. */
     private $max_frame_bytes;
 
-    /** @var int */
+    /** @var int Maximum deployment actions advanced by one commit request. */
     private $max_commit_steps;
 
-    /** @var int */
+    /** @var int Maximum complete MIME parts accepted from one upload request. */
     private $max_upload_parts;
 
-    /** @var int|null */
+    /**
+     * PHP's parsed post_max_size in bytes, or null when PHP reports no useful cap.
+     *
+     * This seeds sender request sizing. A front proxy may enforce a smaller
+     * invisible limit, which the sender learns from HTTP 413 responses.
+     *
+     * @var int|null
+     */
     private $post_max_bytes;
 
     /**
+     * Configures signed endpoint policy and snapshots PHP's request-body limit.
+     *
+     * Supported options are `staging_dir`, `secret`, `apply_target_root`,
+     * `apply_protected_paths`, `apply_sessions_enabled`, `timestamp_tolerance`,
+     * `max_frame_bytes`, `max_commit_steps`, and `max_upload_parts`. Optional
+     * values receive the constants documented above; a supplied invalid value
+     * throws instead of silently selecting its default.
+     *
      * @param array<string,mixed> $options Server-owned configuration.
+     *
+     * @throws InvalidArgumentException If a supplied option has the wrong type
+     *     or a numeric limit is not positive.
      */
     public function __construct(array $options) {
         $staging_dir = $options['staging_dir'] ?? null;
@@ -122,9 +211,16 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
-     * Authenticate before the dispatcher opens or parses a request body.
+     * Authenticates a signed request target before the dispatcher opens its body.
      *
-     * @return array{http_code:int,body:array}|null
+     * Null means authentication succeeded. Missing target configuration may be
+     * returned as 503, while every other authentication failure is deliberately
+     * collapsed to a generic 403 so the pre-body gate does not disclose HMAC
+     * validation details to an unauthenticated peer.
+     *
+     * @param array<string,mixed> $headers Request method, URI, and HMAC headers.
+     * @param string $expected_endpoint Endpoint value required in the signed URI.
+     * @return array{http_code:int,body:array}|null Rejection envelope, or null.
      */
     public function pre_authenticate_envelope(array $headers, string $expected_endpoint): ?array {
         $response = $this->require_envelope_auth($headers, $expected_endpoint);
@@ -135,10 +231,16 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
-     * Report whether this server can accept a staged push without exposing
-     * its secret or creating session storage as a side effect.
+     * Reports whether current target configuration can accept a staged push.
      *
-     * @return array<string,mixed>
+     * The probe exposes request-sizing hints but never the HMAC secret. It does
+     * not create storage: for a missing staging directory it walks upward to an
+     * existing real parent and compares that parent's device with the live
+     * target. create() repeats the authoritative checks when work actually
+     * begins, closing the race between capability inspection and use.
+     *
+     * @return array<string,mixed> Availability, filesystem compatibility,
+     *     reason when unavailable, and target request/part limits.
      */
     public function get_preflight_capability(): array {
         $capability = [
@@ -199,9 +301,14 @@ final class Site_Export_Staged_Endpoints {
      * Creates or reopens the deterministic session derived from a signed token.
      *
      * Replaying a request after a lost response therefore finds the same
-     * workspace instead of orphaning one session and creating another.
+     * workspace instead of orphaning one session and creating another. The
+     * session id is an HMAC-derived target value; the sender chooses only the
+     * random create token and cannot select an existing workspace directly.
      *
-     * @return array{http_code:int,body:array}
+     * @param array<string,mixed> $config Dispatcher parameters, checked against
+     *     the same values in the signed request target.
+     * @param array<string,mixed> $headers Request method, URI, and HMAC headers.
+     * @return array{http_code:int,body:array} Creation or stable rejection envelope.
      */
     public function session_create(array $config, array $headers): array {
         if (($method = $this->require_method($headers, 'POST')) !== null) {
@@ -243,10 +350,23 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
-     * Stream one multipart/mixed request into the session workspace.
+     * Streams one multipart/mixed request into the session workspace.
      *
+     * Authentication and session identity are resolved before the body reader
+     * is created. The endpoint then drives one complete part at a time and
+     * retains only the target-confirmed result records needed for this response.
+     * If the configured part-count cap is reached, parsing stops between parts
+     * and `send_next_request` tells the sender to open another request. No part
+     * is acknowledged before its contents or metadata have been flushed into
+     * private storage.
+     *
+     * A malformed later part rejects the request, but durable state from earlier
+     * accepted parts remains discoverable through session_status().
+     *
+     * @param array<string,mixed> $config Dispatcher parameters.
+     * @param array<string,mixed> $headers Request method, URI, HMAC, and Content-Type.
      * @param resource|null $input
-     * @return array{http_code:int,body:array}
+     * @return array{http_code:int,body:array} Accepted changes or stable rejection.
      */
     public function session_upload(array $config, array $headers, $input): array {
         if (($method = $this->require_method($headers, 'POST')) !== null) {
@@ -304,9 +424,16 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
-     * Reports only workspace-derived state for the requested paths.
+     * Reports only workspace-derived state for a bounded requested path set.
      *
-     * @return array{http_code:int,body:array}
+     * Paths travel as base64 request-target values because filesystem names are
+     * arbitrary bytes while URLs and JSON are text. The response preserves
+     * request order and reports complete, partial, or missing state plus the
+     * durable accepted byte count. It never accepts a sender offset as evidence.
+     *
+     * @param array<string,mixed> $config Dispatcher parameters.
+     * @param array<string,mixed> $headers Request method, URI, and HMAC headers.
+     * @return array{http_code:int,body:array} Current phase and requested paths.
      */
     public function session_status(array $config, array $headers): array {
         if (($method = $this->require_method($headers, 'GET')) !== null) {
@@ -329,7 +456,13 @@ final class Site_Export_Staged_Endpoints {
     /**
      * Advances a commit by the configured number of deployment actions.
      *
-     * @return array{http_code:int,body:array}
+     * The sender repeats this endpoint while `send_next_request` is true. Each
+     * response reflects the durable checkpoint after that bounded slice, so a
+     * timeout or process death can safely retry the same signed operation.
+     *
+     * @param array<string,mixed> $config Dispatcher parameters.
+     * @param array<string,mixed> $headers Request method, URI, and HMAC headers.
+     * @return array{http_code:int,body:array} Durable commit progress or rejection.
      */
     public function session_commit(array $config, array $headers): array {
         if (($method = $this->require_method($headers, 'POST')) !== null) {
@@ -349,7 +482,14 @@ final class Site_Export_Staged_Endpoints {
     /**
      * Discards private work unless live mutation has already begun.
      *
-     * @return array{http_code:int,body:array}
+     * Uploading and preparing sessions can be abandoned because neither has
+     * changed the target. Switching or cleaning sessions return
+     * `commit_required`; those sessions must finish commit so maintenance and
+     * recovery backups are handled by the checkpointed lifecycle.
+     *
+     * @param array<string,mixed> $config Dispatcher parameters.
+     * @param array<string,mixed> $headers Request method, URI, and HMAC headers.
+     * @return array{http_code:int,body:array} Discard confirmation or rejection.
      */
     public function session_discard(array $config, array $headers): array {
         if (($method = $this->require_method($headers, 'POST')) !== null) {
@@ -376,7 +516,9 @@ final class Site_Export_Staged_Endpoints {
      * Verifies that the HTTP method, endpoint, and parameters were signed as
      * the exact request target before any upload body is opened.
      *
-     * @return array{http_code:int,body:array}|null
+     * @param array<string,mixed> $headers Request method, URI, and HMAC headers.
+     * @param string $endpoint Exact endpoint query value expected by the caller.
+     * @return array{http_code:int,body:array}|null Rejection envelope, or null.
      */
     private function require_envelope_auth(array $headers, string $endpoint): ?array {
         if ($this->secret === null || $this->secret === '') {
@@ -396,13 +538,31 @@ final class Site_Export_Staged_Endpoints {
         return $error === null ? null : $this->rejected(403, 'auth_failed', $error);
     }
 
+    /**
+     * Requires the target root and staged-apply switch to be configured.
+     *
+     * Secret availability is checked separately by envelope authentication so
+     * callers receive the protocol's `not_configured` reason at that boundary.
+     *
+     * @throws RuntimeException With endpoint-internal code 2001 when unavailable.
+     */
     private function require_apply_configuration(): void {
         if (!$this->apply_sessions_enabled || $this->apply_target_root === null) {
             throw new RuntimeException('Server configuration has not enabled staged apply sessions.', 2001);
         }
     }
 
-    /** Opens the URI's signed session only when any dispatcher copy agrees. */
+    /**
+     * Opens the URI's signed session only when any dispatcher copy agrees.
+     *
+     * Some routers pass decoded query values separately from REQUEST_URI. The
+     * signed URI remains authoritative; a differing dispatcher value is
+     * rejected before opening private state.
+     *
+     * @param array<string,mixed> $config Dispatcher parameters.
+     * @param array<string,mixed> $headers Request URI and authentication headers.
+     * @return Site_Export_Staged_Apply_Session Validated existing session.
+     */
     private function open_session(array $config, array $headers): Site_Export_Staged_Apply_Session {
         $this->require_apply_configuration();
         $session_id = $this->session_id_from_headers($headers);
@@ -415,6 +575,14 @@ final class Site_Export_Staged_Endpoints {
         );
     }
 
+    /**
+     * Returns the validated session id carried by the signed request target.
+     *
+     * @param array<string,mixed> $headers Request data containing REQUEST_URI.
+     * @return string 32-character lowercase hexadecimal target session id.
+     *
+     * @throws InvalidArgumentException If the URI omits or malforms session_id.
+     */
     private function session_id_from_headers(array $headers): string {
         $parameters = $this->request_target_parameters($headers);
         $session_id = $parameters['session_id'] ?? null;
@@ -427,8 +595,11 @@ final class Site_Export_Staged_Endpoints {
     /**
      * Decodes the bounded path set whose workspace state may be exposed.
      *
+     * A single `path` and a JSON `paths` array may be combined. Values remain
+     * base64 in the signed URL and are decoded only after count and type checks.
+     *
      * @param array<string,mixed> $parameters
-     * @return string[]
+     * @return string[] Raw target-relative path byte strings in request order.
      */
     private function status_paths(array $parameters): array {
         $encoded_paths = [];
@@ -462,7 +633,9 @@ final class Site_Export_Staged_Endpoints {
     /**
      * Rejects an unsigned dispatcher override of a signed URI parameter.
      *
-     * @param array<string,mixed> $config
+     * @param array<string,mixed> $config Dispatcher-decoded parameters.
+     * @param string $name Parameter name being compared.
+     * @param string $signed_value Authoritative value parsed from REQUEST_URI.
      */
     private function require_matching_config_parameter(array $config, string $name, string $signed_value): void {
         if (array_key_exists($name, $config) && $config[$name] !== $signed_value) {
@@ -470,7 +643,14 @@ final class Site_Export_Staged_Endpoints {
         }
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Parses query parameters from the exact request target used for HMAC.
+     *
+     * @param array<string,mixed> $headers Request data containing REQUEST_URI.
+     * @return array<string,mixed> PHP-decoded query parameters, or an empty array.
+     *
+     * @throws InvalidArgumentException If no request target is available.
+     */
     private function request_target_parameters(array $headers): array {
         $request_target = $headers['REQUEST_URI'] ?? null;
         if (!is_string($request_target) || $request_target === '') {
@@ -485,7 +665,13 @@ final class Site_Export_Staged_Endpoints {
         return $parameters;
     }
 
-    /** @return array{http_code:int,body:array}|null */
+    /**
+     * Returns a method-not-allowed envelope unless the exact method matches.
+     *
+     * @param array<string,mixed> $headers Request data containing REQUEST_METHOD.
+     * @param string $expected_method Uppercase method required by the endpoint.
+     * @return array{http_code:int,body:array}|null Rejection envelope, or null.
+     */
     private function require_method(array $headers, string $expected_method): ?array {
         $actual_method = strtoupper((string) ($headers['REQUEST_METHOD'] ?? ''));
         if ($actual_method === $expected_method) {
@@ -494,7 +680,17 @@ final class Site_Export_Staged_Endpoints {
         return $this->rejected(405, 'method_not_allowed', 'Expected ' . $expected_method . '; received ' . ($actual_method === '' ? 'no method' : $actual_method) . '.');
     }
 
-    /** Finds a header across raw, normalized, and HTTP_ SAPI key forms. */
+    /**
+     * Finds a header across raw, normalized, and `HTTP_` SAPI key forms.
+     *
+     * export.php is invoked by more than one server adapter. Normalizing at this
+     * boundary keeps multipart validation independent of each SAPI's header-key
+     * convention.
+     *
+     * @param array<string,mixed> $headers Server and request headers.
+     * @param string $name Canonical HTTP header name.
+     * @return string|null Header value when found.
+     */
     private function header(array $headers, string $name): ?string {
         $server_name = strtoupper(str_replace('-', '_', $name));
         foreach ($headers as $key => $value) {
@@ -514,6 +710,10 @@ final class Site_Export_Staged_Endpoints {
 
     /**
      * Converts session exceptions into the protocol's stable HTTP reasons.
+     *
+     * Endpoint implementations throw precise domain exceptions; this is the
+     * single mapping to public status codes and machine-readable reasons. That
+     * keeps upload, status, commit, and discard error classification aligned.
      *
      * @param callable():array{http_code:int,body:array} $callback
      * @return array{http_code:int,body:array}
@@ -545,7 +745,18 @@ final class Site_Export_Staged_Endpoints {
         }
     }
 
-    /** @return array{http_code:int,body:array} */
+    /**
+     * Builds the common terminal rejection shape used by every endpoint.
+     *
+     * Rejections always set `send_next_request` false. Recoverable classifications
+     * such as `busy` are interpreted by the sender from `reason`, not by asking
+     * the target to prescribe retry policy.
+     *
+     * @param int $http_code HTTP status emitted by the router.
+     * @param string $reason Stable machine-readable protocol reason.
+     * @param string|null $detail Human-readable condition, when available.
+     * @return array{http_code:int,body:array} Router response envelope.
+     */
     private function rejected(int $http_code, string $reason, ?string $detail = null): array {
         return [
             'http_code' => $http_code,

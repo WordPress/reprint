@@ -1,29 +1,107 @@
 <?php
 
 /**
- * Incrementally parses multipart/mixed response bytes.
+ * Incrementally parses multipart/mixed response bytes for pull imports.
  *
- * feed() may split a boundary, header, or body at any byte. Complete body
- * bytes are emitted immediately through the callback; the parser retains only
- * the undecidable tail needed to continue when the next fragment arrives.
+ * Network callbacks may split a boundary, header, or body at any byte. Each
+ * fragment is passed to feed(), which emits body bytes as soon as their part is
+ * known and retains only bytes which might belong to an incomplete delimiter or
+ * header. This lets the importer write a large export response progressively
+ * instead of building the response body in memory.
+ *
+ * The callback receives two event shapes. Each completed part may produce any
+ * number of `body` events followed by exactly one `complete` event:
+ *
+ *     $parser = new Site_Export_Multipart_Stream_Parser(
+ *         'export-0123',
+ *         function (array $event) use ($output): void {
+ *             if ($event['type'] === 'body') {
+ *                 fwrite($output, $event['data']);
+ *                 return;
+ *             }
+ *             // The current part is complete; $event['headers'] identifies it.
+ *         }
+ *     );
+ *
+ *     $parser->feed($first_network_fragment);
+ *     $parser->feed($next_network_fragment);
+ *
+ * A Content-Length part is framed by its declared byte count, so boundary-like
+ * bytes inside its body are harmless. For compatibility with older pull
+ * responses, a part without Content-Length is framed by the next boundary and
+ * therefore retains a delimiter-sized tail between feed() calls. This lenient
+ * response parser accepts either LF or CRLF. Staged push request bodies use the
+ * stricter Site_Export_Multipart_Stream_Input instead.
+ *
+ * There is no finish() assertion: the HTTP caller is responsible for treating
+ * a truncated response as a failed transfer. This parser only reports parts it
+ * can complete from bytes supplied to feed().
  */
 class Site_Export_Multipart_Stream_Parser
 {
-    private const MAX_BUFFER_SIZE = 64 * 1024 * 1024; // 64MB
+    /**
+     * Maximum response bytes accepted in the buffer before a parse pass.
+     *
+     * Normal body streaming retains at most a boundary-sized tail. The 64 MiB
+     * ceiling bounds one unexpectedly large network fragment and malformed
+     * responses whose header line never supplies a line ending.
+     */
+    private const MAX_BUFFER_SIZE = 64 * 1024 * 1024;
+
+    /** Parser state which searches for the next opening or closing delimiter. */
     private const STATE_BOUNDARY = 0;
+
+    /** Parser state which accumulates header lines through their blank line. */
     private const STATE_HEADERS = 1;
+
+    /** Parser state which emits the current part's body bytes. */
     private const STATE_BODY = 2;
 
+    /** @var string MIME delimiter including its leading `--`. */
     private $boundary;
+
+    /** @var int Number of bytes in $boundary, used to retain split delimiters. */
     private $boundary_length;
+
+    /**
+     * Bytes not yet decidable in the current parser state.
+     *
+     * @var string
+     */
     private $buffer = "";
+
+    /** @var int One of the STATE_* values describing what parse() expects next. */
     private $state = self::STATE_BOUNDARY;
+
+    /** @var array<string,string> Lowercase headers for the part being emitted. */
     private $current_headers = [];
+
+    /** @var int Body bytes emitted for the current part. */
     private $body_length = 0;
+
+    /**
+     * Declared Content-Length for the current part, or null for boundary framing.
+     *
+     * @var int|null
+     */
     private $body_target = null;
+
+    /**
+     * Receives body and completion events synchronously while feed() advances.
+     *
+     * @var callable(array<string,mixed>):void
+     */
     private $chunk_handler;
 
     /**
+     * Creates a parser positioned before the response's first boundary.
+     *
+     * The boundary is supplied without leading `--`; the response's trusted
+     * Content-Type parser is responsible for extracting it. Events are emitted
+     * before feed() returns, so the callback should persist body data rather
+     * than retain it.
+     *
+     * @param string $boundary MIME boundary token without leading `--`.
      * @param callable(array<string,mixed>):void $chunk_handler Receives body
      *     fragments and one completion event for each MIME part.
      */
@@ -34,7 +112,17 @@ class Site_Export_Multipart_Stream_Parser
         $this->chunk_handler = $chunk_handler;
     }
 
-    /** Consumes one arbitrary response fragment and emits every complete event. */
+    /**
+     * Consumes one arbitrary response fragment and emits every decidable event.
+     *
+     * The fragment may end in the middle of any delimiter, header, or body.
+     * Empty fragments are permitted. An oversized input buffer indicates a
+     * malformed or unreasonable response fragment and throws before parsing.
+     *
+     * @param string $data Next bytes received from the HTTP response.
+     *
+     * @throws RuntimeException If undecidable bytes exceed the safety ceiling.
+     */
     public function feed(string $data): void
     {
         $this->buffer .= $data;
@@ -46,7 +134,12 @@ class Site_Export_Multipart_Stream_Parser
         $this->parse();
     }
 
-    /** Advances until the buffered bytes cannot complete the next state. */
+    /**
+     * Advances the state machine until the buffered bytes are insufficient.
+     *
+     * State methods return true only after making a complete transition. A
+     * false result leaves the smallest useful tail for a later feed() call.
+     */
     private function parse(): void
     {
         while (true) {
@@ -66,7 +159,12 @@ class Site_Export_Multipart_Stream_Parser
         }
     }
 
-    /** Consumes one boundary line, retaining a split delimiter for the next feed. */
+    /**
+     * Consumes one boundary line, retaining a split delimiter for the next feed.
+     *
+     * @return bool True after entering header state, false when more bytes are needed
+     *     or the closing delimiter has been consumed.
+     */
     private function parse_boundary(): bool
     {
         // Look for boundary
@@ -103,7 +201,15 @@ class Site_Export_Multipart_Stream_Parser
         return true;
     }
 
-    /** Consumes complete header lines and enters body state at the blank line. */
+    /**
+     * Consumes complete header lines and enters body state at the blank line.
+     *
+     * Header names are normalized to lowercase for callback consumers. This
+     * compatibility parser ignores malformed lines without a colon rather than
+     * rejecting an otherwise usable legacy pull response.
+     *
+     * @return bool True after entering body state, false when a line is incomplete.
+     */
     private function parse_headers(): bool
     {
         while (true) {
@@ -158,7 +264,12 @@ class Site_Export_Multipart_Stream_Parser
         }
     }
 
-    /** Selects declared-length framing when present, or boundary framing otherwise. */
+    /**
+     * Selects declared-length framing when present, or boundary framing otherwise.
+     *
+     * Body accounting is reset here, exactly once after each complete header
+     * block, before any body event can be emitted.
+     */
     private function prepare_body(): void
     {
         $this->state = self::STATE_BODY;
@@ -170,7 +281,16 @@ class Site_Export_Multipart_Stream_Parser
             : null;
     }
 
-    /** Emits decidable body bytes and returns true only when the part is complete. */
+    /**
+     * Emits decidable body bytes and returns true only when the part is complete.
+     *
+     * Declared-length bodies can be emitted through their exact final byte.
+     * Boundary-framed bodies keep enough trailing bytes to recognize a delimiter
+     * split across the next feed() call.
+     *
+     * @return bool True after emitting the part's completion event, false when
+     *     more response bytes are required.
+     */
     private function parse_body(): bool
     {
         // If we know the content length, read exactly that many bytes
@@ -239,7 +359,12 @@ class Site_Export_Multipart_Stream_Parser
         return true;
     }
 
-    /** Consumes the MIME line ending between a body and its next boundary. */
+    /**
+     * Consumes the optional MIME line ending before the next boundary.
+     *
+     * Both CRLF and LF are accepted because this parser reads historical pull
+     * responses. The staged push request reader deliberately requires CRLF.
+     */
     private function skip_crlf(): void
     {
         if (
@@ -256,6 +381,7 @@ class Site_Export_Multipart_Stream_Parser
     /**
      * Finds the first line ending at or after an offset.
      *
+     * @param int $offset First buffer position which may terminate the line.
      * @return int|false Position after the line ending, or false when incomplete.
      */
     private function find_line_end(int $offset)
@@ -278,7 +404,11 @@ class Site_Export_Multipart_Stream_Parser
         return false;
     }
 
-    /** Emits one non-empty body fragment with its part headers. */
+    /**
+     * Emits one non-empty body fragment with a snapshot of its part headers.
+     *
+     * @param string $data Decidable body bytes to pass through immediately.
+     */
     private function emit_body_chunk(string $data): void
     {
         if ($data === "") {
@@ -292,7 +422,12 @@ class Site_Export_Multipart_Stream_Parser
         ]);
     }
 
-    /** Signals that the current part body has been emitted completely. */
+    /**
+     * Signals that every body byte for the current part has been emitted.
+     *
+     * Completion is a separate event so zero-length parts and a final short
+     * body fragment have the same lifecycle as every other part.
+     */
     private function emit_chunk_complete(): void
     {
         ($this->chunk_handler)([

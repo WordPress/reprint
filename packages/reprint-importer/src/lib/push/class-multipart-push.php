@@ -1,35 +1,129 @@
 <?php
 
 /**
- * Local, resumable driver for the multipart staged-session protocol.
+ * Drives a local source tree through the resumable staged-push protocol.
  *
- * The sender's disk files are deliberately small, streaming records: a
- * source snapshot, a changed-path list, a delete-path list, and one session
- * checkpoint. The checkpoint stores only target-confirmed byte counts. A
- * request whose outcome is unknown is reconciled with target status before a
- * retry; it never treats its own claimed offset as target truth.
+ * This is the sender's high-level lifecycle. A first run scans the source
+ * without following symlinks, externally sorts a JSONL snapshot, and compares
+ * it with the last completed baseline. Changed and deleted paths remain as
+ * disk-backed streaming plans. The driver then creates one target workspace,
+ * uploads many bounded parts per HTTP request, and repeats bounded commit calls
+ * until the target has switched and cleaned every live action.
+ *
+ * Example:
+ *
+ *     $push = new MultipartPush([
+ *         'base_url' => 'https://target.example/export.php',
+ *         'source_root' => '/srv/source-site',
+ *         'state_dir' => '/srv/reprint-state',
+ *         'secret' => getenv('REPRINT_PUSH_SECRET'),
+ *     ]);
+ *
+ *     $result = $push->run();
+ *
+ * run() is intentionally resumable rather than a one-shot transaction. Its
+ * target-specific state directory contains the current source snapshot, the
+ * changed/delete plan files maintained by PushJournal, and one `session.json`
+ * checkpoint. The checkpoint is written before ambiguous operations and holds
+ * local phase/plan cursors, source tokens, target-issued ids, and learned request
+ * sizing. Every stored accepted byte count comes from target confirmation. It
+ * never contains a materialized request body or future in-memory frame list.
+ *
+ * File cursors carry a source token made from size and ctime. If the source
+ * changes between pieces, the next request restarts that logical file at offset
+ * zero so new bytes are never appended behind an old-version prefix. As with
+ * the journal signals, a same-size edit whose ctime lands in the same timestamp
+ * second can escape this token; callers which require a frozen source should
+ * snapshot it before pushing.
+ *
+ * An upload response may be lost after the target accepted bytes. In that case
+ * this driver asks status for the first uncertain path and resumes only from
+ * the target's workspace-derived offset. It never promotes its own attempted
+ * offset to confirmed state. Structural source changes which invalidate the
+ * disk plan discard the still-private target session and require a new scan.
  */
 class MultipartPush
 {
+    /**
+     * Memory budget given to the external merge sort for a source snapshot.
+     *
+     * Larger sites spill sorted runs to disk; this 4 MiB value is not a bound on
+     * the snapshot or source tree itself.
+     */
     private const SNAPSHOT_SORT_MEMORY_BYTES = 4 * 1024 * 1024;
+
+    /**
+     * Sender-side ceiling for one NUL-delimited delete-list payload.
+     *
+     * The target's advertised part limit may reduce it further. Keeping delete
+     * payloads at 256 KiB also bounds the string assembled from JSONL records.
+     */
     private const DELETE_PART_BYTES = 256 * 1024;
+
+    /**
+     * Sender-side maximum MIME parts placed in one HTTP request.
+     *
+     * The target may advertise a smaller cap. This independent ceiling bounds
+     * response confirmation records and work performed before a checkpoint.
+     */
     private const MAX_PARTS_PER_REQUEST = 128;
+
+    /**
+     * Maximum bytes read for one JSONL changed/delete plan record.
+     *
+     * Plan lines contain metadata for one path. The cap detects an incomplete
+     * or corrupted file without reading an unbounded line into memory.
+     */
     private const MAX_PLAN_LINE_BYTES = 16384;
 
+    /** @var string Exporter API URL, including any required API selector query. */
     private string $base_url;
+
+    /** @var string Canonical real directory scanned as the local source tree. */
     private string $source_root;
+
+    /** @var string Root containing target-specific local push state. */
     private string $state_dir;
+
+    /** @var string Target-specific subdirectory selected by PushJournal::site_key(). */
     private string $site_dir;
+
+    /** @var string Atomic local checkpoint for the active target session. */
     private string $session_path;
+
+    /** @var string Sorted JSONL snapshot captured at the start of the current push. */
     private string $snapshot_path;
+
+    /** @var string Shared secret used to sign target control and upload requests. */
     private string $secret;
+
+    /** @var bool Whether an explicit insecure http:// base URL is permitted. */
     private bool $allow_http;
+
+    /** @var bool Whether lifecycle progress is written to STDERR. */
     private bool $verbose;
 
-    /** @var PushJournal */
+    /**
+     * Maintains the completed baseline and disk-backed changed/delete plans.
+     *
+     * @var PushJournal
+     */
     private $journal;
 
-    /** @param array<string,mixed> $options */
+    /**
+     * Configures one source/target pair and opens its local state namespace.
+     *
+     * Required options are `base_url`, `source_root`, `state_dir`, and `secret`.
+     * `allow_http` defaults to false and exists only for an explicitly selected
+     * development target; `verbose` defaults to false. The source root must be
+     * a real directory rather than a symlink. Relative state directories are
+     * resolved against the current working directory and created mode 0700.
+     *
+     * @param array<string,mixed> $options Sender-owned configuration.
+     *
+     * @throws InvalidArgumentException If required configuration is missing or unsafe.
+     * @throws RuntimeException If the local state directory cannot be created.
+     */
     public function __construct(array $options)
     {
         foreach (['base_url', 'source_root', 'state_dir', 'secret'] as $required) {
@@ -65,12 +159,25 @@ class MultipartPush
     }
 
     /**
-     * Resumes or completes the local scan, upload, and commit lifecycle.
+     * Starts, resumes, or completes the scan, upload, and commit lifecycle.
      *
      * Dry runs build the same disk-backed snapshot and plans without creating
-     * a target session. Abort delegates to abort() before any new work begins.
+     * a target session, which makes their changed/deleted counts representative
+     * without mutating the target. A normal first run persists its create token
+     * before contacting the target, then checkpoints every target-confirmed
+     * cursor and learned request-size decision. Re-running after an exception
+     * continues the active phase rather than rescanning underneath it.
      *
-     * @return array<string,mixed>
+     * After target commit completes, the starting snapshot atomically becomes
+     * the next local baseline and the active session checkpoint is removed.
+     * Passing $abort delegates to abort() before any new scan or upload work.
+     *
+     * @param bool $dry_run Whether to stop after writing the local snapshot and plans.
+     * @param bool $abort Whether to discard an existing private target session.
+     * @return array<string,mixed> Completion, dry-run, or abort status plus path counts.
+     *
+     * @throws RuntimeException If local state, source files, transport, or target
+     *     protocol state cannot be advanced safely.
      */
     public function run(bool $dry_run = false, bool $abort = false): array
     {
@@ -134,7 +241,13 @@ class MultipartPush
     /**
      * Combines the local phase with target-derived session status.
      *
-     * @return array<string,mixed>
+     * Before create returns, status can only report the persisted local
+     * `creating` phase. Once a target session id exists, this sends the normal
+     * signed status control request and annotates its response with the local
+     * phase and current target-confirmed file cursor. It does not advance either
+     * upload or commit.
+     *
+     * @return array<string,mixed> Local/remote phase and suggested next action.
      */
     public function status(): array
     {
@@ -170,10 +283,15 @@ class MultipartPush
     /**
      * Discards private target work that has not begun live mutation.
      *
-     * A session that has begun live mutation must be resumed to completion
-     * and is deliberately not removable through this path.
+     * If a create response was lost, the persisted create token is replayed to
+     * recover the deterministic target session before discard. The local
+     * checkpoint is removed only after the target confirms deletion. A session
+     * that has begun live mutation must instead be resumed to completion and is
+     * deliberately not removable through this path.
      *
-     * @return array<string,mixed>
+     * @return array<string,mixed> `aborted` or `no_active_push` status.
+     *
+     * @throws RuntimeException If target commit has begun or discard is not confirmed.
      */
     public function abort(): array
     {
@@ -217,6 +335,7 @@ class MultipartPush
      * retried without creating a second workspace.
      *
      * @param array<string,mixed> $state
+     * @param MultipartPushStreamClient $client Signed target client.
      */
     private function create_or_reopen_session(array &$state, MultipartPushStreamClient $client): void
     {
@@ -250,6 +369,10 @@ class MultipartPush
 
     /**
      * Writes a sorted source snapshot and disk-backed changed/delete plans.
+     *
+     * The recursive scan writes in filesystem order to a temporary JSONL file;
+     * ExternalMergeSort then orders decoded path bytes within a fixed memory
+     * budget before PushJournal performs its streaming merge diff.
      *
      * @return array{changed:int,deleted:int}
      */
@@ -286,7 +409,10 @@ class MultipartPush
      * Scans without following links and records only uploadable leaves, empty
      * directories, and existence markers for non-empty directory trees.
      *
-     * @param resource $handle
+     * @param string $directory Absolute directory currently being scanned.
+     * @param string $relative_path Target-relative path of that directory.
+     * @param resource $handle Writable unsorted snapshot stream.
+     * @param int|null $directory_ctime Parent-supplied lstat ctime for this directory.
      */
     private function scan_directory(string $directory, string $relative_path, $handle, ?int $directory_ctime): void
     {
@@ -337,7 +463,21 @@ class MultipartPush
         }
     }
 
-    /** @param resource $handle */
+    /**
+     * Writes one binary-safe source identity record to the unsorted snapshot.
+     *
+     * Paths and symlink targets are base64 because JSON accepts only UTF-8 text.
+     * File size and ctime are the same drift signals stored beside resumable
+     * cursors; the logical type distinguishes files, links, empty directories,
+     * and private non-empty tree markers.
+     *
+     * @param resource $handle Writable temporary snapshot stream.
+     * @param string $path Target-relative source path.
+     * @param string $type Snapshot logical type.
+     * @param int $size lstat size in bytes.
+     * @param int $ctime lstat change timestamp in seconds.
+     * @param string|null $target Literal symlink target, when applicable.
+     */
     private function write_snapshot_entry($handle, string $path, string $type, int $size, int $ctime, ?string $target = null): void
     {
         $entry = [
@@ -358,7 +498,12 @@ class MultipartPush
     /**
      * Sends bounded delete-list parts and persists only target-confirmed offsets.
      *
+     * Delete replay is idempotent at commit planning, so an indeterminate
+     * response retries the same complete NUL-delimited records. The JSONL byte
+     * offset moves only after an accepted response confirms the part type.
+     *
      * @param array<string,mixed> $state
+     * @param MultipartPushStreamClient $client Active target client.
      */
     private function upload_deletes(array &$state, MultipartPushStreamClient $client): void
     {
@@ -396,6 +541,12 @@ class MultipartPush
     /**
      * Reads complete delete records up to one bounded MIME-part payload.
      *
+     * The returned offset always lands after a complete JSONL source record;
+     * the payload always lands after a NUL path delimiter. One record too large
+     * for the target part ceiling fails explicitly instead of being split.
+     *
+     * @param int $offset Confirmed byte offset in the JSONL delete plan.
+     * @param int $maximum_bytes Target-advertised one-part ceiling.
      * @return array{0:string,1:int}
      */
     private function read_delete_part(int $offset, int $maximum_bytes): array
@@ -451,6 +602,7 @@ class MultipartPush
      * an unknown response is reconciled through status before reuse.
      *
      * @param array<string,mixed> $state
+     * @param MultipartPushStreamClient $client Active target client.
      */
     private function upload_changes(array &$state, MultipartPushStreamClient $client): void
     {
@@ -574,6 +726,8 @@ class MultipartPush
      * next snapshot diff is the deeper change-detection net.
      *
      * @param array<string,mixed> $state
+     * @param string $path Current target-relative file path.
+     * @param array<string,mixed>|null $working_file In-request cursor not yet checkpointed.
      * @return array<string,mixed>
      */
     private function prepare_file_part(array &$state, string $path, ?array $working_file): array
@@ -628,7 +782,11 @@ class MultipartPush
     /**
      * Revalidates a directory or symlink immediately before sending it.
      *
-     * @param array<string,mixed> $entry
+     * Empty directories must still be empty; symlinks must still be links with
+     * non-empty literal targets. Returning null triggers a fresh whole-tree scan
+     * rather than applying metadata from a stale structural plan.
+     *
+     * @param array<string,mixed> $entry Current disk-plan record.
      * @return array<string,mixed>|null Null when the source changed structurally.
      */
     private function prepare_metadata_part(array $entry): ?array
@@ -660,6 +818,10 @@ class MultipartPush
 
     /**
      * Advances local cursors from an ordered, target-confirmed part list.
+     *
+     * Confirmation order, type, path, file size, and accepted byte counts must
+     * match what this request sent. A file observed changing during transmission
+     * remains on the same plan record with a zero cursor and replacement token.
      *
      * @param array<string,mixed> $state
      * @param array<int,array<string,mixed>> $sent
@@ -724,7 +886,12 @@ class MultipartPush
     /**
      * Handles a failed or indeterminate upload without trusting sender offsets.
      *
+     * Terminal failures stop immediately. Retryable results reconcile the first
+     * uncertain path, persist the request sizer's new evidence, and leave later
+     * parts pending for idempotent replay.
+     *
      * @param array<string,mixed> $state
+     * @param MultipartPushStreamClient $client Target client used for status.
      * @param array<string,mixed> $result
      * @param array<string,mixed>|null $first_sent
      */
@@ -745,7 +912,12 @@ class MultipartPush
     /**
      * Reconciles the first indeterminate part with target workspace state.
      *
+     * A file cursor is reused only if the current size-and-ctime token still
+     * matches the sent token. Completed metadata advances its plan record;
+     * missing metadata remains pending and will be replayed.
+     *
      * @param array<string,mixed> $state
+     * @param MultipartPushStreamClient $client Target client used for status.
      * @param array<string,mixed> $sent
      */
     private function recover_first_sent_status(array &$state, MultipartPushStreamClient $client, array $sent): void
@@ -830,6 +1002,8 @@ class MultipartPush
      *
      * The later structural-change error is more useful than a secondary
      * transport failure from this cleanup attempt.
+     *
+     * @param MultipartPushStreamClient $client Client with an open request.
      */
     private function finish_or_discard_open_request(MultipartPushStreamClient $client): void
     {
@@ -845,6 +1019,7 @@ class MultipartPush
      * Drives bounded target commit calls until every deployment action is durable.
      *
      * @param array<string,mixed> $state
+     * @param MultipartPushStreamClient $client Signed control client.
      */
     private function commit(array &$state, MultipartPushStreamClient $client): void
     {
@@ -859,6 +1034,10 @@ class MultipartPush
     /**
      * Reads one changed-path record at a resumable byte offset.
      *
+     * The returned next offset is ftell() after one complete newline-terminated
+     * record, making the JSONL file itself a constant-memory cursor space.
+     *
+     * @param int $offset Confirmed byte offset in the changed-path plan.
      * @return array<string,mixed>|null
      */
     private function read_plan_entry(int $offset): ?array
@@ -903,6 +1082,11 @@ class MultipartPush
     /**
      * Returns the size-and-ctime source token stored beside a resumable cursor.
      *
+     * lstat() deliberately rejects a file which became a symlink or another
+     * type; ctime catches ordinary replacement/content changes which mtime can
+     * hide through touch(), subject to the filesystem timestamp resolution.
+     *
+     * @param string $path Absolute source path.
      * @return array{size:int,ctime:int}|null
      */
     private function regular_file_stat(string $path): ?array
@@ -915,7 +1099,17 @@ class MultipartPush
         return ['size' => (int) $stat['size'], 'ctime' => (int) $stat['ctime']];
     }
 
-    /** Reads at most one configured in-memory piece at an exact source offset. */
+    /**
+     * Reads at most one configured in-memory piece at an exact source offset.
+     *
+     * The bytes actually returned determine the later Content-Length. A short
+     * read is therefore a valid smaller frame, while false is an I/O failure.
+     *
+     * @param string $path Absolute regular-file source path.
+     * @param int $offset Byte offset confirmed for this source token.
+     * @param int $maximum_bytes Positive caller read budget.
+     * @return string Bytes actually read, possibly fewer than requested.
+     */
     private function read_file_piece(string $path, int $offset, int $maximum_bytes): string
     {
         $handle = @fopen($path, 'rb');
@@ -936,7 +1130,12 @@ class MultipartPush
         }
     }
 
-    /** @param array<string,mixed> $state */
+    /**
+     * Returns the validated target-issued session id from a local checkpoint.
+     *
+     * @param array<string,mixed> $state Active local session checkpoint.
+     * @return string 32-character lowercase hexadecimal session id.
+     */
     private function session_id_from_state(array $state): string
     {
         $session_id = $state['session_id'] ?? null;
@@ -946,7 +1145,11 @@ class MultipartPush
         return $session_id;
     }
 
-    /** @return array<string,mixed>|null */
+    /**
+     * Reads the active local session checkpoint when one exists.
+     *
+     * @return array<string,mixed>|null Decoded checkpoint, or null with no active push.
+     */
     private function read_state(): ?array
     {
         if (!is_file($this->session_path)) {
@@ -992,7 +1195,16 @@ class MultipartPush
         }
     }
 
-    /** Builds a client seeded with the checkpoint's learned request sizing. */
+    /**
+     * Builds a client seeded with checkpointed request sizing and part policy.
+     *
+     * A fresh HMAC client is stateless; only PushRequestSizer learning and the
+     * target's one-part ceiling need to survive process boundaries.
+     *
+     * @param array<string,mixed> $sizer_state Persisted adaptive sizing state.
+     * @param int|null $max_part_bytes Target-advertised one-part ceiling.
+     * @return MultipartPushStreamClient Configured streaming client.
+     */
     private function new_client(array $sizer_state, ?int $max_part_bytes = null): MultipartPushStreamClient
     {
         $options = [
@@ -1007,7 +1219,12 @@ class MultipartPush
         return new MultipartPushStreamClient($options);
     }
 
-    /** @param array<string,mixed> $state */
+    /**
+     * Returns the target-advertised maximum payload bytes for one MIME part.
+     *
+     * @param array<string,mixed> $state Active local session checkpoint.
+     * @return int Positive one-part ceiling.
+     */
     private function maximum_part_bytes(array $state): int
     {
         $maximum = $state['max_frame_bytes'] ?? null;
@@ -1017,7 +1234,12 @@ class MultipartPush
         return (int) $maximum;
     }
 
-    /** @param array<string,mixed> $state */
+    /**
+     * Returns the smaller of target and sender MIME-part count ceilings.
+     *
+     * @param array<string,mixed> $state Active local session checkpoint.
+     * @return int Positive per-request part count.
+     */
     private function maximum_upload_parts(array $state): int
     {
         $maximum = $state['max_upload_parts'] ?? self::MAX_PARTS_PER_REQUEST;
@@ -1027,7 +1249,12 @@ class MultipartPush
         return min(self::MAX_PARTS_PER_REQUEST, (int) $maximum);
     }
 
-    /** @param array<string,mixed> $response */
+    /**
+     * Requires the target's machine-readable control status to match expectation.
+     *
+     * @param array<string,mixed> $response Decoded control response.
+     * @param string $expected_status Success status required by this lifecycle step.
+     */
     private function require_control_status(array $response, string $expected_status): void
     {
         if (($response['status'] ?? null) !== $expected_status) {
@@ -1038,13 +1265,26 @@ class MultipartPush
         }
     }
 
+    /**
+     * Builds an absolute source path after validating its relative bytes.
+     *
+     * @param string $relative_path Target-relative source path.
+     * @return string Absolute path below $source_root.
+     */
     private function source_path(string $relative_path): string
     {
         $this->validate_relative_path($relative_path);
         return ($this->source_root === '/' ? '' : $this->source_root) . '/' . $relative_path;
     }
 
-    /** Rejects path traversal and the target-owned maintenance marker. */
+    /**
+     * Rejects path traversal and the target-owned maintenance marker.
+     *
+     * Paths are raw byte strings. Absolute paths, NUL, backslashes, empty/dot
+     * segments, and `.maintenance` are not valid source entries for this push.
+     *
+     * @param string $path Target-relative source path.
+     */
     private function validate_relative_path(string $path): void
     {
         if ($path === '' || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
@@ -1060,11 +1300,22 @@ class MultipartPush
         }
     }
 
+    /**
+     * Encodes arbitrary path bytes for safe terminal and exception text.
+     *
+     * @param string $path Raw filesystem path bytes.
+     * @return string Base64 representation.
+     */
     private function display_path(string $path): string
     {
         return base64_encode($path);
     }
 
+    /**
+     * Writes one lifecycle message only when verbose output is enabled.
+     *
+     * @param string $message Human-readable progress without the push prefix.
+     */
     private function log(string $message): void
     {
         if ($this->verbose) {
@@ -1072,7 +1323,15 @@ class MultipartPush
         }
     }
 
-    /** Adds the exporter API selector without replacing an existing query. */
+    /**
+     * Adds the exporter API selector without replacing an existing query.
+     *
+     * URLs already selecting either supported API parameter are preserved so
+     * caller-provided routing and later HMAC signatures use the same target.
+     *
+     * @param string $base_url User-supplied exporter URL.
+     * @return string URL ready for endpoint query parameters.
+     */
     private function export_api_base_url(string $base_url): string
     {
         $base_url = rtrim($base_url, '?&');

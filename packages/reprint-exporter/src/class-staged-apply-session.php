@@ -5,71 +5,213 @@ if (!class_exists('Site_Export_Multipart_Stream_Input', false)) {
 }
 
 /**
- * One private, resumable push workspace.
+ * Stages and safely applies one resumable push session to a live site tree.
  *
- * Uploads only mutate work/. Files become commit-ready when they move from
- * work/partial/ into work/files/. commit.json is deliberately the only
- * mutable commit checkpoint; session.json identifies immutable session
- * configuration and is never an upload cursor or a positive-change journal.
+ * Uploads mutate only the session's private `work/` directory. File pieces are
+ * appended under `work/partial/` and become eligible for commit only after the
+ * complete file is renamed into `work/files/`. Directories and symlinks are
+ * complete values in `work/files/` as soon as their metadata part is accepted.
+ * Deletes are an append-only JSONL set. The workspace itself is therefore the
+ * source of truth for what the target has accepted; it does not trust or echo a
+ * sender-owned cursor.
+ *
+ * A commit has three durable phases. `preparing` builds private candidates,
+ * `switching` publishes WordPress maintenance mode and replaces live entries,
+ * and `cleaning` removes recovery backups before taking maintenance mode down.
+ * Any changed member below `wp-content/plugins/{plugin}` or
+ * `wp-content/themes/{theme}` is collapsed into one complete replacement unit.
+ * Directory units start from the live tree and overlay staged changes and
+ * deletes; a file or symlink unit is already a complete value and is copied
+ * directly. Maintenance mode therefore protects one complete deployment action
+ * for each plugin or theme instead of exposing its members incrementally.
+ *
+ * Live replacement is a crash-recoverable pair of same-filesystem renames:
+ * live to `work/backups/`, then `work/prepared/` to live. Session storage and
+ * the target root must consequently be on the same device. `commit.json` is
+ * the only mutable commit checkpoint and records enough physical identity to
+ * reconcile a process death between either rename. `session.json` contains
+ * only immutable session configuration; it is neither an upload cursor nor a
+ * journal of positive changes.
+ *
+ * Uploads are caller-driven so every part is persisted before next_change()
+ * returns. The lock must always be released in a finally block:
+ *
+ *     $session->accept_upload($input);
+ *     try {
+ *         while ($session->next_change()) {
+ *             $accepted_change = $session->get_current_change();
+ *         }
+ *     } finally {
+ *         $session->finish_upload();
+ *     }
+ *
+ * Commit work is deliberately bounded for HTTP runtimes. Call commit() again
+ * while `send_next_request` is true. Once switching begins, the session cannot
+ * accept uploads or be discarded; retries must drive it through cleanup so a
+ * partially replaced live tree is never abandoned.
  */
 final class Site_Export_Staged_Apply_Session {
 
+    /** A session or target-wide non-blocking lock is currently owned elsewhere. */
     public const ERROR_BUSY = 1001;
+
+    /** The requested private workspace does not exist. */
     public const ERROR_SESSION_NOT_FOUND = 1002;
+
+    /** A filesystem operation failed without proving the session irrecoverable. */
     public const ERROR_RETRYABLE_IO = 1003;
+
+    /** Live mutation has begun, so the caller must resume commit rather than upload or discard. */
     public const ERROR_COMMIT_REQUIRED = 1004;
+
+    /** The live tree no longer matches the identity captured during preparation. */
     public const ERROR_LIVE_TREE_CHANGED = 1005;
+
+    /** Durable session metadata is structurally invalid and cannot be reconciled safely. */
     public const ERROR_INVALID_STATE = 1006;
 
+    /**
+     * Maximum bytes accepted in a target-relative path or literal symlink target.
+     *
+     * Paths arrive inside headers and delete-list records. Bounding them keeps
+     * diagnostics, private path construction, and an unterminated delete tail
+     * independent of the total request size.
+     */
     private const MAX_PATH_BYTES = 4096;
+
+    /**
+     * Maximum upload body piece read before it is written to private storage.
+     *
+     * This matches Site_Export_Multipart_Stream_Input's hard per-read ceiling,
+     * keeping the target's in-memory payload unit at 256 KiB.
+     */
     private const BODY_PIECE_BYTES = 262144;
+
+    /**
+     * Maximum bytes read from one session or commit JSON metadata file.
+     *
+     * Metadata is target-generated and normally small. The 1 MiB ceiling turns
+     * corruption or replacement with an unexpected large file into a bounded
+     * failure before JSON decoding.
+     */
     private const MAX_METADATA_BYTES = 1048576;
 
-    /** @var string */
+    /**
+     * Canonical server-private storage root containing all apply sessions.
+     *
+     * It is verified to share a filesystem device with $target_root.
+     *
+     * @var string
+     */
     private $storage_dir;
-    /** @var string */
+
+    /**
+     * Canonical live site root whose relative entries are replaced at commit.
+     *
+     * @var string
+     */
     private $target_root;
-    /** @var string */
+
+    /**
+     * Target-derived 32-character hexadecimal identity for this workspace.
+     *
+     * @var string
+     */
     private $session_id;
-    /** @var string[] */
+
+    /**
+     * Target-relative paths which neither changes nor their ancestors may replace.
+     *
+     * This includes the running Reprint code and session storage when it lives
+     * below the target root.
+     *
+     * @var string[]
+     */
     private $protected_paths;
-    /** @var string */
+
+    /** @var string Absolute private directory for this session id. */
     private $session_dir;
-    /** @var string */
+
+    /** @var string Private mutable workspace below $session_dir. */
     private $work_dir;
-    /** @var string */
+
+    /** @var string Complete staged files, directories, and symlinks eligible for commit. */
     private $files_dir;
-    /** @var string */
+
+    /** @var string Incomplete regular files keyed by their final relative paths. */
     private $partial_dir;
-    /** @var string */
+
+    /** @var string Fully materialized replacement entries awaiting live renames. */
     private $prepared_dir;
-    /** @var string */
+
+    /** @var string Former live entries retained until every switch is checkpointed. */
     private $backups_dir;
-    /** @var string */
+
+    /** @var string Append-only JSONL records for validated target-relative deletes. */
     private $deletes_path;
-    /** @var string */
+
+    /** @var string Immutable session id, target root, and protected-path metadata. */
     private $session_metadata_path;
-    /** @var string */
+
+    /** @var string Sole mutable checkpoint for prepare, switch, and cleanup progress. */
     private $commit_path;
-    /** @var string */
+
+    /** @var string Per-session advisory lock shared by upload, status, commit, and discard. */
     private $lock_path;
-    /** @var string */
+
+    /**
+     * Private hard-link identity used to prove ownership of live `.maintenance`.
+     *
+     * @var string
+     */
     private $maintenance_identity_path;
 
-    /** @var resource|null */
+    /**
+     * Open exclusive session lock held for the current multipart request.
+     *
+     * Non-null means accept_upload() succeeded and finish_upload() is required.
+     *
+     * @var resource|null
+     */
     private $upload_lock = null;
-    /** @var Site_Export_Multipart_Stream_Input|null */
+
+    /**
+     * Multipart input currently driven by next_change(), or null outside upload.
+     *
+     * @var Site_Export_Multipart_Stream_Input|null
+     */
     private $upload_input = null;
-    /** @var array<string,mixed>|null */
+
+    /**
+     * Target-confirmed result of the most recent successful next_change() call.
+     *
+     * It is cleared before advancing and when the upload closes, so callers
+     * cannot mistake a previous part's result for current target state.
+     *
+     * @var array<string,mixed>|null
+     */
     private $current_change = null;
-    /** @var int */
+
+    /** @var int Largest declared Content-Length accepted for one part in this request. */
     private $maximum_upload_part_bytes = PHP_INT_MAX;
-    /** @var int */
+
+    /** @var int Largest number of MIME parts accepted in this request. */
     private $maximum_upload_parts = 128;
-    /** @var int */
+
+    /** @var int Parts whose headers have been accepted in the current request. */
     private $upload_parts_read = 0;
 
-    /** @param string[] $protected_paths */
+    /**
+     * Derives every private path for a validated session configuration.
+     *
+     * Construction performs no I/O. create() and open() are the public
+     * factories which canonicalize roots and validate the on-disk layout.
+     *
+     * @param string   $storage_dir Canonical private session storage root.
+     * @param string   $target_root Canonical live site root.
+     * @param string   $session_id Validated target-owned session identity.
+     * @param string[] $protected_paths Normalized target-relative protected paths.
+     */
     private function __construct(string $storage_dir, string $target_root, string $session_id, array $protected_paths) {
         $this->storage_dir = rtrim($storage_dir, '/');
         $this->target_root = rtrim($target_root, '/');
@@ -89,9 +231,22 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Create or reopen the server-derived session id for one create token.
+     * Creates or idempotently reopens the workspace for one target-derived id.
      *
-     * @param string[] $protected_paths
+     * Both roots are canonicalized and required to be real directories on the
+     * same filesystem before any session is exposed. A new workspace receives
+     * mode-0700 staging directories, an advisory lock, and immutable metadata.
+     * If the session id already exists, its complete private layout and stored
+     * configuration must match the current server configuration exactly.
+     *
+     * @param string   $storage_dir Private root in which `apply-sessions/` lives.
+     * @param string   $target_root Live site root changed by commit().
+     * @param string[] $protected_paths Target-relative paths excluded from changes.
+     * @param string   $session_id Target-derived 32-character hexadecimal id.
+     * @return self New or existing validated session.
+     *
+     * @throws InvalidArgumentException If configuration is unsafe or crosses devices.
+     * @throws RuntimeException If creation is busy or private storage cannot be written.
      */
     public static function create(string $storage_dir, string $target_root, array $protected_paths, string $session_id): self {
         self::require_session_id($session_id);
@@ -149,10 +304,20 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Opens an existing workspace only when its private layout is intact and
-     * its immutable target and protected paths still match server configuration.
+     * Opens an existing workspace after verifying its private layout and identity.
      *
-     * @param string[] $protected_paths
+     * The immutable target root and protected paths recorded at creation must
+     * still match server configuration. This prevents a session id created for
+     * one destination from being replayed after the endpoint is reconfigured.
+     *
+     * @param string   $storage_dir Existing private session storage root.
+     * @param string   $target_root Current live site root.
+     * @param string   $session_id Target-owned session identity to open.
+     * @param string[] $protected_paths Current target-relative protected paths.
+     * @return self Validated existing session.
+     *
+     * @throws InvalidArgumentException If configuration is unsafe or crosses devices.
+     * @throws RuntimeException If the session is missing, corrupt, or mismatched.
      */
     public static function open(string $storage_dir, string $target_root, string $session_id, array $protected_paths): self {
         self::require_session_id($session_id);
@@ -171,17 +336,45 @@ final class Site_Export_Staged_Apply_Session {
         return $session;
     }
 
+    /**
+     * Returns the target-owned identity used by control and upload endpoints.
+     *
+     * @return string 32-character lowercase hexadecimal session id.
+     */
     public function get_session_id(): string {
         return $this->session_id;
     }
 
+    /**
+     * Returns the absolute private directory which contains this workspace.
+     *
+     * Recovery tooling uses this path to locate immutable and commit metadata.
+     *
+     * @return string Absolute session directory.
+     */
     public function get_session_directory(): string {
         return $this->session_dir;
     }
 
     /**
-     * Accept one authenticated multipart request. The caller must always call
-     * finish_upload(), including after next_change() throws.
+     * Opens one authenticated multipart request for caller-driven staging.
+     *
+     * This acquires the per-session lock without waiting, repairs any single
+     * incomplete delete-list record left by a process death, and freezes the
+     * target limits used by subsequent next_change() calls. It does not read
+     * the request body. An existing commit checkpoint closes uploads because
+     * the staged final tree has already been frozen.
+     *
+     * The caller must invoke finish_upload() in a finally block after this
+     * method succeeds, including when next_change() throws.
+     *
+     * @param Site_Export_Multipart_Stream_Input $input Validated request-body reader.
+     * @param int $maximum_part_bytes Largest declared part body allowed by target policy.
+     * @param int $maximum_parts Largest number of parts allowed in this request.
+     *
+     * @throws LogicException If another upload is already open on this object.
+     * @throws InvalidArgumentException If either request limit is not positive.
+     * @throws RuntimeException If the session is busy, missing, or already committing.
      */
     public function accept_upload(Site_Export_Multipart_Stream_Input $input, int $maximum_part_bytes = PHP_INT_MAX, int $maximum_parts = 128): void {
         if ($this->upload_lock !== null) {
@@ -224,10 +417,25 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Stage exactly one complete multipart part.
+     * Reads, validates, and durably stages exactly one complete multipart part.
      *
-     * False means the request ended with a clean closing boundary. Invalid
-     * input stops this request before later parts are read.
+     * File parts append only at the byte offset already present in
+     * `work/partial/`; offset zero restarts that path. Complete files are
+     * promoted into `work/files/`. Directory and symlink parts replace their
+     * staged path as complete metadata values, and delete-list parts append
+     * complete NUL-delimited paths as recoverable JSONL records.
+     *
+     * True means get_current_change() now describes target-confirmed durable
+     * state for this part. False means the request ended with a clean closing
+     * boundary. Invalid input makes the remaining request terminal before any
+     * later part is read, while already flushed partial bytes remain available
+     * for status and resume.
+     *
+     * @return bool True after one part is staged, false at the closing boundary.
+     *
+     * @throws LogicException If accept_upload() has not opened a request.
+     * @throws InvalidArgumentException If part headers, offsets, or paths are invalid.
+     * @throws RuntimeException If request input or durable storage fails.
      */
     public function next_change(): bool {
         if ($this->upload_lock === null || $this->upload_input === null) {
@@ -277,7 +485,15 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** Ends the upload request and releases its session lock. */
+    /**
+     * Ends the upload request, clears its transient state, and releases its lock.
+     *
+     * This does not discard durable partial or complete changes. It only closes
+     * the in-process lifecycle started by accept_upload(), making the workspace
+     * available to status, another upload request, or commit.
+     *
+     * @throws LogicException If no upload request is open.
+     */
     public function finish_upload(): void {
         if ($this->upload_lock === null) {
             throw new LogicException('No staged apply upload is open; call accept_upload() first.');
@@ -293,16 +509,34 @@ final class Site_Export_Staged_Apply_Session {
         fclose($lock);
     }
 
-    /** @return array<string,mixed>|null */
+    /**
+     * Returns the target-confirmed result of the most recently staged part.
+     *
+     * A file result reports its durable accepted byte count and whether it is
+     * partial or complete. Metadata and delete-list results report only work
+     * already persisted by the target. Null means no next_change() call has
+     * succeeded in the current upload lifecycle.
+     *
+     * @return array<string,mixed>|null Current target-derived change result.
+     */
     public function get_current_change(): ?array {
         return $this->current_change;
     }
 
     /**
-     * Return only target-derived state for explicitly requested paths.
+     * Returns target-derived upload and commit state for explicitly requested paths.
      *
-     * @param string[] $paths raw target-relative paths
-     * @return array<string,mixed>
+     * Each requested path is inspected in `work/files/` and `work/partial/` at
+     * the time of this call. Missing paths report zero accepted bytes. Sender
+     * offsets are never accepted as input or reflected as truth. The response
+     * also reports the durable commit phase, defaulting to `uploading` before a
+     * commit checkpoint exists.
+     *
+     * @param string[] $paths Raw target-relative paths to inspect.
+     * @return array<string,mixed> Session phase and one state record per path.
+     *
+     * @throws InvalidArgumentException If any requested path is unsafe or protected.
+     * @throws RuntimeException If session state cannot be read consistently.
      */
     public function get_status(array $paths = []): array {
         return $this->with_session_lock(function () use ($paths): array {
@@ -363,6 +597,9 @@ final class Site_Export_Staged_Apply_Session {
      * Offset zero always replaces any earlier partial or complete artifact.
      * A file becomes commit-visible only after its declared total size has
      * been written and the partial file is renamed into work/files/.
+     *
+     * @param array<string,string> $headers Validated MIME headers for the part.
+     * @param int $part_bytes Exact body bytes declared by Content-Length.
      */
     private function stage_file_part(array $headers, int $part_bytes): void {
         foreach ($headers as $name => $unused) {
@@ -450,7 +687,16 @@ final class Site_Export_Staged_Apply_Session {
         ];
     }
 
-    /** Replaces a staged path with an explicitly empty final directory. */
+    /**
+     * Replaces a staged path with an explicitly empty final directory.
+     *
+     * Directory parts have no body. Removing any earlier staged value before
+     * mkdir makes the metadata part a complete replacement rather than a hint
+     * to create parents for later children.
+     *
+     * @param array<string,string> $headers MIME headers containing the encoded path.
+     * @param int $part_bytes Exact body bytes, which must be zero.
+     */
     private function stage_directory_part(array $headers, int $part_bytes): void {
         foreach ($headers as $name => $unused) {
             if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type', 'x-directory-path'], true)) {
@@ -472,7 +718,16 @@ final class Site_Export_Staged_Apply_Session {
         $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'directory', 'accepted_bytes' => 0];
     }
 
-    /** Replaces a staged path with a symlink preserving its literal target. */
+    /**
+     * Replaces a staged path with a symlink preserving its literal target.
+     *
+     * The target is decoded as an arbitrary byte string and is neither resolved
+     * nor followed. This preserves relative links while private-parent checks
+     * prevent a staged link from redirecting later writes outside the workspace.
+     *
+     * @param array<string,string> $headers MIME headers containing path and target.
+     * @param int $part_bytes Exact body bytes, which must be zero.
+     */
     private function stage_symlink_part(array $headers, int $part_bytes): void {
         foreach ($headers as $name => $unused) {
             if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type', 'x-symlink-path', 'x-symlink-target'], true)) {
@@ -501,6 +756,8 @@ final class Site_Export_Staged_Apply_Session {
      *
      * A process death can leave only the last record incomplete; the next
      * request repairs that tail before accepting or reporting session state.
+     *
+     * @param array<string,string> $headers Validated delete-list MIME headers.
      */
     private function stage_delete_list_part(array $headers): void {
         foreach ($headers as $name => $unused) {
@@ -546,11 +803,29 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Advance preparation, switching, or cleanup by a bounded number of
-     * deployment actions. The response deliberately counts only visible live
-     * replacements as files_applied.
+     * Advances the durable commit by a bounded number of deployment actions.
      *
-     * @return array<string,mixed>
+     * The first call freezes uploads by creating `commit.json` and deriving the
+     * final action list from `work/files/` plus deletes. Preparation may span
+     * many calls without maintenance mode because it only copies private
+     * candidates. Switching publishes or refreshes the session-owned WordPress
+     * `.maintenance` marker before any live rename. Cleanup retains maintenance
+     * mode until all switches are checkpointed and recovery backups are gone.
+     *
+     * The same call may cross phase boundaries while budget remains. A retry
+     * resumes from the checkpoint, including a process death between either
+     * rename of one action. The result deliberately counts only visible live
+     * replacements as `files_applied`; private preparation and cleanup do not
+     * inflate that number.
+     *
+     * @param int $maximum_steps Maximum prepare or switch actions in this call.
+     * @return array<string,mixed> Durable phase, progress counts, and whether
+     *     another commit request is required.
+     *
+     * @throws InvalidArgumentException If the step budget is not positive.
+     * @throws RuntimeException If the target is busy, changed, or cannot be
+     *     advanced without losing recovery evidence.
+     *
      */
     public function commit(int $maximum_steps = 1): array {
         if ($maximum_steps <= 0) {
@@ -639,7 +914,21 @@ final class Site_Export_Staged_Apply_Session {
         });
     }
 
-    /** Removes a private session after upload release and before live mutation. */
+    /**
+     * Removes a private session only while abandoning it cannot strand live changes.
+     *
+     * A session may be discarded during upload or preparation because neither
+     * phase has mutated the live tree. Once switching begins, discard is
+     * rejected with ERROR_COMMIT_REQUIRED and commit() must resume to cleanup.
+     * The exclusive session lock remains held until recursive removal finishes,
+     * preventing a concurrent upload from reopening the disappearing workspace.
+     *
+     * @return bool True when the private session directory no longer exists.
+     *
+     * @throws LogicException If this object still has an open upload.
+     * @throws RuntimeException If the session is busy, live mutation began, or
+     *     private storage cannot be removed safely.
+     */
     public function discard_workspace(): bool {
         if ($this->upload_lock !== null) {
             throw new LogicException('Finish the upload before discarding its session.');
@@ -678,7 +967,11 @@ final class Site_Export_Staged_Apply_Session {
     /**
      * Freezes uploads by writing the sole mutable commit checkpoint.
      *
-     * @return array<string,mixed>
+     * The complete action list and maintenance ownership token are persisted
+     * before preparation starts, so every later call operates on the same final
+     * tree even if private upload files are inspected after a process restart.
+     *
+     * @return array<string,mixed> Newly persisted `preparing` checkpoint.
      */
     private function start_commit(): array {
         $this->repair_delete_tail();
@@ -788,7 +1081,14 @@ final class Site_Export_Staged_Apply_Session {
     /**
      * Finds the highest ancestor that must be replaced as a complete tree.
      *
+     * A generic staged leaf needs tree reconstruction when an ancestor is being
+     * deleted, is missing, or is currently a non-directory. A deletion below
+     * the path likewise makes that path the replacement root. Protected
+     * ancestors may be traversed only when they remain real directories and are
+     * never themselves selected for replacement.
+     *
      * @param array<string,bool> $deleted_paths
+     * @return string|null Highest target-relative reconstruction root, if any.
      */
     private function structural_tree_root(string $path, array $deleted_paths): ?string {
         foreach (array_slice(explode('/', $path), 0, -1) as $index => $unused) {
@@ -819,7 +1119,13 @@ final class Site_Export_Staged_Apply_Session {
         return null;
     }
 
-    /** @param array<string,array<string,mixed>> $actions */
+    /**
+     * Indicates whether a path is already covered by a planned complete tree.
+     *
+     * @param string $path Target-relative path being classified.
+     * @param array<string,array<string,mixed>> $actions Actions keyed during planning.
+     * @return bool True for the root or a descendant of a unit/tree action.
+     */
     private function path_is_covered_by_action_tree(string $path, array $actions): bool {
         foreach ($actions as $action) {
             if (($action['kind'] ?? null) !== 'unit' && ($action['kind'] ?? null) !== 'tree') {
@@ -833,6 +1139,12 @@ final class Site_Export_Staged_Apply_Session {
         return false;
     }
 
+    /**
+     * Indicates whether replacing a path would implicitly replace a protected child.
+     *
+     * @param string $path Target-relative potential ancestor.
+     * @return bool True when a protected path is strictly below it.
+     */
     private function is_protected_ancestor(string $path): bool {
         foreach ($this->protected_paths as $protected_path) {
             if (strpos($protected_path, $path . '/') === 0) {
@@ -842,7 +1154,13 @@ final class Site_Export_Staged_Apply_Session {
         return false;
     }
 
-    /** @param array<string,string> $staged_paths */
+    /**
+     * Indicates whether a staged ancestor already materializes this path's subtree.
+     *
+     * @param string $path Target-relative path being classified.
+     * @param array<string,string> $staged_paths Staged path-to-type map.
+     * @return bool True when a different staged path is an ancestor.
+     */
     private function has_staged_ancestor(string $path, array $staged_paths): bool {
         foreach ($staged_paths as $staged_path => $type) {
             if ($path !== $staged_path && strpos($path, $staged_path . '/') === 0) {
@@ -852,7 +1170,13 @@ final class Site_Export_Staged_Apply_Session {
         return false;
     }
 
-    /** @param array<string,bool> $deleted_paths */
+    /**
+     * Indicates whether an ancestor delete already removes this path.
+     *
+     * @param string $path Target-relative path being classified.
+     * @param array<string,bool> $deleted_paths Delete-set lookup table.
+     * @return bool True when a different deleted path is an ancestor.
+     */
     private function has_deleted_ancestor(string $path, array $deleted_paths): bool {
         foreach ($deleted_paths as $deleted_path => $unused) {
             if ($path !== $deleted_path && strpos($path, $deleted_path . '/') === 0) {
@@ -869,6 +1193,7 @@ final class Site_Export_Staged_Apply_Session {
      * retain the identities observed before preparation began.
      *
      * @param array<string,mixed> $state
+     * @param int $index Action index to prepare and enrich in the checkpoint.
      */
     private function prepare_action(array &$state, int $index): void {
         $action = $state['actions'][$index] ?? null;
@@ -927,6 +1252,9 @@ final class Site_Export_Staged_Apply_Session {
      * descendants, and apply staged deletes. A staged file or symlink is
      * already a complete root value and is copied directly; it is never
      * reconstructed as a directory tree.
+     *
+     * @param string $root_path Target-relative root of the replacement unit.
+     * @param string $prepared_path Private destination for the complete value.
      */
     private function prepare_complete_tree(string $root_path, string $prepared_path): void {
         $staged_path = $this->private_path($this->files_dir, $root_path);
@@ -971,7 +1299,13 @@ final class Site_Export_Staged_Apply_Session {
     /**
      * Advances one crash-recoverable two-rename live transition.
      *
+     * A transition checkpoint is persisted before any rename. Reconciliation
+     * may perform both renames now or prove that a prior process already did.
+     * The checkpoint is cleared only after the intended live outcome is proven.
+     *
      * @param array<string,mixed> $state
+     * @param int $index Current action index.
+     * @return bool Whether the prepared identity differs from the prior live one.
      */
     private function switch_action(array &$state, int $index): bool {
         $action = $state['actions'][$index] ?? null;
@@ -1015,6 +1349,7 @@ final class Site_Export_Staged_Apply_Session {
      * proves that this session intentionally moved the entry.
      *
      * @param array<string,mixed> $state
+     * @param int $index Prepared action whose live tree is about to switch.
      */
     private function require_prepared_live_tree(array $state, int $index): void {
         // A durable transition already describes a live rename that may have
@@ -1046,12 +1381,15 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Reconcile exactly one two-rename transition after a process death.
+     * Reconciles exactly one two-rename transition after a process death.
      *
      * The checkpoint is written before the first rename.  We only continue
      * when the live, prepared, and backup identities prove which of those
      * renames completed; an outside writer is never guessed through.
-     *
+     * @param string $live_path Absolute live entry path.
+     * @param string $prepared_path Absolute private replacement path.
+     * @param string $backup_path Absolute private prior-live path.
+     * @param array<string,mixed> $state Durable commit checkpoint to advance.
      */
     private function reconcile_transition(string $live_path, string $prepared_path, string $backup_path, array &$state): void {
         while (true) {
@@ -1172,6 +1510,7 @@ final class Site_Export_Staged_Apply_Session {
      * Checkpoints the identities observed after one rename and before the next.
      *
      * @param array<string,mixed> $state
+     * @param string $stage `backup` or `installed` durable transition stage.
      * @param array<string,mixed>|null $backup
      * @param array<string,mixed>|null $installed
      */
@@ -1190,11 +1529,15 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Compare the stable identity of a path across a rename.
+     * Compares the stable identity of a path across a rename.
      *
      * A rename can change ctime, so the full durable identity used for
      * ordinary outside-writer detection cannot identify the same entry in
      * the small window between rename() and the next checkpoint write.
+     *
+     * @param array<string,mixed>|null $actual Identity observed at the new path.
+     * @param array<string,mixed>|null $expected Identity captured before rename.
+     * @return bool True when type, device, inode, and symlink target prove sameness.
      */
     private function same_physical_entry(?array $actual, ?array $expected): bool {
         if ($actual === null || $expected === null) {
@@ -1280,7 +1623,17 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** Checks both the hard-linked identity and the embedded session token. */
+    /**
+     * Indicates whether a maintenance marker is still owned by this session.
+     *
+     * Ownership requires both the same file identity as the private hard link
+     * and the session/token line in a small bounded body. Neither inode reuse nor
+     * copied marker contents alone is enough to authorize removal.
+     *
+     * @param string $path Live or private marker path to inspect.
+     * @param string $token Commit checkpoint's random maintenance token.
+     * @return bool True only when both identity and contents match.
+     */
     private function maintenance_marker_is_owned(string $path, string $token): bool {
         $identity = $this->path_identity($path);
         $private_identity = $this->path_identity($this->maintenance_identity_path);
@@ -1301,7 +1654,13 @@ final class Site_Export_Staged_Apply_Session {
         return strpos($contents, '// reprint-staged-session:' . $this->session_id . ':' . $token . "\n") !== false;
     }
 
-    /** Claim the one target-wide coordinator before preparation begins. */
+    /**
+     * Claims the one target-wide coordinator before preparation begins.
+     *
+     * Session locks serialize work within one id; this separate claim prevents
+     * two sessions from preparing and switching the same target concurrently.
+     * Reclaiming an existing claim by this session is idempotent after a crash.
+     */
     private function claim_target(): void {
         $this->with_target_lock(function (): void {
             $active_path = $this->storage_dir . '/apply-sessions/target.active';
@@ -1316,7 +1675,12 @@ final class Site_Export_Staged_Apply_Session {
         });
     }
 
-    /** Release only this session's target-wide coordinator claim. */
+    /**
+     * Releases only this session's target-wide coordinator claim.
+     *
+     * A missing or foreign active id is left untouched, so stale cleanup from
+     * this object cannot unlock another commit.
+     */
     private function release_target(): void {
         $this->with_target_lock(function (): void {
             $active_path = $this->storage_dir . '/apply-sessions/target.active';
@@ -1352,7 +1716,15 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** Publishes target-wide coordinator metadata through a temporary rename. */
+    /**
+     * Publishes target-wide coordinator metadata through a flushed temporary rename.
+     *
+     * The path is restricted to the apply-sessions root. Readers therefore see
+     * either the old complete owner id or the new one, never a partial write.
+     *
+     * @param string $path Allowed target coordinator metadata path.
+     * @param string $contents Complete owner record to publish.
+     */
     private function write_target_coordinator_file(string $path, string $contents): void {
         $parent = dirname($path);
         if ($parent !== $this->storage_dir . '/apply-sessions') {
@@ -1381,7 +1753,15 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** @return array<string,string> */
+    /**
+     * Returns commit-visible staged paths and their filesystem types.
+     *
+     * The walk never follows symlinks. Non-empty directories are structural and
+     * omitted; explicitly empty directories are final values and are retained.
+     *
+     * @param string $directory Private staged root to inspect.
+     * @return array<string,string> Target-relative path to file/directory/symlink.
+     */
     private function list_staged_paths(string $directory): array {
         $identity = $this->path_identity($directory);
         if ($identity === null) {
@@ -1401,7 +1781,9 @@ final class Site_Export_Staged_Apply_Session {
      * Non-empty directories are structural parents rather than independent
      * final entries, so their descendants alone enter the action planner.
      *
-     * @param array<string,string> $paths
+     * @param string $directory Current absolute private directory.
+     * @param string $prefix Current target-relative prefix.
+     * @param array<string,string> $paths Collected path-to-type map.
      */
     private function collect_staged_paths(string $directory, string $prefix, array &$paths): void {
         $entries = @scandir($directory);
@@ -1437,7 +1819,14 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** @return array<string,bool> */
+    /**
+     * Returns the validated de-duplicated delete set from durable JSONL records.
+     *
+     * The incomplete final record is repaired before this method is called. Each
+     * decoded path is validated again because the file survives process restarts.
+     *
+     * @return array<string,bool> Target-relative delete paths as lookup keys.
+     */
     private function read_delete_paths(): array {
         $this->repair_delete_tail();
         if ($this->path_identity($this->deletes_path) === null) {
@@ -1470,7 +1859,13 @@ final class Site_Export_Staged_Apply_Session {
         return $paths;
     }
 
-    /** Discard only an incomplete final JSONL record after a killed upload. */
+    /**
+     * Discards only an incomplete final JSONL record after a killed upload.
+     *
+     * Complete newline-terminated records are immutable evidence. If the file
+     * lacks a final newline, truncation returns it to the preceding newline;
+     * malformed complete records are rejected later rather than silently removed.
+     */
     private function repair_delete_tail(): void {
         $identity = $this->path_identity($this->deletes_path);
         if ($identity === null) {
@@ -1523,6 +1918,9 @@ final class Site_Export_Staged_Apply_Session {
      *
      * Directories recurse, symlinks preserve their literal target, and regular
      * files are copied through bounded pieces rather than one in-memory string.
+     *
+     * @param string $source Existing entry to clone.
+     * @param string $destination Absent private destination path.
      */
     private function copy_entry(string $source, string $destination): void {
         $identity = $this->path_identity($source);
@@ -1598,7 +1996,16 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** Overlay staged descendants without following a live or staged link. */
+    /**
+     * Overlays staged descendants onto an existing prepared directory tree.
+     *
+     * Every source child replaces the same destination child. Parent checks and
+     * lstat identities prevent either live or staged symlinks from becoming
+     * traversal points during the recursive overlay.
+     *
+     * @param string $source Staged directory whose descendants win.
+     * @param string $destination Prepared directory being updated.
+     */
     private function overlay_directory(string $source, string $destination): void {
         $identity = $this->path_identity($source);
         if ($identity === null || $identity['type'] !== 'directory') {
@@ -1638,7 +2045,17 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** Performs one atomic rename after proving both sides share a device. */
+    /**
+     * Performs one atomic rename after proving both sides share a device.
+     *
+     * rename() is the commit primitive; falling back to copy-and-delete would
+     * expose partial plugin/theme trees. A device mismatch is therefore a hard
+     * refusal which names both observed device ids.
+     *
+     * @param string $source Existing entry moved atomically.
+     * @param string $destination Absent destination path.
+     * @param string $operation Human-readable action named in failures.
+     */
     private function rename_same_filesystem(string $source, string $destination, string $operation): void {
         $source_identity = $this->path_identity($source);
         $destination_parent_identity = $this->path_identity(dirname($destination));
@@ -1656,7 +2073,15 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** Requires every target parent to be a real same-device directory. */
+    /**
+     * Requires every target parent to be a real same-device directory.
+     *
+     * The method creates no live parents. Action planning must choose a complete
+     * tree root whenever the final entry sits below a missing ancestor; silently
+     * mkdir here would split one intended atomic tree into visible substeps.
+     *
+     * @param string $target_path Absolute live destination path.
+     */
     private function ensure_target_parent(string $target_path): void {
         $relative = substr($target_path, strlen($this->target_root));
         $relative = ltrim($relative, '/');
@@ -1682,6 +2107,11 @@ final class Site_Export_Staged_Apply_Session {
     /**
      * Verifies existing path components stay on the target device and no
      * ancestor is a symlink.
+     *
+     * The final path itself may be a symlink because replacing a symlink is a
+     * valid operation; only ancestor links could redirect traversal.
+     *
+     * @param string $path Validated target-relative path.
      */
     private function assert_target_path_same_filesystem(string $path): void {
         if ($path === '') {
@@ -1712,6 +2142,13 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
+    /**
+     * Builds a private workspace path after proving its root cannot escape the session.
+     *
+     * @param string $root One of this session's private subtree roots.
+     * @param string $relative_path Validated target-relative path.
+     * @return string Absolute private path.
+     */
     private function private_path(string $root, string $relative_path): string {
         $this->validate_path($relative_path);
         $root = rtrim($root, '/');
@@ -1721,15 +2158,24 @@ final class Site_Export_Staged_Apply_Session {
         return $root . '/' . $relative_path;
     }
 
+    /**
+     * Builds an absolute live path from a validated target-relative path.
+     *
+     * @param string $relative_path Target-relative path.
+     * @return string Absolute path below $target_root.
+     */
     private function target_path(string $relative_path): string {
         $this->validate_path($relative_path);
         return $this->target_root === '/' ? '/' . $relative_path : $this->target_root . '/' . $relative_path;
     }
 
     /**
-     * Require private parent components to be actual directories. When
+     * Requires private parent components to be actual directories. When
      * $create_missing is false, a missing parent is safe and simply means
      * there cannot yet be a staged leaf below it.
+     *
+     * @param string $path Absolute private leaf path.
+     * @param bool $create_missing Whether absent parents should be created.
      */
     private function ensure_private_parent(string $path, bool $create_missing = true): void {
         $session_prefix = $this->session_dir . '/';
@@ -1757,7 +2203,12 @@ final class Site_Export_Staged_Apply_Session {
     /**
      * Returns the no-follow filesystem identity persisted in commit checkpoints.
      *
-     * @return array<string,mixed>|null
+     * Entries include type, device, inode, size, and ctime; symlinks also include
+     * the literal target. lstat() keeps an attacker-controlled link from
+     * changing what is identified.
+     *
+     * @param string $path Absolute filesystem path to inspect.
+     * @return array<string,mixed>|null Stable identity, or null when absent.
      */
     private function path_identity(string $path): ?array {
         clearstatcache(true, $path);
@@ -1797,11 +2248,15 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Fingerprint a live entry and every descendant without following links.
+     * Fingerprints a live entry and every descendant without following links.
      *
      * A directory's own lstat identity cannot observe a rewrite of an
-     * existing child file. This bounded-memory digest closes that gap between
-     * candidate preparation and the first live rename.
+     * existing child file. A streaming digest avoids retaining an identity map
+     * for the complete tree while closing that gap between candidate preparation
+     * and the first live rename.
+     *
+     * @param string $path Absolute live entry path.
+     * @return string|null Deterministic SHA-256 digest, or null when absent.
      */
     private function tree_fingerprint(string $path): ?string {
         $identity = $this->path_identity($path);
@@ -1817,7 +2272,10 @@ final class Site_Export_Staged_Apply_Session {
      * Adds one identity and its sorted descendants to a no-follow tree digest.
      *
      * @param resource|object $context
+     * @param string $path Absolute entry currently being hashed.
+     * @param string $relative_path Root-relative path included in the digest.
      * @param array<string,mixed> $identity
+     * @param int $root_device Device id every descendant must retain.
      */
     private function append_tree_fingerprint($context, string $path, string $relative_path, array $identity, int $root_device): void {
         if ((int) $identity['dev'] !== $root_device) {
@@ -1859,7 +2317,14 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** Recursively removes an entry without following symlinks. */
+    /**
+     * Recursively removes an entry without following symlinks.
+     *
+     * A symlink is unlinked as one leaf regardless of its target. Missing paths
+     * are already the desired state and return successfully.
+     *
+     * @param string $path Absolute live or private entry to remove.
+     */
     private function remove_entry(string $path): void {
         $identity = $this->path_identity($path);
         if ($identity === null) {
@@ -1885,7 +2350,12 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** @return array<string,mixed>|null */
+    /**
+     * Reads one bounded JSON object from durable session metadata.
+     *
+     * @param string $path Session or commit metadata path.
+     * @return array<string,mixed>|null Decoded object, or null when absent.
+     */
     private function read_json(string $path): ?array {
         $identity = $this->path_identity($path);
         if ($identity === null) {
@@ -1905,7 +2375,12 @@ final class Site_Export_Staged_Apply_Session {
         return $value;
     }
 
-    /** @param array<string,mixed> $value */
+    /**
+     * Encodes and atomically publishes one bounded session metadata object.
+     *
+     * @param string $path Session or commit metadata destination.
+     * @param array<string,mixed> $value Complete value to persist.
+     */
     private function write_json(string $path, array $value): void {
         $encoded = json_encode($value, JSON_UNESCAPED_SLASHES);
         if ($encoded === false || strlen($encoded) > self::MAX_METADATA_BYTES) {
@@ -1914,7 +2389,17 @@ final class Site_Export_Staged_Apply_Session {
         $this->write_atomic_file($path, $encoded, 0600);
     }
 
-    /** Publishes private metadata only after a complete, flushed temporary write. */
+    /**
+     * Publishes private metadata only after a complete, flushed temporary write.
+     *
+     * The temporary file is created exclusively beside its destination and then
+     * renamed, so recovery observes either the prior complete checkpoint or the
+     * new one. A stale temporary entry is removed without following symlinks.
+     *
+     * @param string $path Final private metadata path.
+     * @param string $contents Complete bytes to publish.
+     * @param int $permissions Mode applied before the final rename.
+     */
     private function write_atomic_file(string $path, string $contents, int $permissions): void {
         $this->ensure_private_parent($path);
         $temporary = $path . '.tmp';
@@ -1940,7 +2425,13 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** @param resource $handle */
+    /**
+     * Writes every byte to a stream whose fwrite() calls may be short.
+     *
+     * @param resource $handle Writable stream.
+     * @param string $contents Complete bytes to write.
+     * @param string $description Human-readable object named in failures.
+     */
     private function write_all($handle, string $contents, string $description): void {
         $offset = 0;
         $length = strlen($contents);
@@ -1983,6 +2474,10 @@ final class Site_Export_Staged_Apply_Session {
      * The workspace is private state, but it is still durable state that can
      * survive a crashed process. Refuse a substituted directory or symlink
      * rather than letting a later lstat() through an unexpected ancestor.
+     *
+     * All required private roots must be real directories and the lock must be
+     * a regular file. Missing optional data files are interpreted by their
+     * individual readers, never by weakening the workspace roots.
      */
     private function assert_workspace_layout(): void {
         foreach ([
@@ -2004,7 +2499,13 @@ final class Site_Export_Staged_Apply_Session {
         }
     }
 
-    /** Verifies immutable session ownership against the current server configuration. */
+    /**
+     * Verifies immutable session ownership against current server configuration.
+     *
+     * The session id, canonical target root, and normalized protected paths must
+     * exactly match the creation metadata. A server reconfiguration cannot
+     * silently retarget a durable workspace created for another tree.
+     */
     private function read_session_metadata(): void {
         $metadata = $this->read_json($this->session_metadata_path);
         if (!is_array($metadata) || ($metadata['version'] ?? null) !== 1 || ($metadata['session_id'] ?? null) !== $this->session_id || !isset($metadata['target_root_b64'])) {
@@ -2033,6 +2534,11 @@ final class Site_Export_Staged_Apply_Session {
 
     /**
      * Rejects a corrupt or internally inconsistent durable commit checkpoint.
+     *
+     * Version, phase names, action record shapes, index bounds, phase/index
+     * consistency, and the basic transition type are checked here. Later
+     * prepare/switch methods validate decoded paths, identities, maintenance
+     * ownership, and transition-stage fields at the point they use them.
      *
      * @param array<string,mixed> $state
      */
@@ -2080,6 +2586,12 @@ final class Site_Export_Staged_Apply_Session {
     /**
      * Rejects path traversal, protected targets, and separately mounted target
      * components before a staged operation mutates the filesystem.
+     *
+     * Paths are raw byte strings relative to the target root. Absolute paths,
+     * empty/dot segments, NUL, backslashes, `.maintenance`, and any overlap with
+     * protected paths are refused before private or live path construction.
+     *
+     * @param string $path Target-relative path to validate.
      */
     private function validate_path(string $path): void {
         if ($path === '' || strlen($path) > self::MAX_PATH_BYTES || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
@@ -2105,6 +2617,18 @@ final class Site_Export_Staged_Apply_Session {
         $this->assert_target_path_same_filesystem($path);
     }
 
+    /**
+     * Decodes one base64 protocol header and optionally validates it as a path.
+     *
+     * Symlink targets use the same binary-safe transport but deliberately skip
+     * target-path validation because their literal relative syntax is data, not
+     * a path traversed by the staging process.
+     *
+     * @param array<string,string> $headers Current part headers.
+     * @param string $header Lowercase required header name.
+     * @param bool $is_target_path Whether to apply target path safety rules.
+     * @return string Raw decoded byte string.
+     */
     private function decode_path_header(array $headers, string $header, bool $is_target_path = true): string {
         $encoded = $headers[$header] ?? null;
         if (!is_string($encoded) || $encoded === '') {
@@ -2120,6 +2644,16 @@ final class Site_Export_Staged_Apply_Session {
         return $value;
     }
 
+    /**
+     * Returns a required decimal header within this server's integer range.
+     *
+     * Leading signs, whitespace, and leading zeroes are rejected so one value
+     * has one wire representation and arithmetic cannot silently overflow.
+     *
+     * @param array<string,string> $headers Current part headers.
+     * @param string $header Lowercase required header name.
+     * @return int Parsed non-negative value.
+     */
     private function require_non_negative_header(array $headers, string $header): int {
         $value = $headers[$header] ?? null;
         if (!is_string($value) || preg_match('/^(?:0|[1-9][0-9]*)$/D', $value) !== 1) {
@@ -2131,7 +2665,16 @@ final class Site_Export_Staged_Apply_Session {
         return (int) $value;
     }
 
-    /** Returns the complete plugin or theme root containing a changed path. */
+    /**
+     * Returns the complete plugin or theme root containing a changed path.
+     *
+     * `wp-content/plugins/foo/a.php` becomes `wp-content/plugins/foo`; the same
+     * applies to themes. Container directories and unrelated paths return null
+     * because they are not independently deployable units.
+     *
+     * @param string $path Validated target-relative path.
+     * @return string|null Atomic deployment-unit root.
+     */
     private function deployment_unit_for_path(string $path): ?string {
         $segments = explode('/', $path);
         if (count($segments) < 3 || $segments[0] !== 'wp-content' || ($segments[1] !== 'plugins' && $segments[1] !== 'themes')) {
@@ -2140,10 +2683,28 @@ final class Site_Export_Staged_Apply_Session {
         return $segments[0] . '/' . $segments[1] . '/' . $segments[2];
     }
 
+    /**
+     * Encodes an arbitrary path byte string for safe text diagnostics.
+     *
+     * @param string $path Raw filesystem path bytes.
+     * @return string Base64 representation safe for JSON and logs.
+     */
     private function describe_path(string $path): string {
         return base64_encode($path);
     }
 
+    /**
+     * Returns a canonical real directory, creating it only when explicitly allowed.
+     *
+     * Symlinked roots are refused because later no-follow checks depend on a
+     * stable directory identity.
+     *
+     * @param string $path Absolute configured path.
+     * @param string $description Human-readable role named in failures.
+     * @param bool $create Whether a missing directory may be created mode 0700.
+     * @return string Canonical absolute directory without a trailing slash,
+     *     except for the filesystem root `/`.
+     */
     private static function require_directory(string $path, string $description, bool $create): string {
         if ($path === '' || $path[0] !== '/') {
             throw new InvalidArgumentException('The ' . $description . ' must be an absolute directory; observed ' . json_encode($path) . '.');
@@ -2158,6 +2719,15 @@ final class Site_Export_Staged_Apply_Session {
         return $real_path === '/' ? '/' : rtrim($real_path, '/');
     }
 
+    /**
+     * Requires two existing roots to report the same filesystem device.
+     *
+     * Commit never falls back from rename to copy-and-delete, so this check is
+     * performed at create/open time before the target accepts upload work.
+     *
+     * @param string $left_path First existing root.
+     * @param string $right_path Second existing root.
+     */
     private static function require_same_filesystem(string $left_path, string $right_path): void {
         $left = @lstat($left_path);
         $right = @lstat($right_path);
@@ -2177,8 +2747,10 @@ final class Site_Export_Staged_Apply_Session {
      * like the installed Reprint plugin. This also covers a configured
      * staging path that did not exist when the WordPress plugin built options.
      *
-     * @param string[] $protected_paths
-     * @return string[]
+     * @param string $storage_dir Canonical private session storage root.
+     * @param string $target_root Canonical live target root.
+     * @param string[] $protected_paths Configured target-relative protected paths.
+     * @return string[] Protected paths including nested session storage, if any.
      */
     private static function protect_session_storage(string $storage_dir, string $target_root, array $protected_paths): array {
         if ($storage_dir === $target_root) {
@@ -2194,13 +2766,26 @@ final class Site_Export_Staged_Apply_Session {
         return $protected_paths;
     }
 
+    /**
+     * Requires the fixed target-owned session id grammar used in paths and HMAC.
+     *
+     * @param string $session_id Proposed session identity.
+     */
     private static function require_session_id(string $session_id): void {
         if (preg_match('/^[a-f0-9]{32}$/D', $session_id) !== 1) {
             throw new InvalidArgumentException('Staged apply session id must be a 32-character lowercase hexadecimal string.');
         }
     }
 
-    /** @param string[] $protected_paths @return string[] */
+    /**
+     * Validates, sorts, and de-duplicates target-relative protected paths.
+     *
+     * Normalization makes immutable session metadata independent of option
+     * order while retaining raw path bytes.
+     *
+     * @param string[] $protected_paths Configured path list.
+     * @return string[] Stable normalized path list.
+     */
     private static function normalize_protected_paths(array $protected_paths): array {
         $normalized = [];
         foreach ($protected_paths as $path) {
@@ -2218,7 +2803,15 @@ final class Site_Export_Staged_Apply_Session {
         return array_values(array_unique($normalized));
     }
 
-    /** Recursively removes private session storage without following symlinks. */
+    /**
+     * Recursively removes private session storage without following symlinks.
+     *
+     * This static variant is used while creation is rolling back and after the
+     * instance lock is held for discard. Any link encountered is unlinked as a
+     * leaf, never traversed.
+     *
+     * @param string $path Private session entry to remove.
+     */
     private static function remove_tree(string $path): void {
         clearstatcache(true, $path);
         $stat = @lstat($path);

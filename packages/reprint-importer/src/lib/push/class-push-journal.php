@@ -13,8 +13,8 @@
  * .import-index.jsonl: one JSON object per line with a base64-encoded path
  * plus ctime, size, and type, sorted by decoded path. Non-empty directories
  * use a private `tree-directory` marker: it is never uploaded, but lets a
- * later diff remove a vanished directory after its last child goes. The push driver
- * captures it at the end of a successful push. A capture writes a
+ * later diff remove a vanished directory after its last child goes. The push
+ * driver captures it at the end of a successful push. A capture writes a
  * temporary file and renames it into place, so a killed process never
  * leaves a truncated baseline for the next push to trust — until the
  * rename lands, the previous baseline stays in effect.
@@ -34,32 +34,76 @@
  * decoded JSON objects match, so JSON field order or escaping changes do not
  * affect the diff. Changed-path output carries the current snapshot entry
  * (path, type, size, ctime, and symlink target where relevant); private
- * tree-directory markers never appear in that list. Delete output
- * carries just a base64 path. The sender still lstat()s immediately before upload; these
+ * tree-directory markers never appear in that list. Delete output carries just
+ * a base64 path. The sender still lstat()s immediately before upload; these
  * fields are the normalized logical-change type, not source truth after the
  * plan was written.
  *
- * With no baseline yet — the first push to a site — every current entry
- * counts as changed and no deletion can be detected.
+ * With no baseline yet — the first push to a site — every uploadable current
+ * entry counts as changed and no deletion can be detected.
  *
  * Producing the current index is the caller's job; this class only
- * compares and stores. The lists belong to the run that produced them:
- * a resumed push reruns the diff (one cheap local pass) rather than
- * trusting lists from an earlier run.
+ * compares and stores. The lists belong to the push which produced them and
+ * remain its stable disk-backed plan when that active session resumes. A new
+ * push replaces both lists from a new snapshot before creating its target
+ * session.
+ *
+ * This journal is deliberately not a record of what the target accepted and
+ * not the target's commit plan. MultipartPush keeps target-confirmed cursors in
+ * its separate session checkpoint, while the target reconstructs accepted work
+ * from its own `work/files/`, `work/partial/`, and delete storage. The baseline
+ * advances only after target commit completes.
+ *
+ * Example:
+ *
+ *     $journal = new PushJournal('/srv/reprint-state', $target_url);
+ *     $summary = $journal->diff_local_files($current_snapshot);
+ *     // Stream the generated push/delete lists, then wait for target commit.
+ *     // After target commit succeeds:
+ *     $journal->capture_local_files_baseline($current_snapshot);
  */
 class PushJournal
 {
+    /**
+     * Target-specific directory containing the baseline and current plan files.
+     *
+     * The directory name is derived from site_key(), separating baselines by
+     * normalized destination identity instead of source-tree location.
+     *
+     * @var string
+     */
     private string $site_dir;
 
-    /** @var string Copy of the local file index from the last completed push. */
+    /**
+     * Copy of the local file index from the last completed target commit.
+     *
+     * @var string
+     */
     public string $local_files_baseline_path;
 
-    /** @var string JSONL file of local paths to push, written by diff_local_files(). */
+    /**
+     * JSONL current-snapshot entries which the active push must materialize.
+     *
+     * @var string
+     */
     public string $local_paths_to_push;
 
-    /** @var string JSONL file of local paths whose deletion should be pushed, written by diff_local_files(). */
+    /**
+     * JSONL base64 paths which existed at baseline and are absent or replaced.
+     *
+     * @var string
+     */
     public string $local_paths_to_delete;
 
+    /**
+     * Selects the local state files for one normalized remote site identity.
+     *
+     * Construction derives paths only; directories are created lazily when a
+     * baseline or diff is written.
+     *
+     * @param string $state_dir Local root shared by push state for all targets.
+     * @param string $site_url Remote site URL used to isolate this baseline.
+     */
     public function __construct(string $state_dir, string $site_url)
     {
         $this->site_dir = rtrim($state_dir, "/") . "/push/" . self::site_key($site_url);
@@ -77,6 +121,11 @@ class PushJournal
      * keeps the directory recognizable when someone lists <state-dir>/push;
      * the hash tells apart URLs whose slugs collide, like a site on port
      * 8080 next to one on 8081.
+     *
+     * @param string $site_url Absolute or host-relative remote site URL.
+     * @return string Filesystem-safe, recognizable target key.
+     *
+     * @throws RuntimeException If the URL has no host component.
      */
     public static function site_key(string $site_url): string
     {
@@ -105,11 +154,15 @@ class PushJournal
     }
 
     /**
-     * Store a copy of the local file index as the new local baseline.
+     * Stores a copy of the local file index as the new local baseline.
      *
      * The push driver calls this at the end of a successful push; from then
      * on "changed locally" means "different from this index". The copy is
      * atomic (temp file + rename) and the source file is left untouched.
+     *
+     * @param string $index_file Sorted JSONL snapshot whose target commit completed.
+     *
+     * @throws RuntimeException If the snapshot is missing or cannot be published.
      */
     public function capture_local_files_baseline(string $index_file): void
     {
@@ -117,7 +170,7 @@ class PushJournal
     }
 
     /**
-     * Compare the current local index against the local baseline and write
+     * Compares the current local index against the local baseline and writes
      * the local paths to push and local paths to delete, replacing any lists
      * from an earlier run.
      *
@@ -132,7 +185,10 @@ class PushJournal
      * line from each input file and the lists go straight to disk, so an
      * index with a million entries costs the same as one with ten.
      *
+     * @param string $current_index_file Path-sorted JSONL snapshot for this push.
      * @return array{changed: int, deleted: int} Entry counts, for the push summary.
+     *
+     * @throws RuntimeException If an index is invalid or plan files cannot be written.
      */
     public function diff_local_files(string $current_index_file): array
     {
@@ -266,13 +322,28 @@ class PushJournal
         return ["changed" => $changed, "deleted" => $deleted];
     }
 
-    /** @param array<string,mixed> $entry */
+    /**
+     * Indicates whether an index entry is a private non-empty directory marker.
+     *
+     * @param array<string,mixed> $entry Decoded snapshot record.
+     * @return bool True for `tree-directory`, which is diff metadata, not upload work.
+     */
     private function is_tree_directory(array $entry): bool
     {
         return ($entry['type'] ?? null) === 'tree-directory';
     }
 
-    /** @param string[] $roots */
+    /**
+     * Indicates whether a path is already covered by a prior replacement root.
+     *
+     * Sorted input makes roots appear before descendants. Suppressing covered
+     * descendants keeps delete plans minimal and avoids contradictory work when
+     * a complete ancestor is already deleted or positively replaced.
+     *
+     * @param string $path Decoded path being classified.
+     * @param string[] $roots Previously emitted decoded roots.
+     * @return bool True when $path is a strict descendant of a root.
+     */
     private function is_below_a_root(string $path, array $roots): bool
     {
         foreach ($roots as $root) {
@@ -284,7 +355,7 @@ class PushJournal
     }
 
     /**
-     * Read the next index line and parse its JSON object.
+     * Reads the next index line and parses its JSON object.
      *
      * All three out-parameters become null at end of file: $entry is the
      * decoded index object, $path the decoded path (for ordering),
@@ -292,6 +363,8 @@ class PushJournal
      *
      * @param resource|null $handle
      * @param array<string, mixed>|null $entry
+     * @param string|null $path Decoded path used for bytewise ordering.
+     * @param string|null $base64_path Original encoded path reused in output.
      */
     private function read_line($handle, ?array &$entry, ?string &$path, ?string &$base64_path): void
     {
@@ -324,8 +397,13 @@ class PushJournal
     }
 
     /**
-     * Copy an index file over a baseline: temp file in the same directory,
-     * then rename, so readers only ever see the old or the new baseline.
+     * Copies an index file over a baseline through an adjacent temporary file.
+     *
+     * The final rename means readers see either the prior completed baseline or
+     * the new complete snapshot, never a partially copied index.
+     *
+     * @param string $target Final baseline path.
+     * @param string $source_index_file Completed snapshot to copy.
      */
     private function replace_file(string $target, string $source_index_file): void
     {
@@ -342,6 +420,12 @@ class PushJournal
         }
     }
 
+    /**
+     * Creates the target-specific journal directory before a write.
+     *
+     * Construction stays side-effect free; capture and diff call this only when
+     * they have output to publish.
+     */
     private function ensure_site_dir(): void
     {
         if (!is_dir($this->site_dir) && !@mkdir($this->site_dir, 0755, true) && !is_dir($this->site_dir)) {

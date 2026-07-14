@@ -12,10 +12,11 @@
  * This class owns the request-body-size decision:
  *
  * - Remote-reported request limits (post_max_size, upload_max_filesize, and
- *   similar) establish the session ceiling, minus a safety margin for host
- *   quirks and the multipart part that may straddle the budget edge. A reverse proxy
- *   or CDN may still reject earlier, so the ceiling is an upper bound, not a
- *   guarantee.
+ *   similar) establish the session ceiling, minus a safety margin for rounding
+ *   and differences between reported and effective host limits. Multipart
+ *   delimiters, part headers, and payload all count inside the resulting
+ *   entity-body budget. A reverse proxy or CDN may still reject earlier, so the
+ *   ceiling is an upper bound, not a guarantee.
  * - Without a useful reported limit, request bodies start at a conservative
  *   32 MiB.
  * - A hard cap (default 1 GiB) bounds every request even when the host
@@ -44,6 +45,20 @@
  * decision state survives get_state()/constructor round-trips so a resumed
  * session keeps the learned safe request size.
  *
+ * Example:
+ *
+ *     $sizer = new PushRequestSizer([], $checkpoint['sizer'] ?? []);
+ *     $sizer->apply_reported_limits([$preflight['post_max_bytes'] ?? null]);
+ *     $request_body_budget = $sizer->request_body_bytes();
+ *
+ *     // After the request receives a conclusive outcome:
+ *     if ($http_status === 413) {
+ *         $sizer->record_too_large();
+ *     } elseif ($accepted_non_empty_request) {
+ *         $sizer->record_success();
+ *     }
+ *     $checkpoint['sizer'] = $sizer->get_state();
+ *
  * This is a sibling of AdaptiveTuner, not an extension of it: AdaptiveTuner
  * tunes how much work a pull request asks for so the exporter fits its time
  * budget, driven by server-reported timing and a throughput average. Push
@@ -52,20 +67,45 @@
  */
 class PushRequestSizer
 {
+    /**
+     * Normalized floor, start, hard cap, safety ratio, and growth holdoff policy.
+     *
+     * @var array{floor_bytes:int,start_bytes:int,max_bytes:int,limit_safety_ratio:float,growth_holdoff_successes:int}
+     */
     private array $config;
 
-    /** @var int Current request body size in bytes. */
+    /**
+     * Current decoded entity-body budget for the next multipart request.
+     *
+     * @var int
+     */
     private int $request_body_bytes;
 
-    /** @var int|null Session ceiling in bytes, null while no limit is known. */
+    /**
+     * Smallest learned session ceiling in bytes, or null before useful evidence.
+     *
+     * A conclusive smaller limit only lowers this value; later successes cannot
+     * erase a refusal already observed during the session.
+     *
+     * @var int|null
+     */
     private ?int $ceiling_bytes;
 
-    /** @var int Successes to absorb after a failure before growing again. */
+    /**
+     * Accepted non-empty requests still required before exponential growth resumes.
+     *
+     * @var int
+     */
     private int $growth_holdoff_remaining;
 
     /**
-     * @param array $config Sizing configuration (merged with defaults, unknown keys ignored).
-     * @param array $state  Persisted sizing state from get_state().
+     * Missing configuration values receive defaults and unknown keys are
+     * ignored. Persisted numeric strings are cast because state commonly comes
+     * through JSON or argv; every restored size is clamped through the current
+     * floor, learned ceiling, and hard cap.
+     *
+     * @param array $config Sizing configuration merged with documented defaults.
+     * @param array $state Persisted sizing state from get_state().
      */
     public function __construct(array $config = [], array $state = [])
     {
@@ -79,8 +119,8 @@ class PushRequestSizer
             // reports a larger limit. Bodies stream, so this is not a memory
             // bound — it only keeps single requests from growing without end.
             "max_bytes" => 1024 * 1024 * 1024,
-            // Fraction of a reported limit usable for the request body; the
-            // rest absorbs MIME delimiters, part headers, and host quirks.
+            // Fraction of a reported limit usable for the complete request
+            // body; the rest covers rounding and effective host-limit quirks.
             "limit_safety_ratio" => 0.9,
             // Successful requests required after a failure before growing again.
             "growth_holdoff_successes" => 3,
@@ -111,7 +151,12 @@ class PushRequestSizer
     }
 
     /**
-     * The body size the next push stream request should stay within, in bytes.
+     * Returns the decoded entity-body budget for the next push request.
+     *
+     * Multipart delimiters, part headers, and payloads count toward this value.
+     * HTTP headers and transfer framing do not.
+     *
+     * @return int Request body budget in bytes.
      */
     public function request_body_bytes(): int
     {
@@ -119,14 +164,14 @@ class PushRequestSizer
     }
 
     /**
-     * Lower the session ceiling from remote-reported request-size limits.
+     * Lowers the session ceiling from remote-reported request-size limits.
      *
      * Accepts raw limit values in bytes, e.g. the preflight response's
      * post_max_bytes and upload_max_bytes. Null and non-positive entries mean
      * "unknown" and are ignored. The smallest known limit, reduced by the
      * safety margin, becomes the ceiling.
      *
-     * @param array $limit_bytes_list List of int|null limit candidates.
+     * @param array $limit_bytes_list List of int|string|null limit candidates.
      * @return array{action:string,request_body_bytes:int} Decision summary.
      */
     public function apply_reported_limits(array $limit_bytes_list): array
@@ -152,7 +197,7 @@ class PushRequestSizer
     }
 
     /**
-     * Record an accepted request; grows toward the ceiling unless a recent
+     * Records an accepted non-empty request and grows unless a recent
      * failure is still being held off.
      *
      * @return array{action:string,request_body_bytes:int} Decision summary.
@@ -174,13 +219,12 @@ class PushRequestSizer
     }
 
     /**
-     * Record a rejection that is known to be size-related: HTTP 413 or a
+     * Records a rejection known to be size-related: HTTP 413 or a
      * structured request_too_large response.
      *
      * The failed size caps the session ceiling so growth cannot retry it.
      * When the server reports its actual entity-body limit, the ceiling drops
-     * below that limit directly instead of
-     * probing downward.
+     * below that limit directly instead of probing downward.
      *
      * @param int|null $reported_max_bytes Server-reported request limit, if any.
      * @return array{action:string,request_body_bytes:int} Decision summary.
@@ -207,7 +251,7 @@ class PushRequestSizer
     }
 
     /**
-     * Record a rejection that may or may not be size-related: timeout, empty
+     * Records a rejection that may or may not be size-related: timeout, empty
      * response, connection reset, or similar during a push stream.
      *
      * Halves the size and holds growth back, but does not cap the ceiling —
@@ -229,6 +273,11 @@ class PushRequestSizer
     }
 
     /**
+     * Returns the adaptive state which must survive a resumed push session.
+     *
+     * Policy configuration is intentionally omitted: the constructor applies
+     * current policy and clamps these learned values when restoring them.
+     *
      * @return array{request_body_bytes:int,ceiling_bytes:?int,growth_holdoff_remaining:int}
      */
     public function get_state(): array
@@ -244,6 +293,7 @@ class PushRequestSizer
      * Lowers the learned per-session ceiling and shrinks the current size
      * when it no longer fits.
      *
+     * @param int $ceiling New evidence-derived ceiling in bytes.
      * @return array{action:string,request_body_bytes:int}
      */
     private function lower_ceiling(int $ceiling): array

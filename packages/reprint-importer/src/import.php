@@ -234,8 +234,9 @@ function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn, i
 
 /**
  * Pull responses still use their callback-oriented parser. It belongs to the
- * exporter package beside the caller-driven request reader so boundary and
- * Content-Length parsing do not fork between the two directions.
+ * exporter package because that package defines the response format. Staged
+ * push requests use a separate, stricter caller-driven reader: pull must retain
+ * compatibility with historical boundary-framed responses and LF line endings.
  */
 if (!class_exists('Site_Export_Multipart_Stream_Parser')) {
     $multipart_parser_source = __DIR__ . '/../../reprint-exporter/src/class-multipart-stream-parser.php';
@@ -247,7 +248,19 @@ if (!class_exists('Site_Export_Multipart_Stream_Parser', false)) {
     throw new RuntimeException('The Reprint exporter multipart parser is not installed. Refresh the exporter package.');
 }
 
-/** Backward-compatible pull-response name used by the importer. */
+/**
+ * Preserves the importer's historical name for the pull-response MIME parser.
+ *
+ * The implementation and callback event contract live in
+ * Site_Export_Multipart_Stream_Parser. Keeping this empty subclass avoids
+ * duplicating parser state while existing importer code can continue to use:
+ *
+ *     $parser = new MultipartStreamParser($boundary, $event_handler);
+ *     $parser->feed($network_fragment);
+ *
+ * This adapter is for streamed pull responses only. Multipart push request
+ * bodies are read on the target by Site_Export_Multipart_Stream_Input.
+ */
 class MultipartStreamParser extends Site_Export_Multipart_Stream_Parser
 {
 }
