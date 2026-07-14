@@ -163,6 +163,41 @@ final class PushJournalTest extends TestCase
         );
     }
 
+    public function testNonEmptyDirectoryModesProduceMetadataChanges(): void
+    {
+        $journal = $this->makeJournal();
+        $baseline = $this->tempDir . '/directory-mode-baseline.jsonl';
+        $current = $this->tempDir . '/directory-mode-current.jsonl';
+        file_put_contents($baseline, json_encode([
+            'path' => base64_encode('existing'),
+            'ctime' => 1,
+            'size' => 0,
+            'type' => 'tree-directory',
+            'mode' => 0755,
+        ]) . "\n");
+        file_put_contents($current, json_encode([
+            'path' => base64_encode('existing'),
+            'ctime' => 2,
+            'size' => 0,
+            'type' => 'tree-directory',
+            'mode' => 0711,
+        ]) . "\n" . json_encode([
+            'path' => base64_encode('new-tree'),
+            'ctime' => 2,
+            'size' => 0,
+            'type' => 'tree-directory',
+            'mode' => 0750,
+        ]) . "\n");
+        $journal->capture_local_files_baseline($baseline);
+
+        $this->assertSame(['changed' => 2, 'deleted' => 0], $journal->diff_local_files($current));
+        $records = array_map(static function (string $line): array {
+            return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        }, file($journal->local_paths_to_push, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
+        $this->assertSame(['directory-mode', 'directory-mode'], array_column($records, 'type'));
+        $this->assertSame([0711, 0750], array_column($records, 'mode'));
+    }
+
     public function testNewChangedDeletedAndUnchangedTogether(): void
     {
         $journal = $this->makeJournal();
@@ -182,6 +217,26 @@ final class PushJournalTest extends TestCase
         // Output order follows the sorted index order.
         $this->assertSame(['added.txt', 'changed.txt'], $this->listPaths($journal->local_paths_to_push));
         $this->assertSame(['deleted.txt'], $this->listPaths($journal->local_paths_to_delete));
+    }
+
+    public function testReplacementRootSurvivesLexicallyInterleavedSiblingPaths(): void
+    {
+        $journal = $this->makeJournal();
+        $baseline = $this->tempDir . '/interleaved-baseline.jsonl';
+        $current = $this->tempDir . '/interleaved-current.jsonl';
+        file_put_contents($baseline, implode("\n", [
+            json_encode(['path' => base64_encode('a'), 'ctime' => 1, 'size' => 0, 'type' => 'tree-directory', 'mode' => 0755]),
+            json_encode(['path' => base64_encode('a/child'), 'ctime' => 1, 'size' => 1, 'type' => 'file', 'mode' => 0644]),
+        ]) . "\n");
+        file_put_contents($current, implode("\n", [
+            json_encode(['path' => base64_encode('a'), 'ctime' => 2, 'size' => 1, 'type' => 'file', 'mode' => 0644]),
+            // `-` sorts before `/`, so this sibling appears before a/child.
+            json_encode(['path' => base64_encode('a-other'), 'ctime' => 2, 'size' => 1, 'type' => 'file', 'mode' => 0644]),
+        ]) . "\n");
+        $journal->capture_local_files_baseline($baseline);
+
+        $this->assertSame(['changed' => 2, 'deleted' => 0], $journal->diff_local_files($current));
+        $this->assertSame([], file($journal->local_paths_to_delete, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
     }
 
     public function testDiffReplacesListsFromAnEarlierRun(): void
@@ -277,6 +332,57 @@ final class PushJournalTest extends TestCase
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('current index file is missing');
         $this->makeJournal()->diff_local_files($this->tempDir . '/no-such-index.jsonl');
+    }
+
+    public function testDiffMemoryDoesNotGrowWithTheNumberOfChangedRoots(): void
+    {
+        $class = realpath(__DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push-journal.php');
+        $this->assertNotFalse($class);
+        $caseRoot = $this->tempDir . '/bounded-memory';
+        mkdir($caseRoot, 0700, true);
+        $script = <<<'PHP'
+require $argv[1];
+$root = $argv[2];
+$current = $root . '/current.jsonl';
+$baseline = $root . '/baseline.jsonl';
+$handle = fopen($current, 'wb');
+for ($index = 0; $index < 500000; ++$index) {
+    $path = sprintf('a-%06d.txt', $index);
+    fwrite($handle, json_encode([
+        'path' => base64_encode($path),
+        'ctime' => 1,
+        'size' => 1,
+        'type' => 'file',
+    ]) . "\n");
+}
+fclose($handle);
+file_put_contents($baseline, json_encode([
+    'path' => base64_encode('z-deleted-tree'),
+    'ctime' => 1,
+    'size' => 0,
+    'type' => 'tree-directory',
+]) . "\n");
+$journal = new PushJournal($root . '/state', 'https://example.com/');
+$journal->capture_local_files_baseline($baseline);
+$summary = $journal->diff_local_files($current);
+if ($summary !== ['changed' => 500000, 'deleted' => 1]) {
+    fwrite(STDERR, json_encode($summary));
+    exit(2);
+}
+PHP;
+        $process = proc_open(
+            [PHP_BINARY, '-d', 'memory_limit=20M', '-r', $script, $class, $caseRoot],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+            $caseRoot
+        );
+        $this->assertIsResource($process);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+
+        $this->assertSame(0, proc_close($process), (string) $stdout . (string) $stderr);
     }
 
     // ------------------------------------------------------------------

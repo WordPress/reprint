@@ -1,5 +1,7 @@
 <?php
 
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Session errors become authenticated API JSON, never HTML output.
+
 if (!class_exists('Site_Export_Multipart_Stream_Input', false)) {
     require_once __DIR__ . '/class-multipart-stream-input.php';
 }
@@ -15,23 +17,26 @@ if (!class_exists('Site_Export_Multipart_Stream_Input', false)) {
  * source of truth for what the target has accepted; it does not trust or echo a
  * sender-owned cursor.
  *
- * A commit has three durable phases. `preparing` builds private candidates,
- * `switching` publishes WordPress maintenance mode and replaces live entries,
- * and `cleaning` removes recovery backups before taking maintenance mode down.
- * Any changed member below `wp-content/plugins/{plugin}` or
- * `wp-content/themes/{theme}` is collapsed into one complete replacement unit.
- * Directory units start from the live tree and overlay staged changes and
- * deletes; a file or symlink unit is already a complete value and is copied
- * directly. Maintenance mode therefore protects one complete deployment action
- * for each plugin or theme instead of exposing its members incrementally.
+ * A commit has four durable phases. `materializing` turns the append-only
+ * upload journals into a disk-backed action plan, `preparing` builds private
+ * candidates, `switching` publishes WordPress maintenance mode and replaces
+ * live entries, and `cleaning` removes recovery backups before taking
+ * maintenance mode down.
+ * Any changed member below a configured deployment container's direct child is
+ * collapsed into one complete replacement unit. Directory units start from the
+ * live tree and overlay staged changes and deletes; a file or symlink unit is
+ * already a complete value and is copied directly. Maintenance mode therefore
+ * protects one complete deployment action for each plugin or theme instead of
+ * exposing its members incrementally.
  *
  * Live replacement is a crash-recoverable pair of same-filesystem renames:
  * live to `work/backups/`, then `work/prepared/` to live. Session storage and
  * the target root must consequently be on the same device. `commit.json` is
  * the only mutable commit checkpoint and records enough physical identity to
  * reconcile a process death between either rename. `session.json` contains
- * only immutable session configuration; it is neither an upload cursor nor a
- * journal of positive changes.
+ * only immutable session configuration. The append-before-publish
+ * `work/staged.jsonl` manifest is the durable cursor used to resume positive
+ * path materialization without trusting sender-owned state.
  *
  * Uploads are caller-driven so every part is persisted before next_change()
  * returns. The lock must always be released in a finally block:
@@ -96,6 +101,9 @@ final class Site_Export_Staged_Apply_Session {
      */
     private const MAX_METADATA_BYTES = 1048576;
 
+    /** Maximum bytes in one target-generated commit-plan JSONL record. */
+    private const MAX_COMMIT_RECORD_BYTES = 32768;
+
     /**
      * Canonical server-private storage root containing all apply sessions.
      *
@@ -129,6 +137,9 @@ final class Site_Export_Staged_Apply_Session {
      */
     private $protected_paths;
 
+    /** @var string[] Target-relative plugin/theme container roots. */
+    private $deployment_roots;
+
     /** @var string Absolute private directory for this session id. */
     private $session_dir;
 
@@ -150,10 +161,13 @@ final class Site_Export_Staged_Apply_Session {
     /** @var string Append-only JSONL records for validated target-relative deletes. */
     private $deletes_path;
 
+    /** @var string Append-before-publish JSONL path evidence for work/files/. */
+    private $staged_paths_path;
+
     /** @var string Immutable session id, target root, and protected-path metadata. */
     private $session_metadata_path;
 
-    /** @var string Sole mutable checkpoint for prepare, switch, and cleanup progress. */
+    /** @var string Sole mutable checkpoint for planning, prepare, switch, and cleanup progress. */
     private $commit_path;
 
     /** @var string Per-session advisory lock shared by upload, status, commit, and discard. */
@@ -165,6 +179,36 @@ final class Site_Export_Staged_Apply_Session {
      * @var string
      */
     private $maintenance_identity_path;
+
+    /** @var string Private disk-backed commit planning directory. */
+    private $commit_work_dir;
+
+    /** @var string One record for each unique candidate action path. */
+    private $action_candidates_path;
+
+    /** @var string Final disk-backed basic action sequence. */
+    private $actions_path;
+
+    /** @var string Prepared actions enriched with live and candidate identities. */
+    private $prepared_actions_path;
+
+    /** @var string Resumable traversal queue for the action currently being prepared. */
+    private $prepare_queue_path;
+
+    /** @var string Disk-backed directory-mode plans grouped by action and path depth. */
+    private $prepare_modes_dir;
+
+    /** @var string Flat hashed exact-delete lookup. */
+    private $delete_index_dir;
+
+    /** @var string Flat hashed lookup for paths having deleted descendants. */
+    private $delete_descendants_index_dir;
+
+    /** @var string Flat hashed exact-staged-entry lookup. */
+    private $staged_index_dir;
+
+    /** @var string Flat hashed current action record lookup. */
+    private $action_index_dir;
 
     /**
      * Open exclusive session lock held for the current multipart request.
@@ -211,12 +255,14 @@ final class Site_Export_Staged_Apply_Session {
      * @param string   $target_root Canonical live site root.
      * @param string   $session_id Validated target-owned session identity.
      * @param string[] $protected_paths Normalized target-relative protected paths.
+     * @param string[] $deployment_roots Normalized plugin/theme container roots.
      */
-    private function __construct(string $storage_dir, string $target_root, string $session_id, array $protected_paths) {
+    private function __construct(string $storage_dir, string $target_root, string $session_id, array $protected_paths, array $deployment_roots) {
         $this->storage_dir = rtrim($storage_dir, '/');
-        $this->target_root = rtrim($target_root, '/');
+        $this->target_root = $target_root === '/' ? '/' : rtrim($target_root, '/');
         $this->session_id = $session_id;
         $this->protected_paths = $protected_paths;
+        $this->deployment_roots = $deployment_roots;
         $this->session_dir = $this->storage_dir . '/apply-sessions/' . $session_id;
         $this->work_dir = $this->session_dir . '/work';
         $this->files_dir = $this->work_dir . '/files';
@@ -224,10 +270,21 @@ final class Site_Export_Staged_Apply_Session {
         $this->prepared_dir = $this->work_dir . '/prepared';
         $this->backups_dir = $this->work_dir . '/backups';
         $this->deletes_path = $this->work_dir . '/deletes.jsonl';
+        $this->staged_paths_path = $this->work_dir . '/staged.jsonl';
         $this->session_metadata_path = $this->session_dir . '/session.json';
         $this->commit_path = $this->session_dir . '/commit.json';
         $this->lock_path = $this->session_dir . '/lock';
         $this->maintenance_identity_path = $this->work_dir . '/maintenance.php';
+        $this->commit_work_dir = $this->work_dir . '/commit';
+        $this->action_candidates_path = $this->commit_work_dir . '/action-candidates.jsonl';
+        $this->actions_path = $this->commit_work_dir . '/actions.jsonl';
+        $this->prepared_actions_path = $this->commit_work_dir . '/prepared-actions.jsonl';
+        $this->prepare_queue_path = $this->commit_work_dir . '/prepare-queue.jsonl';
+        $this->prepare_modes_dir = $this->commit_work_dir . '/prepare-modes';
+        $this->delete_index_dir = $this->commit_work_dir . '/delete-index';
+        $this->delete_descendants_index_dir = $this->commit_work_dir . '/delete-descendants-index';
+        $this->staged_index_dir = $this->commit_work_dir . '/staged-index';
+        $this->action_index_dir = $this->commit_work_dir . '/action-index';
     }
 
     /**
@@ -243,18 +300,20 @@ final class Site_Export_Staged_Apply_Session {
      * @param string   $target_root Live site root changed by commit().
      * @param string[] $protected_paths Target-relative paths excluded from changes.
      * @param string   $session_id Target-derived 32-character hexadecimal id.
+     * @param string[] $deployment_roots Plugin/theme containers whose children switch atomically.
      * @return self New or existing validated session.
      *
      * @throws InvalidArgumentException If configuration is unsafe or crosses devices.
      * @throws RuntimeException If creation is busy or private storage cannot be written.
      */
-    public static function create(string $storage_dir, string $target_root, array $protected_paths, string $session_id): self {
+    public static function create(string $storage_dir, string $target_root, array $protected_paths, string $session_id, array $deployment_roots): self {
         self::require_session_id($session_id);
         $storage_dir = self::require_directory($storage_dir, 'session storage', true);
         $target_root = self::require_directory($target_root, 'apply target root', false);
         $protected_paths = self::protect_session_storage($storage_dir, $target_root, $protected_paths);
         self::require_same_filesystem($storage_dir, $target_root);
         $protected_paths = self::normalize_protected_paths($protected_paths);
+        $deployment_roots = self::normalize_deployment_roots($deployment_roots);
 
         $sessions_dir = $storage_dir . '/apply-sessions';
         if (!is_dir($sessions_dir) && !@mkdir($sessions_dir, 0700, true) && !is_dir($sessions_dir)) {
@@ -270,7 +329,7 @@ final class Site_Export_Staged_Apply_Session {
             if (!flock($creation_lock, LOCK_EX | LOCK_NB)) {
                 throw new RuntimeException('Staged apply session creation is busy. Retry the create request.', self::ERROR_BUSY);
             }
-            $session = new self($storage_dir, $target_root, $session_id, $protected_paths);
+            $session = new self($storage_dir, $target_root, $session_id, $protected_paths, $deployment_roots);
             if (file_exists($session->session_dir) || is_link($session->session_dir)) {
                 $session->assert_workspace_layout();
                 $session->read_session_metadata();
@@ -289,12 +348,17 @@ final class Site_Export_Staged_Apply_Session {
                 self::remove_tree($session->session_dir);
                 throw new RuntimeException('Could not create staged apply session lock.', self::ERROR_RETRYABLE_IO);
             }
+            if (@file_put_contents($session->staged_paths_path, '') === false) {
+                self::remove_tree($session->session_dir);
+                throw new RuntimeException('Could not create the staged positive-path journal.', self::ERROR_RETRYABLE_IO);
+            }
             $session->assert_workspace_layout();
             $session->write_json($session->session_metadata_path, [
                 'version' => 1,
                 'session_id' => $session_id,
                 'target_root_b64' => base64_encode($target_root),
                 'protected_paths_b64' => array_map('base64_encode', $protected_paths),
+                'deployment_roots_b64' => array_map('base64_encode', $deployment_roots),
             ]);
             return $session;
         } finally {
@@ -314,12 +378,13 @@ final class Site_Export_Staged_Apply_Session {
      * @param string   $target_root Current live site root.
      * @param string   $session_id Target-owned session identity to open.
      * @param string[] $protected_paths Current target-relative protected paths.
+     * @param string[] $deployment_roots Current plugin/theme container roots.
      * @return self Validated existing session.
      *
      * @throws InvalidArgumentException If configuration is unsafe or crosses devices.
      * @throws RuntimeException If the session is missing, corrupt, or mismatched.
      */
-    public static function open(string $storage_dir, string $target_root, string $session_id, array $protected_paths): self {
+    public static function open(string $storage_dir, string $target_root, string $session_id, array $protected_paths, array $deployment_roots): self {
         self::require_session_id($session_id);
         $storage_dir = self::require_directory($storage_dir, 'session storage', false);
         $target_root = self::require_directory($target_root, 'apply target root', false);
@@ -327,7 +392,13 @@ final class Site_Export_Staged_Apply_Session {
         self::require_same_filesystem($storage_dir, $target_root);
         $sessions_dir = self::require_directory($storage_dir . '/apply-sessions', 'staged apply sessions', false);
         self::require_same_filesystem($sessions_dir, $target_root);
-        $session = new self($storage_dir, $target_root, $session_id, self::normalize_protected_paths($protected_paths));
+        $session = new self(
+            $storage_dir,
+            $target_root,
+            $session_id,
+            self::normalize_protected_paths($protected_paths),
+            self::normalize_deployment_roots($deployment_roots)
+        );
         if (!file_exists($session->session_dir) && !is_link($session->session_dir)) {
             throw new RuntimeException('The staged apply session does not exist: ' . $session_id . '.', self::ERROR_SESSION_NOT_FOUND);
         }
@@ -403,6 +474,7 @@ final class Site_Export_Staged_Apply_Session {
                 throw new RuntimeException('Uploads are closed because this staged apply session is committing.', self::ERROR_COMMIT_REQUIRED);
             }
             $this->repair_delete_tail();
+            $this->repair_staged_paths_tail();
             $this->upload_lock = $lock;
             $this->upload_input = $input;
             $this->current_change = null;
@@ -469,6 +541,8 @@ final class Site_Export_Staged_Apply_Session {
                 $this->stage_file_part($headers, $part_bytes);
             } elseif ($type === 'directory') {
                 $this->stage_directory_part($headers, $part_bytes);
+            } elseif ($type === 'directory-mode') {
+                $this->stage_directory_mode_part($headers, $part_bytes);
             } elseif ($type === 'symlink') {
                 $this->stage_symlink_part($headers, $part_bytes);
             } elseif ($type === 'delete-list') {
@@ -603,13 +677,14 @@ final class Site_Export_Staged_Apply_Session {
      */
     private function stage_file_part(array $headers, int $part_bytes): void {
         foreach ($headers as $name => $unused) {
-            if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type', 'x-file-path', 'x-file-size', 'x-chunk-offset'], true)) {
+            if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type', 'x-file-path', 'x-file-size', 'x-chunk-offset', 'x-file-mode'], true)) {
                 throw new InvalidArgumentException('Multipart file part does not allow header ' . json_encode($name) . '.');
             }
         }
         $path = $this->decode_path_header($headers, 'x-file-path');
         $total_bytes = $this->require_non_negative_header($headers, 'x-file-size');
         $offset = $this->require_non_negative_header($headers, 'x-chunk-offset');
+        $mode = isset($headers['x-file-mode']) ? $this->require_mode_header($headers, 'x-file-mode') : null;
         if ($offset > $total_bytes || $part_bytes > $total_bytes - $offset) {
             throw new InvalidArgumentException(
                 'File part for ' . $this->describe_path($path) . ' declares offset ' . $offset
@@ -641,6 +716,13 @@ final class Site_Export_Staged_Apply_Session {
                     . ', but work/partial contains ' . $partial_identity['size'] . ' bytes.'
                 );
             }
+            if ($mode !== null && $partial_identity['permissions'] !== $mode) {
+                throw new InvalidArgumentException(
+                    'File part for ' . $this->describe_path($path) . ' declares mode '
+                    . sprintf('0%o', $mode) . ', but work/partial has mode '
+                    . sprintf('0%o', $partial_identity['permissions']) . '. Start at offset 0.'
+                );
+            }
         }
 
         $file = @fopen($partial_path, $offset === 0 ? 'c+b' : 'r+b');
@@ -661,6 +743,9 @@ final class Site_Export_Staged_Apply_Session {
         } finally {
             fclose($file);
         }
+        if ($mode !== null && !@chmod($partial_path, $mode)) {
+            throw new RuntimeException('Could not apply staged file mode for ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+        }
 
         $actual = $this->path_identity($partial_path);
         if ($actual === null || $actual['type'] !== 'file' || $actual['size'] !== $offset + $part_bytes) {
@@ -668,6 +753,11 @@ final class Site_Export_Staged_Apply_Session {
         }
         if ($actual['size'] === $total_bytes) {
             $this->ensure_private_parent($complete_path);
+            // Journal the path before rename makes it commit-visible. A killed
+            // request can therefore leave either a harmless record for an
+            // absent path or both the record and completed staged value, never
+            // a completed value which commit planning cannot resume finding.
+            $this->append_staged_path_record($path);
             if (!@rename($partial_path, $complete_path)) {
                 throw new RuntimeException('Could not promote completed staged file ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
             }
@@ -699,11 +789,12 @@ final class Site_Export_Staged_Apply_Session {
      */
     private function stage_directory_part(array $headers, int $part_bytes): void {
         foreach ($headers as $name => $unused) {
-            if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type', 'x-directory-path'], true)) {
+            if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type', 'x-directory-path', 'x-directory-mode'], true)) {
                 throw new InvalidArgumentException('Multipart directory part does not allow header ' . json_encode($name) . '.');
             }
         }
         $path = $this->decode_path_header($headers, 'x-directory-path');
+        $mode = isset($headers['x-directory-mode']) ? $this->require_mode_header($headers, 'x-directory-mode') : null;
         if ($part_bytes !== 0) {
             throw new InvalidArgumentException('Multipart directory part must have Content-Length 0.');
         }
@@ -712,10 +803,50 @@ final class Site_Export_Staged_Apply_Session {
         // A directory part represents an explicitly empty final directory,
         // not merely a request to create a missing parent.
         $this->remove_entry($target);
+        $this->append_staged_path_record($path);
         if (!is_dir($target) && !@mkdir($target, 0700)) {
             throw new RuntimeException('Could not stage directory ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
         }
+        if ($mode !== null && !@chmod($target, $mode)) {
+            throw new RuntimeException('Could not apply staged directory mode for ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+        }
         $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'directory', 'accepted_bytes' => 0];
+    }
+
+    /**
+     * Records the final mode of a non-empty directory without emptying it.
+     *
+     * The private directory is only an overlay traversal point. Its requested
+     * mode lives in the append-before-publish journal record so a killed
+     * request cannot expose unjournaled metadata.
+     *
+     * @param array<string,string> $headers MIME headers containing path and mode.
+     * @param int $part_bytes Exact body bytes, which must be zero.
+     */
+    private function stage_directory_mode_part(array $headers, int $part_bytes): void {
+        foreach ($headers as $name => $unused) {
+            if (!in_array($name, ['content-length', 'content-type', 'x-chunk-type', 'x-directory-path', 'x-directory-mode'], true)) {
+                throw new InvalidArgumentException('Multipart directory-mode part does not allow header ' . json_encode($name) . '.');
+            }
+        }
+        $path = $this->decode_path_header($headers, 'x-directory-path');
+        $mode = $this->require_mode_header($headers, 'x-directory-mode');
+        if ($part_bytes !== 0) {
+            throw new InvalidArgumentException('Multipart directory-mode part must have Content-Length 0.');
+        }
+        $target = $this->private_path($this->files_dir, $path);
+        $this->ensure_private_parent($target);
+        $identity = $this->path_identity($target);
+        if ($identity !== null && $identity['type'] !== 'directory') {
+            throw new InvalidArgumentException(
+                'Directory mode for ' . $this->describe_path($path) . ' conflicts with a staged ' . $identity['type'] . '.'
+            );
+        }
+        $this->append_staged_path_record($path, ['kind' => 'directory-mode', 'mode' => $mode]);
+        if ($identity === null && !@mkdir($target, 0700) && !is_dir($target)) {
+            throw new RuntimeException('Could not stage directory mode for ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+        }
+        $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'directory-mode', 'accepted_bytes' => 0];
     }
 
     /**
@@ -745,10 +876,38 @@ final class Site_Export_Staged_Apply_Session {
         $target = $this->private_path($this->files_dir, $path);
         $this->ensure_private_parent($target);
         $this->remove_entry($target);
+        $this->append_staged_path_record($path);
         if (!@symlink($target_value, $target)) {
             throw new RuntimeException('Could not stage symlink ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
         }
         $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'symlink', 'accepted_bytes' => 0];
+    }
+
+    /**
+     * Records one path before its completed staged value becomes visible.
+     *
+     * Duplicate records are intentional: restarting or replacing a path
+     * appends new evidence, while commit planning de-duplicates the current
+     * value in its disk-backed index. A record whose value never became visible
+     * is ignored, which makes the append-before-publish ordering crash-safe.
+     */
+    private function append_staged_path_record(string $path, array $metadata = []): void {
+        $encoded = json_encode(['path_b64' => base64_encode($path)] + $metadata, JSON_UNESCAPED_SLASHES);
+        if ($encoded === false || strlen($encoded) + 1 > self::MAX_COMMIT_RECORD_BYTES) {
+            throw new RuntimeException('Could not encode staged positive path ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+        }
+        $handle = @fopen($this->staged_paths_path, 'ab');
+        if ($handle === false) {
+            throw new RuntimeException('Could not open the staged positive-path journal.', self::ERROR_RETRYABLE_IO);
+        }
+        try {
+            $this->write_all($handle, $encoded . "\n", 'staged positive-path journal');
+            if (!fflush($handle)) {
+                throw new RuntimeException('Could not flush the staged positive-path journal.', self::ERROR_RETRYABLE_IO);
+            }
+        } finally {
+            fclose($handle);
+        }
     }
 
     /**
@@ -805,12 +964,13 @@ final class Site_Export_Staged_Apply_Session {
     /**
      * Advances the durable commit by a bounded number of deployment actions.
      *
-     * The first call freezes uploads by creating `commit.json` and deriving the
-     * final action list from `work/files/` plus deletes. Preparation may span
-     * many calls without maintenance mode because it only copies private
-     * candidates. Switching publishes or refreshes the session-owned WordPress
-     * `.maintenance` marker before any live rename. Cleanup retains maintenance
-     * mode until all switches are checkpointed and recovery backups are gone.
+     * The first call freezes uploads by creating `commit.json`. Materialization
+     * then derives a disk-backed action list from the positive-path and delete
+     * manifests. Preparation may span many calls without maintenance mode
+     * because it only copies private candidates. Switching publishes or
+     * refreshes the session-owned WordPress `.maintenance` marker before any
+     * live rename. Cleanup retains maintenance mode until all switches are
+     * checkpointed and recovery backups are gone.
      *
      * The same call may cross phase boundaries while budget remains. A retry
      * resumes from the checkpoint, including a process death between either
@@ -818,7 +978,8 @@ final class Site_Export_Staged_Apply_Session {
      * replacements as `files_applied`; private preparation and cleanup do not
      * inflate that number.
      *
-     * @param int $maximum_steps Maximum prepare or switch actions in this call.
+     * @param int $maximum_steps Maximum bounded materialize, prepare, or switch
+     *     operations in this call.
      * @return array<string,mixed> Durable phase, progress counts, and whether
      *     another commit request is required.
      *
@@ -854,36 +1015,64 @@ final class Site_Export_Staged_Apply_Session {
 
             $files_applied = 0;
             $steps = 0;
+            while ($steps < $maximum_steps && $state['phase'] === 'materializing') {
+                $this->materialize_commit_action($state);
+                ++$steps;
+                $this->write_json($this->commit_path, $state);
+            }
+
             while ($steps < $maximum_steps && $state['phase'] === 'preparing') {
-                if ($state['prepare_index'] >= count($state['actions'])) {
-                    $state['phase'] = 'switching';
-                    $this->write_json($this->commit_path, $state);
-                    break;
+                if ($state['current_prepare'] === null) {
+                    $record = $this->read_commit_record($this->actions_path, (int) $state['prepare_offset']);
+                    if ($record === null) {
+                        $state['phase'] = 'switching';
+                        $this->write_json($this->commit_path, $state);
+                        break;
+                    }
+                    $state['current_prepare'] = $this->start_preparing_action(
+                        $record['value'],
+                        $record['next_offset'],
+                        (int) $state['prepare_index']
+                    );
+                } elseif ($this->advance_preparing_action($state['current_prepare'])) {
+                    $this->truncate_file_to($this->prepared_actions_path, (int) $state['prepared_actions_bytes']);
+                    $state['prepared_actions_bytes'] = $this->append_commit_record(
+                        $this->prepared_actions_path,
+                        $state['current_prepare']['action']
+                    );
+                    $state['prepare_offset'] = $state['current_prepare']['action_next_offset'];
+                    ++$state['prepare_index'];
+                    $state['current_prepare'] = null;
                 }
-                $this->prepare_action($state, (int) $state['prepare_index']);
-                ++$state['prepare_index'];
                 ++$steps;
                 $this->write_json($this->commit_path, $state);
             }
 
             if ($state['phase'] === 'switching') {
-                if ($state['switch_index'] < count($state['actions'])) {
-                    // Detect a changed member of a prepared directory before
-                    // maintenance is published. A directory's own ctime does
-                    // not change when an existing child file is rewritten.
-                    $this->require_prepared_live_tree($state, (int) $state['switch_index']);
+                // Detect drift before publishing maintenance whenever no
+                // rename transition is already in flight. A failed preflight
+                // must not strand a site in maintenance mode when no live
+                // mutation from this session has begun.
+                $next_record = $this->read_commit_record($this->prepared_actions_path, (int) $state['switch_offset']);
+                if ($next_record !== null) {
+                    $this->require_prepared_live_tree($state, $next_record['value'], (int) $state['switch_index']);
                 }
                 $this->publish_or_refresh_maintenance_marker($state);
-                while ($steps < $maximum_steps && $state['switch_index'] < count($state['actions'])) {
-                    if ($this->switch_action($state, (int) $state['switch_index'])) {
+                while ($steps < $maximum_steps) {
+                    $record = $this->read_commit_record($this->prepared_actions_path, (int) $state['switch_offset']);
+                    if ($record === null) {
+                        $state['phase'] = 'cleaning';
+                        $this->write_json($this->commit_path, $state);
+                        break;
+                    }
+                    $action = $record['value'];
+                    $this->require_prepared_live_tree($state, $action, (int) $state['switch_index']);
+                    if ($this->switch_action($state, $action, (int) $state['switch_index'])) {
                         ++$files_applied;
                     }
+                    $state['switch_offset'] = $record['next_offset'];
                     ++$state['switch_index'];
                     ++$steps;
-                    $this->write_json($this->commit_path, $state);
-                }
-                if ($state['switch_index'] >= count($state['actions'])) {
-                    $state['phase'] = 'cleaning';
                     $this->write_json($this->commit_path, $state);
                 }
             }
@@ -902,7 +1091,7 @@ final class Site_Export_Staged_Apply_Session {
                 $this->release_target();
             }
 
-            $remaining = max(0, count($state['actions']) - (int) $state['switch_index']);
+            $remaining = max(0, (int) $state['actions_count'] - (int) $state['switch_index']);
             return [
                 'session_id' => $this->session_id,
                 'phase' => $state['phase'],
@@ -945,7 +1134,7 @@ final class Site_Export_Staged_Apply_Session {
             $state = $this->read_json($this->commit_path);
             if (is_array($state)) {
                 $this->require_valid_commit_state($state);
-                if (($state['phase'] ?? null) !== 'preparing') {
+                if (!in_array($state['phase'] ?? null, ['materializing', 'preparing'], true)) {
                     throw new RuntimeException(
                         'This staged apply session has begun live mutation and must be resumed to completion.',
                         self::ERROR_COMMIT_REQUIRED
@@ -967,20 +1156,41 @@ final class Site_Export_Staged_Apply_Session {
     /**
      * Freezes uploads by writing the sole mutable commit checkpoint.
      *
-     * The complete action list and maintenance ownership token are persisted
-     * before preparation starts, so every later call operates on the same final
-     * tree even if private upload files are inspected after a process restart.
+     * The maintenance ownership token and materialization cursors are persisted
+     * before planning starts. Each later call advances the immutable upload
+     * journals into the same disk-backed action sequence after a restart.
      *
-     * @return array<string,mixed> Newly persisted `preparing` checkpoint.
+     * @return array<string,mixed> Newly persisted `materializing` checkpoint.
      */
     private function start_commit(): array {
         $this->repair_delete_tail();
-        $actions = $this->build_commit_actions();
+        $this->repair_staged_paths_tail();
+        if (!@mkdir($this->commit_work_dir, 0700, true) && !is_dir($this->commit_work_dir)) {
+            throw new RuntimeException('Could not create the private commit planning directory.', self::ERROR_RETRYABLE_IO);
+        }
+        foreach ([$this->delete_index_dir, $this->delete_descendants_index_dir, $this->staged_index_dir, $this->action_index_dir, $this->prepare_modes_dir] as $directory) {
+            if (!@mkdir($directory, 0700, true) && !is_dir($directory)) {
+                throw new RuntimeException('Could not create a private commit index directory.', self::ERROR_RETRYABLE_IO);
+            }
+        }
+        foreach ([$this->action_candidates_path, $this->actions_path, $this->prepared_actions_path, $this->prepare_queue_path] as $path) {
+            $this->write_atomic_file($path, '', 0600);
+        }
         $state = [
-            'version' => 1,
-            'phase' => 'preparing',
-            'actions' => $actions,
+            'version' => 2,
+            'phase' => 'materializing',
+            'materialize_stage' => 'delete_index',
+            'delete_index_offset' => 0,
+            'staged_paths_offset' => 0,
+            'delete_action_offset' => 0,
+            'candidate_offset' => 0,
+            'actions_bytes' => 0,
+            'actions_count' => 0,
+            'prepare_offset' => 0,
+            'prepared_actions_bytes' => 0,
             'prepare_index' => 0,
+            'current_prepare' => null,
+            'switch_offset' => 0,
             'switch_index' => 0,
             'transition' => null,
             'maintenance_token' => bin2hex(random_bytes(16)),
@@ -990,110 +1200,175 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Builds the minimal set of live replacement actions for the final tree.
+     * Advances one durable, bounded record of commit-plan materialization.
      *
-     * Every changed plugin or theme member collapses into one complete unit
-     * action. Generic paths remain individual entries unless a type change or
-     * ancestor deletion requires reconstructing a complete subtree.
+     * Deletes are indexed first, then the append-only positive-path journal is
+     * consumed one record at a time. Candidate actions are de-duplicated in a
+     * flat hashed index and copied to the final JSONL sequence in a last pass.
+     * No phase retains the staged path set or action list in PHP memory.
      *
-     * @return array<int,array<string,mixed>>
+     * @param array<string,mixed> $state Mutable commit checkpoint.
      */
-    private function build_commit_actions(): array {
-        $staged_paths = $this->list_staged_paths($this->files_dir);
-        $deleted_paths = $this->read_delete_paths();
-        $actions = [];
-
-        // Plugin and theme children always move with their complete root.
-        // Generic paths only need a complete replacement tree when a final
-        // child must replace a missing, non-directory, or deleted ancestor.
-        foreach (array_merge(array_keys($staged_paths), array_keys($deleted_paths)) as $path) {
-            $unit = $this->deployment_unit_for_path($path);
+    private function materialize_commit_action(array &$state): void {
+        $stage = $state['materialize_stage'] ?? null;
+        if ($stage === 'delete_index') {
+            $record = $this->read_staged_delete_record((int) $state['delete_index_offset']);
+            if ($record === null) {
+                $state['materialize_stage'] = 'staged';
+                return;
+            }
+            $this->write_commit_index_record($this->delete_index_dir, $record['path'], ['deleted' => true]);
+            foreach ($this->path_ancestors($record['path']) as $ancestor) {
+                $this->write_commit_index_record($this->delete_descendants_index_dir, $ancestor, ['has_descendant' => true]);
+            }
+            $state['delete_index_offset'] = $record['next_offset'];
+            return;
+        }
+        if ($stage === 'staged') {
+            $record = $this->read_commit_record($this->staged_paths_path, (int) $state['staged_paths_offset']);
+            if ($record !== null) {
+                $path = $this->decode_commit_path($record['value'], 'staged positive path');
+                $staged_path = $this->private_path($this->files_dir, $path);
+                $identity = $this->path_identity($staged_path);
+                $record_kind = $record['value']['kind'] ?? 'entry';
+                if ($record_kind === 'directory-mode') {
+                    $mode = $record['value']['mode'] ?? null;
+                    if (!is_int($mode) || $mode < 0 || $mode > 07777) {
+                        throw new RuntimeException('Staged directory-mode record has an invalid mode.', self::ERROR_INVALID_STATE);
+                    }
+                    if ($identity === null) {
+                        $state['staged_paths_offset'] = $record['next_offset'];
+                        return;
+                    }
+                    if ($identity['type'] !== 'directory') {
+                        throw new RuntimeException(
+                            'Staged directory-mode path is not a private directory: ' . $this->describe_path($path) . '.',
+                            self::ERROR_INVALID_STATE
+                        );
+                    }
+                    $existing = $this->read_commit_index_record($this->staged_index_dir, $path);
+                    if ($existing !== null && ($existing['type'] ?? null) !== 'directory-mode') {
+                        throw new RuntimeException('Staged path has conflicting value and mode operations: ' . $this->describe_path($path) . '.', self::ERROR_INVALID_STATE);
+                    }
+                    $this->write_commit_index_record($this->staged_index_dir, $path, ['type' => 'directory-mode', 'mode' => $mode]);
+                    $this->record_staged_action_candidate($path, true);
+                } elseif ($record_kind !== 'entry') {
+                    throw new RuntimeException('Staged positive-path record has an invalid kind.', self::ERROR_INVALID_STATE);
+                } elseif ($identity !== null) {
+                    $existing = $this->read_commit_index_record($this->staged_index_dir, $path);
+                    if ($existing !== null && ($existing['type'] ?? null) === 'directory-mode') {
+                        throw new RuntimeException('Staged path has conflicting value and mode operations: ' . $this->describe_path($path) . '.', self::ERROR_INVALID_STATE);
+                    }
+                    if ($identity['type'] === 'directory') {
+                        $handle = @opendir($staged_path);
+                        if ($handle === false) {
+                            throw new RuntimeException('Could not inspect staged directory ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                        }
+                        try {
+                            do {
+                                $entry = readdir($handle);
+                            } while ($entry === '.' || $entry === '..');
+                        } finally {
+                            closedir($handle);
+                        }
+                        // Structural parent directories are not final values;
+                        // their separately journaled descendants drive actions.
+                        if ($entry === false) {
+                            $this->write_commit_index_record($this->staged_index_dir, $path, ['type' => 'directory']);
+                            $this->record_staged_action_candidate($path);
+                        }
+                    } elseif ($identity['type'] === 'file' || $identity['type'] === 'symlink') {
+                        $this->write_commit_index_record($this->staged_index_dir, $path, ['type' => $identity['type']]);
+                        $this->record_staged_action_candidate($path);
+                    } else {
+                        throw new RuntimeException('Staged path has an unsupported type: ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                    }
+                }
+                $state['staged_paths_offset'] = $record['next_offset'];
+                return;
+            }
+            $state['materialize_stage'] = 'delete_actions';
+            return;
+        }
+        if ($stage === 'delete_actions') {
+            $record = $this->read_staged_delete_record((int) $state['delete_action_offset']);
+            if ($record === null) {
+                $state['materialize_stage'] = 'actions';
+                return;
+            }
+            $unit = $this->deployment_unit_for_path($record['path']);
             if ($unit !== null) {
-                $actions['unit:' . base64_encode($unit)] = [
-                    'path_b64' => base64_encode($unit),
-                    'kind' => 'unit',
-                    'deleted' => false,
-                ];
+                $this->record_action_candidate($unit, 'unit', false);
+            } else {
+                $this->record_action_candidate($record['path'], 'entry', true);
             }
+            $state['delete_action_offset'] = $record['next_offset'];
+            return;
         }
-
-        foreach ($staged_paths as $path => $type) {
-            if ($this->deployment_unit_for_path($path) !== null) {
-                continue;
+        if ($stage === 'actions') {
+            $record = $this->read_commit_record($this->action_candidates_path, (int) $state['candidate_offset']);
+            if ($record === null) {
+                $state['materialize_stage'] = 'complete';
+                $state['phase'] = 'preparing';
+                return;
             }
-            if (isset($deleted_paths[$path])) {
-                throw new RuntimeException(
-                    'The staged final tree both deletes and materializes ' . $this->describe_path($path) . '.',
-                    self::ERROR_RETRYABLE_IO
-                );
+            $path = $this->decode_commit_path($record['value'], 'candidate action');
+            $action = $this->read_commit_index_record($this->action_index_dir, $path);
+            if ($action === null) {
+                throw new RuntimeException('Commit candidate action index lost ' . $this->describe_path($path) . '.', self::ERROR_INVALID_STATE);
             }
-            $tree_root = $this->structural_tree_root($path, $deleted_paths);
-            if ($tree_root !== null) {
-                $actions['tree:' . base64_encode($tree_root)] = [
-                    'path_b64' => base64_encode($tree_root),
-                    'kind' => 'tree',
-                    'deleted' => false,
-                ];
-                continue;
+            $this->truncate_file_to($this->actions_path, (int) $state['actions_bytes']);
+            $candidate_end = $action['candidate_end'] ?? null;
+            if (!is_int($candidate_end) || $candidate_end <= 0) {
+                throw new RuntimeException('Commit candidate action index has no valid candidate cursor.', self::ERROR_INVALID_STATE);
             }
-            $actions['entry:' . base64_encode($path)] = [
-                'path_b64' => base64_encode($path),
-                'kind' => 'entry',
-                'deleted' => false,
-            ];
+            if ($candidate_end !== $record['next_offset']) {
+                // An append completed before its index publication and was
+                // repeated after recovery. Only the candidate cursor retained
+                // by the index names the current enumerable record.
+                $state['candidate_offset'] = $record['next_offset'];
+                return;
+            }
+            unset($action['candidate_end']);
+            if (!$this->action_has_covering_ancestor($path)) {
+                $state['actions_bytes'] = $this->append_commit_record($this->actions_path, $action);
+                ++$state['actions_count'];
+            }
+            $state['candidate_offset'] = $record['next_offset'];
+            return;
         }
-
-        foreach ($deleted_paths as $path => $unused) {
-            if ($this->deployment_unit_for_path($path) !== null || $this->path_is_covered_by_action_tree($path, $actions)) {
-                continue;
-            }
-            if ($this->has_staged_ancestor($path, $staged_paths) || $this->has_deleted_ancestor($path, $deleted_paths)) {
-                continue;
-            }
-            $actions['entry:' . base64_encode($path)] = [
-                'path_b64' => base64_encode($path),
-                'kind' => 'entry',
-                'deleted' => true,
-            ];
-        }
-
-        $actions = array_values($actions);
-        usort($actions, static function (array $left, array $right): int {
-            $left_path = base64_decode((string) $left['path_b64'], true);
-            $right_path = base64_decode((string) $right['path_b64'], true);
-            if ($left_path === false || $right_path === false) {
-                return strcmp((string) $left['path_b64'], (string) $right['path_b64']);
-            }
-            // Parents switch before their direct descendants when a source
-            // contains an explicitly empty directory outside a deployment
-            // unit.  The source normally supplies only such empty dirs.
-            if (strpos($right_path, $left_path . '/') === 0) {
-                return -1;
-            }
-            if (strpos($left_path, $right_path . '/') === 0) {
-                return 1;
-            }
-            return strcmp($left_path, $right_path);
-        });
-        return $actions;
+        throw new RuntimeException('Commit checkpoint has an invalid materialization stage ' . json_encode($stage) . '.', self::ERROR_INVALID_STATE);
     }
 
-    /**
-     * Finds the highest ancestor that must be replaced as a complete tree.
-     *
-     * A generic staged leaf needs tree reconstruction when an ancestor is being
-     * deleted, is missing, or is currently a non-directory. A deletion below
-     * the path likewise makes that path the replacement root. Protected
-     * ancestors may be traversed only when they remain real directories and are
-     * never themselves selected for replacement.
-     *
-     * @param array<string,bool> $deleted_paths
-     * @return string|null Highest target-relative reconstruction root, if any.
-     */
-    private function structural_tree_root(string $path, array $deleted_paths): ?string {
-        foreach (array_slice(explode('/', $path), 0, -1) as $index => $unused) {
-            $ancestor = implode('/', array_slice(explode('/', $path), 0, $index + 1));
-            if (isset($deleted_paths[$ancestor])) {
+    /** Records the action implied by one staged value or directory mode. */
+    private function record_staged_action_candidate(string $path, bool $directory_mode = false): void {
+        if (!$directory_mode && $this->read_commit_index_record($this->delete_index_dir, $path) !== null) {
+            throw new RuntimeException(
+                'The staged final tree both deletes and materializes ' . $this->describe_path($path) . '.',
+                self::ERROR_INVALID_STATE
+            );
+        }
+        $unit = $this->deployment_unit_for_path($path);
+        if ($unit !== null) {
+            $this->record_action_candidate($unit, 'unit', false);
+            return;
+        }
+        if ($directory_mode) {
+            $this->record_action_candidate($path, 'tree', false);
+            return;
+        }
+        $tree_root = $this->indexed_structural_tree_root($path);
+        if ($tree_root !== null) {
+            $this->record_action_candidate($tree_root, 'tree', false);
+            return;
+        }
+        $this->record_action_candidate($path, 'entry', false);
+    }
+
+    /** Finds a structural replacement root using disk-backed delete indexes. */
+    private function indexed_structural_tree_root(string $path): ?string {
+        foreach ($this->path_ancestors($path) as $ancestor) {
+            if ($this->read_commit_index_record($this->delete_index_dir, $ancestor) !== null) {
                 return $ancestor;
             }
             if ($this->is_protected_ancestor($ancestor)) {
@@ -1111,32 +1386,215 @@ final class Site_Export_Staged_Apply_Session {
                 return $ancestor;
             }
         }
-        foreach ($deleted_paths as $deleted_path => $unused) {
-            if (strpos($deleted_path, $path . '/') === 0) {
-                return $path;
-            }
-        }
-        return null;
+        return $this->read_commit_index_record($this->delete_descendants_index_dir, $path) !== null ? $path : null;
     }
 
     /**
-     * Indicates whether a path is already covered by a planned complete tree.
-     *
-     * @param string $path Target-relative path being classified.
-     * @param array<string,array<string,mixed>> $actions Actions keyed during planning.
-     * @return bool True for the root or a descendant of a unit/tree action.
+     * Adds or strengthens one de-duplicated action marker and candidate record.
      */
-    private function path_is_covered_by_action_tree(string $path, array $actions): bool {
-        foreach ($actions as $action) {
-            if (($action['kind'] ?? null) !== 'unit' && ($action['kind'] ?? null) !== 'tree') {
+    private function record_action_candidate(string $path, string $kind, bool $deleted): void {
+        $record = [
+            'path_b64' => base64_encode($path),
+            'kind' => $kind,
+            'deleted' => $deleted,
+        ];
+        $existing = $this->read_commit_index_record($this->action_index_dir, $path);
+        if ($existing === null) {
+            // Append before publishing the index. If index publication dies,
+            // retry appends again and points candidate_end at the later record;
+            // the enumeration pass ignores the orphaned earlier append.
+            $record['candidate_end'] = $this->append_commit_record(
+                $this->action_candidates_path,
+                ['path_b64' => base64_encode($path)]
+            );
+            $this->write_commit_index_record($this->action_index_dir, $path, $record);
+            return;
+        }
+        $priority = ['entry' => 1, 'tree' => 2, 'unit' => 3];
+        $existing_kind = $existing['kind'] ?? null;
+        if (!is_string($existing_kind) || !isset($priority[$existing_kind])) {
+            throw new RuntimeException('Commit action index contains an invalid kind.', self::ERROR_INVALID_STATE);
+        }
+        if ($existing_kind === 'entry' && $kind === 'entry' && (bool) $existing['deleted'] !== $deleted) {
+            throw new RuntimeException('Commit action both deletes and materializes ' . $this->describe_path($path) . '.', self::ERROR_INVALID_STATE);
+        }
+        $changed = false;
+        if ($priority[$kind] > $priority[$existing_kind]) {
+            $existing['kind'] = $kind;
+            $existing['deleted'] = $deleted;
+            $changed = true;
+        }
+        if (!array_key_exists('candidate_end', $existing)) {
+            // Recover an index published by the former index-first ordering, or
+            // an interrupted publication from this same materialization pass.
+            $existing['candidate_end'] = $this->append_commit_record(
+                $this->action_candidates_path,
+                ['path_b64' => base64_encode($path)]
+            );
+            $changed = true;
+        } elseif (!is_int($existing['candidate_end']) || $existing['candidate_end'] <= 0) {
+            throw new RuntimeException('Commit action index contains an invalid candidate cursor.', self::ERROR_INVALID_STATE);
+        }
+        if ($changed) {
+            $this->write_commit_index_record($this->action_index_dir, $path, $existing);
+        }
+    }
+
+    /** Returns whether a final action is subsumed by an ancestor tree/delete. */
+    private function action_has_covering_ancestor(string $path): bool {
+        foreach ($this->path_ancestors($path) as $ancestor) {
+            $action = $this->read_commit_index_record($this->action_index_dir, $ancestor);
+            if ($action === null) {
                 continue;
             }
-            $root = base64_decode((string) ($action['path_b64'] ?? ''), true);
-            if ($root !== false && ($path === $root || strpos($path, $root . '/') === 0)) {
+            if (($action['kind'] ?? null) === 'unit' || ($action['kind'] ?? null) === 'tree' || !empty($action['deleted'])) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** @return string[] Strict ancestors from highest to direct parent. */
+    private function path_ancestors(string $path): array {
+        $segments = explode('/', $path);
+        $ancestors = [];
+        $segment_count = count($segments);
+        for ($length = 1; $length < $segment_count; ++$length) {
+            $ancestors[] = implode('/', array_slice($segments, 0, $length));
+        }
+        return $ancestors;
+    }
+
+    /** Writes one collision-checked path record into a flat hashed index. */
+    private function write_commit_index_record(string $index_dir, string $path, array $value): void {
+        $marker = $this->commit_index_path($index_dir, $path);
+        $value['path_b64'] = base64_encode($path);
+        $this->write_json($marker, $value);
+    }
+
+    /** Reads one flat hashed index record while checking its original path. */
+    private function read_commit_index_record(string $index_dir, string $path): ?array {
+        $value = $this->read_json($this->commit_index_path($index_dir, $path));
+        if ($value === null) {
+            return null;
+        }
+        $stored_path = isset($value['path_b64']) && is_string($value['path_b64']) ? base64_decode($value['path_b64'], true) : false;
+        if ($stored_path !== $path) {
+            throw new RuntimeException('Commit path index collision or corruption for ' . $this->describe_path($path) . '.', self::ERROR_INVALID_STATE);
+        }
+        return $value;
+    }
+
+    /** Returns the bounded fixed-name marker for an arbitrary raw path. */
+    private function commit_index_path(string $index_dir, string $path): string {
+        $hash = hash('sha256', $path);
+        $shard = $index_dir . '/' . substr($hash, 0, 2);
+        if (!is_dir($shard) && !@mkdir($shard, 0700, true) && !is_dir($shard)) {
+            throw new RuntimeException('Could not create a private commit index shard.', self::ERROR_RETRYABLE_IO);
+        }
+        return $shard . '/' . substr($hash, 2) . '.json';
+    }
+
+    /** @return array{path:string,next_offset:int}|null */
+    private function read_staged_delete_record(int $offset): ?array {
+        $record = $this->read_commit_record($this->deletes_path, $offset);
+        if ($record === null) {
+            return null;
+        }
+        $path = $this->decode_commit_path($record['value'], 'staged delete');
+        $this->validate_path($path);
+        return ['path' => $path, 'next_offset' => $record['next_offset']];
+    }
+
+    /** Decodes a required path_b64 field from a durable plan record. */
+    private function decode_commit_path(array $record, string $description): string {
+        $path = isset($record['path_b64']) && is_string($record['path_b64']) ? base64_decode($record['path_b64'], true) : false;
+        if ($path === false) {
+            throw new RuntimeException('Commit ' . $description . ' record has an invalid path.', self::ERROR_INVALID_STATE);
+        }
+        if ($path !== '') {
+            $this->validate_path($path);
+        }
+        return $path;
+    }
+
+    /** @return array{value:array<string,mixed>,next_offset:int}|null */
+    private function read_commit_record(string $path, int $offset): ?array {
+        $identity = $this->path_identity($path);
+        if ($identity === null) {
+            return null;
+        }
+        if ($identity['type'] !== 'file' || $offset < 0 || $offset > (int) $identity['size']) {
+            throw new RuntimeException('Commit JSONL cursor is outside a regular file: ' . $path . '.', self::ERROR_INVALID_STATE);
+        }
+        $handle = @fopen($path, 'rb');
+        if ($handle === false || fseek($handle, $offset, SEEK_SET) !== 0) {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+            throw new RuntimeException('Could not resume commit JSONL file ' . $path . '.', self::ERROR_RETRYABLE_IO);
+        }
+        try {
+            $line = fgets($handle, self::MAX_COMMIT_RECORD_BYTES + 2);
+            if ($line === false) {
+                return null;
+            }
+            if (strlen($line) > self::MAX_COMMIT_RECORD_BYTES || substr($line, -1) !== "\n") {
+                throw new RuntimeException('Commit JSONL file contains an oversized or incomplete record: ' . $path . '.', self::ERROR_INVALID_STATE);
+            }
+            $value = json_decode(substr($line, 0, -1), true);
+            if (!is_array($value)) {
+                throw new RuntimeException('Commit JSONL file contains invalid JSON: ' . $path . '.', self::ERROR_INVALID_STATE);
+            }
+            $next_offset = ftell($handle);
+            if (!is_int($next_offset)) {
+                throw new RuntimeException('Could not checkpoint commit JSONL file ' . $path . '.', self::ERROR_RETRYABLE_IO);
+            }
+            return ['value' => $value, 'next_offset' => $next_offset];
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    /** Appends and flushes one bounded JSONL record, returning the durable size. */
+    private function append_commit_record(string $path, array $value): int {
+        $encoded = json_encode($value, JSON_UNESCAPED_SLASHES);
+        if ($encoded === false || strlen($encoded) + 1 > self::MAX_COMMIT_RECORD_BYTES) {
+            throw new RuntimeException('Could not encode bounded commit JSONL record for ' . $path . '.', self::ERROR_INVALID_STATE);
+        }
+        $handle = @fopen($path, 'ab');
+        if ($handle === false) {
+            throw new RuntimeException('Could not append commit JSONL file ' . $path . '.', self::ERROR_RETRYABLE_IO);
+        }
+        try {
+            $this->write_all($handle, $encoded . "\n", 'commit JSONL file ' . $path);
+            if (!fflush($handle)) {
+                throw new RuntimeException('Could not flush commit JSONL file ' . $path . '.', self::ERROR_RETRYABLE_IO);
+            }
+            $stat = fstat($handle);
+            if (!is_array($stat) || !isset($stat['size'])) {
+                throw new RuntimeException('Could not checkpoint commit JSONL append for ' . $path . '.', self::ERROR_RETRYABLE_IO);
+            }
+            return (int) $stat['size'];
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    /** Truncates bytes written after the last durable checkpoint. */
+    private function truncate_file_to(string $path, int $size): void {
+        $handle = @fopen($path, 'c+b');
+        if ($handle === false) {
+            throw new RuntimeException('Could not open commit plan for recovery truncation: ' . $path . '.', self::ERROR_RETRYABLE_IO);
+        }
+        try {
+            $stat = fstat($handle);
+            if (!is_array($stat) || $size < 0 || $size > (int) $stat['size'] || !ftruncate($handle, $size) || !fflush($handle)) {
+                throw new RuntimeException('Could not truncate commit plan to durable byte ' . $size . ': ' . $path . '.', self::ERROR_RETRYABLE_IO);
+            }
+        } finally {
+            fclose($handle);
+        }
     }
 
     /**
@@ -1155,163 +1613,528 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Indicates whether a staged ancestor already materializes this path's subtree.
+     * Captures one action and its live fingerprint before resumable copying.
      *
-     * @param string $path Target-relative path being classified.
-     * @param array<string,string> $staged_paths Staged path-to-type map.
-     * @return bool True when a different staged path is an ancestor.
+     * @param array<string,mixed> $action Basic disk-backed action record.
+     * @param int $action_next_offset Durable byte after that action record.
+     * @param int $action_index Stable ordinal used for its private mode plan.
+     * @return array<string,mixed> Durable cursor for one prepared candidate.
      */
-    private function has_staged_ancestor(string $path, array $staged_paths): bool {
-        foreach ($staged_paths as $staged_path => $type) {
-            if ($path !== $staged_path && strpos($path, $staged_path . '/') === 0) {
-                return true;
-            }
+    private function start_preparing_action(array $action, int $action_next_offset, int $action_index): array {
+        $path = $this->decode_commit_path($action, 'action');
+        $kind = $action['kind'] ?? null;
+        $deleted = $action['deleted'] ?? null;
+        if (!is_string($kind) || !in_array($kind, ['entry', 'tree', 'unit'], true) || !is_bool($deleted)) {
+            throw new RuntimeException('Commit action has an invalid kind or deletion state.', self::ERROR_INVALID_STATE);
         }
-        return false;
-    }
-
-    /**
-     * Indicates whether an ancestor delete already removes this path.
-     *
-     * @param string $path Target-relative path being classified.
-     * @param array<string,bool> $deleted_paths Delete-set lookup table.
-     * @return bool True when a different deleted path is an ancestor.
-     */
-    private function has_deleted_ancestor(string $path, array $deleted_paths): bool {
-        foreach ($deleted_paths as $deleted_path => $unused) {
-            if ($path !== $deleted_path && strpos($path, $deleted_path . '/') === 0) {
-                return true;
-            }
+        if ($kind !== 'entry' && $deleted) {
+            throw new RuntimeException('Only an entry action may be a direct deletion.', self::ERROR_INVALID_STATE);
         }
-        return false;
-    }
-
-    /**
-     * Materializes one private candidate and checkpoints its live identity.
-     *
-     * The candidate is accepted only if the live entry and all descendants
-     * retain the identities observed before preparation began.
-     *
-     * @param array<string,mixed> $state
-     * @param int $index Action index to prepare and enrich in the checkpoint.
-     */
-    private function prepare_action(array &$state, int $index): void {
-        $action = $state['actions'][$index] ?? null;
-        if (!is_array($action)) {
-            throw new RuntimeException('Commit checkpoint has no action at index ' . $index . '.', self::ERROR_RETRYABLE_IO);
-        }
-        $path = base64_decode((string) ($action['path_b64'] ?? ''), true);
-        if ($path === false || $path === '') {
-            throw new RuntimeException('Commit checkpoint has an invalid action path.', self::ERROR_RETRYABLE_IO);
-        }
-        $this->validate_path($path);
         $this->assert_target_path_same_filesystem($path);
-
         $live_path = $this->target_path($path);
-        $prepared_path = $this->private_path($this->prepared_dir, $path);
-        // Record the live identity before copying it.  Preparation can span
-        // substantial trees, so accepting a writer that changed the source
-        // during that copy would create a candidate from an unknown mix.
-        $expected_live = $this->path_identity($live_path);
-        $expected_live_tree = $this->tree_fingerprint($live_path);
-        $this->ensure_private_parent($prepared_path);
-        $this->remove_entry($prepared_path);
+        $staged_path = $this->private_path($this->files_dir, $path);
+        $live_identity = $this->path_identity($live_path);
+        $staged_identity = $this->path_identity($staged_path);
+        $mode_plan_dir = $this->prepare_modes_dir . '/' . $action_index;
+        if (!@mkdir($mode_plan_dir, 0700) && !is_dir($mode_plan_dir)) {
+            throw new RuntimeException('Could not create a private directory-mode plan.', self::ERROR_RETRYABLE_IO);
+        }
 
-        if ($action['kind'] === 'unit' || $action['kind'] === 'tree') {
-            $this->prepare_complete_tree($path, $prepared_path);
-        } elseif ($action['kind'] === 'entry' && !(bool) $action['deleted']) {
-            $staged_path = $this->private_path($this->files_dir, $path);
-            if ($this->path_identity($staged_path) === null) {
+        $sources = [];
+        if ($kind === 'entry' && !$deleted) {
+            if ($staged_identity === null) {
                 throw new RuntimeException('Staged entry disappeared before commit: ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
             }
-            $this->copy_entry($staged_path, $prepared_path);
-        } elseif ($action['kind'] !== 'entry') {
-            throw new RuntimeException('Commit checkpoint has an invalid action kind.', self::ERROR_RETRYABLE_IO);
+            $sources[] = 'staged';
+        } elseif ($kind === 'tree' || $kind === 'unit') {
+            if ($live_identity !== null && $live_identity['type'] === 'directory') {
+                $sources[] = 'live';
+            }
+            if ($staged_identity !== null) {
+                $sources[] = 'staged';
+            }
         }
 
+        $action['expected_live'] = $live_identity;
+        $action['expected_live_tree'] = $this->tree_fingerprint($live_path);
+        return [
+            'action' => $action,
+            'action_next_offset' => $action_next_offset,
+            'stage' => 'reset',
+            'sources' => $sources,
+            'source_index' => 0,
+            'source_started' => false,
+            'queue_offset' => 0,
+            'queue_bytes' => 0,
+            'directory' => null,
+            'file' => null,
+            'mode_plan_index' => $action_index,
+            'mode_bytes' => [],
+            'maximum_mode_depth' => 0,
+            'mode_depth' => 0,
+            'mode_offset' => 0,
+            'root_directory_mode' => null,
+        ];
+    }
+
+    /**
+     * Advances one bounded preparation operation for the current action.
+     *
+     * Directory children and deferred modes live in disk-backed plans, while
+     * regular files advance by at most BODY_PIECE_BYTES. Reopening a session
+     * therefore resumes a large candidate tree, read-only mode finalization,
+     * and an individual large file from durable cursors.
+     *
+     * @param array<string,mixed> $prepare Mutable current-action cursor.
+     * @return bool True only after the candidate identity has been verified.
+     */
+    private function advance_preparing_action(array &$prepare): bool {
+        $action = $prepare['action'];
+        $root_path = $this->decode_commit_path($action, 'preparing action');
+        $prepared_root = $this->private_path($this->prepared_dir, $root_path);
+
+        if ($prepare['stage'] === 'reset') {
+            $this->ensure_private_parent($prepared_root);
+            $this->remove_entry($prepared_root);
+            $this->truncate_file_to($this->prepare_queue_path, 0);
+            $prepare['queue_offset'] = 0;
+            $prepare['queue_bytes'] = 0;
+            $prepare['stage'] = 'copying';
+            return false;
+        }
+
+        if ($prepare['stage'] === 'copying') {
+            $sources = $prepare['sources'];
+            if (!is_array($sources) || !isset($prepare['source_index']) || !is_int($prepare['source_index'])) {
+                throw new RuntimeException('Commit preparation source cursor is invalid.', self::ERROR_INVALID_STATE);
+            }
+            if ($prepare['source_index'] >= count($sources)) {
+                $prepare['stage'] = 'modes';
+                $prepare['mode_depth'] = $prepare['maximum_mode_depth'];
+                $prepare['mode_offset'] = 0;
+                return false;
+            }
+            $source_kind = $sources[$prepare['source_index']] ?? null;
+            if ($source_kind !== 'live' && $source_kind !== 'staged') {
+                throw new RuntimeException('Commit preparation source kind is invalid.', self::ERROR_INVALID_STATE);
+            }
+
+            if (!$prepare['source_started']) {
+                $this->truncate_file_to($this->prepare_queue_path, 0);
+                $prepare['queue_offset'] = 0;
+                $prepare['queue_bytes'] = $this->append_commit_record(
+                    $this->prepare_queue_path,
+                    ['path_b64' => base64_encode($root_path)]
+                );
+                $prepare['directory'] = null;
+                $prepare['file'] = null;
+                $prepare['source_started'] = true;
+                return false;
+            }
+
+            $this->truncate_file_to($this->prepare_queue_path, (int) $prepare['queue_bytes']);
+            if (is_array($prepare['file'])) {
+                $this->advance_preparing_file($prepare, $source_kind, $root_path);
+                return false;
+            }
+            if (is_array($prepare['directory'])) {
+                $this->advance_preparing_directory($prepare, $source_kind, $root_path);
+                return false;
+            }
+
+            $record = $this->read_commit_record($this->prepare_queue_path, (int) $prepare['queue_offset']);
+            if ($record === null) {
+                ++$prepare['source_index'];
+                $prepare['source_started'] = false;
+                return false;
+            }
+            $path = $this->decode_commit_path($record['value'], 'preparation queue');
+            if ($path !== $root_path && strpos($path, $root_path . '/') !== 0) {
+                throw new RuntimeException('Commit preparation queue escaped its action root.', self::ERROR_INVALID_STATE);
+            }
+            $staged_record = $this->read_commit_index_record($this->staged_index_dir, $path);
+            $staged_replaces_live = $staged_record !== null
+                && ($staged_record['type'] ?? null) !== 'directory-mode';
+            if (
+                $source_kind === 'live'
+                && ($this->read_commit_index_record($this->delete_index_dir, $path) !== null || $staged_replaces_live)
+            ) {
+                $prepare['queue_offset'] = $record['next_offset'];
+                return false;
+            }
+
+            $source = $source_kind === 'live' ? $this->target_path($path) : $this->private_path($this->files_dir, $path);
+            $destination = $this->private_path($this->prepared_dir, $path);
+            $identity = $this->path_identity($source);
+            if ($identity === null) {
+                $this->throw_preparation_source_changed($source_kind, $path);
+            }
+            $this->require_preparation_source_device($identity, $source);
+            $this->ensure_private_parent($destination);
+
+            if ($identity['type'] === 'directory') {
+                $destination_identity = $this->path_identity($destination);
+                if ($destination_identity !== null && $destination_identity['type'] !== 'directory') {
+                    if ($source_kind !== 'staged') {
+                        throw new RuntimeException('Prepared destination changed type while copying ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                    }
+                    $this->remove_entry($destination);
+                    $destination_identity = null;
+                }
+                if ($destination_identity === null && !@mkdir($destination, 0700) && !is_dir($destination)) {
+                    throw new RuntimeException('Could not create prepared directory ' . $destination . '.', self::ERROR_RETRYABLE_IO);
+                }
+                $directory_mode = (int) $identity['permissions'];
+                $explicit_staged_directory = false;
+                if ($source_kind === 'staged' && $staged_record !== null) {
+                    $staged_type = $staged_record['type'] ?? null;
+                    if ($staged_type !== 'directory' && $staged_type !== 'directory-mode') {
+                        throw new RuntimeException('Staged directory index has an invalid type for ' . $this->describe_path($path) . '.', self::ERROR_INVALID_STATE);
+                    }
+                    $explicit_staged_directory = true;
+                    if ($staged_type === 'directory-mode') {
+                        $requested_mode = $staged_record['mode'] ?? null;
+                        if (!is_int($requested_mode) || $requested_mode < 0 || $requested_mode > 07777) {
+                            throw new RuntimeException('Staged directory index has an invalid mode for ' . $this->describe_path($path) . '.', self::ERROR_INVALID_STATE);
+                        }
+                        $directory_mode = $requested_mode;
+                    }
+                }
+                if ($source_kind === 'live' || $explicit_staged_directory) {
+                    $this->record_preparing_directory_mode($prepare, $path, $directory_mode);
+                }
+                $prepare['directory'] = [
+                    'path_b64' => base64_encode($path),
+                    'last_entry_b64' => null,
+                    'queue_next_offset' => $record['next_offset'],
+                    'identity' => $identity,
+                ];
+                return false;
+            }
+
+            if ($identity['type'] === 'file') {
+                $destination_identity = $this->path_identity($destination);
+                if ($destination_identity !== null && $destination_identity['type'] !== 'file') {
+                    throw new RuntimeException('Prepared file destination has an unexpected type at ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                }
+                $prepare['file'] = [
+                    'path_b64' => base64_encode($path),
+                    'queue_next_offset' => $record['next_offset'],
+                    'identity' => $identity,
+                ];
+                return false;
+            }
+
+            if ($identity['type'] !== 'symlink') {
+                throw new RuntimeException('Could not prepare unsupported filesystem entry ' . $source . '.', self::ERROR_RETRYABLE_IO);
+            }
+            $target = @readlink($source);
+            if (!is_string($target)) {
+                $this->throw_preparation_source_changed($source_kind, $path);
+            }
+            $destination_identity = $this->path_identity($destination);
+            if ($destination_identity === null) {
+                if (!@symlink($target, $destination)) {
+                    throw new RuntimeException('Could not recreate prepared symlink ' . $source . '.', self::ERROR_RETRYABLE_IO);
+                }
+            } elseif ($destination_identity['type'] !== 'symlink' || @readlink($destination) !== $target) {
+                throw new RuntimeException('Prepared symlink destination disagrees with its durable cursor at ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+            }
+            if ($this->path_identity($source) !== $identity) {
+                $this->throw_preparation_source_changed($source_kind, $path);
+            }
+            $prepare['queue_offset'] = $record['next_offset'];
+            return false;
+        }
+
+        if ($prepare['stage'] === 'modes') {
+            $this->advance_preparing_directory_modes($prepare, $root_path);
+            return false;
+        }
+
+        if ($prepare['stage'] !== 'verifying') {
+            throw new RuntimeException('Commit preparation has an invalid stage.', self::ERROR_INVALID_STATE);
+        }
+        $live_path = $this->target_path($root_path);
         if (
-            $this->path_identity($live_path) !== $expected_live
-            || $this->tree_fingerprint($live_path) !== $expected_live_tree
+            $this->path_identity($live_path) !== ($action['expected_live'] ?? null)
+            || $this->tree_fingerprint($live_path) !== ($action['expected_live_tree'] ?? null)
         ) {
             throw new RuntimeException(
-                'Live entry changed while preparing ' . $this->describe_path($path)
+                'Live entry changed while preparing ' . $this->describe_path($root_path)
                 . '; refusing to switch a candidate built from an external writer.',
                 self::ERROR_LIVE_TREE_CHANGED
             );
         }
-
-        $state['actions'][$index]['expected_live'] = $expected_live;
-        $state['actions'][$index]['expected_live_tree'] = $expected_live_tree;
-        $state['actions'][$index]['prepared'] = $this->path_identity($prepared_path);
+        $action['prepared'] = $this->path_identity($prepared_root);
+        $root_directory_mode = $prepare['root_directory_mode'] ?? null;
+        if ($root_directory_mode !== null) {
+            if (!is_int($root_directory_mode) || $root_directory_mode < 0 || $root_directory_mode > 07777) {
+                throw new RuntimeException('Commit preparation root directory mode is invalid.', self::ERROR_INVALID_STATE);
+            }
+            if (!is_array($action['prepared']) || ($action['prepared']['type'] ?? null) !== 'directory') {
+                throw new RuntimeException('Commit preparation recorded a directory mode for a non-directory root.', self::ERROR_INVALID_STATE);
+            }
+            $action['final_directory_mode'] = $root_directory_mode;
+        }
+        $prepare['action'] = $action;
+        $prepare['stage'] = 'complete';
+        return true;
     }
 
-    /**
-     * Builds the final value of one complete replacement root.
-     *
-     * Directory changes start with the current live tree, overlay staged
-     * descendants, and apply staged deletes. A staged file or symlink is
-     * already a complete root value and is copied directly; it is never
-     * reconstructed as a directory tree.
-     *
-     * @param string $root_path Target-relative root of the replacement unit.
-     * @param string $prepared_path Private destination for the complete value.
-     */
-    private function prepare_complete_tree(string $root_path, string $prepared_path): void {
-        $staged_path = $this->private_path($this->files_dir, $root_path);
-        $staged_identity = $this->path_identity($staged_path);
-        $deleted_paths = $this->read_delete_paths();
-        if (isset($deleted_paths[$root_path]) && $staged_identity === null) {
+    /** Advances one child of a reopened directory in deterministic byte order. */
+    private function advance_preparing_directory(array &$prepare, string $source_kind, string $root_path): void {
+        $cursor = $prepare['directory'];
+        $path = $this->decode_commit_path($cursor, 'preparation directory cursor');
+        if ($path !== $root_path && strpos($path, $root_path . '/') !== 0) {
+            throw new RuntimeException('Commit preparation directory escaped its action root.', self::ERROR_INVALID_STATE);
+        }
+        $source = $source_kind === 'live' ? $this->target_path($path) : $this->private_path($this->files_dir, $path);
+        $identity = $cursor['identity'] ?? null;
+        if (!is_array($identity) || $this->path_identity($source) !== $identity) {
+            $this->throw_preparation_source_changed($source_kind, $path);
+        }
+        $last_entry_b64 = $cursor['last_entry_b64'] ?? null;
+        $last_entry = $last_entry_b64 === null
+            ? null
+            : (is_string($last_entry_b64) ? base64_decode($last_entry_b64, true) : false);
+        if ($last_entry === false || ($last_entry !== null && ($last_entry === '' || strpos($last_entry, '/') !== false || strpos($last_entry, "\0") !== false))) {
+            throw new RuntimeException('Commit preparation directory entry cursor is invalid.', self::ERROR_INVALID_STATE);
+        }
+        $handle = @opendir($source);
+        if ($handle === false) {
+            $this->throw_preparation_source_changed($source_kind, $path);
+        }
+        $entry = false;
+        try {
+            while (($candidate = readdir($handle)) !== false) {
+                if ($candidate === '.' || $candidate === '..') {
+                    continue;
+                }
+                if ($last_entry !== null && strcmp($candidate, $last_entry) <= 0) {
+                    continue;
+                }
+                if ($entry === false || strcmp($candidate, $entry) < 0) {
+                    $entry = $candidate;
+                }
+            }
+        } finally {
+            closedir($handle);
+        }
+        if ($entry === false) {
+            if ($this->path_identity($source) !== $identity) {
+                $this->throw_preparation_source_changed($source_kind, $path);
+            }
+            $prepare['queue_offset'] = (int) $cursor['queue_next_offset'];
+            $prepare['directory'] = null;
             return;
         }
-        if ($staged_identity !== null && $staged_identity['type'] !== 'directory') {
-            $this->copy_entry($staged_path, $prepared_path);
-            return;
-        }
+        $child_path = $path . '/' . $entry;
+        $this->validate_path($child_path);
+        $this->truncate_file_to($this->prepare_queue_path, (int) $prepare['queue_bytes']);
+        $prepare['queue_bytes'] = $this->append_commit_record(
+            $this->prepare_queue_path,
+            ['path_b64' => base64_encode($child_path)]
+        );
+        $cursor['last_entry_b64'] = base64_encode($entry);
+        $prepare['directory'] = $cursor;
+    }
 
-        $live_path = $this->target_path($root_path);
-        $live_identity = $this->path_identity($live_path);
-        if ($live_identity !== null && $live_identity['type'] === 'directory') {
-            $this->copy_entry($live_path, $prepared_path);
-        } else {
-            $this->ensure_private_parent($prepared_path);
-            if (!@mkdir($prepared_path, 0700, true) && !is_dir($prepared_path)) {
-                throw new RuntimeException('Could not create prepared deployment unit ' . $this->describe_path($root_path) . '.', self::ERROR_RETRYABLE_IO);
-            }
+    /** Records one exact directory mode without making the candidate read-only yet. */
+    private function record_preparing_directory_mode(array &$prepare, string $path, int $mode): void {
+        if ($mode < 0 || $mode > 07777) {
+            throw new RuntimeException('Commit preparation directory mode is invalid.', self::ERROR_INVALID_STATE);
         }
-        if ($staged_identity !== null) {
-            $this->overlay_directory($staged_path, $prepared_path);
+        $mode_bytes = $prepare['mode_bytes'] ?? null;
+        if (!is_array($mode_bytes)) {
+            throw new RuntimeException('Commit preparation directory-mode byte cursors are invalid.', self::ERROR_INVALID_STATE);
         }
-        foreach ($deleted_paths as $deleted_path => $unused) {
-            if ($deleted_path === $root_path) {
-                continue;
-            }
-            $prefix = $root_path . '/';
-            if (strpos($deleted_path, $prefix) !== 0) {
-                continue;
-            }
-            $relative = substr($deleted_path, strlen($prefix));
-            $delete_path = $this->private_path($prepared_path, $relative);
-            $this->ensure_private_parent($delete_path);
-            $this->remove_entry($delete_path);
+        $depth = substr_count($path, '/') + 1;
+        $plan_path = $this->preparing_mode_plan_path($prepare, $depth);
+        $durable_bytes = $mode_bytes[$depth] ?? 0;
+        if (!is_int($durable_bytes) || $durable_bytes < 0) {
+            throw new RuntimeException('Commit preparation directory-mode byte cursor is invalid.', self::ERROR_INVALID_STATE);
         }
+        if (!array_key_exists($depth, $mode_bytes)) {
+            $this->write_atomic_file($plan_path, '', 0600);
+        }
+        $this->truncate_file_to($plan_path, $durable_bytes);
+        $prepare['mode_bytes'][$depth] = $this->append_commit_record($plan_path, [
+            'path_b64' => base64_encode($path),
+            'mode' => $mode,
+        ]);
+        $prepare['maximum_mode_depth'] = max((int) ($prepare['maximum_mode_depth'] ?? 0), $depth);
+    }
+
+    /** Applies one deferred directory mode, deepest paths first. */
+    private function advance_preparing_directory_modes(array &$prepare, string $root_path): void {
+        $depth = $prepare['mode_depth'] ?? null;
+        $offset = $prepare['mode_offset'] ?? null;
+        $mode_bytes = $prepare['mode_bytes'] ?? null;
+        if (!is_int($depth) || $depth < 0 || !is_int($offset) || $offset < 0 || !is_array($mode_bytes)) {
+            throw new RuntimeException('Commit preparation directory-mode cursor is invalid.', self::ERROR_INVALID_STATE);
+        }
+        if ($depth === 0) {
+            $prepare['stage'] = 'verifying';
+            return;
+        }
+        $durable_bytes = $mode_bytes[$depth] ?? 0;
+        if (!is_int($durable_bytes) || $durable_bytes < 0 || $offset > $durable_bytes) {
+            throw new RuntimeException('Commit preparation directory-mode byte range is invalid.', self::ERROR_INVALID_STATE);
+        }
+        if ($durable_bytes === 0) {
+            $prepare['mode_depth'] = $depth - 1;
+            $prepare['mode_offset'] = 0;
+            return;
+        }
+        $plan_path = $this->preparing_mode_plan_path($prepare, $depth);
+        $this->truncate_file_to($plan_path, $durable_bytes);
+        $record = $this->read_commit_record($plan_path, $offset);
+        if ($record === null) {
+            $prepare['mode_depth'] = $depth - 1;
+            $prepare['mode_offset'] = 0;
+            return;
+        }
+        $path = $this->decode_commit_path($record['value'], 'preparation directory-mode plan');
+        if ($path !== $root_path && strpos($path, $root_path . '/') !== 0) {
+            throw new RuntimeException('Commit preparation directory mode escaped its action root.', self::ERROR_INVALID_STATE);
+        }
+        $mode = $record['value']['mode'] ?? null;
+        if (!is_int($mode) || $mode < 0 || $mode > 07777) {
+            throw new RuntimeException('Commit preparation directory-mode plan has an invalid mode.', self::ERROR_INVALID_STATE);
+        }
+        $destination = $this->private_path($this->prepared_dir, $path);
+        $identity = $this->path_identity($destination);
+        if ($identity === null || $identity['type'] !== 'directory') {
+            throw new RuntimeException('Prepared directory disappeared before applying its mode at ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+        }
+        if ($path === $root_path) {
+            // Some platforms refuse to rename a directory without owner write
+            // permission. Keep the private action root writable through both
+            // renames; the transition applies its final mode after install.
+            $prepare['root_directory_mode'] = $mode;
+        } elseif (!@chmod($destination, $mode)) {
+            throw new RuntimeException('Could not preserve prepared directory mode for ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+        }
+        $prepare['mode_offset'] = $record['next_offset'];
+    }
+
+    /** Returns one action-and-depth-specific deferred directory-mode plan. */
+    private function preparing_mode_plan_path(array $prepare, int $depth): string {
+        $index = $prepare['mode_plan_index'] ?? null;
+        if (!is_int($index) || $index < 0 || $depth <= 0 || $depth > self::MAX_PATH_BYTES) {
+            throw new RuntimeException('Commit preparation directory-mode plan identity is invalid.', self::ERROR_INVALID_STATE);
+        }
+        return $this->prepare_modes_dir . '/' . $index . '/' . $depth . '.jsonl';
+    }
+
+    /** Copies at most one bounded piece of the current regular file. */
+    private function advance_preparing_file(array &$prepare, string $source_kind, string $root_path): void {
+        $cursor = $prepare['file'];
+        $path = $this->decode_commit_path($cursor, 'preparation file cursor');
+        if ($path !== $root_path && strpos($path, $root_path . '/') !== 0) {
+            throw new RuntimeException('Commit preparation file escaped its action root.', self::ERROR_INVALID_STATE);
+        }
+        $source = $source_kind === 'live' ? $this->target_path($path) : $this->private_path($this->files_dir, $path);
+        $destination = $this->private_path($this->prepared_dir, $path);
+        $identity = $cursor['identity'] ?? null;
+        if (!is_array($identity) || ($identity['type'] ?? null) !== 'file' || $this->path_identity($source) !== $identity) {
+            $this->throw_preparation_source_changed($source_kind, $path);
+        }
+        $destination_identity = $this->path_identity($destination);
+        if ($destination_identity !== null && $destination_identity['type'] !== 'file') {
+            throw new RuntimeException('Prepared file destination changed type at ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+        }
+        $accepted_bytes = $destination_identity === null ? 0 : (int) $destination_identity['size'];
+        if ($accepted_bytes > (int) $identity['size']) {
+            throw new RuntimeException('Prepared file exceeds its source size at ' . $this->describe_path($path) . '.', self::ERROR_INVALID_STATE);
+        }
+        $input = @fopen($source, 'rb');
+        $output = @fopen($destination, 'c+b');
+        if ($input === false || $output === false) {
+            if (is_resource($input)) {
+                fclose($input);
+            }
+            if (is_resource($output)) {
+                fclose($output);
+            }
+            throw new RuntimeException('Could not resume prepared file ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+        }
+        try {
+            if (fseek($input, $accepted_bytes, SEEK_SET) !== 0 || fseek($output, $accepted_bytes, SEEK_SET) !== 0) {
+                throw new RuntimeException('Could not seek prepared file ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+            }
+            $remaining = (int) $identity['size'] - $accepted_bytes;
+            if ($remaining > 0) {
+                $piece = fread($input, min(self::BODY_PIECE_BYTES, $remaining));
+                if (!is_string($piece) || $piece === '') {
+                    throw new RuntimeException('Could not read source file while preparing ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
+                }
+                $this->write_all($output, $piece, 'prepared file ' . $this->describe_path($path));
+                $accepted_bytes += strlen($piece);
+            }
+            if (!fflush($output)) {
+                throw new RuntimeException('Could not flush prepared file ' . $destination . '.', self::ERROR_RETRYABLE_IO);
+            }
+        } finally {
+            fclose($input);
+            fclose($output);
+        }
+        if ($this->path_identity($source) !== $identity) {
+            $this->throw_preparation_source_changed($source_kind, $path);
+        }
+        if ($accepted_bytes === (int) $identity['size']) {
+            if (!@chmod($destination, (int) $identity['permissions'])) {
+                throw new RuntimeException('Could not preserve prepared file mode for ' . $source . '.', self::ERROR_RETRYABLE_IO);
+            }
+            $prepare['queue_offset'] = (int) $cursor['queue_next_offset'];
+            $prepare['file'] = null;
+        }
+    }
+
+    /** Requires a copied source to remain on the target filesystem. */
+    private function require_preparation_source_device(array $identity, string $source): void {
+        $target_identity = $this->path_identity($this->target_root);
+        if ($target_identity === null || $target_identity['type'] !== 'directory') {
+            throw new RuntimeException('The apply target root is not a directory.', self::ERROR_RETRYABLE_IO);
+        }
+        if ((int) $identity['dev'] !== (int) $target_identity['dev']) {
+            throw new RuntimeException(
+                'Refusing to prepare ' . $source . ' on device ' . $identity['dev']
+                . ' below a target rooted on device ' . $target_identity['dev'] . '.',
+                self::ERROR_RETRYABLE_IO
+            );
+        }
+    }
+
+    /** Throws the source-appropriate error when a resumable copy loses input. */
+    private function throw_preparation_source_changed(string $source_kind, string $path): void {
+        if ($source_kind === 'live') {
+            throw new RuntimeException(
+                'Live entry changed while preparing ' . $this->describe_path($path) . '.',
+                self::ERROR_LIVE_TREE_CHANGED
+            );
+        }
+        throw new RuntimeException(
+            'Staged entry changed while preparing ' . $this->describe_path($path) . '.',
+            self::ERROR_RETRYABLE_IO
+        );
     }
 
     /**
      * Advances one crash-recoverable two-rename live transition.
      *
-     * A transition checkpoint is persisted before any rename. Reconciliation
-     * may perform both renames now or prove that a prior process already did.
-     * The checkpoint is cleared only after the intended live outcome is proven.
+     * A transition checkpoint is persisted before any live chmod or rename.
+     * Reconciliation may perform both renames now or prove that a prior process
+     * already did. Read-only roots are made owner-writable under maintenance and
+     * the replacement's exact final mode is restored after installation. The
+     * checkpoint is cleared only after the intended live outcome is proven.
      *
      * @param array<string,mixed> $state
      * @param int $index Current action index.
      * @return bool Whether the prepared identity differs from the prior live one.
      */
-    private function switch_action(array &$state, int $index): bool {
-        $action = $state['actions'][$index] ?? null;
-        if (!is_array($action)) {
-            throw new RuntimeException('Commit checkpoint has no switch action at index ' . $index . '.', self::ERROR_RETRYABLE_IO);
-        }
+    private function switch_action(array &$state, array $action, int $index): bool {
         $path = base64_decode((string) ($action['path_b64'] ?? ''), true);
         if ($path === false || $path === '') {
             throw new RuntimeException('Commit checkpoint has an invalid switch path.', self::ERROR_RETRYABLE_IO);
@@ -1322,7 +2145,11 @@ final class Site_Export_Staged_Apply_Session {
         $backup_path = $this->private_path($this->backups_dir, $path);
 
         if (!is_array($state['transition'])) {
-            $this->require_prepared_live_tree($state, $index);
+            $this->require_prepared_live_tree($state, $action, $index);
+            $final_directory_mode = $action['final_directory_mode'] ?? null;
+            if ($final_directory_mode !== null && (!is_int($final_directory_mode) || $final_directory_mode < 0 || $final_directory_mode > 07777)) {
+                throw new RuntimeException('Prepared commit action has an invalid final directory mode.', self::ERROR_INVALID_STATE);
+            }
             $state['transition'] = [
                 'index' => $index,
                 'stage' => 'prepared',
@@ -1330,6 +2157,7 @@ final class Site_Export_Staged_Apply_Session {
                 'expected_live' => $action['expected_live'] ?? null,
                 'expected_live_tree' => $action['expected_live_tree'] ?? null,
                 'prepared' => $action['prepared'] ?? null,
+                'final_directory_mode' => $final_directory_mode,
                 'backup_b64' => base64_encode($path),
             ];
             $this->write_json($this->commit_path, $state);
@@ -1351,15 +2179,14 @@ final class Site_Export_Staged_Apply_Session {
      * @param array<string,mixed> $state
      * @param int $index Prepared action whose live tree is about to switch.
      */
-    private function require_prepared_live_tree(array $state, int $index): void {
+    private function require_prepared_live_tree(array $state, array $action, int $index): void {
         // A durable transition already describes a live rename that may have
         // happened. Its recovery must use the recorded physical identities,
         // rather than reject the intentionally absent live path here.
         if (is_array($state['transition'] ?? null)) {
             return;
         }
-        $action = $state['actions'][$index] ?? null;
-        if (!is_array($action) || !array_key_exists('expected_live_tree', $action)) {
+        if (!array_key_exists('expected_live_tree', $action)) {
             throw new RuntimeException('Prepared commit action ' . $index . ' has no live-tree fingerprint.', self::ERROR_INVALID_STATE);
         }
         $expected_live_tree = $action['expected_live_tree'];
@@ -1402,13 +2229,19 @@ final class Site_Export_Staged_Apply_Session {
             $prepared = $transition['prepared'] ?? null;
             $backup_expected = $transition['backup'] ?? null;
             $installed = $transition['installed'] ?? null;
-            foreach ([$expected_live, $prepared, $backup_expected, $installed] as $identity) {
+            $writable_live = $transition['writable_live'] ?? null;
+            $mode_applied = $transition['mode_applied'] ?? null;
+            foreach ([$expected_live, $prepared, $backup_expected, $installed, $writable_live, $mode_applied] as $identity) {
                 if ($identity !== null && !is_array($identity)) {
                     throw new RuntimeException('Commit transition contains an invalid filesystem identity.', self::ERROR_RETRYABLE_IO);
                 }
             }
+            $final_directory_mode = $transition['final_directory_mode'] ?? null;
+            if ($final_directory_mode !== null && (!is_int($final_directory_mode) || $final_directory_mode < 0 || $final_directory_mode > 07777)) {
+                throw new RuntimeException('Commit transition contains an invalid final directory mode.', self::ERROR_INVALID_STATE);
+            }
             $stage = $transition['stage'] ?? 'prepared';
-            if (!is_string($stage) || !in_array($stage, ['prepared', 'backup', 'installed'], true)) {
+            if (!is_string($stage) || !in_array($stage, ['prepared', 'live_writable', 'backup', 'installed', 'mode_applied'], true)) {
                 throw new RuntimeException('Commit transition contains an invalid stage.', self::ERROR_RETRYABLE_IO);
             }
             if ($expected_live_tree !== null && !is_string($expected_live_tree)) {
@@ -1426,6 +2259,33 @@ final class Site_Export_Staged_Apply_Session {
                 throw new RuntimeException('Delete transition has unexpected live, prepared, or backup state.', self::ERROR_LIVE_TREE_CHANGED);
             }
 
+            $live_requires_owner_access = is_array($expected_live)
+                && ($expected_live['type'] ?? null) === 'directory'
+                && (((int) ($expected_live['permissions'] ?? 0)) & 0700) !== 0700;
+            if ($stage === 'prepared' && $live_requires_owner_access) {
+                $writable_mode = ((int) $expected_live['permissions']) | 0700;
+                if ($live === $expected_live && $backup === null) {
+                    if (!@chmod($live_path, $writable_mode)) {
+                        throw new RuntimeException('Could not make the live directory movable under maintenance.', self::ERROR_RETRYABLE_IO);
+                    }
+                    $this->record_live_writable_transition($state, $this->path_identity($live_path));
+                    continue;
+                }
+                // A process may die after chmod() but before its checkpoint.
+                // The same inode and exact temporary mode identify that narrow
+                // transition window without following or guessing another path.
+                if (
+                    $live !== null
+                    && $backup === null
+                    && $this->same_physical_entry($live, $expected_live)
+                    && ($live['permissions'] ?? null) === $writable_mode
+                ) {
+                    $this->record_live_writable_transition($state, $live);
+                    continue;
+                }
+                throw new RuntimeException('Writable-live transition has unexpected live or backup state.', self::ERROR_LIVE_TREE_CHANGED);
+            }
+
             if (
                 $stage === 'prepared'
                 && $expected_live_tree !== null
@@ -1438,6 +2298,43 @@ final class Site_Export_Staged_Apply_Session {
                     self::ERROR_LIVE_TREE_CHANGED
                 );
             }
+
+            if ($stage === 'installed' || $stage === 'mode_applied') {
+                $expected_backup = $expected_live === null ? null : $backup_expected;
+                if ($candidate !== null || $backup !== $expected_backup || $live === null) {
+                    throw new RuntimeException('Installed transition has unexpected live, prepared, or backup state.', self::ERROR_LIVE_TREE_CHANGED);
+                }
+                if ($stage === 'mode_applied') {
+                    if ($live === $mode_applied) {
+                        return;
+                    }
+                    throw new RuntimeException('Installed directory mode changed after its checkpoint.', self::ERROR_LIVE_TREE_CHANGED);
+                }
+                if ($live === $installed) {
+                    if ($final_directory_mode === null || ($live['permissions'] ?? null) === $final_directory_mode) {
+                        return;
+                    }
+                    if (($live['type'] ?? null) !== 'directory' || !@chmod($live_path, $final_directory_mode)) {
+                        throw new RuntimeException('Could not apply the installed directory mode.', self::ERROR_RETRYABLE_IO);
+                    }
+                    $this->record_mode_applied_transition($state, $this->path_identity($live_path));
+                    continue;
+                }
+                if (
+                    $final_directory_mode !== null
+                    && $this->same_physical_entry($live, $installed)
+                    && ($live['permissions'] ?? null) === $final_directory_mode
+                ) {
+                    $this->record_mode_applied_transition($state, $live);
+                    continue;
+                }
+                throw new RuntimeException('Installed transition changed before its final mode checkpoint.', self::ERROR_LIVE_TREE_CHANGED);
+            }
+
+            $live_before_rename = $stage === 'live_writable' ? $writable_live : $expected_live;
+            $can_move_live = ($stage === 'prepared' && $live === $expected_live)
+                || ($stage === 'live_writable' && $live === $writable_live);
+            $before_backup = $stage === 'prepared' || $stage === 'live_writable';
 
             if ($expected_live === null) {
                 if ($stage === 'prepared' && $live === null && $candidate === $prepared && $backup === null) {
@@ -1454,21 +2351,18 @@ final class Site_Export_Staged_Apply_Session {
                     $this->record_transition_stage($state, 'installed', null, $live);
                     continue;
                 }
-                if ($stage === 'installed' && $live === $installed && $candidate === null && $backup === null) {
-                    return;
-                }
                 throw new RuntimeException('Install transition has unexpected live, prepared, or backup state.', self::ERROR_LIVE_TREE_CHANGED);
             }
 
             if ($prepared === null) {
-                if ($stage === 'prepared' && $live === $expected_live && $backup === null && $candidate === null) {
+                if ($can_move_live && $backup === null && $candidate === null) {
                     $this->ensure_target_parent($live_path);
                     $this->ensure_private_parent($backup_path);
                     $this->rename_same_filesystem($live_path, $backup_path, 'move deleted entry into backup');
                     $this->record_transition_stage($state, 'backup', $this->path_identity($backup_path), null);
                     continue;
                 }
-                if ($stage === 'prepared' && $live === null && $this->same_physical_entry($backup, $expected_live) && $candidate === null) {
+                if ($before_backup && $live === null && $this->same_physical_entry($backup, $live_before_rename) && $candidate === null) {
                     $this->record_transition_stage($state, 'backup', $backup, null);
                     continue;
                 }
@@ -1478,14 +2372,14 @@ final class Site_Export_Staged_Apply_Session {
                 throw new RuntimeException('Delete transition has unexpected live, prepared, or backup state.', self::ERROR_LIVE_TREE_CHANGED);
             }
 
-            if ($stage === 'prepared' && $live === $expected_live && $backup === null && $candidate === $prepared) {
+            if ($can_move_live && $backup === null && $candidate === $prepared) {
                 $this->ensure_target_parent($live_path);
                 $this->ensure_private_parent($backup_path);
                 $this->rename_same_filesystem($live_path, $backup_path, 'move replaced entry into backup');
                 $this->record_transition_stage($state, 'backup', $this->path_identity($backup_path), null);
                 continue;
             }
-            if ($stage === 'prepared' && $live === null && $this->same_physical_entry($backup, $expected_live) && $candidate === $prepared) {
+            if ($before_backup && $live === null && $this->same_physical_entry($backup, $live_before_rename) && $candidate === $prepared) {
                 $this->record_transition_stage($state, 'backup', $backup, null);
                 continue;
             }
@@ -1498,9 +2392,6 @@ final class Site_Export_Staged_Apply_Session {
             if ($stage === 'backup' && $this->same_physical_entry($live, $prepared) && $backup === $backup_expected && $candidate === null) {
                 $this->record_transition_stage($state, 'installed', $backup_expected, $live);
                 continue;
-            }
-            if ($stage === 'installed' && $live === $installed && $backup === $backup_expected && $candidate === null) {
-                return;
             }
             throw new RuntimeException('Replacement transition has unexpected live, prepared, or backup state.', self::ERROR_LIVE_TREE_CHANGED);
         }
@@ -1525,6 +2416,26 @@ final class Site_Export_Staged_Apply_Session {
         if ($installed !== null) {
             $state['transition']['installed'] = $installed;
         }
+        $this->write_json($this->commit_path, $state);
+    }
+
+    /** Checkpoints the owner-writable live identity required for portable rename. */
+    private function record_live_writable_transition(array &$state, ?array $identity): void {
+        if (!is_array($state['transition'] ?? null) || $identity === null || ($identity['type'] ?? null) !== 'directory') {
+            throw new RuntimeException('Could not checkpoint the writable live directory identity.', self::ERROR_RETRYABLE_IO);
+        }
+        $state['transition']['stage'] = 'live_writable';
+        $state['transition']['writable_live'] = $identity;
+        $this->write_json($this->commit_path, $state);
+    }
+
+    /** Checkpoints the installed directory after applying its exact final mode. */
+    private function record_mode_applied_transition(array &$state, ?array $identity): void {
+        if (!is_array($state['transition'] ?? null) || $identity === null || ($identity['type'] ?? null) !== 'directory') {
+            throw new RuntimeException('Could not checkpoint the installed directory mode.', self::ERROR_RETRYABLE_IO);
+        }
+        $state['transition']['stage'] = 'mode_applied';
+        $state['transition']['mode_applied'] = $identity;
         $this->write_json($this->commit_path, $state);
     }
 
@@ -1573,32 +2484,76 @@ final class Site_Export_Staged_Apply_Session {
         }
 
         if ($this->path_identity($this->maintenance_identity_path) === null) {
-            $contents = "<?php\n\$upgrading = " . time() . ";\n// reprint-staged-session:" . $this->session_id . ':' . $token . "\n";
+            $contents = $this->maintenance_marker_contents($token);
             $this->write_atomic_file($this->maintenance_identity_path, $contents, 0600);
         }
         if (!$this->maintenance_marker_is_owned($this->maintenance_identity_path, $token)) {
             throw new RuntimeException('The private maintenance marker identity is not owned by this session.', self::ERROR_RETRYABLE_IO);
         }
 
+        $this->refresh_private_maintenance_marker($token);
+
         if ($live_identity === null) {
-            $temporary_path = $live_path . '.reprint-' . $this->session_id;
-            if ($this->path_identity($temporary_path) !== null) {
-                throw new RuntimeException('Refusing to replace an unexpected maintenance marker temporary path.', self::ERROR_RETRYABLE_IO);
-            }
-            if (!@link($this->maintenance_identity_path, $temporary_path)) {
-                throw new RuntimeException('Could not link the private maintenance marker into the target root.', self::ERROR_RETRYABLE_IO);
-            }
-            if (!@rename($temporary_path, $live_path)) {
-                @unlink($temporary_path);
+            // link() fails atomically when another updater wins the absent-name
+            // race. A check-then-rename sequence could overwrite its marker.
+            if (!@link($this->maintenance_identity_path, $live_path)) {
+                $observed = $this->path_identity($live_path);
+                if ($observed !== null && !$this->maintenance_marker_is_owned($live_path, $token)) {
+                    throw new RuntimeException('A foreign WordPress maintenance marker appeared while publishing this session marker.', self::ERROR_BUSY);
+                }
                 throw new RuntimeException('Could not publish the WordPress maintenance marker.', self::ERROR_RETRYABLE_IO);
             }
-        } elseif (!@touch($live_path)) {
-            throw new RuntimeException('Could not refresh the WordPress maintenance marker.', self::ERROR_RETRYABLE_IO);
         }
 
         if (!$this->maintenance_marker_is_owned($live_path, $token)) {
             throw new RuntimeException('The WordPress maintenance marker changed while it was being refreshed.', self::ERROR_BUSY);
         }
+    }
+
+    /**
+     * Rewrites the timestamp WordPress evaluates without replacing the owned inode.
+     *
+     * WordPress ignores the marker's filesystem mtime and expires the `$upgrading`
+     * value stored in its PHP body. A fixed-width decimal string lets each refresh
+     * overwrite the same bytes in place, preserving the hard-link identity used
+     * for ownership and avoiding a rename which could replace a foreign marker.
+     *
+     * @param string $token Commit checkpoint's maintenance ownership token.
+     */
+    private function refresh_private_maintenance_marker(string $token): void {
+        $contents = $this->maintenance_marker_contents($token);
+        $identity = $this->path_identity($this->maintenance_identity_path);
+        if ($identity === null || $identity['type'] !== 'file' || (int) $identity['size'] !== strlen($contents)) {
+            throw new RuntimeException('The private maintenance marker has an unexpected size and cannot be refreshed safely.', self::ERROR_RETRYABLE_IO);
+        }
+        $handle = @fopen($this->maintenance_identity_path, 'r+b');
+        if ($handle === false) {
+            throw new RuntimeException('Could not open the private maintenance marker for refresh.', self::ERROR_RETRYABLE_IO);
+        }
+        try {
+            if (fseek($handle, 0, SEEK_SET) !== 0) {
+                throw new RuntimeException('Could not seek the private maintenance marker for refresh.', self::ERROR_RETRYABLE_IO);
+            }
+            $this->write_all($handle, $contents, 'private maintenance marker');
+            if (!fflush($handle)) {
+                throw new RuntimeException('Could not flush the private maintenance marker refresh.', self::ERROR_RETRYABLE_IO);
+            }
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    /**
+     * Returns the fixed-length marker body WordPress evaluates on every request.
+     *
+     * @param string $token Commit checkpoint's maintenance ownership token.
+     */
+    private function maintenance_marker_contents(string $token): string {
+        $timestamp = sprintf('%010d', time());
+        if (strlen($timestamp) !== 10) {
+            throw new RuntimeException('The current time cannot be represented in the maintenance marker.', self::ERROR_RETRYABLE_IO);
+        }
+        return "<?php\n\$upgrading = '" . $timestamp . "';\n// reprint-staged-session:" . $this->session_id . ':' . $token . "\n";
     }
 
     /**
@@ -1754,112 +2709,6 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Returns commit-visible staged paths and their filesystem types.
-     *
-     * The walk never follows symlinks. Non-empty directories are structural and
-     * omitted; explicitly empty directories are final values and are retained.
-     *
-     * @param string $directory Private staged root to inspect.
-     * @return array<string,string> Target-relative path to file/directory/symlink.
-     */
-    private function list_staged_paths(string $directory): array {
-        $identity = $this->path_identity($directory);
-        if ($identity === null) {
-            return [];
-        }
-        if ($identity['type'] !== 'directory') {
-            throw new RuntimeException('Staged files root is not a directory.', self::ERROR_RETRYABLE_IO);
-        }
-        $paths = [];
-        $this->collect_staged_paths($directory, '', $paths);
-        return $paths;
-    }
-
-    /**
-     * Collects staged leaves and explicitly empty directories.
-     *
-     * Non-empty directories are structural parents rather than independent
-     * final entries, so their descendants alone enter the action planner.
-     *
-     * @param string $directory Current absolute private directory.
-     * @param string $prefix Current target-relative prefix.
-     * @param array<string,string> $paths Collected path-to-type map.
-     */
-    private function collect_staged_paths(string $directory, string $prefix, array &$paths): void {
-        $entries = @scandir($directory);
-        if (!is_array($entries)) {
-            throw new RuntimeException('Could not read staged directory ' . $directory . '.', self::ERROR_RETRYABLE_IO);
-        }
-        $children = [];
-        foreach ($entries as $entry) {
-            if ($entry === '.' || $entry === '..') {
-                continue;
-            }
-            $children[] = $entry;
-        }
-        if ($prefix !== '' && $children === []) {
-            $paths[$prefix] = 'directory';
-            return;
-        }
-        foreach ($children as $entry) {
-            $path = $prefix === '' ? $entry : $prefix . '/' . $entry;
-            $full_path = $directory . '/' . $entry;
-            $identity = $this->path_identity($full_path);
-            if ($identity === null) {
-                throw new RuntimeException('Staged path disappeared while building a commit: ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
-            }
-            if ($identity['type'] === 'directory') {
-                $this->collect_staged_paths($full_path, $path, $paths);
-                continue;
-            }
-            if ($identity['type'] !== 'file' && $identity['type'] !== 'symlink') {
-                throw new RuntimeException('Staged path has an unsupported type: ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
-            }
-            $paths[$path] = $identity['type'];
-        }
-    }
-
-    /**
-     * Returns the validated de-duplicated delete set from durable JSONL records.
-     *
-     * The incomplete final record is repaired before this method is called. Each
-     * decoded path is validated again because the file survives process restarts.
-     *
-     * @return array<string,bool> Target-relative delete paths as lookup keys.
-     */
-    private function read_delete_paths(): array {
-        $this->repair_delete_tail();
-        if ($this->path_identity($this->deletes_path) === null) {
-            return [];
-        }
-        $handle = @fopen($this->deletes_path, 'rb');
-        if ($handle === false) {
-            throw new RuntimeException('Could not read the staged delete list.', self::ERROR_RETRYABLE_IO);
-        }
-        $paths = [];
-        try {
-            while (($line = fgets($handle, 8193)) !== false) {
-                if (strlen($line) > 8192 || substr($line, -1) !== "\n") {
-                    throw new RuntimeException('The staged delete list has an invalid record length.', self::ERROR_RETRYABLE_IO);
-                }
-                $record = json_decode(substr($line, 0, -1), true);
-                if (!is_array($record) || !isset($record['path_b64']) || !is_string($record['path_b64'])) {
-                    throw new RuntimeException('The staged delete list contains an invalid record.', self::ERROR_RETRYABLE_IO);
-                }
-                $path = base64_decode($record['path_b64'], true);
-                if ($path === false || $path === '') {
-                    throw new RuntimeException('The staged delete list contains an invalid path.', self::ERROR_RETRYABLE_IO);
-                }
-                $this->validate_path($path);
-                $paths[$path] = true;
-            }
-        } finally {
-            fclose($handle);
-        }
-        return $paths;
-    }
-
-    /**
      * Discards only an incomplete final JSONL record after a killed upload.
      *
      * Complete newline-terminated records are immutable evidence. If the file
@@ -1867,19 +2716,29 @@ final class Site_Export_Staged_Apply_Session {
      * malformed complete records are rejected later rather than silently removed.
      */
     private function repair_delete_tail(): void {
-        $identity = $this->path_identity($this->deletes_path);
+        $this->repair_jsonl_tail($this->deletes_path, 'staged delete list');
+    }
+
+    /** Repairs a killed append to the positive-path journal. */
+    private function repair_staged_paths_tail(): void {
+        $this->repair_jsonl_tail($this->staged_paths_path, 'staged positive-path journal');
+    }
+
+    /** Discards only the final non-newline-terminated record of one journal. */
+    private function repair_jsonl_tail(string $path, string $description): void {
+        $identity = $this->path_identity($path);
         if ($identity === null) {
             return;
         }
         if ($identity['type'] !== 'file') {
-            throw new RuntimeException('The staged delete list is not a regular file.', self::ERROR_RETRYABLE_IO);
+            throw new RuntimeException('The ' . $description . ' is not a regular file.', self::ERROR_RETRYABLE_IO);
         }
         if ((int) $identity['size'] === 0) {
             return;
         }
-        $handle = @fopen($this->deletes_path, 'c+b');
+        $handle = @fopen($path, 'c+b');
         if ($handle === false) {
-            throw new RuntimeException('Could not repair the staged delete list.', self::ERROR_RETRYABLE_IO);
+            throw new RuntimeException('Could not repair the ' . $description . '.', self::ERROR_RETRYABLE_IO);
         }
         try {
             $size = (int) $identity['size'];
@@ -1890,158 +2749,26 @@ final class Site_Export_Staged_Apply_Session {
             while ($position > 0) {
                 $start = max(0, $position - 65536);
                 if (fseek($handle, $start, SEEK_SET) !== 0) {
-                    throw new RuntimeException('Could not seek the staged delete list for repair.', self::ERROR_RETRYABLE_IO);
+                    throw new RuntimeException('Could not seek the ' . $description . ' for repair.', self::ERROR_RETRYABLE_IO);
                 }
                 $chunk = fread($handle, $position - $start);
                 if (!is_string($chunk)) {
-                    throw new RuntimeException('Could not read the staged delete list for repair.', self::ERROR_RETRYABLE_IO);
+                    throw new RuntimeException('Could not read the ' . $description . ' for repair.', self::ERROR_RETRYABLE_IO);
                 }
                 $newline = strrpos($chunk, "\n");
                 if ($newline !== false) {
                     if (!ftruncate($handle, $start + $newline + 1) || !fflush($handle)) {
-                        throw new RuntimeException('Could not repair the staged delete list tail.', self::ERROR_RETRYABLE_IO);
+                        throw new RuntimeException('Could not repair the ' . $description . ' tail.', self::ERROR_RETRYABLE_IO);
                     }
                     return;
                 }
                 $position = $start;
             }
             if (!ftruncate($handle, 0) || !fflush($handle)) {
-                throw new RuntimeException('Could not clear an incomplete staged delete list record.', self::ERROR_RETRYABLE_IO);
+                throw new RuntimeException('Could not clear an incomplete ' . $description . ' record.', self::ERROR_RETRYABLE_IO);
             }
         } finally {
             fclose($handle);
-        }
-    }
-
-    /**
-     * Clones one entry without following symlinks.
-     *
-     * Directories recurse, symlinks preserve their literal target, and regular
-     * files are copied through bounded pieces rather than one in-memory string.
-     *
-     * @param string $source Existing entry to clone.
-     * @param string $destination Absent private destination path.
-     */
-    private function copy_entry(string $source, string $destination): void {
-        $identity = $this->path_identity($source);
-        if ($identity === null) {
-            throw new RuntimeException('Source entry disappeared during commit preparation: ' . $source . '.', self::ERROR_RETRYABLE_IO);
-        }
-        $target_root_identity = $this->path_identity($this->target_root);
-        if ($target_root_identity === null || $target_root_identity['type'] !== 'directory') {
-            throw new RuntimeException('The apply target root is not a directory.', self::ERROR_RETRYABLE_IO);
-        }
-        if ((int) $identity['dev'] !== (int) $target_root_identity['dev']) {
-            throw new RuntimeException(
-                'Refusing to prepare entry on device ' . $identity['dev']
-                . ' below a target rooted on device ' . $target_root_identity['dev'] . '.',
-                self::ERROR_RETRYABLE_IO
-            );
-        }
-        $this->ensure_private_parent($destination);
-        $this->remove_entry($destination);
-        if ($identity['type'] === 'directory') {
-            if (!@mkdir($destination, 0700) && !is_dir($destination)) {
-                throw new RuntimeException('Could not create prepared directory ' . $destination . '.', self::ERROR_RETRYABLE_IO);
-            }
-            $entries = @scandir($source);
-            if (!is_array($entries)) {
-                throw new RuntimeException('Could not read directory while preparing ' . $source . '.', self::ERROR_RETRYABLE_IO);
-            }
-            foreach ($entries as $entry) {
-                if ($entry === '.' || $entry === '..') {
-                    continue;
-                }
-                $this->copy_entry($source . '/' . $entry, $destination . '/' . $entry);
-            }
-            return;
-        }
-        if ($identity['type'] === 'symlink') {
-            $target = @readlink($source);
-            if (!is_string($target) || !@symlink($target, $destination)) {
-                throw new RuntimeException('Could not recreate prepared symlink ' . $source . '.', self::ERROR_RETRYABLE_IO);
-            }
-            return;
-        }
-        if ($identity['type'] !== 'file') {
-            throw new RuntimeException('Could not prepare unsupported filesystem entry ' . $source . '.', self::ERROR_RETRYABLE_IO);
-        }
-        $input = @fopen($source, 'rb');
-        $output = @fopen($destination, 'xb');
-        if ($input === false || $output === false) {
-            if (is_resource($input)) {
-                fclose($input);
-            }
-            if (is_resource($output)) {
-                fclose($output);
-            }
-            throw new RuntimeException('Could not open file while preparing ' . $source . '.', self::ERROR_RETRYABLE_IO);
-        }
-        try {
-            while (!feof($input)) {
-                $piece = fread($input, self::BODY_PIECE_BYTES);
-                if ($piece === false) {
-                    throw new RuntimeException('Could not read file while preparing ' . $source . '.', self::ERROR_RETRYABLE_IO);
-                }
-                if ($piece !== '') {
-                    $this->write_all($output, $piece, 'prepared file ' . $source);
-                }
-            }
-            if (!fflush($output)) {
-                throw new RuntimeException('Could not flush prepared file ' . $destination . '.', self::ERROR_RETRYABLE_IO);
-            }
-        } finally {
-            fclose($input);
-            fclose($output);
-        }
-    }
-
-    /**
-     * Overlays staged descendants onto an existing prepared directory tree.
-     *
-     * Every source child replaces the same destination child. Parent checks and
-     * lstat identities prevent either live or staged symlinks from becoming
-     * traversal points during the recursive overlay.
-     *
-     * @param string $source Staged directory whose descendants win.
-     * @param string $destination Prepared directory being updated.
-     */
-    private function overlay_directory(string $source, string $destination): void {
-        $identity = $this->path_identity($source);
-        if ($identity === null || $identity['type'] !== 'directory') {
-            throw new RuntimeException('Expected a staged directory while preparing a deployment unit.', self::ERROR_RETRYABLE_IO);
-        }
-        $entries = @scandir($source);
-        if (!is_array($entries)) {
-            throw new RuntimeException('Could not read staged directory ' . $source . '.', self::ERROR_RETRYABLE_IO);
-        }
-        $children = array_values(array_filter($entries, static function (string $entry): bool {
-            return $entry !== '.' && $entry !== '..';
-        }));
-        if ($children === []) {
-            $this->copy_entry($source, $destination);
-            return;
-        }
-        $destination_identity = $this->path_identity($destination);
-        if ($destination_identity === null || $destination_identity['type'] !== 'directory') {
-            $this->ensure_private_parent($destination);
-            $this->remove_entry($destination);
-            if (!@mkdir($destination, 0700) && !is_dir($destination)) {
-                throw new RuntimeException('Could not create prepared directory ' . $destination . '.', self::ERROR_RETRYABLE_IO);
-            }
-        }
-        foreach ($children as $entry) {
-            $source_child = $source . '/' . $entry;
-            $destination_child = $destination . '/' . $entry;
-            $child_identity = $this->path_identity($source_child);
-            if ($child_identity === null) {
-                throw new RuntimeException('Staged child disappeared while preparing ' . $source . '.', self::ERROR_RETRYABLE_IO);
-            }
-            if ($child_identity['type'] === 'directory') {
-                $this->overlay_directory($source_child, $destination_child);
-            } else {
-                $this->copy_entry($source_child, $destination_child);
-            }
         }
     }
 
@@ -2129,15 +2856,14 @@ final class Site_Export_Staged_Apply_Session {
             if ($identity === null) {
                 break;
             }
-            // A regular-file ancestor can be a deliberate file -> directory
-            // transition; the commit planner prepares its whole replacement
-            // tree privately. A link would make even inspection/copy follow
-            // an attacker-controlled path, so it is never a valid ancestor.
-            if ($index < count($segments) - 1 && is_link($current)) {
-                throw new RuntimeException('Refusing staged apply path below a symlinked target parent ' . $current . '.');
-            }
             if ((int) $identity['dev'] !== (int) $root_identity['dev']) {
                 throw new RuntimeException('Refusing staged apply path below separately mounted target path ' . $current . '.');
+            }
+            // A file or symlink ancestor can be a deliberate transition to a
+            // directory. Stop at that lstat result: commit planning replaces
+            // the ancestor as a whole, and must never inspect through a link.
+            if ($index < count($segments) - 1 && $identity['type'] !== 'directory') {
+                break;
             }
         }
     }
@@ -2236,6 +2962,7 @@ final class Site_Export_Staged_Apply_Session {
             'ino' => (int) $stat['ino'],
             'ctime' => (int) $stat['ctime'],
             'size' => (int) $stat['size'],
+            'permissions' => $mode & 07777,
         ];
         if ($type === 'symlink') {
             $target = @readlink($path);
@@ -2284,9 +3011,17 @@ final class Site_Export_Staged_Apply_Session {
                 self::ERROR_RETRYABLE_IO
             );
         }
+        $content_hash = null;
+        if ($identity['type'] === 'file') {
+            $content_hash = @hash_file('sha256', $path);
+            if (!is_string($content_hash) || $this->path_identity($path) !== $identity) {
+                throw new RuntimeException('Live file changed while it was being fingerprinted: ' . $path . '.', self::ERROR_LIVE_TREE_CHANGED);
+            }
+        }
         $record = json_encode([
             'path_b64' => base64_encode($relative_path),
             'identity' => $identity,
+            'content_sha256' => $content_hash,
         ], JSON_UNESCAPED_SLASHES);
         if ($record === false) {
             throw new RuntimeException('Could not fingerprint live tree entry ' . $path . '.', self::ERROR_RETRYABLE_IO);
@@ -2331,6 +3066,12 @@ final class Site_Export_Staged_Apply_Session {
             return;
         }
         if ($identity['type'] === 'directory') {
+            // Prepared candidates and backups preserve source modes, including
+            // read-only directories. They are private cleanup inputs here, so
+            // restore owner access before descending into them.
+            if (!@chmod($path, 0700)) {
+                throw new RuntimeException('Could not make private directory removable: ' . $path . '.', self::ERROR_RETRYABLE_IO);
+            }
             $entries = @scandir($path);
             if (!is_array($entries)) {
                 throw new RuntimeException('Could not read directory for removal: ' . $path . '.', self::ERROR_RETRYABLE_IO);
@@ -2497,6 +3238,10 @@ final class Site_Export_Staged_Apply_Session {
         if ($lock_identity === null || $lock_identity['type'] !== 'file' || is_link($this->lock_path)) {
             throw new RuntimeException('Staged apply session lock is not a regular file.', self::ERROR_RETRYABLE_IO);
         }
+        $staged_paths_identity = $this->path_identity($this->staged_paths_path);
+        if ($staged_paths_identity === null || $staged_paths_identity['type'] !== 'file' || is_link($this->staged_paths_path)) {
+            throw new RuntimeException('Staged apply positive-path journal is not a regular file.', self::ERROR_RETRYABLE_IO);
+        }
     }
 
     /**
@@ -2530,6 +3275,21 @@ final class Site_Export_Staged_Apply_Session {
         if (self::normalize_protected_paths($decoded_paths) !== $this->protected_paths) {
             throw new RuntimeException('Staged apply session protected paths no longer match server configuration.', self::ERROR_INVALID_STATE);
         }
+        $stored_roots = $metadata['deployment_roots_b64'] ?? null;
+        if (!is_array($stored_roots)) {
+            throw new RuntimeException('Staged apply session deployment-root metadata is invalid.', self::ERROR_INVALID_STATE);
+        }
+        $decoded_roots = [];
+        foreach ($stored_roots as $encoded_root) {
+            $root = is_string($encoded_root) ? base64_decode($encoded_root, true) : false;
+            if ($root === false || $root === '') {
+                throw new RuntimeException('Staged apply session deployment-root metadata is invalid.', self::ERROR_INVALID_STATE);
+            }
+            $decoded_roots[] = $root;
+        }
+        if (self::normalize_deployment_roots($decoded_roots) !== $this->deployment_roots) {
+            throw new RuntimeException('Staged apply session deployment roots no longer match server configuration.', self::ERROR_INVALID_STATE);
+        }
     }
 
     /**
@@ -2543,39 +3303,49 @@ final class Site_Export_Staged_Apply_Session {
      * @param array<string,mixed> $state
      */
     private function require_valid_commit_state(array $state): void {
-        if (($state['version'] ?? null) !== 1) {
+        if (($state['version'] ?? null) !== 2) {
             throw new RuntimeException('Commit checkpoint has an unsupported version ' . json_encode($state['version'] ?? null) . '.', self::ERROR_INVALID_STATE);
         }
         $phase = $state['phase'] ?? null;
-        if (!is_string($phase) || !in_array($phase, ['preparing', 'switching', 'cleaning', 'complete'], true)) {
+        if (!is_string($phase) || !in_array($phase, ['materializing', 'preparing', 'switching', 'cleaning', 'complete'], true)) {
             throw new RuntimeException('Commit checkpoint has an invalid phase ' . json_encode($phase) . '.', self::ERROR_INVALID_STATE);
         }
-        $actions = $state['actions'] ?? null;
-        if (!is_array($actions)) {
-            throw new RuntimeException('Commit checkpoint has no action list.', self::ERROR_INVALID_STATE);
-        }
-        foreach ($actions as $index => $action) {
-            if (!is_array($action)
-                || !is_string($action['path_b64'] ?? null)
-                || $action['path_b64'] === ''
-                || !is_string($action['kind'] ?? null)
-                || !in_array($action['kind'], ['unit', 'tree', 'entry'], true)
-                || !array_key_exists('deleted', $action)
-                || !is_bool($action['deleted'])) {
-                throw new RuntimeException('Commit checkpoint action ' . $index . ' is invalid.', self::ERROR_INVALID_STATE);
+        foreach ([$this->commit_work_dir, $this->delete_index_dir, $this->delete_descendants_index_dir, $this->staged_index_dir, $this->action_index_dir, $this->prepare_modes_dir] as $directory) {
+            $identity = $this->path_identity($directory);
+            if ($identity === null || $identity['type'] !== 'directory') {
+                throw new RuntimeException('Commit checkpoint is missing a private disk-backed planning directory.', self::ERROR_INVALID_STATE);
             }
         }
-        $action_count = count($actions);
-        foreach (['prepare_index', 'switch_index'] as $field) {
+        foreach (['delete_index_offset', 'staged_paths_offset', 'delete_action_offset', 'candidate_offset', 'actions_bytes', 'actions_count', 'prepare_offset', 'prepared_actions_bytes', 'prepare_index', 'switch_offset', 'switch_index'] as $field) {
             $value = $state[$field] ?? null;
-            if (!is_int($value) || $value < 0 || $value > $action_count) {
-                throw new RuntimeException('Commit checkpoint ' . $field . ' must be an integer from 0 through ' . $action_count . '; observed ' . json_encode($value) . '.', self::ERROR_INVALID_STATE);
+            if (!is_int($value) || $value < 0) {
+                throw new RuntimeException('Commit checkpoint ' . $field . ' must be a non-negative integer; observed ' . json_encode($value) . '.', self::ERROR_INVALID_STATE);
             }
         }
-        if ($phase !== 'preparing' && $state['prepare_index'] !== $action_count) {
+        if ($state['prepare_index'] > $state['actions_count'] || $state['switch_index'] > $state['prepare_index']) {
+            throw new RuntimeException('Commit checkpoint action indexes are inconsistent.', self::ERROR_INVALID_STATE);
+        }
+        if (!array_key_exists('current_prepare', $state)) {
+            throw new RuntimeException('Commit checkpoint has no current preparation cursor.', self::ERROR_INVALID_STATE);
+        }
+        $current_prepare = $state['current_prepare'];
+        if ($current_prepare !== null && !is_array($current_prepare)) {
+            throw new RuntimeException('Commit checkpoint current preparation cursor is invalid.', self::ERROR_INVALID_STATE);
+        }
+        if ($phase !== 'preparing' && $current_prepare !== null) {
+            throw new RuntimeException('Commit checkpoint retains a preparation cursor in phase ' . $phase . '.', self::ERROR_INVALID_STATE);
+        }
+        $materialize_stage = $state['materialize_stage'] ?? null;
+        if (!is_string($materialize_stage) || !in_array($materialize_stage, ['delete_index', 'staged', 'delete_actions', 'actions', 'complete'], true)) {
+            throw new RuntimeException('Commit checkpoint has an invalid materialization stage.', self::ERROR_INVALID_STATE);
+        }
+        if ($phase !== 'materializing' && $materialize_stage !== 'complete') {
+            throw new RuntimeException('Commit checkpoint left materialization incomplete before phase ' . $phase . '.', self::ERROR_INVALID_STATE);
+        }
+        if (!in_array($phase, ['materializing', 'preparing'], true) && $state['prepare_index'] !== $state['actions_count']) {
             throw new RuntimeException('Commit checkpoint phase ' . $phase . ' has unprepared actions.', self::ERROR_INVALID_STATE);
         }
-        if (in_array($phase, ['cleaning', 'complete'], true) && $state['switch_index'] !== $action_count) {
+        if (in_array($phase, ['cleaning', 'complete'], true) && $state['switch_index'] !== $state['actions_count']) {
             throw new RuntimeException('Commit checkpoint phase ' . $phase . ' has unswitched actions.', self::ERROR_INVALID_STATE);
         }
         if (array_key_exists('transition', $state) && $state['transition'] !== null && !is_array($state['transition'])) {
@@ -2666,21 +3436,47 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
+     * Returns an octal permission header without accepting file-type bits.
+     *
+     * @param array<string,string> $headers Current part headers.
+     * @param string $header Lowercase required header name.
+     */
+    private function require_mode_header(array $headers, string $header): int {
+        $value = $headers[$header] ?? null;
+        if (!is_string($value) || preg_match('/^0[0-7]{3,4}$/D', $value) !== 1) {
+            throw new InvalidArgumentException('Multipart push header ' . $header . ' must be an octal mode such as 0644; observed ' . json_encode($value) . '.');
+        }
+        $mode = octdec($value);
+        if ($mode < 0 || $mode > 07777) {
+            throw new InvalidArgumentException('Multipart push header ' . $header . ' exceeds permission bits: ' . $value . '.');
+        }
+        return $mode;
+    }
+
+    /**
      * Returns the complete plugin or theme root containing a changed path.
      *
-     * `wp-content/plugins/foo/a.php` becomes `wp-content/plugins/foo`; the same
-     * applies to themes. Container directories and unrelated paths return null
-     * because they are not independently deployable units.
+     * A path below a configured container becomes that container's direct child.
+     * Container directories and unrelated paths return null because they are not
+     * independently deployable units.
      *
      * @param string $path Validated target-relative path.
      * @return string|null Atomic deployment-unit root.
      */
     private function deployment_unit_for_path(string $path): ?string {
-        $segments = explode('/', $path);
-        if (count($segments) < 3 || $segments[0] !== 'wp-content' || ($segments[1] !== 'plugins' && $segments[1] !== 'themes')) {
-            return null;
+        foreach ($this->deployment_roots as $root) {
+            $prefix = $root . '/';
+            if (strpos($path, $prefix) !== 0) {
+                continue;
+            }
+            $remainder = substr($path, strlen($prefix));
+            $separator = strpos($remainder, '/');
+            $child = $separator === false ? $remainder : substr($remainder, 0, $separator);
+            if ($child !== '') {
+                return $root . '/' . $child;
+            }
         }
-        return $segments[0] . '/' . $segments[1] . '/' . $segments[2];
+        return null;
     }
 
     /**
@@ -2787,14 +3583,27 @@ final class Site_Export_Staged_Apply_Session {
      * @return string[] Stable normalized path list.
      */
     private static function normalize_protected_paths(array $protected_paths): array {
+        return self::normalize_configured_paths($protected_paths, 'protected staged apply path');
+    }
+
+    /** @param string[] $deployment_roots @return string[] */
+    private static function normalize_deployment_roots(array $deployment_roots): array {
+        return self::normalize_configured_paths($deployment_roots, 'staged apply deployment root');
+    }
+
+    /**
+     * @param string[] $paths Configured target-relative paths.
+     * @return string[] Stable normalized path list.
+     */
+    private static function normalize_configured_paths(array $paths, string $description): array {
         $normalized = [];
-        foreach ($protected_paths as $path) {
+        foreach ($paths as $path) {
             if (!is_string($path) || $path === '' || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
-                throw new InvalidArgumentException('Each protected staged apply path must be a non-empty safe relative path.');
+                throw new InvalidArgumentException('Each ' . $description . ' must be a non-empty safe relative path.');
             }
             foreach (explode('/', $path) as $segment) {
                 if ($segment === '' || $segment === '.' || $segment === '..') {
-                    throw new InvalidArgumentException('Protected staged apply path is unsafe: ' . $path . '.');
+                    throw new InvalidArgumentException(ucfirst($description) . ' is unsafe: ' . $path . '.');
                 }
             }
             $normalized[] = $path;

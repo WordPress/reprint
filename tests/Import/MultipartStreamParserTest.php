@@ -131,6 +131,30 @@ class MultipartStreamParserTest extends TestCase
         $this->assertSame("world", $this->get_part_body($events, 0));
     }
 
+    public function testBoundaryPrefixInsideUndeclaredBodyIsNotADelimiter(): void
+    {
+        [$events, $handler] = $this->make_collector();
+        $parser = new MultipartStreamParser('BOUNDARY', $handler);
+        $body = "before\r\n--BOUNDARY-not-a-delimiter\r\nafter";
+
+        $parser->feed("--BOUNDARY\r\nX-Test: yes\r\n\r\n" . $body . "\r\n--BOUNDARY--\r\n");
+
+        $this->assertSame(1, $this->count_completed_parts($events));
+        $this->assertSame($body, $this->get_part_body($events, 0));
+    }
+
+    public function testClosingBoundaryPrefixSplitAfterItsDashesRemainsBodyData(): void
+    {
+        [$events, $handler] = $this->make_collector();
+        $parser = new MultipartStreamParser('BOUNDARY', $handler);
+
+        $parser->feed("--BOUNDARY\r\n\r\nbefore\r\n--BOUNDARY--");
+        $parser->feed("backup\r\nafter\r\n--BOUNDARY--\r\n");
+
+        $this->assertSame(1, $this->count_completed_parts($events));
+        $this->assertSame("before\r\n--BOUNDARY--backup\r\nafter", $this->get_part_body($events, 0));
+    }
+
     public function testMultipleParts(): void
     {
         [$events, $handler] = $this->make_collector();

@@ -33,6 +33,7 @@
             <file>MultipartStreamInputTest.php</file>
             <file>StagedApplySessionTest.php</file>
             <file>MultipartSessionEndpointsTest.php</file>
+            <file>WordPressStagedOptionsTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">
             <file>NaiveQueryStreamTest.php</file>

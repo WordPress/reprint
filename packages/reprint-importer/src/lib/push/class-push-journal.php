@@ -1,4 +1,6 @@
 <?php
+
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal errors are CLI values, never HTML output.
 /**
  * Per-remote-site memory of the last completed push: the local baseline.
  *
@@ -11,13 +13,14 @@
  *
  * The baseline is a copy of a file index in the same format as
  * .import-index.jsonl: one JSON object per line with a base64-encoded path
- * plus ctime, size, and type, sorted by decoded path. Non-empty directories
- * use a private `tree-directory` marker: it is never uploaded, but lets a
- * later diff remove a vanished directory after its last child goes. The push
- * driver captures it at the end of a successful push. A capture writes a
- * temporary file and renames it into place, so a killed process never
- * leaves a truncated baseline for the next push to trust — until the
- * rename lands, the previous baseline stays in effect.
+ * plus ctime, size, type, permission mode, and any symlink target, sorted by
+ * decoded path. Non-empty directories use a private `tree-directory` marker:
+ * it is never uploaded, but lets a later diff remove a vanished directory
+ * after its last child goes. The push driver captures it at the end of a
+ * successful push. A capture writes a temporary file and renames it into
+ * place, so a killed process never leaves a truncated baseline for the next
+ * push to trust — until the rename lands, the previous baseline stays in
+ * effect.
  *
  * diff_local_files() answers "what changed on this machine since the last
  * push to this site". It streams the current index and the local baseline
@@ -25,7 +28,7 @@
  * two lists into the site directory:
  *
  *     local-paths-to-push.jsonl    paths new since the baseline, or whose
- *                                  ctime, size, or type differs
+ *                                  ctime, size, type, or mode differs
  *     local-paths-to-delete.jsonl  paths in the baseline but gone from the
  *                                  current index
  *
@@ -33,11 +36,11 @@
  * decoded paths; two entries with the same path count as unchanged when their
  * decoded JSON objects match, so JSON field order or escaping changes do not
  * affect the diff. Changed-path output carries the current snapshot entry
- * (path, type, size, ctime, and symlink target where relevant); private
- * tree-directory markers never appear in that list. Delete output carries just
- * a base64 path. The sender still lstat()s immediately before upload; these
- * fields are the normalized logical-change type, not source truth after the
- * plan was written.
+ * (path, type, size, ctime, mode, and symlink target where relevant); private
+ * tree-directory markers become directory-mode operations rather than leaking
+ * into that list. Delete output carries just a base64 path. The sender still
+ * lstat()s immediately before upload; these fields are the normalized logical
+ * change, not source truth after the plan was written.
  *
  * With no baseline yet — the first push to a site — every uploadable current
  * entry counts as changed and no deletion can be detected.
@@ -232,10 +235,8 @@ class PushJournal
 
         $changed = 0;
         $deleted = 0;
-        /** @var string[] $deleted_tree_roots */
-        $deleted_tree_roots = [];
-        /** @var string[] $positive_replacement_roots */
-        $positive_replacement_roots = [];
+        $pending_deleted_tree_roots = [];
+        $pending_positive_replacement_roots = [];
         $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
         $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
         while ($current_entry !== null || $baseline_entry !== null) {
@@ -252,26 +253,30 @@ class PushJournal
 
             if ($order < 0) {
                 // Only in the current index: new since the last push.
-                if (!$this->is_tree_directory($current_entry)) {
-                    $out = json_encode($current_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                    if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
-                        throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
-                    }
-                    $changed++;
-                    $positive_replacement_roots[] = $current_path;
+                $is_tree_directory = $this->is_tree_directory($current_entry);
+                $changed_entry = $is_tree_directory
+                    ? $this->directory_mode_change($current_entry)
+                    : $current_entry;
+                $out = json_encode($changed_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
+                    throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
+                }
+                $changed++;
+                if (!$is_tree_directory) {
+                    $this->remember_pending_root($current_path, $pending_positive_replacement_roots);
                 }
                 $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
             } elseif ($order > 0) {
                 // Only in the baseline: deleted since the last push.
-                if (!$this->is_below_a_root($baseline_path, $deleted_tree_roots)
-                    && !$this->is_below_a_root($baseline_path, $positive_replacement_roots)) {
+                if (!$this->is_below_pending_root($baseline_path, $pending_deleted_tree_roots)
+                    && !$this->is_below_pending_root($baseline_path, $pending_positive_replacement_roots)) {
                     $out = json_encode(["path" => $baseline_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
                     if (fwrite($paths_to_delete_handle, $out) !== strlen($out)) {
                         throw new RuntimeException("Short write on local_paths_to_delete, is the disk full?");
                     }
                     $deleted++;
                     if ($this->is_tree_directory($baseline_entry)) {
-                        $deleted_tree_roots[] = $baseline_path;
+                        $this->remember_pending_root($baseline_path, $pending_deleted_tree_roots);
                     }
                 }
                 $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
@@ -282,7 +287,15 @@ class PushJournal
                 // wasted re-upload, never a missed one).
                 if ($this->is_tree_directory($current_entry) && $this->is_tree_directory($baseline_entry)) {
                     // A non-empty directory still exists. Its ctime changes
-                    // with child entries, but it is not an upload operation.
+                    // with child entries; only a mode change is upload work.
+                    if (($current_entry['mode'] ?? null) !== ($baseline_entry['mode'] ?? null)) {
+                        $changed_entry = $this->directory_mode_change($current_entry);
+                        $out = json_encode($changed_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                        if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
+                            throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
+                        }
+                        ++$changed;
+                    }
                 } elseif ($current_entry != $baseline_entry && $this->is_tree_directory($current_entry)) {
                     // A file or link becoming a non-empty directory needs a
                     // delete of the old root; staged children construct the
@@ -293,7 +306,18 @@ class PushJournal
                             throw new RuntimeException("Short write on local_paths_to_delete, is the disk full?");
                         }
                         $deleted++;
-                        $deleted_tree_roots[] = $baseline_path;
+                        $this->remember_pending_root($baseline_path, $pending_deleted_tree_roots);
+                    }
+                    if (
+                        ($baseline_entry['type'] ?? null) !== 'directory'
+                        || ($current_entry['mode'] ?? null) !== ($baseline_entry['mode'] ?? null)
+                    ) {
+                        $changed_entry = $this->directory_mode_change($current_entry);
+                        $out = json_encode($changed_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                        if (fwrite($paths_to_push_handle, $out) !== strlen($out)) {
+                            throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
+                        }
+                        ++$changed;
                     }
                 } elseif ($current_entry != $baseline_entry) {
                     $out = json_encode($current_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
@@ -301,7 +325,7 @@ class PushJournal
                         throw new RuntimeException("Short write on local_paths_to_push, is the disk full?");
                     }
                     $changed++;
-                    $positive_replacement_roots[] = $current_path;
+                    $this->remember_pending_root($current_path, $pending_positive_replacement_roots);
                 }
                 $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
                 $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
@@ -333,6 +357,17 @@ class PushJournal
         return ($entry['type'] ?? null) === 'tree-directory';
     }
 
+    /** Converts a private snapshot marker into one uploadable mode operation. */
+    private function directory_mode_change(array $entry): array
+    {
+        $mode = $entry['mode'] ?? null;
+        if (!is_int($mode) || $mode < 0 || $mode > 07777) {
+            throw new RuntimeException('A non-empty directory snapshot has no valid permission mode.');
+        }
+        $entry['type'] = 'directory-mode';
+        return $entry;
+    }
+
     /**
      * Indicates whether a path is already covered by a prior replacement root.
      *
@@ -340,18 +375,39 @@ class PushJournal
      * descendants keeps delete plans minimal and avoids contradictory work when
      * a complete ancestor is already deleted or positively replaced.
      *
+     * Byte sorting can put a sibling such as `a-other` before `a/child`, so one
+     * active root is insufficient. The pending roots form a stack ordered by
+     * their not-yet-reached `root/` intervals. A new pending interval can sit
+     * before the prior one only when its path extends that prior root, which
+     * bounds stack depth by path length rather than the number of changed paths.
+     *
      * @param string $path Decoded path being classified.
-     * @param string[] $roots Previously emitted decoded roots.
+     * @param string[] $pending_roots Not-yet-passed replacement roots.
      * @return bool True when $path is a strict descendant of a root.
      */
-    private function is_below_a_root(string $path, array $roots): bool
+    private function is_below_pending_root(string $path, array &$pending_roots): bool
     {
-        foreach ($roots as $root) {
-            if ($path !== $root && strpos($path, $root . '/') === 0) {
+        while ($pending_roots !== []) {
+            $root = $pending_roots[count($pending_roots) - 1];
+            $descendant_prefix = $root . '/';
+            if (strpos($path, $descendant_prefix) === 0) {
                 return true;
             }
+            if (strcmp($path, $descendant_prefix) <= 0) {
+                return false;
+            }
+            array_pop($pending_roots);
         }
         return false;
+    }
+
+    /** Adds one root after discarding intervals already passed by sorted input. */
+    private function remember_pending_root(string $path, array &$pending_roots): void
+    {
+        if ($this->is_below_pending_root($path, $pending_roots)) {
+            return;
+        }
+        $pending_roots[] = $path;
     }
 
     /**

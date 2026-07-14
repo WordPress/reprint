@@ -1,5 +1,7 @@
 <?php
 
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Push errors are CLI/API values, never HTML output.
+
 /**
  * Drives a local source tree through the resumable staged-push protocol.
  *
@@ -29,7 +31,7 @@
  * sizing. Every stored accepted byte count comes from target confirmation. It
  * never contains a materialized request body or future in-memory frame list.
  *
- * File cursors carry a source token made from size and ctime. If the source
+ * File cursors carry a source token made from size, ctime, and mode. If the source
  * changes between pieces, the next request restarts that logical file at offset
  * zero so new bytes are never appended behind an old-version prefix. As with
  * the journal signals, a same-size edit whose ctime lands in the same timestamp
@@ -103,6 +105,9 @@ class MultipartPush
     /** @var bool Whether lifecycle progress is written to STDERR. */
     private bool $verbose;
 
+    /** @var bool Whether this instance may inspect state but never scan or push its source root. */
+    private bool $status_only;
+
     /**
      * Maintains the completed baseline and disk-backed changed/delete plans.
      *
@@ -115,9 +120,11 @@ class MultipartPush
      *
      * Required options are `base_url`, `source_root`, `state_dir`, and `secret`.
      * `allow_http` defaults to false and exists only for an explicitly selected
-     * development target; `verbose` defaults to false. The source root must be
-     * a real directory rather than a symlink. Relative state directories are
-     * resolved against the current working directory and created mode 0700.
+     * development target; `verbose` and `status_only` default to false. The
+     * source root must be a real directory rather than a symlink. Relative state
+     * directories are resolved against the current working directory and
+     * created mode 0700. Status-only instances do not scan their placeholder
+     * source and therefore allow state below it; run() rejects such instances.
      *
      * @param array<string,mixed> $options Sender-owned configuration.
      *
@@ -139,8 +146,39 @@ class MultipartPush
         if ($state_dir === '' || $state_dir[0] !== '/') {
             $state_dir = getcwd() . '/' . $state_dir;
         }
+        $existing_state_parent = $state_dir;
+        while (!file_exists($existing_state_parent) && !is_link($existing_state_parent)) {
+            $parent = dirname($existing_state_parent);
+            if ($parent === $existing_state_parent) {
+                break;
+            }
+            $existing_state_parent = $parent;
+        }
+        $existing_state_parent = realpath($existing_state_parent);
         if (!is_dir($state_dir) && !@mkdir($state_dir, 0700, true) && !is_dir($state_dir)) {
             throw new RuntimeException('Could not create push state directory ' . $state_dir . '.');
+        }
+        $canonical_state_dir = realpath($state_dir);
+        if ($canonical_state_dir === false || !is_dir($canonical_state_dir) || is_link($state_dir)) {
+            throw new InvalidArgumentException('push state_dir must name a real directory: ' . $options['state_dir'] . '.');
+        }
+        $canonical_state_dir = $canonical_state_dir === '/' ? '/' : rtrim($canonical_state_dir, '/');
+        $status_only = $options['status_only'] ?? false;
+        if (!is_bool($status_only)) {
+            throw new InvalidArgumentException('status_only must be a boolean.');
+        }
+        $source_prefix = $source_root === '/' ? '/' : rtrim($source_root, '/') . '/';
+        if (!$status_only && ($canonical_state_dir === $source_root || strpos($canonical_state_dir . '/', $source_prefix) === 0)) {
+            if (is_string($existing_state_parent)) {
+                $current = $canonical_state_dir;
+                while ($current !== $existing_state_parent && @rmdir($current)) {
+                    $current = dirname($current);
+                }
+            }
+            throw new InvalidArgumentException(
+                'push state_dir must be outside source_root so Reprint does not snapshot its own changing state; '
+                . $options['state_dir'] . ' resolves inside ' . $source_root . '.'
+            );
         }
         $allow_http = $options['allow_http'] ?? false;
         if (!is_bool($allow_http)) {
@@ -148,10 +186,11 @@ class MultipartPush
         }
         $this->base_url = $this->export_api_base_url($options['base_url']);
         $this->source_root = $source_root === '/' ? '/' : rtrim($source_root, '/');
-        $this->state_dir = rtrim($state_dir, '/');
+        $this->state_dir = $canonical_state_dir;
         $this->secret = $options['secret'];
         $this->allow_http = $allow_http;
         $this->verbose = (bool) ($options['verbose'] ?? false);
+        $this->status_only = $status_only;
         $this->journal = new PushJournal($this->state_dir, $this->base_url);
         $this->site_dir = dirname($this->journal->local_files_baseline_path);
         $this->session_path = $this->site_dir . '/session.json';
@@ -181,6 +220,9 @@ class MultipartPush
      */
     public function run(bool $dry_run = false, bool $abort = false): array
     {
+        if ($this->status_only) {
+            throw new LogicException('A status-only MultipartPush instance cannot scan or push a source tree.');
+        }
         if ($abort) {
             return $this->abort();
         }
@@ -387,7 +429,7 @@ class MultipartPush
             throw new RuntimeException('Could not write local push snapshot ' . $temporary . '.');
         }
         try {
-            $this->scan_directory($this->source_root, '', $handle, null);
+            $this->scan_directory($this->source_root, '', $handle, null, null);
         } finally {
             fclose($handle);
         }
@@ -413,8 +455,9 @@ class MultipartPush
      * @param string $relative_path Target-relative path of that directory.
      * @param resource $handle Writable unsorted snapshot stream.
      * @param int|null $directory_ctime Parent-supplied lstat ctime for this directory.
+     * @param int|null $directory_mode Parent-supplied permission bits for this directory.
      */
-    private function scan_directory(string $directory, string $relative_path, $handle, ?int $directory_ctime): void
+    private function scan_directory(string $directory, string $relative_path, $handle, ?int $directory_ctime, ?int $directory_mode): void
     {
         $entries = @scandir($directory);
         if (!is_array($entries)) {
@@ -427,7 +470,7 @@ class MultipartPush
             }
         }
         if ($relative_path !== '' && $children === []) {
-            $this->write_snapshot_entry($handle, $relative_path, 'directory', 0, $directory_ctime ?? 0);
+            $this->write_snapshot_entry($handle, $relative_path, 'directory', 0, $directory_ctime ?? 0, $directory_mode);
             return;
         }
         if ($relative_path !== '') {
@@ -435,7 +478,7 @@ class MultipartPush
             // children create them. Keep an existence-only baseline marker so
             // deleting a whole non-empty directory also removes the now-empty
             // directory on the target.
-            $this->write_snapshot_entry($handle, $relative_path, 'tree-directory', 0, $directory_ctime ?? 0);
+            $this->write_snapshot_entry($handle, $relative_path, 'tree-directory', 0, $directory_ctime ?? 0, $directory_mode);
         }
         foreach ($children as $entry) {
             $path = $relative_path === '' ? $entry : $relative_path . '/' . $entry;
@@ -448,15 +491,15 @@ class MultipartPush
             }
             $type_bits = ((int) $stat['mode']) & 0170000;
             if ($type_bits === 0040000) {
-                $this->scan_directory($absolute_path, $path, $handle, (int) $stat['ctime']);
+                $this->scan_directory($absolute_path, $path, $handle, (int) $stat['ctime'], ((int) $stat['mode']) & 07777);
             } elseif ($type_bits === 0100000) {
-                $this->write_snapshot_entry($handle, $path, 'file', (int) $stat['size'], (int) $stat['ctime']);
+                $this->write_snapshot_entry($handle, $path, 'file', (int) $stat['size'], (int) $stat['ctime'], ((int) $stat['mode']) & 07777);
             } elseif ($type_bits === 0120000) {
                 $target = @readlink($absolute_path);
                 if (!is_string($target)) {
                     throw new RuntimeException('Could not read source symlink ' . $this->display_path($path) . '.');
                 }
-                $this->write_snapshot_entry($handle, $path, 'symlink', (int) $stat['size'], (int) $stat['ctime'], $target);
+                $this->write_snapshot_entry($handle, $path, 'symlink', (int) $stat['size'], (int) $stat['ctime'], null, $target);
             } else {
                 throw new RuntimeException('Source path ' . $this->display_path($path) . ' has an unsupported filesystem type.');
             }
@@ -467,18 +510,19 @@ class MultipartPush
      * Writes one binary-safe source identity record to the unsorted snapshot.
      *
      * Paths and symlink targets are base64 because JSON accepts only UTF-8 text.
-     * File size and ctime are the same drift signals stored beside resumable
-     * cursors; the logical type distinguishes files, links, empty directories,
-     * and private non-empty tree markers.
+     * File size, ctime, and mode are the same drift signals stored beside
+     * resumable cursors; the logical type distinguishes files, links, empty
+     * directories, and private non-empty tree markers.
      *
      * @param resource $handle Writable temporary snapshot stream.
      * @param string $path Target-relative source path.
      * @param string $type Snapshot logical type.
      * @param int $size lstat size in bytes.
      * @param int $ctime lstat change timestamp in seconds.
+     * @param int|null $mode Permission bits for files and directories.
      * @param string|null $target Literal symlink target, when applicable.
      */
-    private function write_snapshot_entry($handle, string $path, string $type, int $size, int $ctime, ?string $target = null): void
+    private function write_snapshot_entry($handle, string $path, string $type, int $size, int $ctime, ?int $mode = null, ?string $target = null): void
     {
         $entry = [
             'path' => base64_encode($path),
@@ -486,6 +530,9 @@ class MultipartPush
             'size' => $size,
             'ctime' => $ctime,
         ];
+        if ($mode !== null) {
+            $entry['mode'] = $mode;
+        }
         if ($target !== null) {
             $entry['target'] = base64_encode($target);
         }
@@ -627,15 +674,27 @@ class MultipartPush
                         $this->restart_for_structural_source_change($state);
                         return;
                     }
-                    $payload_limit = $client->next_file_body_bytes($path, $file['size'], $file['offset']);
+                    $payload_limit = $client->next_file_body_bytes($path, $file['size'], $file['offset'], $file['mode']);
                     if ($payload_limit === 0) {
                         break;
                     }
-                    $payload = $this->read_file_piece($file['absolute_path'], $file['offset'], $payload_limit);
-                    if ($payload === '' && $file['size'] !== 0) {
-                        $this->finish_or_discard_open_request($client);
-                        $this->restart_for_structural_source_change($state);
-                        return;
+                    if ($file['offset'] === $file['size']) {
+                        // A killed target can retain every byte in work/partial
+                        // before its promotion rename. An empty final part lets
+                        // that target complete the rename without retransmitting.
+                        $payload = '';
+                    } else {
+                        $payload = $this->read_file_piece(
+                            $file['absolute_path'],
+                            $file['offset'],
+                            $payload_limit,
+                            $file['size']
+                        );
+                        if ($payload === '') {
+                            $this->finish_or_discard_open_request($client);
+                            $this->restart_for_structural_source_change($state);
+                            return;
+                        }
                     }
                     $after_read = $this->regular_file_stat($file['absolute_path']);
                     if ($after_read === null) {
@@ -650,6 +709,7 @@ class MultipartPush
                         'path' => $path,
                         'total_bytes' => $file['size'],
                         'offset' => $file['offset'],
+                        'mode' => $file['mode'],
                         'payload' => $payload,
                     ])) {
                         break;
@@ -720,10 +780,10 @@ class MultipartPush
     /**
      * Selects the persisted file offset whose source token still matches.
      *
-     * A persisted cursor is reusable only with the same size-and-ctime
+     * A persisted cursor is reusable only with the same size, ctime, and mode
      * fingerprint. The fingerprint is checkpointed before any bytes leave.
-     * A same-size rewrite within one ctime tick remains indistinguishable; the
-     * next snapshot diff is the deeper change-detection net.
+     * A same-size rewrite within one ctime tick remains indistinguishable to
+     * both this token and the snapshot diff, which uses the same signals.
      *
      * @param array<string,mixed> $state
      * @param string $path Current target-relative file path.
@@ -737,7 +797,7 @@ class MultipartPush
         if ($stat === null) {
             return ['restart_session' => true];
         }
-        $fingerprint = ['size' => $stat['size'], 'ctime' => $stat['ctime']];
+        $fingerprint = ['size' => $stat['size'], 'ctime' => $stat['ctime'], 'mode' => $stat['mode']];
         if ($working_file !== null) {
             if ($working_file['path'] !== $path || $working_file['fingerprint'] !== $fingerprint) {
                 return ['restart_session' => true];
@@ -747,6 +807,7 @@ class MultipartPush
                 'absolute_path' => $absolute_path,
                 'size' => $stat['size'],
                 'offset' => $working_file['offset'],
+                'mode' => $stat['mode'],
                 'fingerprint' => $fingerprint,
             ];
         }
@@ -775,6 +836,7 @@ class MultipartPush
             'absolute_path' => $absolute_path,
             'size' => $stat['size'],
             'offset' => $offset,
+            'mode' => $stat['mode'],
             'fingerprint' => $fingerprint,
         ];
     }
@@ -782,9 +844,10 @@ class MultipartPush
     /**
      * Revalidates a directory or symlink immediately before sending it.
      *
-     * Empty directories must still be empty; symlinks must still be links with
-     * non-empty literal targets. Returning null triggers a fresh whole-tree scan
-     * rather than applying metadata from a stale structural plan.
+     * Empty directories must still be empty, directory-mode records must still
+     * name non-empty directories, and symlinks must still be links with non-empty
+     * literal targets. Returning null triggers a fresh whole-tree scan rather
+     * than applying metadata from a stale structural plan.
      *
      * @param array<string,mixed> $entry Current disk-plan record.
      * @return array<string,mixed>|null Null when the source changed structurally.
@@ -799,12 +862,40 @@ class MultipartPush
             return null;
         }
         $type_bits = ((int) ($stat['mode'] ?? 0)) & 0170000;
-        if ($entry['type'] === 'directory') {
-            $entries = @scandir($absolute_path);
-            if ($type_bits !== 0040000 || !is_array($entries) || count(array_diff($entries, ['.', '..'])) !== 0) {
+        if ($entry['type'] === 'directory' || $entry['type'] === 'directory-mode') {
+            if ($type_bits !== 0040000) {
                 return null;
             }
-            return ['type' => 'directory', 'path' => $path, 'payload' => ''];
+            $handle = @opendir($absolute_path);
+            if ($handle === false) {
+                return null;
+            }
+            $has_entries = false;
+            try {
+                while (true) {
+                    $candidate = readdir($handle);
+                    if ($candidate === false) {
+                        break;
+                    }
+                    if ($candidate !== '.' && $candidate !== '..') {
+                        $has_entries = true;
+                        break;
+                    }
+                }
+            } finally {
+                closedir($handle);
+            }
+            if (
+                ($entry['type'] === 'directory' && $has_entries)
+                || ($entry['type'] === 'directory-mode' && !$has_entries)
+            ) {
+                return null;
+            }
+            $mode = ((int) $stat['mode']) & 07777;
+            if (!isset($entry['mode']) || $entry['mode'] !== $mode) {
+                return null;
+            }
+            return ['type' => $entry['type'], 'path' => $path, 'mode' => $mode, 'payload' => ''];
         }
         if ($entry['type'] === 'symlink') {
             $target = $type_bits === 0120000 ? @readlink($absolute_path) : false;
@@ -912,7 +1003,7 @@ class MultipartPush
     /**
      * Reconciles the first indeterminate part with target workspace state.
      *
-     * A file cursor is reused only if the current size-and-ctime token still
+     * A file cursor is reused only if the current size, ctime, and mode token still
      * matches the sent token. Completed metadata advances its plan record;
      * missing metadata remains pending and will be replayed.
      *
@@ -1066,12 +1157,17 @@ class MultipartPush
                 throw new RuntimeException('Local changed-path list contains an invalid path record.');
             }
             $type = $entry['type'] ?? null;
-            if (!is_string($type) || !in_array($type, ['file', 'directory', 'symlink'], true)) {
+            if (!is_string($type) || !in_array($type, ['file', 'directory', 'directory-mode', 'symlink'], true)) {
                 throw new RuntimeException('Local changed-path list contains no supported logical type for ' . $this->display_path($path) . '.');
+            }
+            $mode = $entry['mode'] ?? null;
+            if (in_array($type, ['file', 'directory', 'directory-mode'], true) && (!is_int($mode) || $mode < 0 || $mode > 07777)) {
+                throw new RuntimeException('Local changed-path list contains no valid mode for ' . $this->display_path($path) . '.');
             }
             return [
                 'path' => $path,
                 'type' => $type,
+                'mode' => $mode,
                 'next_offset' => ftell($handle),
             ];
         } finally {
@@ -1080,14 +1176,14 @@ class MultipartPush
     }
 
     /**
-     * Returns the size-and-ctime source token stored beside a resumable cursor.
+     * Returns the size, ctime, and mode token stored beside a resumable cursor.
      *
      * lstat() deliberately rejects a file which became a symlink or another
      * type; ctime catches ordinary replacement/content changes which mtime can
      * hide through touch(), subject to the filesystem timestamp resolution.
      *
      * @param string $path Absolute source path.
-     * @return array{size:int,ctime:int}|null
+     * @return array{size:int,ctime:int,mode:int}|null
      */
     private function regular_file_stat(string $path): ?array
     {
@@ -1096,7 +1192,11 @@ class MultipartPush
         if (!is_array($stat) || (((int) ($stat['mode'] ?? 0)) & 0170000) !== 0100000) {
             return null;
         }
-        return ['size' => (int) $stat['size'], 'ctime' => (int) $stat['ctime']];
+        return [
+            'size' => (int) $stat['size'],
+            'ctime' => (int) $stat['ctime'],
+            'mode' => ((int) $stat['mode']) & 07777,
+        ];
     }
 
     /**
@@ -1108,9 +1208,10 @@ class MultipartPush
      * @param string $path Absolute regular-file source path.
      * @param int $offset Byte offset confirmed for this source token.
      * @param int $maximum_bytes Positive caller read budget.
+     * @param int $snapshotted_total_bytes Total declared in the multipart file headers.
      * @return string Bytes actually read, possibly fewer than requested.
      */
-    private function read_file_piece(string $path, int $offset, int $maximum_bytes): string
+    private function read_file_piece(string $path, int $offset, int $maximum_bytes, int $snapshotted_total_bytes): string
     {
         $handle = @fopen($path, 'rb');
         if ($handle === false || fseek($handle, $offset, SEEK_SET) !== 0) {
@@ -1120,7 +1221,9 @@ class MultipartPush
             throw new RuntimeException('Could not read source file at offset ' . $offset . ': ' . $path . '.');
         }
         try {
-            $piece = fread($handle, $maximum_bytes);
+            // A source may grow after its token was captured. Never read bytes
+            // beyond the total this part will declare to the target.
+            $piece = fread($handle, min($maximum_bytes, $snapshotted_total_bytes - $offset));
             if ($piece === false) {
                 throw new RuntimeException('Could not read source file ' . $path . '.');
             }

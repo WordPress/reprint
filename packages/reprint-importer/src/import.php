@@ -1377,6 +1377,7 @@ class ImportClient
                 'secret' => $secret,
                 'allow_http' => (bool) ($options['allow_http'] ?? false),
                 'verbose' => $this->verbose_mode,
+                'status_only' => $command === 'push-status',
             ]);
             $result = $command === 'push-status'
                 ? $push->status()

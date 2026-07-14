@@ -19,7 +19,11 @@ require_once __DIR__ . '/lib.php';
 // compatibility with clients pinned to earlier plugin versions.
 // New integrations should use `?reprint-api`.
 if (isset($_GET['reprint-api']) || isset($_GET['site-export-api'])) {
-    _site_export_handle_api_request();
+    $site_export_request_options = [];
+    if (defined('SITE_EXPORT_STAGING_DIR')) {
+        $site_export_request_options['staging_dir'] = SITE_EXPORT_STAGING_DIR;
+    }
+    _site_export_handle_api_request($site_export_request_options);
     exit;
 }
 

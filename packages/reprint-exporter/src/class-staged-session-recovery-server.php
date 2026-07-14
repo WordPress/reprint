@@ -20,6 +20,7 @@ if (!class_exists('Site_Export_Staged_Endpoints', false)) {
  *         'secret' => getenv('REPRINT_PUSH_SECRET'),
  *         'apply_target_root' => '/srv/www',
  *         'apply_protected_paths' => ['wp-content/plugins/reprint'],
+ *         'apply_deployment_roots' => ['wp-content/plugins', 'wp-content/themes'],
  *     ]);
  *
  * The route accepts the ordinary signed status, commit, and discard request

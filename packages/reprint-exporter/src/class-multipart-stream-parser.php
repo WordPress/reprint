@@ -1,5 +1,7 @@
 <?php
 
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Parser errors are values for callers, never HTML output.
+
 /**
  * Incrementally parses multipart/mixed response bytes for pull imports.
  *
@@ -167,25 +169,42 @@ class Site_Export_Multipart_Stream_Parser
      */
     private function parse_boundary(): bool
     {
-        // Look for boundary
-        $pos = strpos($this->buffer, $this->boundary);
+        $search_offset = 0;
+        $pos = false;
+        $closing = false;
+        while (true) {
+            $candidate = strpos($this->buffer, $this->boundary, $search_offset);
+            if ($candidate === false) {
+                break;
+            }
+            if ($candidate !== 0 && $this->buffer[$candidate - 1] !== "\n") {
+                $search_offset = $candidate + 1;
+                continue;
+            }
+            $classification = $this->classify_boundary_suffix($candidate);
+            if ($classification === null) {
+                return false;
+            }
+            if ($classification !== false) {
+                $pos = $candidate;
+                $closing = $classification === 'closing';
+                break;
+            }
+            $search_offset = $candidate + 1;
+        }
         if ($pos === false) {
-            // Keep only last boundary_length bytes in case boundary is split
-            if (strlen($this->buffer) > $this->boundary_length) {
-                $this->buffer = substr($this->buffer, -$this->boundary_length);
+            // Retain a possible line ending, split token, and split suffix.
+            $retained_bytes = $this->boundary_length + 4;
+            if (strlen($this->buffer) > $retained_bytes) {
+                $this->buffer = substr($this->buffer, -$retained_bytes);
             }
             return false;
         }
 
-        // Check if this is the closing boundary (--boundary--)
         $after_boundary = $pos + $this->boundary_length;
-        if ($after_boundary + 2 <= strlen($this->buffer)) {
-            $next_chars = substr($this->buffer, $after_boundary, 2);
-            if ($next_chars === "--") {
-                // Closing boundary - done
-                $this->buffer = "";
-                return false;
-            }
+        if ($closing) {
+            $this->buffer = "";
+            return false;
         }
 
         // Find end of line after boundary (\r\n or \n)
@@ -324,16 +343,12 @@ class Site_Export_Multipart_Stream_Parser
             return true;
         }
 
-        // No content-length - read until next boundary
-        // Look for boundary in buffer
-        $boundary_pos = strpos($this->buffer, "\r\n" . $this->boundary);
-        if ($boundary_pos === false) {
-            $boundary_pos = strpos($this->buffer, "\n" . $this->boundary);
-        }
+        // No content-length - read until the next complete boundary line.
+        $boundary_pos = $this->find_body_boundary();
 
         if ($boundary_pos === false) {
-            // No boundary yet - process all but last boundary_length+2 bytes
-            $safe_length = strlen($this->buffer) - $this->boundary_length - 2;
+            // Retain enough for a split CRLF, token, closing suffix, and CRLF.
+            $safe_length = strlen($this->buffer) - $this->boundary_length - 6;
             if ($safe_length > 0) {
                 $body_data = substr($this->buffer, 0, $safe_length);
                 $this->buffer = substr($this->buffer, $safe_length);
@@ -357,6 +372,90 @@ class Site_Export_Multipart_Stream_Parser
         $this->state = self::STATE_BOUNDARY;
         $this->emit_chunk_complete();
         return true;
+    }
+
+    /**
+     * Finds a valid delimiter after an undeclared-length body.
+     *
+     * Prefix matches such as `--boundary-backup` remain ordinary body bytes.
+     *
+     * @return int|false Position of the CRLF/LF before the delimiter.
+     */
+    private function find_body_boundary()
+    {
+        $search_offset = 0;
+        while (true) {
+            $candidate = strpos($this->buffer, $this->boundary, $search_offset);
+            if ($candidate === false) {
+                break;
+            }
+            if ($candidate === 0 || $this->buffer[$candidate - 1] !== "\n") {
+                $search_offset = $candidate + 1;
+                continue;
+            }
+            $classification = $this->classify_boundary_suffix($candidate);
+            if ($classification === null) {
+                return false;
+            }
+            if ($classification !== false) {
+                return $candidate >= 2 && substr($this->buffer, $candidate - 2, 2) === "\r\n"
+                    ? $candidate - 2
+                    : $candidate - 1;
+            }
+            $search_offset = $candidate + 1;
+        }
+        return false;
+    }
+
+    /**
+     * Validates the bytes immediately after one complete boundary token.
+     *
+     * @param int $position Buffer offset at the boundary's first hyphen.
+     * @return string|false|null `regular`, `closing`, false for a prefix match,
+     *     or null when the suffix is split across feeds.
+     */
+    private function classify_boundary_suffix(int $position)
+    {
+        $suffix = $position + $this->boundary_length;
+        $available = strlen($this->buffer) - $suffix;
+        if ($available === 0) {
+            return null;
+        }
+        if ($this->buffer[$suffix] === "\n") {
+            return 'regular';
+        }
+        if ($this->buffer[$suffix] === "\r") {
+            if ($available < 2) {
+                return null;
+            }
+            return $this->buffer[$suffix + 1] === "\n" ? 'regular' : false;
+        }
+        if ($this->buffer[$suffix] !== '-') {
+            return false;
+        }
+        if ($available < 2) {
+            return null;
+        }
+        if ($this->buffer[$suffix + 1] !== '-') {
+            return false;
+        }
+        if ($available === 2) {
+            // A later feed may extend `--boundary--` into a prefix such as
+            // `--boundary--backup`; require the delimiter line ending before
+            // deciding that an incremental response has closed.
+            return null;
+        }
+        $after_closing = $suffix + 2;
+        if ($this->buffer[$after_closing] === "\n") {
+            return 'closing';
+        }
+        if ($this->buffer[$after_closing] === "\r") {
+            if ($available < 4) {
+                return null;
+            }
+            return $this->buffer[$after_closing + 1] === "\n" ? 'closing' : false;
+        }
+        return false;
     }
 
     /**

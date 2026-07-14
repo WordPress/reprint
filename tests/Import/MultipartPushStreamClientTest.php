@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Site_Export_HMAC_Client;
 use MultipartPushStreamClient;
+use PushRequestSizer;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
@@ -48,8 +49,8 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertStringContainsString('X-Chunk-Type: file', $received);
         $this->assertStringContainsString("a\0b", $received, 'The raw part payload is on the network before finish_request().');
 
-        $response = json_encode(['status' => 'accepted', 'accepted' => []]);
-        fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen((string) $response) . "\r\nConnection: close\r\n\r\n" . $response);
+        $response = (string) json_encode(['status' => 'accepted', 'accepted' => []]);
+        fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($response) . "\r\nConnection: close\r\n\r\n" . $response);
         fclose($connection);
         fclose($listener);
 
@@ -82,6 +83,51 @@ final class MultipartPushStreamClientTest extends TestCase {
         fclose($connection);
         fclose($listener);
         $client->finish_request();
+    }
+
+    public function testNextSourceReadReservesTheFileModeHeaderItWillSend(): void {
+        if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
+            $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        $this->assertNotFalse($listener, (string) $error);
+        $address = stream_socket_get_name($listener, false);
+        $request_sizer = new PushRequestSizer([
+            'floor_bytes' => 512,
+            'start_bytes' => 512,
+            'max_bytes' => 512,
+        ]);
+        $client = new MultipartPushStreamClient([
+            'base_url' => 'http://' . $address . '/?reprint-api=1',
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'request_sizer' => $request_sizer,
+            'chunk_bytes' => 1024,
+            'connect_timeout' => 2,
+        ]);
+        $this->assertTrue($client->start_upload_request(str_repeat('d', 32)));
+        $connection = stream_socket_accept($listener, 3);
+        $this->assertNotFalse($connection);
+        $this->read_available($connection);
+
+        $maximum = $client->next_file_body_bytes('mode.bin', 1000, 0, 0001);
+        $this->assertGreaterThan(0, $maximum);
+        $this->assertTrue($client->send_part([
+            'type' => 'file',
+            'path' => 'mode.bin',
+            'total_bytes' => 1000,
+            'offset' => 0,
+            'mode' => 0001,
+            'payload' => str_repeat('x', $maximum),
+        ]), 'The read budget omitted bytes that send_part() adds for X-File-Mode.');
+        $received = $this->read_available($connection);
+        $this->assertStringContainsString('X-File-Mode: 0001', $received);
+
+        $response = (string) json_encode(['status' => 'accepted', 'accepted' => []]);
+        fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($response) . "\r\nConnection: close\r\n\r\n" . $response);
+        fclose($connection);
+        fclose($listener);
+        $this->assertSame('complete', $client->finish_request()['status']);
     }
 
     public function testPlainHttpRequiresAnExplicitOptIn(): void {

@@ -182,21 +182,21 @@ function _site_export_default_authenticate(): void {
 /**
  * Server-side options for multipart staged-session endpoints.
  *
- * The staging directory needs to be writable and on the same filesystem as
- * ABSPATH: commit uses same-device renames for atomic replacement and refuses
- * a cross-device layout instead of silently copying live code. The default is
- * a system-temp subdirectory keyed by ABSPATH so co-hosted sites do not share
- * state. If that temp filesystem is separate, define SITE_EXPORT_STAGING_DIR
- * to a durable directory on ABSPATH's filesystem before using push. A host
- * that cleans its staging directory only loses in-progress upload state.
+ * The caller must choose durable storage on the same filesystem as ABSPATH.
+ * Commit stores recovery checkpoints and former live entries there, so a
+ * system-temporary fallback could turn a reboot or cleanup into live data loss.
+ *
+ * @param array<string,mixed> $options Embedding caller configuration.
  */
-function _site_export_staged_options(): array {
-    $staging_dir = defined('SITE_EXPORT_STAGING_DIR')
-        ? SITE_EXPORT_STAGING_DIR
-        : rtrim(sys_get_temp_dir(), '/') . '/reprint-staging-' . md5(ABSPATH);
+function _site_export_staged_options(array $options): array {
+    $staging_dir = $options['staging_dir'] ?? null;
+    if (!is_string($staging_dir) || $staging_dir === '') {
+        throw new InvalidArgumentException('Staged push requires a caller-configured staging_dir in durable storage.');
+    }
 
     $target_root = realpath(ABSPATH);
     $protected_paths = [];
+    $deployment_roots = [];
     $plugin_dir = realpath(SITE_EXPORT_PLUGIN_DIR);
     if (is_string($target_root) && is_string($plugin_dir)) {
         $target_prefix = rtrim($target_root, '/') . '/';
@@ -206,6 +206,17 @@ function _site_export_staged_options(): array {
         $configured_staging_dir = realpath($staging_dir);
         if (is_string($configured_staging_dir) && strpos($configured_staging_dir . '/', $target_prefix) === 0) {
             $protected_paths[] = rtrim(substr($configured_staging_dir, strlen($target_prefix)), '/');
+        }
+        $plugin_root = defined('WP_PLUGIN_DIR') ? WP_PLUGIN_DIR : $target_root . '/wp-content/plugins';
+        $theme_root = function_exists('get_theme_root') ? get_theme_root() : $target_root . '/wp-content/themes';
+        foreach ([$plugin_root, $theme_root] as $deployment_root) {
+            if (!is_string($deployment_root)) {
+                continue;
+            }
+            $resolved_root = realpath($deployment_root);
+            if (is_string($resolved_root) && strpos($resolved_root . '/', $target_prefix) === 0) {
+                $deployment_roots[] = rtrim(substr($resolved_root, strlen($target_prefix)), '/');
+            }
         }
     }
 
@@ -217,6 +228,9 @@ function _site_export_staged_options(): array {
         'apply_protected_paths' => array_values(array_filter($protected_paths, static function ($path): bool {
             return is_string($path) && $path !== '';
         })),
+        'apply_deployment_roots' => array_values(array_unique(array_filter($deployment_roots, static function ($path): bool {
+            return is_string($path) && $path !== '';
+        }))),
         'apply_sessions_enabled' => true,
     ];
 }
@@ -318,10 +332,11 @@ function _site_export_handle_api_request(array $options = []): void {
 
     // -- Dispatch --
     try {
-        Site_Export_HTTP_Server::serve([
-            'default_directory' => ABSPATH,
-            'staged' => _site_export_staged_options(),
-        ]);
+        $server_options = ['default_directory' => ABSPATH];
+        if (isset($options['staging_dir'])) {
+            $server_options['staged'] = _site_export_staged_options($options);
+        }
+        Site_Export_HTTP_Server::serve($server_options);
     } catch (Exception $e) {
         if (!headers_sent()) {
             http_response_code(400);

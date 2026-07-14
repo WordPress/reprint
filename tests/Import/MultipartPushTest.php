@@ -166,6 +166,12 @@ final class MultipartPushTest extends TestCase {
     public function testPushMakesTheTargetTreeExactlyMatchAStandaloneSourceSnapshot(): void {
         $this->write_source('ordinary.txt', 'first contents');
         $this->write_source('zero.bin', '');
+        $this->write_source('directory-to-file/old.txt', 'old tree');
+        $this->write_source('directory-to-link/old.txt', 'old tree');
+        $this->write_source('file-to-link', 'old file');
+        $this->write_source('wp-content/plugins/directory-to-file/old.php', 'old plugin tree');
+        $this->write_source('wp-content/plugins/directory-to-link/old.php', 'old plugin tree');
+        $this->write_source('wp-content/plugins/file-to-directory', 'old plugin file');
         $this->write_source('empty/.placeholder', '');
         unlink($this->source . '/empty/.placeholder');
         // APFS configured with a UTF-8-only volume rejects this name, while
@@ -173,6 +179,9 @@ final class MultipartPushTest extends TestCase {
         // the host supports it without making portability a test warning.
         @file_put_contents($this->source . "/raw-\xff-name", "\0binary\xff");
         $has_link = @symlink('ordinary.txt', $this->source . '/link');
+        if ($has_link) {
+            symlink('ordinary.txt', $this->source . '/link-to-directory');
+        }
 
         $first = $this->run_cli('push', ['--source-root=' . $this->source]);
         $this->assertSame(0, $first['exit_code'], $first['stderr']);
@@ -183,14 +192,45 @@ final class MultipartPushTest extends TestCase {
         file_put_contents($this->source . '/ordinary.txt/nested.php', 'replacement tree');
         unlink($this->source . '/zero.bin');
         $this->write_source('added.txt', 'new file with a different size');
+        self::remove_tree($this->source . '/directory-to-file');
+        $this->write_source('directory-to-file', 'a directory became a file');
+        self::remove_tree($this->source . '/wp-content/plugins/directory-to-file');
+        $this->write_source('wp-content/plugins/directory-to-file', 'a plugin directory became a file');
+        unlink($this->source . '/wp-content/plugins/file-to-directory');
+        $this->write_source('wp-content/plugins/file-to-directory/new.php', 'a plugin file became a directory');
         if ($has_link) {
             unlink($this->source . '/link');
             $this->write_source('link', 'a symlink became a file');
+            self::remove_tree($this->source . '/directory-to-link');
+            symlink('added.txt', $this->source . '/directory-to-link');
+            unlink($this->source . '/file-to-link');
+            symlink('added.txt', $this->source . '/file-to-link');
+            unlink($this->source . '/link-to-directory');
+            mkdir($this->source . '/link-to-directory', 0700);
+            file_put_contents($this->source . '/link-to-directory/new.txt', 'a link became a directory');
+            self::remove_tree($this->source . '/wp-content/plugins/directory-to-link');
+            symlink('../../../added.txt', $this->source . '/wp-content/plugins/directory-to-link');
         }
 
         $second = $this->run_cli('push', ['--source-root=' . $this->source]);
         $this->assertSame(0, $second['exit_code'], $second['stderr']);
         $this->assertSame($this->lstat_tree($this->source), $this->lstat_tree($this->target));
+    }
+
+    public function testPushPreservesNewNonEmptyDirectoryModesAndModeOnlyChanges(): void {
+        $this->write_source('mode-tree/child.txt', 'child');
+        chmod($this->source . '/mode-tree', 0751);
+
+        $first = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $first['exit_code'], $first['stderr']);
+        $this->assertSame(0751, fileperms($this->target . '/mode-tree') & 07777);
+        $this->assertSame('child', file_get_contents($this->target . '/mode-tree/child.txt'));
+
+        chmod($this->source . '/mode-tree', 0711);
+        $second = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $second['exit_code'], $second['stderr']);
+        $this->assertSame(0711, fileperms($this->target . '/mode-tree') & 07777);
+        $this->assertSame('child', file_get_contents($this->target . '/mode-tree/child.txt'));
     }
 
     public function testLargeFileUsesSeveralMultipartRequestsBeforeItIsPromoted(): void {
@@ -253,6 +293,60 @@ final class MultipartPushTest extends TestCase {
         $this->assertSame(str_repeat("a\0b", 40), file_get_contents($this->target . '/lost-response.bin'));
         $this->assertGreaterThanOrEqual(1, $this->endpoint_count('staged_session_status'));
         $this->assertCount(1, glob($this->state . '/push/*/last-sync-local-files.jsonl') ?: []);
+    }
+
+    public function testFullPartialFileAfterInterruptedPromotionCompletesOnResume(): void {
+        $this->pause_after_upload_marker = $this->case_root . '/upload-accepted';
+        $this->resume_upload_response_marker = $this->case_root . '/resume-upload-response';
+        $this->configure_server();
+        $contents = str_repeat('promotion-crash-', 4);
+        $this->write_source('promotion.bin', $contents);
+
+        $entry = realpath(__DIR__ . '/../../importer/import.php');
+        $this->assertNotFalse($entry);
+        $process = proc_open([
+            PHP_BINARY,
+            $entry,
+            'push',
+            self::$base_url,
+            '--state-dir=' . $this->state,
+            '--secret=' . self::SECRET,
+            '--allow-http',
+            '--source-root=' . $this->source,
+        ], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $this->case_root);
+        $this->assertIsResource($process);
+
+        for ($attempt = 0; $attempt < 100; ++$attempt) {
+            if (is_file($this->pause_after_upload_marker)) {
+                break;
+            }
+            usleep(100000);
+        }
+        $sessions = glob($this->storage . '/apply-sessions/*', GLOB_ONLYDIR) ?: [];
+        $this->assertCount(1, $sessions, 'The target never completed the file upload before its response was interrupted.');
+        $complete = $sessions[0] . '/work/files/promotion.bin';
+        $partial = $sessions[0] . '/work/partial/promotion.bin';
+        $this->assertFileExists($complete);
+        $this->assertTrue(rename($complete, $partial), 'Could not simulate a crash between the final write and promotion rename.');
+        file_put_contents($this->resume_upload_response_marker, "resume\n");
+
+        $stdout = (string) stream_get_contents($pipes[1]);
+        $stderr = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exit_code = proc_close($process);
+        $lines = array_values(array_filter(preg_split('/\R/', trim($stdout)) ?: [], static function (string $line): bool {
+            return $line !== '';
+        }));
+        $last_line = end($lines);
+        $result = is_string($last_line) ? json_decode($last_line, true) : null;
+        $status = is_array($result) ? $result['status'] ?? null : null;
+
+        $this->assertSame(0, $exit_code, $stderr);
+        $this->assertSame('complete', $status);
+        $this->assertSame($contents, file_get_contents($this->target . '/promotion.bin'));
+        $this->assertGreaterThanOrEqual(1, $this->endpoint_count('staged_session_status'));
+        $this->assertGreaterThanOrEqual(2, $this->endpoint_count('staged_session_upload'));
     }
 
     public function testSameSizeSourceEditDuringLostResponseRestartsAtZeroInsteadOfBuildingAHybridFile(): void {
@@ -394,6 +488,7 @@ final class MultipartPushTest extends TestCase {
             'staging_dir' => $this->storage,
             'secret' => self::SECRET,
             'apply_target_root' => $this->target,
+            'apply_deployment_roots' => ['wp-content/plugins', 'wp-content/themes'],
             'apply_sessions_enabled' => true,
             // Make the real CLI split the large file into several MIME parts.
             'max_frame_bytes' => 128,

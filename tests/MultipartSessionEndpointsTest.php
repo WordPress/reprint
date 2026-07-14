@@ -193,6 +193,7 @@ final class MultipartSessionEndpointsTest extends TestCase {
             'staging_dir' => $this->storage,
             'secret' => self::SECRET,
             'apply_target_root' => $this->target,
+            'apply_deployment_roots' => ['wp-content/plugins', 'wp-content/themes'],
             'apply_sessions_enabled' => true,
             'max_frame_bytes' => 1024,
         ];

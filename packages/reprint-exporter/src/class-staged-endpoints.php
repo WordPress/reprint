@@ -22,8 +22,8 @@ if (!class_exists('Site_Export_Staged_Apply_Session', false)) {
  *   workspace and reports only bytes which the target durably accepted.
  * - `staged_session_status` reconciles a bounded set of sender paths against
  *   the workspace after a lost or ambiguous upload response.
- * - `staged_session_commit` advances bounded prepare, live-switch, and cleanup
- *   work until `send_next_request` becomes false.
+ * - `staged_session_commit` advances bounded planning, preparation,
+ *   live-switch, and cleanup work until `send_next_request` becomes false.
  * - `staged_session_discard` removes private work only before live mutation.
  *
  * HMAC authentication covers the HTTP method and exact request target,
@@ -111,6 +111,9 @@ final class Site_Export_Staged_Endpoints {
      */
     private $apply_protected_paths;
 
+    /** @var string[] Target-relative plugin/theme containers. */
+    private $apply_deployment_roots;
+
     /** @var bool Whether create, upload, status, commit, and discard are enabled. */
     private $apply_sessions_enabled;
 
@@ -140,10 +143,11 @@ final class Site_Export_Staged_Endpoints {
      * Configures signed endpoint policy and snapshots PHP's request-body limit.
      *
      * Supported options are `staging_dir`, `secret`, `apply_target_root`,
-     * `apply_protected_paths`, `apply_sessions_enabled`, `timestamp_tolerance`,
-     * `max_frame_bytes`, `max_commit_steps`, and `max_upload_parts`. Optional
-     * values receive the constants documented above; a supplied invalid value
-     * throws instead of silently selecting its default.
+     * `apply_protected_paths`, `apply_deployment_roots`,
+     * `apply_sessions_enabled`, `timestamp_tolerance`, `max_frame_bytes`,
+     * `max_commit_steps`, and `max_upload_parts`. Optional values receive the
+     * constants documented above; a supplied invalid value throws instead of
+     * silently selecting its default.
      *
      * @param array<string,mixed> $options Server-owned configuration.
      *
@@ -174,6 +178,12 @@ final class Site_Export_Staged_Endpoints {
             throw new InvalidArgumentException('Staged session apply_protected_paths must be an array.');
         }
         $this->apply_protected_paths = $protected_paths;
+
+        $deployment_roots = $options['apply_deployment_roots'] ?? [];
+        if (!is_array($deployment_roots)) {
+            throw new InvalidArgumentException('Staged session apply_deployment_roots must be an array.');
+        }
+        $this->apply_deployment_roots = $deployment_roots;
 
         $enabled = $options['apply_sessions_enabled'] ?? true;
         if (!is_bool($enabled)) {
@@ -330,7 +340,8 @@ final class Site_Export_Staged_Endpoints {
                 $this->staging_dir,
                 (string) $this->apply_target_root,
                 $this->apply_protected_paths,
-                $session_id
+                $session_id,
+                $this->apply_deployment_roots
             );
             $status = $session->get_status();
             return [
@@ -571,7 +582,8 @@ final class Site_Export_Staged_Endpoints {
             $this->staging_dir,
             (string) $this->apply_target_root,
             $session_id,
-            $this->apply_protected_paths
+            $this->apply_protected_paths,
+            $this->apply_deployment_roots
         );
     }
 
