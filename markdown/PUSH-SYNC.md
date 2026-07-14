@@ -145,11 +145,12 @@ try {
 
 The input is Site_Export_Multipart_Stream_Input, a strict,
 boundary-validated reader over php://input. It requires a Content-Length on
-every part, bounds headers, retains only a small current body piece, and
-refuses to move to another part until the current one is drained. A malformed
-header, truncated body, invalid path, or offset gap throws before any later
-part is read. finish_upload() releases the session lock even after failure;
-completed staging stays durable.
+every part, accumulates short physical-line reads within fixed header bounds,
+and unfolds space- or tab-prefixed MIME header continuations before validation.
+It retains only a small current body piece and refuses to move to another part
+until the current one is drained. A malformed header, truncated body, invalid
+path, or offset gap throws before any later part is read. finish_upload()
+releases the session lock even after failure; completed staging stays durable.
 
 The older callback-oriented MultipartStreamParser was extracted into the
 exporter package as Site_Export_Multipart_Stream_Parser, where the importer

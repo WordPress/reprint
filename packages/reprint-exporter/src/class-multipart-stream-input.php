@@ -18,8 +18,9 @@
  *
  * The input follows the strict form emitted by MultipartPushStreamClient:
  * boundaries and header lines end in CRLF, each header name appears once, and
- * a closing boundary terminates the request. Truncation is reported as malformed
- * input rather than mistaken for a clean end of the upload.
+ * a closing boundary terminates the request. Standard space- or tab-prefixed
+ * continuation lines are unfolded before header validation. Truncation is
+ * reported as malformed input rather than mistaken for a clean end of the upload.
  *
  * Example:
  *
@@ -257,6 +258,8 @@ final class Site_Export_Multipart_Stream_Input {
 
         $headers = [];
         $header_bytes = 0;
+        $current_header_name = null;
+        $current_header_value = '';
         while (true) {
             $line = $this->read_line('a multipart part header');
             $header_bytes += strlen($line) + 2;
@@ -265,24 +268,42 @@ final class Site_Export_Multipart_Stream_Input {
                     'Multipart part headers exceed ' . self::MAX_HEADER_BYTES . ' bytes.'
                 );
             }
+            if ($line !== '' && ( $line[0] === ' ' || $line[0] === "\t" )) {
+                if ($current_header_name === null) {
+                    throw new InvalidArgumentException('Multipart part header continuation has no preceding header field.');
+                }
+                // Unfold by removing the physical CRLF. The continuation's
+                // leading whitespace remains part of the logical field value.
+                $current_header_value .= $line;
+                continue;
+            }
+
+            if ($current_header_name !== null) {
+                if (count($headers) >= self::MAX_HEADERS) {
+                    throw new InvalidArgumentException(
+                        'Multipart part has more than ' . self::MAX_HEADERS . ' headers.'
+                    );
+                }
+                if (isset($headers[$current_header_name])) {
+                    throw new InvalidArgumentException('Multipart part repeats header ' . json_encode($current_header_name) . '.');
+                }
+                $headers[$current_header_name] = ltrim($current_header_value);
+                $current_header_name = null;
+                $current_header_value = '';
+            }
             if ($line === '') {
                 break;
             }
-            if (count($headers) >= self::MAX_HEADERS) {
-                throw new InvalidArgumentException(
-                    'Multipart part has more than ' . self::MAX_HEADERS . ' headers.'
-                );
-            }
+
             $colon = strpos($line, ':');
             if ($colon === false || $colon === 0) {
                 throw new InvalidArgumentException('Malformed multipart part header ' . json_encode($line) . '.');
             }
-            $name = strtolower(trim(substr($line, 0, $colon)));
-            $value = ltrim(substr($line, $colon + 1));
-            if ($name === '' || isset($headers[$name])) {
-                throw new InvalidArgumentException('Multipart part repeats or has an invalid header ' . json_encode($name) . '.');
+            $current_header_name = strtolower(trim(substr($line, 0, $colon)));
+            $current_header_value = substr($line, $colon + 1);
+            if ($current_header_name === '') {
+                throw new InvalidArgumentException('Multipart part has an invalid empty header name.');
             }
-            $headers[$name] = $value;
         }
 
         $content_length = $headers['content-length'] ?? null;
@@ -302,9 +323,9 @@ final class Site_Export_Multipart_Stream_Input {
     /**
      * Returns the normalized headers of the current part.
      *
-     * Header names are lowercase and each name occurs at most once. Values
-     * preserve trailing whitespace and discard leading whitespace following
-     * the colon.
+     * Header names are lowercase and each name occurs at most once. Folded
+     * physical lines have their CRLF removed. Values preserve trailing
+     * whitespace and discard leading whitespace following the colon.
      *
      * @return array<string,string> Current part headers keyed by lowercase name.
      *
@@ -418,6 +439,10 @@ final class Site_Export_Multipart_Stream_Input {
     /**
      * Reads one required CRLF-terminated syntax line within the fixed line cap.
      *
+     * A stream may return a short fragment before the line ending is available.
+     * Such fragments are accumulated only up to the physical-line limit; the
+     * absence of CRLF in one fgets() result does not make that fragment a line.
+     *
      * @param string $description Human-readable construct named in failures.
      * @return string Line contents without CRLF.
      *
@@ -425,9 +450,22 @@ final class Site_Export_Multipart_Stream_Input {
      * @throws RuntimeException If the stream ends before a line is available.
      */
     private function read_line(string $description): string {
-        $line = fgets($this->input, self::MAX_HEADER_LINE_BYTES + 3);
-        if ($line === false || $line === '') {
-            throw new RuntimeException('The request ended while reading ' . $description . '.');
+        $line = '';
+        $maximum_bytes_with_crlf = self::MAX_HEADER_LINE_BYTES + 2;
+        while (substr($line, -1) !== "\n") {
+            $remaining_bytes = $maximum_bytes_with_crlf - strlen($line);
+            if ($remaining_bytes <= 0) {
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Parser errors are values for callers, never HTML output.
+                throw new InvalidArgumentException(
+                    'Multipart ' . $description . ' exceeds ' . self::MAX_HEADER_LINE_BYTES . ' bytes or is missing CRLF.'
+                );
+                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            }
+            $fragment = fgets($this->input, $remaining_bytes + 1);
+            if ($fragment === false || $fragment === '') {
+                throw new RuntimeException('The request ended while reading ' . $description . '.');
+            }
+            $line .= $fragment;
         }
         if (substr($line, -2) !== "\r\n") {
             throw new InvalidArgumentException(
