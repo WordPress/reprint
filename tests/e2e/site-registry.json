@@ -130,6 +130,9 @@
     },
     "edit-locks": {
       "port": 8122
+    },
+    "symlink-bundle": {
+      "port": 8123
     }
   }
 }

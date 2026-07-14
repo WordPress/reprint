@@ -1106,6 +1106,18 @@ class ImportClient
     private $follow_symlinks = true;
 
     /**
+     * @var string|null Destination directory for escaping (out-of-scope) symlink targets,
+     * nested by the source path. null keeps the default: each symlink target is
+     * mirrored at its own source path underneath --fs-root.
+     *
+     * Usage: --follow-symlinks=<dir>
+     */
+    private $symlink_bundle_directory = null;
+
+    /** @var array|null Cached result of get_export_directories(). */
+    private $export_directories_cache = null;
+
+    /**
      * @var bool When true, ask the server to ship the default-skipped
      * generated content (wp-content/cache, .git, node_modules, etc.).
      *
@@ -1658,6 +1670,13 @@ class ImportClient
             $this->save_state($this->state);
         } elseif (isset($this->import_state()->follow_symlinks)) {
             $this->follow_symlinks = $this->import_state()->follow_symlinks;
+        }
+
+        if (isset($options["symlink_bundle_directory"])) {
+            $this->symlink_bundle_directory = $this->resolve_symlink_bundle_directory($options["symlink_bundle_directory"]);
+            $this->follow_symlinks = true;
+            $this->import_state()->follow_symlinks = true;
+            $this->save_state($this->state);
         }
 
         // Persist fs_root_nonempty_behavior in state so it survives across invocations.
@@ -2739,6 +2758,7 @@ class ImportClient
 
         $this->recover_index_updates();
         $this->assert_files_pull_only_unchanged_while_resuming($has_progress);
+        $this->assert_symlink_bundle_directory_unchanged();
 
         // Already completed.
         if ($current_status === "complete") {
@@ -3291,7 +3311,10 @@ class ImportClient
      */
     private function discover_symlink_targets(): void
     {
-        $roots = $this->get_root_directories_from_preflight();
+        // Seed "already covered" from the dirs actually enumerated this run (the
+        // --only prefixes when scoped), not the full preflight roots — otherwise a
+        // narrow --only skips a target under a root but outside its scope.
+        $roots = $this->get_export_directories();
 
         // Collect all indexed directory real paths for containment checks
         $visited = [];
@@ -3546,6 +3569,11 @@ class ImportClient
                 );
                 continue;
             }
+
+            // Repoint through the same seam regular symlink chunks use, so the
+            // link targets wherever the content actually landed (fs-root,
+            // remapped, or bundled) instead of the raw source spelling.
+            $target = $this->map_symlink_target_for_local_mirror($path, $local_path, $target);
 
             // Already correct — skip
             if (is_link($local_path) && readlink($local_path) === $target) {
@@ -8371,7 +8399,11 @@ class ImportClient
     }
 
     /**
-     * Map an absolute remote symlink target to the local fs-root mirror when possible.
+     * Map a remote symlink target to the local fs-root mirror when possible.
+     *
+     * Handles both absolute and relative targets (relative ones are resolved
+     * against the symlink's source directory). In-scope and non-followed targets
+     * keep their original spelling.
      *
      * Example:
      *
@@ -8400,33 +8432,29 @@ class ImportClient
      * With this mapping, the symlink is rewritten to a relative path that resolves to the
      * mirrored local copy under fs-root.
      */
-    private function map_absolute_symlink_target_for_local_mirror(
+    private function map_symlink_target_for_local_mirror(
         string $path,
         string $local_path,
         string $target
     ): string {
-        if (!str_starts_with($target, "/")) {
-            return $target;
-        }
+        // Resolve to an absolute source path (relative targets against the
+        // symlink's source dir) so both spellings are handled the same way.
+        $source_target = str_starts_with($target, "/")
+            ? normalize_path($target)
+            : normalize_path(dirname($path) . "/" . $target);
 
-        $root = $this->get_filesystem_root_path();
-        $normalized_target = normalize_path($target);
-
-        // Already points inside fs-root, keep as-is.
-        if (path_is_within_root($normalized_target, $root)) {
-            return $target;
-        }
-
-        // Only rewrite when symlink-following is enabled and the target path
-        // was actually indexed from the source.
+        // Only rewrite a target whose subtree was actually followed and indexed;
+        // everything else keeps its original (portable) spelling.
         if (
             !$this->follow_symlinks ||
-            !$this->remote_index_contains_path_prefix($normalized_target)
+            !$this->remote_index_contains_path_prefix($source_target)
         ) {
             return $target;
         }
 
-        $mapped_absolute = $root . $normalized_target;
+        // Repoint to wherever the target's content is actually placed,
+        // the same seam file chunks use, so that the link never dangles.
+        $mapped_absolute = $this->remote_path_to_local_path_within_import_root($source_target);
         $mapped_relative = self::compute_relative_path(
             dirname($local_path),
             $mapped_absolute
@@ -8603,6 +8631,62 @@ class ImportClient
             "sha256",
             json_encode($this->pull_only_files_with_path_prefixes, JSON_UNESCAPED_SLASHES),
         );
+    }
+
+    /**
+     * Refuse to run files-pull after the --follow-symlinks bundle directory
+     * changed. Placement of followed content is bound to it, so changing it
+     * mid-state would split content across two layouts. Recorded on the first
+     * run, compared on every run after; --abort resets it.
+     */
+    private function assert_symlink_bundle_directory_unchanged(): void
+    {
+        $fingerprint = $this->symlink_bundle_directory_fingerprint();
+        $previous = $this->import_state()->symlink_bundle_directory_fingerprint ?? null;
+
+        if ($previous !== null && $previous !== $fingerprint) {
+            throw new RuntimeException(
+                "Cannot change the --follow-symlinks bundle directory for an existing files-pull. " .
+                    "Use the original value, or use --abort to start a new files-pull.",
+            );
+        }
+
+        if ($previous === null) {
+            $this->import_state()->symlink_bundle_directory_fingerprint = $fingerprint;
+            $this->save_state($this->state);
+        }
+    }
+
+    /**
+     * Fingerprint of the effective bundle placement root. No bundle directory
+     * (and bare --follow-symlinks) fingerprints as fs-root, which is the
+     * equivalent placement — so switching between those spellings is allowed.
+     */
+    private function symlink_bundle_directory_fingerprint(): string
+    {
+        $effective = $this->symlink_bundle_directory ?? rtrim($this->get_filesystem_root_path(), "/");
+        return hash("sha256", $effective);
+    }
+
+    /**
+     * Resolve the --follow-symlinks=<dir> bundle destination.
+     *
+     * Uses the same target grammar as --remap targets: a :fs-root: path or a raw
+     * absolute path, which must resolve within --fs-root.
+     */
+    private function resolve_symlink_bundle_directory(string $raw): string
+    {
+        $fs_root = rtrim($this->get_filesystem_root_path(), "/");
+        $directory = $this->resolve_token_path($raw, ["fs-root" => $fs_root]);
+
+        if (!path_is_within_root($directory, $fs_root)) {
+            throw new InvalidArgumentException(
+                "--follow-symlinks bundle directory \"{$directory}\" resolves outside --fs-root ({$fs_root}); " .
+                    "it must stay within the destination root",
+            );
+        }
+
+        return $directory;
     }
 
     /**
@@ -8905,6 +8989,14 @@ class ImportClient
                 return $target;
             }
         }
+
+        // Following symlinks is currently the only way paths outside the original export scope reach this mapper.
+        // Use the same bundle mapping for copied content and rewritten symlink targets so the links do not dangle.
+        if ($this->symlink_bundle_directory !== null
+            && !$this->path_is_within_original_export_scope($path)) {
+            return $this->symlink_bundle_directory . $path;
+        }
+
         return $this->get_filesystem_root_path() . $path;
     }
 
@@ -9463,7 +9555,7 @@ class ImportClient
         }
 
         $local_path = $this->remote_path_to_local_path_within_import_root($path);
-        $target_for_local = $this->map_absolute_symlink_target_for_local_mirror(
+        $target_for_local = $this->map_symlink_target_for_local_mirror(
             $path,
             $local_path,
             $target,
@@ -9720,6 +9812,22 @@ class ImportClient
     }
 
     /**
+     * Whether $path falls under one of the ORIGINAL export directories (the
+     * --only prefixes, or the base roots without --only) — i.e. it was going to
+     * be pulled anyway. Evaluated against the pre-follow scope; a followed
+     * target outside all of these is "escaping" and eligible for symlink bundling.
+     */
+    private function path_is_within_original_export_scope(string $path): bool
+    {
+        foreach ($this->get_export_directories() as $root) {
+            if (path_is_within_root($path, $root)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Build the list of directories the server should traverse.
      *
      * Starts from the wp_detect roots (ABSPATH, etc.) and adds
@@ -9731,16 +9839,24 @@ class ImportClient
      */
     private function get_export_directories(): array
     {
+        // Memoized: The inputs (pull_only, remap, preflight) are all set before
+        // the first caller and never change mid-run, so cache on first use.
+        if ($this->export_directories_cache !== null) {
+            return $this->export_directories_cache;
+        }
+
         // With --only, files-pull should enumerate only the selected source path
         // prefixes. Do not add the default roots, remap sources, document root, or
         // auto-prepend/append directories below.
         if (!empty($this->pull_only_files_with_path_prefixes)) {
-            return $this->pull_only_files_with_path_prefixes;
+            $this->export_directories_cache = $this->pull_only_files_with_path_prefixes;
+            return $this->export_directories_cache;
         }
 
         $dirs = $this->get_root_directories_from_preflight();
         if (empty($dirs)) {
-            return [];
+            $this->export_directories_cache = [];
+            return $this->export_directories_cache;
         }
 
         $preflight = $this->import_state()->preflight["data"] ?? [];
@@ -9802,7 +9918,8 @@ class ImportClient
             }
         }
 
-        return $dirs;
+        $this->export_directories_cache = $dirs;
+        return $this->export_directories_cache;
     }
 
     /**
@@ -10889,6 +11006,7 @@ class ImportClient
             "version" => null,
             "webhost" => null,
             "follow_symlinks" => true,
+            "symlink_bundle_directory_fingerprint" => null,
             "fs_root_nonempty_behavior" => "error",
             "filter" => "none",
             "user_agent" => null,
@@ -11750,6 +11868,16 @@ if (
             'flag_value' => true,
             'help' => null,
             'commands' => [],
+        ],
+        [
+            'name' => 'follow-symlinks',
+            'type' => 'value',
+            'target' => 'symlink_bundle_directory',
+            'placeholder' => 'DIR',
+            'help' => 'Follow symlinks, consolidating escaping (out-of-scope) targets into DIR ' .
+                '(a :fs-root: path or an absolute path within --fs-root), nested by source path. ' .
+                'Bare --follow-symlinks is equivalent to --follow-symlinks=:fs-root:.',
+            'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
             'name' => 'on-fs-root-nonempty',
