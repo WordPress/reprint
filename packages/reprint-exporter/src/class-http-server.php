@@ -2,6 +2,10 @@
 
 use function WordPress\Reprint\Exporter\parse_size;
 
+if (!class_exists('Site_Export_Multipart_Processor', false)) {
+    require_once __DIR__ . '/class-multipart-processor.php';
+}
+
 /**
  * Parses and dispatches HTTP requests for the Site Export API.
  *
@@ -79,6 +83,9 @@ final class Site_Export_HTTP_Server {
     /** @var string|null Directory inserted when an ordinary request omits one. */
     private $default_directory;
 
+    /** @var string|null Server-owned directory used for staged push storage. */
+    private $staging_dir;
+
     /**
      * Configured staged target endpoints, or null when push is unavailable.
      *
@@ -116,9 +123,13 @@ final class Site_Export_HTTP_Server {
         };
         $this->cursor_header_name = $options['cursor_header_name'] ?? 'HTTP_X_EXPORT_CURSOR';
         $this->default_directory = $options['default_directory'] ?? null;
+        $this->staging_dir = null;
         $this->staged_endpoints = null;
 
         if (isset($options['staged']) && is_array($options['staged'])) {
+            if (isset($options['staged']['staging_dir']) && is_string($options['staged']['staging_dir'])) {
+                $this->staging_dir = $options['staged']['staging_dir'];
+            }
             $this->staged_endpoints = new Site_Export_Staged_Endpoints($options['staged']);
             $this->register_staged_handlers($this->staged_endpoints);
         }
@@ -380,6 +391,14 @@ final class Site_Export_HTTP_Server {
      * @throws InvalidArgumentException If the endpoint or cursor is malformed.
      */
     public function normalize_config(array $config, array $server = []): array {
+        unset($config['storage_path'], $config['staging_dir'], $config['excluded_staging_root']);
+        if (
+            $this->staging_dir !== null &&
+            in_array($config['endpoint'] ?? null, ['file_index', 'file_fetch'], true)
+        ) {
+            $config['excluded_staging_root'] = $this->staging_dir;
+        }
+
         if (
             $this->default_directory !== null &&
             !isset($config['directory'])
@@ -406,6 +425,42 @@ final class Site_Export_HTTP_Server {
     }
 
     /**
+     * Encodes one opaque response cursor without exceeding a multipart header line.
+     *
+     * Importers return this value unchanged. Short JSON cursors retain their
+     * historical base64 representation; longer cursors use gzip before base64
+     * so ordinary in-flight SQL rows still fit the strict multipart grammar.
+     * decode_cursor() accepts both representations.
+     *
+     * @param string $cursor_json Endpoint-specific cursor JSON.
+     * @return string Base64 transport value for X-Cursor.
+     *
+     * @throws RuntimeException If even the compressed cursor cannot fit.
+     */
+    public static function encode_cursor(string $cursor_json): string {
+        $maximum_value_bytes = Site_Export_Multipart_Processor::MAX_HEADER_LINE_BYTES - strlen('X-Cursor: ');
+        $cursor_b64 = base64_encode($cursor_json);
+        if (strlen($cursor_b64) <= $maximum_value_bytes) {
+            return $cursor_b64;
+        }
+
+        $compressed_cursor = gzencode($cursor_json);
+        if ($compressed_cursor === false) {
+            throw new RuntimeException('Failed to compress the response cursor for its multipart header.');
+        }
+        $cursor_b64 = base64_encode($compressed_cursor);
+        if (strlen($cursor_b64) > $maximum_value_bytes) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Byte counts are CLI/API diagnostics, never HTML output.
+            throw new RuntimeException(
+                'The encoded response cursor requires ' . strlen($cursor_b64) . ' bytes, but X-Cursor permits at most '
+                . $maximum_value_bytes . ' bytes.'
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+        return $cursor_b64;
+    }
+
+    /**
      * Decodes one transport cursor while verifying that it contains JSON.
      *
      * The JSON text, rather than its decoded PHP value, is returned because
@@ -423,6 +478,14 @@ final class Site_Export_HTTP_Server {
             throw new InvalidArgumentException(
                 'Cursor must be base64-encoded. Received invalid base64: ' . substr($cursor_b64, 0, 50)
             );
+        }
+
+        if (strncmp($cursor_json, "\x1f\x8b", 2) === 0) {
+            $decoded_cursor = @gzdecode($cursor_json);
+            if ($decoded_cursor === false) {
+                throw new InvalidArgumentException('Cursor contains an invalid gzip stream.');
+            }
+            $cursor_json = $decoded_cursor;
         }
 
         $cursor_data = json_decode($cursor_json, true);

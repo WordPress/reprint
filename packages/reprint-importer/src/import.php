@@ -5783,11 +5783,15 @@ class ImportClient
 
             // Streamed file bodies can arrive in multiple parser callbacks
             // for one exporter file part. Save only at the part boundary:
-            // mid-body, the cursor already points to the end of the part
-            // while file_bytes_written may still lag; at is_streaming_close
-            // the bytes are on disk and we force a per-part checkpoint.
+            // mid-body, the header cursor points to the end of a part whose
+            // bytes have not all arrived. Confirm that cursor only at
+            // is_streaming_close, when the bytes are on disk, and force a
+            // per-part checkpoint there.
             $is_streaming_body = !empty($chunk["is_streaming_body"]);
             $is_streaming_close = !empty($chunk["is_streaming_close"]);
+            if (!$is_streaming_body && isset($chunk["headers"]["x-cursor"])) {
+                $cursor = $chunk["headers"]["x-cursor"];
+            }
             if (!$is_streaming_body) {
                 $chunks_since_save++;
                 $force_save = $is_streaming_close;
@@ -5806,10 +5810,6 @@ class ImportClient
                     $this->save_state($this->state);
                     $chunks_since_save = 0;
                 }
-            }
-
-            if (isset($chunk["headers"]["x-cursor"])) {
-                $cursor = $chunk["headers"]["x-cursor"];
             }
 
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
@@ -5883,18 +5883,30 @@ class ImportClient
             // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
             // with no progress, so we don't retry forever.
             $this->assert_can_retry_consecutive_timeout("file_fetch", $cursor_before, $cursor);
-            // Save state so the next invocation resumes from the
-            // last cursor instead of crashing with exit code 1.
-            $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-            $this->finalize_index_updates();
-            if ($context->file_handle && $context->file_path) {
-                fflush($context->file_handle);
-                $this->import_state()->current_file = $context->file_path;
-                $this->import_state()->current_file_bytes = $context->file_bytes_written;
+            return $this->checkpoint_incomplete_file_fetch($state_key, $cursor, $context);
+        } catch (RuntimeException $e) {
+            // A server crash can close an otherwise valid response before its
+            // completion part arrives. Preserve the confirmed cursor and file
+            // bytes just as the timeout path does. Strict framing failures
+            // after a claimed completion remain terminal.
+            $message = $e->getMessage();
+            $is_retryable_curl = preg_match(
+                '/cURL error \((\d+)\):/',
+                $message,
+                $curl_match,
+            ) && in_array( (int) $curl_match[1], [18, 52, 56], true );
+            $is_retryable =
+                strpos($message, "missing completion chunk") !== false ||
+                $is_retryable_curl;
+            if (!$is_retryable) {
+                throw $e;
             }
-            $this->import_state()->active_resumable_command->completion_state = "partial";
-            $this->save_state($this->state);
-            return false;
+            $this->audit_log(
+                "INCOMPLETE FILE RESPONSE | " . $message . " — will save state for retry",
+                true,
+            );
+            $this->assert_can_retry_consecutive_timeout("file_fetch", $cursor_before, $cursor);
+            return $this->checkpoint_incomplete_file_fetch($state_key, $cursor, $context);
         }
         $this->import_state()->consecutive_timeouts = 0;
         $wall_time = microtime(true) - $request_start;
@@ -5918,6 +5930,43 @@ class ImportClient
         $this->save_state($this->state);
 
         return $complete;
+    }
+
+    /**
+     * Persist the last confirmed file-fetch progress for the next invocation.
+     *
+     * An unconfirmed tail of a tracked file is discarded so the returned
+     * cursor and local byte count continue to describe the same point after a
+     * timeout or truncated response. An unconfirmed first part is overwritten
+     * when the previous cursor is replayed.
+     */
+    private function checkpoint_incomplete_file_fetch(
+        string $state_key,
+        ?string $cursor,
+        StreamingContext $context
+    ): bool {
+        $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
+        $this->finalize_index_updates();
+        $confirmed_file = $this->import_state()->current_file ?? null;
+        $confirmed_bytes = $this->import_state()->current_file_bytes ?? null;
+        if (
+            $context->file_handle &&
+            $context->file_path === $confirmed_file &&
+            is_int($confirmed_bytes)
+        ) {
+            fflush($context->file_handle);
+            if (!ftruncate($context->file_handle, $confirmed_bytes)) {
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local paths and byte counts are CLI diagnostics, never HTML output.
+                throw new RuntimeException(
+                    "Failed to discard an incomplete file response after {$confirmed_bytes} confirmed bytes: {$confirmed_file}",
+                );
+                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            }
+            $context->file_bytes_written = $confirmed_bytes;
+        }
+        $this->import_state()->active_resumable_command->completion_state = "partial";
+        $this->save_state($this->state);
+        return false;
     }
 
     /**
@@ -10628,20 +10677,15 @@ class ImportClient
             false,
         );
 
+        $transport_error = null;
         try {
             try {
                 $this->check_curl_error($ch);
             } catch (RuntimeException $curl_error) {
-                if ($endpoint !== null) {
-                    $this->handle_tuner_error($endpoint, [
-                        "http_code" => 0,
-                        "timeout" => $this->last_curl_timeout,
-                        "curl_errno" => $this->last_curl_errno,
-                    ]);
-                }
-                throw $curl_error;
+                // Preserve the transport result until strict multipart EOF
+                // validation has had a chance to reject a claimed completion.
+                $transport_error = $curl_error;
             }
-
             $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
             $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
@@ -10655,6 +10699,27 @@ class ImportClient
         }
         $context->response_stats["ttfb"] = $ttfb;
         $context->response_stats["total_time"] = $total_time;
+
+        // A completion part is only trustworthy when its MIME close also
+        // arrived. Validate that claim before classifying a simultaneous cURL
+        // error, otherwise a framing failure could be retried as truncation.
+        if ($context->saw_completion) {
+            if ($multipart_processor === null) {
+                throw new LogicException('A completion part was observed without a multipart processor.');
+            }
+            $multipart_processor->finish_input();
+        }
+
+        if ($transport_error !== null) {
+            if ($endpoint !== null) {
+                $this->handle_tuner_error($endpoint, [
+                    "http_code" => 0,
+                    "timeout" => $this->last_curl_timeout,
+                    "curl_errno" => $this->last_curl_errno,
+                ]);
+            }
+            throw $transport_error;
+        }
 
         if ($http_code !== 200) {
             if ($endpoint !== null) {
@@ -10693,11 +10758,6 @@ class ImportClient
                     ($snippet !== "" ? "Body: {$snippet}" : ""),
             );
         }
-
-        // Every response part may already have been delivered, but the MIME
-        // close is still protocol evidence. Reject a transport which ended
-        // after a plausible completion part but before its closing boundary.
-        $multipart_processor->finish_input();
 
         if (!$context->saw_completion) {
             throw new RuntimeException(

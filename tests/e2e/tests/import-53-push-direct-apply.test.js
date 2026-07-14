@@ -17,7 +17,8 @@ import { join, relative } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { randomBytes } from 'node:crypto';
 import {
-    cleanupTempDir, createTempDir, getSiteDir, getSiteSecret, getSiteUrl, runPush,
+    cleanupTempDir, createTempDir, fsRootDir, getSiteDir, getSiteSecret, getSiteUrl,
+    runImporter, runPush,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { HmacClient } from '../lib/hmac-client.js';
@@ -51,6 +52,32 @@ describe.sequential('Import: direct push apply', { timeout: 300000 }, () => {
     });
 
     afterAll(() => cleanupTempDir(caseRoot));
+
+    it('excludes active server-owned staging storage from a full pull', () => {
+        const pullState = join(caseRoot, 'storage-pull');
+        const stagingSentinel = join(stagingDir, 'apply-sessions/active/work/files/private.txt');
+        execFileSync('sudo', ['mkdir', '-p', join(stagingSentinel, '..')]);
+        execFileSync('sudo', ['sh', '-c', `printf private > ${shellQuote(stagingSentinel)}`]);
+        execFileSync('sudo', ['chown', '-R', 'nginx:nginx', stagingDir]);
+
+        const result = runImporter(
+            `${getSiteUrl(site)}&directory=${targetRoot}`,
+            pullState,
+            'files-pull',
+            { secret: getSiteSecret(site) },
+        );
+
+        assert.equal(result.exitCode, 0, result.stderr);
+        const pulledSite = join(fsRootDir(pullState), targetRoot);
+        assert.ok(existsSync(join(pulledSite, 'index.php')), 'The full pull omitted the WordPress root.');
+        assert.ok(!existsSync(join(pulledSite, '.reprint-staging')),
+            'Server-owned staging storage leaked into the pulled tree.');
+        const indexedPaths = readFileSync(join(pullState, '.import-index.jsonl'), 'utf8')
+            .trim().split('\n').filter(Boolean)
+            .map((line) => Buffer.from(JSON.parse(line).path, 'base64').toString());
+        assert.ok(!indexedPaths.some((path) => path === stagingDir || path.startsWith(`${stagingDir}/`)),
+            'Server-owned staging storage leaked into the completed pull index.');
+    });
 
     it('applies basic and delta trees without target-side planning artifacts', () => {
         writeSource(sourceRoot, 'push-fixture/file.txt', 'first');

@@ -44,6 +44,39 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame('{"offset":10}', $config['cursor']);
     }
 
+    public function testLargeCursorRoundTripsThroughTheBoundedMultipartHeader(): void
+    {
+        $server = new Site_Export_HTTP_Server();
+        $cursor_json = json_encode([
+            'current_row' => str_repeat('compressible WordPress option data ', 2000),
+        ]) ?: '';
+
+        $cursor_header = Site_Export_HTTP_Server::encode_cursor($cursor_json);
+        $config = $server->normalize_config([
+            'endpoint' => 'sql_chunk',
+            'cursor' => $cursor_header,
+        ]);
+
+        $this->assertLessThanOrEqual(
+            Site_Export_Multipart_Processor::MAX_HEADER_LINE_BYTES - strlen('X-Cursor: '),
+            strlen($cursor_header)
+        );
+        $this->assertSame($cursor_json, $config['cursor']);
+    }
+
+    public function testCursorWhichCannotFitTheBoundedHeaderIsRejectedBeforeEmission(): void
+    {
+        $bytes = '';
+        for ($index = 0; $index < 400; ++$index) {
+            $bytes .= hash('sha256', (string) $index, true);
+        }
+        $cursor_json = json_encode(['current_row' => base64_encode($bytes)]) ?: '';
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('encoded response cursor requires');
+        Site_Export_HTTP_Server::encode_cursor($cursor_json);
+    }
+
     public function testNormalizeConfigAppliesDefaultDirectoryEvenWhenListDirPresent(): void
     {
         $server = new Site_Export_HTTP_Server([
@@ -57,6 +90,90 @@ final class ExportHttpServerTest extends TestCase
 
         $this->assertSame('/srv/site', $config['directory']);
         $this->assertSame('/srv/site/wp-content', $config['list_dir']);
+    }
+
+    public function testQueryCannotOverrideOrLeakPrivateStagingConfiguration(): void
+    {
+        $config = $this->captureFileHandlerConfig([
+            'get' => [
+                'endpoint' => 'file_index',
+                'storage_path' => '/client/storage',
+                'staging_dir' => '/client/staging',
+                'excluded_staging_root' => '/client/excluded',
+            ],
+            'post' => [],
+            'server' => ['REQUEST_METHOD' => 'GET'],
+            'body' => '',
+        ]);
+
+        $this->assertSame('/srv/site/.reprint-staging', $config['excluded_staging_root']);
+        $this->assertArrayNotHasKey('storage_path', $config);
+        $this->assertArrayNotHasKey('staging_dir', $config);
+    }
+
+    public function testFormCannotOverrideOrLeakPrivateStagingConfiguration(): void
+    {
+        $config = $this->captureFileHandlerConfig([
+            'get' => [],
+            'post' => [
+                'endpoint' => 'file_fetch',
+                'storage_path' => '/client/storage',
+                'staging_dir' => '/client/staging',
+                'excluded_staging_root' => '/client/excluded',
+            ],
+            'server' => [
+                'REQUEST_METHOD' => 'POST',
+                'CONTENT_TYPE' => 'application/x-www-form-urlencoded',
+            ],
+            'body' => '',
+        ]);
+
+        $this->assertSame('/srv/site/.reprint-staging', $config['excluded_staging_root']);
+        $this->assertArrayNotHasKey('storage_path', $config);
+        $this->assertArrayNotHasKey('staging_dir', $config);
+    }
+
+    public function testJsonCannotOverrideOrLeakPrivateStagingConfiguration(): void
+    {
+        $config = $this->captureFileHandlerConfig([
+            'get' => [],
+            'post' => [],
+            'server' => [
+                'REQUEST_METHOD' => 'POST',
+                'CONTENT_TYPE' => 'application/json',
+            ],
+            'body' => json_encode([
+                'endpoint' => 'file_index',
+                'storage_path' => '/client/storage',
+                'staging_dir' => '/client/staging',
+                'excluded_staging_root' => '/client/excluded',
+            ]) ?: '',
+        ]);
+
+        $this->assertSame('/srv/site/.reprint-staging', $config['excluded_staging_root']);
+        $this->assertArrayNotHasKey('storage_path', $config);
+        $this->assertArrayNotHasKey('staging_dir', $config);
+    }
+
+    public function testPrivateStagingConfigurationIsNotInjectedIntoOtherHandlers(): void
+    {
+        $server = new Site_Export_HTTP_Server([
+            'staged' => [
+                'staging_dir' => '/srv/site/.reprint-staging',
+                'secret' => 'test-secret',
+            ],
+        ]);
+
+        $config = $server->normalize_config([
+            'endpoint' => 'sql_chunk',
+            'storage_path' => '/client/storage',
+            'staging_dir' => '/client/staging',
+            'excluded_staging_root' => '/client/excluded',
+        ]);
+
+        $this->assertArrayNotHasKey('storage_path', $config);
+        $this->assertArrayNotHasKey('staging_dir', $config);
+        $this->assertArrayNotHasKey('excluded_staging_root', $config);
     }
 
     public function testNormalizeConfigRejectsInvalidCursor(): void
@@ -144,5 +261,37 @@ final class ExportHttpServerTest extends TestCase
         ]);
 
         $this->assertSame([['endpoint' => 'preflight']], $calls);
+    }
+
+    /**
+     * Dispatches one request to a file handler and returns its configuration.
+     *
+     * @param array<string,mixed> $request Request overrides for handle_request().
+     * @return array<string,mixed>
+     */
+    private function captureFileHandlerConfig(array $request): array
+    {
+        $captured_config = null;
+        $handler = static function (array $config) use (&$captured_config): void {
+            $captured_config = $config;
+        };
+        $server = new Site_Export_HTTP_Server([
+            'handlers' => [
+                'file_index' => $handler,
+                'file_fetch' => $handler,
+            ],
+            'budget_factory' => static function (): stdClass {
+                return new stdClass();
+            },
+            'staged' => [
+                'staging_dir' => '/srv/site/.reprint-staging',
+                'secret' => 'test-secret',
+            ],
+        ]);
+
+        $server->handle_request($request);
+
+        $this->assertIsArray($captured_config);
+        return $captured_config;
     }
 }

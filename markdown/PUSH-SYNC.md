@@ -273,8 +273,14 @@ direct installation requires same-filesystem rename.
 
 The session storage path is automatically protected if it lies under the
 target, as are .maintenance and the installed Reprint plugin. A push cannot
-stage, delete, or replace those paths. Target and workspace inspection uses
-lstat() and refuses symlinked parents rather than following them.
+stage, delete, or replace those paths. The server's `staging_dir` setting is
+target-private and is never supplied by a pulling client. File indexes exclude
+that root, its descendants, and aliases which resolve into it. If an older
+saved fetch list still names an excluded path, the server rejects the whole
+list and directs the operator to run `files-pull --abort` before rerunning the
+full pull; the fresh index and ordinary diff then remove the old local entries.
+Target and workspace inspection uses lstat() and refuses symlinked parents
+rather than following them.
 
 ## Commit, maintenance, and recovery
 

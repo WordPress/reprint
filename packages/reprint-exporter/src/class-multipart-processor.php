@@ -73,7 +73,7 @@ final class Site_Export_Multipart_Processor {
      * The count excludes CRLF. An unterminated line is rejected as soon as it
      * can no longer fit within this bound.
      */
-    private const MAX_HEADER_LINE_BYTES = 8192;
+    public const MAX_HEADER_LINE_BYTES = 8192;
 
     /**
      * Maximum aggregate bytes accepted for one part's headers, including CRLF.
