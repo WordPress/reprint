@@ -26,7 +26,6 @@
             "src/class-staged-apply-exception.php",
             "src/class-staged-apply-session.php",
             "src/class-staged-endpoints.php",
-            "src/class-staged-session-recovery-server.php",
             "src/class-sqlite-driver-pdo.php",
             "src/class-wpdb-driver-pdo.php"
         ],

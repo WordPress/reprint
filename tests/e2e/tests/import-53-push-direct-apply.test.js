@@ -67,9 +67,10 @@ describe.sequential('Import: direct push apply', { timeout: 300000 }, () => {
 
         assert.deepEqual(logicalTree(join(sourceRoot, 'push-fixture')), logicalTree(targetFixture));
         const planDirectory = join(stateDir, 'push', readdirSync(join(stateDir, 'push'))[0]);
-        const deletedPaths = readJsonLines(join(planDirectory, 'local-paths-to-delete.jsonl'))
-            .map((record) => Buffer.from(record.path, 'base64').toString());
-        assert.deepEqual(deletedPaths, ['push-fixture/delete-tree']);
+        assert.deepEqual(
+            readFileSync(join(planDirectory, 'local-delete-stream.bin')),
+            Buffer.from('push-fixture/delete-tree\0')
+        );
         const obsoleteNames = new Set(['prepared', 'backups', 'actions', 'candidates', 'indexes', 'staged.jsonl']);
         for (const entry of recursiveNames(stagingDir)) {
             assert.ok(!obsoleteNames.has(entry), `obsolete target artifact exists: ${entry}`);
@@ -504,10 +505,6 @@ function recursiveNames(root) {
         if (stat.isDirectory()) names.push(...recursiveNames(path));
     }
     return names;
-}
-
-function readJsonLines(path) {
-    return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
 function assertPush(result) {

@@ -362,7 +362,7 @@
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-exporter",
-                "reference": "34b3ba0e5c0c79f655fb65c04affa186feeb7e27"
+                "reference": "44aaed97182d0f98dfed6d6f7d58e7155bdefb34"
             },
             "require": {
                 "php": ">=7.2",
@@ -388,7 +388,6 @@
                     "src/class-staged-apply-exception.php",
                     "src/class-staged-apply-session.php",
                     "src/class-staged-endpoints.php",
-                    "src/class-staged-session-recovery-server.php",
                     "src/class-sqlite-driver-pdo.php",
                     "src/class-wpdb-driver-pdo.php"
                 ],

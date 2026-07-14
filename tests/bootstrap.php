@@ -28,7 +28,6 @@ if (!class_exists('Site_Export_HMAC_Server', false)) {
 require_once __DIR__ . '/../packages/reprint-exporter/src/class-multipart-processor.php';
 require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-apply-session.php';
 require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-endpoints.php';
-require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-session-recovery-server.php';
 require_once __DIR__ . '/../packages/reprint-exporter/src/class-http-server.php';
 
 // Load the test base class

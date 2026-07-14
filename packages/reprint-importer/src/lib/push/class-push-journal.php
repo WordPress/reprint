@@ -25,12 +25,12 @@
  * diff_local_files() answers "what changed on this machine since the last
  * push to this site". It streams the current index and the local baseline
  * together — both are sorted by path, so one pass suffices — and writes
- * two lists into the site directory:
+ * two outputs into the site directory:
  *
- *     local-paths-to-push.jsonl    paths new since the baseline, or whose
- *                                  ctime, size, or type differs
- *     local-paths-to-delete.jsonl  paths in the baseline but gone from the
- *                                  current index
+ *     local-paths-to-push.jsonl  paths new since the baseline, or whose
+ *                                ctime, size, or type differs
+ *     local-delete-stream.bin    raw NUL-delimited paths in the baseline but
+ *                                gone from the current index
  *
  * The diff parses one JSON line at a time from each input. Ordering compares
  * decoded paths; two entries with the same path count as unchanged when their
@@ -38,17 +38,19 @@
  * affect the diff. Changed-path output carries the current snapshot entry
  * (path, type, size, ctime, and symlink target where relevant); private
  * tree-directory markers remain private and never become upload operations.
- * Delete output carries just a base64 path. The sender still
- * lstat()s immediately before upload; these fields are the normalized logical
- * change, not source truth after the plan was written.
+ * Delete output is already the exact byte stream sent to and stored by the
+ * target. Filesystem paths cannot contain NUL, so the delimiter preserves every
+ * other path byte without a second representation. The sender still lstat()s
+ * positive changes immediately before upload; their fields are the normalized
+ * logical change, not source truth after the plan was written.
  *
  * With no baseline yet — the first push to a site — every uploadable current
  * entry counts as changed and no deletion can be detected.
  *
  * Producing the current index is the caller's job; this class only
- * compares and stores. The lists belong to the push which produced them and
- * remain its stable disk-backed plan when that active session resumes. A new
- * push replaces both lists from a new snapshot before creating its target
+ * compares and stores. The outputs belong to the push which produced them and
+ * remain its stable disk-backed inputs when that active session resumes. A new
+ * push replaces both outputs from a new snapshot before creating its target
  * session.
  *
  * This journal is deliberately not a record of what the target accepted and
@@ -61,14 +63,14 @@
  *
  *     $journal = new PushJournal('/srv/reprint-state', $target_url);
  *     $summary = $journal->diff_local_files($current_snapshot);
- *     // Stream the generated push/delete lists, then wait for target commit.
+ *     // Stream the positive plan and raw delete stream, then wait for commit.
  *     // After target commit succeeds:
  *     $journal->capture_local_files_baseline($current_snapshot);
  */
 class PushJournal
 {
     /**
-     * Target-specific directory containing the baseline and current plan files.
+     * Target-specific directory containing the baseline and current transfer inputs.
      *
      * The directory name is derived from site_key(), separating baselines by
      * normalized destination identity instead of source-tree location.
@@ -92,11 +94,11 @@ class PushJournal
     public string $local_paths_to_push;
 
     /**
-     * JSONL base64 paths which existed at baseline and are absent or replaced.
+     * Raw NUL-delimited paths which existed at baseline and are absent or replaced.
      *
      * @var string
      */
-    public string $local_paths_to_delete;
+    public string $local_delete_stream_path;
 
     /**
      * Selects the local state files for one normalized remote site identity.
@@ -112,7 +114,7 @@ class PushJournal
         $this->site_dir = rtrim($state_dir, "/") . "/push/" . self::site_key($site_url);
         $this->local_files_baseline_path = $this->site_dir . "/last-sync-local-files.jsonl";
         $this->local_paths_to_push = $this->site_dir . "/local-paths-to-push.jsonl";
-        $this->local_paths_to_delete = $this->site_dir . "/local-paths-to-delete.jsonl";
+        $this->local_delete_stream_path = $this->site_dir . "/local-delete-stream.bin";
     }
 
     /**
@@ -174,24 +176,25 @@ class PushJournal
 
     /**
      * Compares the current local index against the local baseline and writes
-     * the local paths to push and local paths to delete, replacing any lists
-     * from an earlier run.
+     * the positive plan and raw delete stream, replacing either output from an
+     * earlier run.
      *
      * A single merge pass over the two path-sorted files: a path only in
      * the current index is new, a path in both whose lines differ has
      * changed (both go to local_paths_to_push), a path only in the baseline
-     * was deleted (it goes to local_paths_to_delete). Unchanged paths produce
-     * no output. Each list is written to a temporary file and renamed into
-     * place, so a killed run never leaves a torn line behind.
+     * was deleted (its raw bytes and a NUL go to local_delete_stream_path).
+     * Unchanged paths produce no output. Both outputs are written to temporary
+     * files and renamed into place, so a killed run never leaves a torn record
+     * behind.
      *
      * Memory stays constant however large the site is: the merge holds one
-     * line from each input file and the lists go straight to disk, so an
+     * line from each input file and the outputs go straight to disk, so an
      * index with a million entries costs the same as one with ten.
      *
      * @param string $current_index_file Path-sorted JSONL snapshot for this push.
      * @return array{changed: int, deleted: int} Entry counts, for the push summary.
      *
-     * @throws RuntimeException If an index is invalid or plan files cannot be written.
+     * @throws RuntimeException If an index is invalid or output files cannot be written.
      */
     public function diff_local_files(string $current_index_file): array
     {
@@ -222,22 +225,22 @@ class PushJournal
             }
             throw new RuntimeException("Failed to open local_paths_to_push for writing: {$local_paths_to_push_tmp}");
         }
-        $local_paths_to_delete_tmp = $this->local_paths_to_delete . ".tmp";
-        $paths_to_delete_handle = fopen($local_paths_to_delete_tmp, "w");
-        if (!$paths_to_delete_handle) {
+        $local_delete_stream_tmp = $this->local_delete_stream_path . ".tmp";
+        $delete_stream_handle = fopen($local_delete_stream_tmp, "wb");
+        if (!$delete_stream_handle) {
             fclose($current_handle);
             if ($baseline_handle) {
                 fclose($baseline_handle);
             }
             fclose($paths_to_push_handle);
-            throw new RuntimeException("Failed to open local_paths_to_delete for writing: {$local_paths_to_delete_tmp}");
+            throw new RuntimeException("Failed to open the local delete stream for writing: {$local_delete_stream_tmp}");
         }
 
         $changed = 0;
         $deleted = 0;
         $pending_deleted_tree_roots = [];
-        $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
-        $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
+        $this->read_line($current_handle, $current_entry, $current_path);
+        $this->read_line($baseline_handle, $baseline_entry, $baseline_path);
         while ($current_entry !== null || $baseline_entry !== null) {
             // base64 does not preserve byte order ('0' sorts before 'A' in
             // ASCII but encodes a higher value), so ordering has to use the
@@ -259,20 +262,20 @@ class PushJournal
                     }
                     ++$changed;
                 }
-                $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
+                $this->read_line($current_handle, $current_entry, $current_path);
             } elseif ($order > 0) {
                 // Only in the baseline: deleted since the last push.
                 if (!$this->is_below_pending_root($baseline_path, $pending_deleted_tree_roots)) {
-                    $out = json_encode(["path" => $baseline_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                    if (fwrite($paths_to_delete_handle, $out) !== strlen($out)) {
-                        throw new RuntimeException("Short write on local_paths_to_delete, is the disk full?");
+                    $out = $baseline_path . "\0";
+                    if (fwrite($delete_stream_handle, $out) !== strlen($out)) {
+                        throw new RuntimeException("Short write on the local delete stream, is the disk full?");
                     }
                     $deleted++;
                     if ($this->is_tree_directory($baseline_entry)) {
                         $this->remember_pending_root($baseline_path, $pending_deleted_tree_roots);
                     }
                 }
-                $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
+                $this->read_line($baseline_handle, $baseline_entry, $baseline_path);
             } else {
                 $current_entry = $this->without_mode($current_entry);
                 $baseline_entry = $this->without_mode($baseline_entry);
@@ -299,9 +302,9 @@ class PushJournal
                 }
 
                 if ($needs_delete) {
-                    $out = json_encode(["path" => $baseline_base64_path], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-                    if (fwrite($paths_to_delete_handle, $out) !== strlen($out)) {
-                        throw new RuntimeException("Short write on local_paths_to_delete, is the disk full?");
+                    $out = $baseline_path . "\0";
+                    if (fwrite($delete_stream_handle, $out) !== strlen($out)) {
+                        throw new RuntimeException("Short write on the local delete stream, is the disk full?");
                     }
                     ++$deleted;
                     $this->remember_pending_root($baseline_path, $pending_deleted_tree_roots);
@@ -313,8 +316,8 @@ class PushJournal
                     }
                     ++$changed;
                 }
-                $this->read_line($current_handle, $current_entry, $current_path, $current_base64_path);
-                $this->read_line($baseline_handle, $baseline_entry, $baseline_path, $baseline_base64_path);
+                $this->read_line($current_handle, $current_entry, $current_path);
+                $this->read_line($baseline_handle, $baseline_entry, $baseline_path);
             }
         }
 
@@ -325,8 +328,8 @@ class PushJournal
         if (!fclose($paths_to_push_handle) || !rename($local_paths_to_push_tmp, $this->local_paths_to_push)) {
             throw new RuntimeException("Failed to move local_paths_to_push into place: {$this->local_paths_to_push}");
         }
-        if (!fclose($paths_to_delete_handle) || !rename($local_paths_to_delete_tmp, $this->local_paths_to_delete)) {
-            throw new RuntimeException("Failed to move local_paths_to_delete into place: {$this->local_paths_to_delete}");
+        if (!fclose($delete_stream_handle) || !rename($local_delete_stream_tmp, $this->local_delete_stream_path)) {
+            throw new RuntimeException("Failed to move the local delete stream into place: {$this->local_delete_stream_path}");
         }
 
         return ["changed" => $changed, "deleted" => $deleted];
@@ -354,7 +357,7 @@ class PushJournal
      * Indicates whether a path is already covered by a prior replacement root.
      *
      * Sorted input makes roots appear before descendants. Suppressing covered
-     * descendants keeps delete plans minimal and avoids contradictory work when
+     * descendants keeps the delete stream minimal and avoids contradictory work when
      * a complete ancestor is already deleted or positively replaced.
      *
      * Byte sorting can put a sibling such as `a-other` before `a/child`, so one
@@ -395,20 +398,18 @@ class PushJournal
     /**
      * Reads the next index line and parses its JSON object.
      *
-     * All three out-parameters become null at end of file: $entry is the
-     * decoded index object, $path the decoded path (for ordering),
-     * $base64_path the encoded path (reused in output lines).
+     * Both out-parameters become null at end of file: $entry is the decoded
+     * index object and $path is the decoded path used for ordering and raw
+     * delete output.
      *
      * @param resource|null $handle
      * @param array<string, mixed>|null $entry
      * @param string|null $path Decoded path used for bytewise ordering.
-     * @param string|null $base64_path Original encoded path reused in output.
      */
-    private function read_line($handle, ?array &$entry, ?string &$path, ?string &$base64_path): void
+    private function read_line($handle, ?array &$entry, ?string &$path): void
     {
         $entry = null;
         $path = null;
-        $base64_path = null;
         if (!$handle) {
             return;
         }
@@ -431,7 +432,6 @@ class PushJournal
         }
         $entry = $decoded_entry;
         $path = $decoded_path;
-        $base64_path = $decoded_entry["path"];
     }
 
     /**

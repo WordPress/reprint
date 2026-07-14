@@ -409,15 +409,42 @@ class MultipartPushStreamClient
         if ($total_bytes < 0 || $offset < 0 || $offset > $total_bytes) {
             throw new InvalidArgumentException('File part total and offset must be non-negative and offset must not exceed total.');
         }
-        // Reserve enough digits for a PHP integer Content-Length plus all
-        // headers; the actual part is charged after send_part().
-        $headers = $this->part_headers([
+        return $this->next_body_bytes([
             'type' => 'file',
             'path' => $path,
             'total_bytes' => $total_bytes,
             'offset' => $offset,
             'payload' => '',
-        ], 0);
+        ]);
+    }
+
+    /**
+     * Returns the safe maximum for the next raw delete-stream read.
+     *
+     * @param int $offset Target-confirmed raw delete-stream byte offset.
+     * @return int Maximum payload bytes to read, or zero when no part fits.
+     */
+    public function next_delete_body_bytes(int $offset): int
+    {
+        if ($this->curl_handle === null) {
+            throw new RuntimeException('No upload request is open; call start_upload_request() before next_delete_body_bytes().');
+        }
+        if ($offset < 0) {
+            throw new InvalidArgumentException('Delete-list offset must be non-negative.');
+        }
+        return $this->next_body_bytes([
+            'type' => 'delete-list',
+            'offset' => $offset,
+            'payload' => '',
+        ]);
+    }
+
+    /** @param array<string,mixed> $part One empty part descriptor used to size its headers. */
+    private function next_body_bytes(array $part): int
+    {
+        // Reserve enough digits for a PHP integer Content-Length plus all
+        // headers; the actual part is charged after send_part().
+        $headers = $this->part_headers($part, 0);
         $headers['Content-Length'] = (string) PHP_INT_MAX;
         $overhead = strlen('--' . $this->boundary . "\r\n\r\n\r\n") + 2;
         foreach ($headers as $name => $value) {
@@ -664,8 +691,8 @@ class MultipartPushStreamClient
      *
      * Paths and symlink targets are base64 because filesystem byte strings are
      * not necessarily valid UTF-8. Content-Length is always derived from the
-     * payload already in hand. Metadata parts require empty bodies; delete-list
-     * payloads must end at a NUL record boundary.
+     * payload already in hand. Metadata parts require empty bodies. Delete-list
+     * payloads may end within a NUL-delimited record and resume in a later part.
      *
      * @param array<string,mixed> $part Caller-supplied part descriptor.
      * @param int $payload_bytes Exact strlen() of its payload.

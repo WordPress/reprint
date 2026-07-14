@@ -30,9 +30,17 @@ final class MultipartPushTest extends TestCase {
     private string $state;
     private string $request_log;
     private ?string $other_filesystem_storage = null;
+    private int $max_frame_bytes = 128;
     private ?string $drop_upload_response_marker = null;
+    private ?string $drop_delete_completion_response_marker = null;
+    private ?string $inflate_delete_response_marker = null;
+    private ?string $negative_delete_status_marker = null;
+    private ?string $pause_status_response_marker = null;
+    private ?string $resume_status_response_marker = null;
+    private ?string $capture_upload_body_path = null;
     private ?string $pause_after_upload_marker = null;
     private ?string $resume_upload_response_marker = null;
+    private bool $return_paused_upload_response = false;
     private ?string $reject_upload_marker = null;
     private ?string $drop_discard_response_marker = null;
     private bool $make_checkpoint_unremovable_after_discard = false;
@@ -176,10 +184,6 @@ final class MultipartPushTest extends TestCase {
         $this->write_source('wp-content/plugins/file-to-directory', 'old plugin file');
         $this->write_source('empty/.placeholder', '');
         unlink($this->source . '/empty/.placeholder');
-        // APFS configured with a UTF-8-only volume rejects this name, while
-        // Linux filesystems accept it. Exercise the arbitrary-byte path when
-        // the host supports it without making portability a test warning.
-        @file_put_contents($this->source . "/raw-\xff-name", "\0binary\xff");
         $has_link = @symlink('ordinary.txt', $this->source . '/link');
         if ($has_link) {
             symlink('ordinary.txt', $this->source . '/link-to-directory');
@@ -219,6 +223,30 @@ final class MultipartPushTest extends TestCase {
         $this->assertSame($this->lstat_tree($this->source), $this->lstat_tree($this->target));
     }
 
+    public function testDeleteUploadPreservesArbitraryPathBytes(): void {
+        $relative_path = "raw-\xff-name";
+        $source_path = $this->source . '/' . $relative_path;
+        if (@file_put_contents($source_path, 'delete me') === false) {
+            if (PHP_OS_FAMILY === 'Linux') {
+                self::fail('The Linux test filesystem rejected an arbitrary-byte filename.');
+            }
+            $this->markTestSkipped('This filesystem requires UTF-8 filenames.');
+        }
+
+        $initial = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $initial['exit_code'], $initial['stderr']);
+        $this->assertSame('delete me', file_get_contents($this->target . '/' . $relative_path));
+        unlink($source_path);
+
+        $deleted = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $deleted['exit_code'], $deleted['stderr']);
+        $this->assertFalse(file_exists($this->target . '/' . $relative_path));
+        $delete_streams = glob($this->state . '/push/*/local-delete-stream.bin') ?: [];
+        $this->assertCount(1, $delete_streams);
+        $this->assertSame($relative_path . "\0", file_get_contents($delete_streams[0]));
+    }
+
     public function testPushUsesTargetLocalModesAndIgnoresModeOnlyChanges(): void {
         $this->write_source('mode-tree/child.txt', 'child');
         chmod($this->source . '/mode-tree', 0751);
@@ -241,7 +269,7 @@ final class MultipartPushTest extends TestCase {
     }
 
     public function testLargeFileUsesSeveralMultipartRequestsBeforeItIsPromoted(): void {
-        $contents = str_repeat("part\0", 700);
+        $contents = str_repeat("part\0", 4000);
         $this->write_source('multipart-large.bin', $contents);
 
         $result = $this->run_cli('push', ['--source-root=' . $this->source]);
@@ -250,6 +278,424 @@ final class MultipartPushTest extends TestCase {
         $this->assertSame('complete', $result['json']['status'] ?? null);
         $this->assertSame($contents, file_get_contents($this->target . '/multipart-large.bin'));
         $this->assertGreaterThanOrEqual(2, $this->endpoint_count('staged_session_upload'));
+    }
+
+    public function testDeleteRecordsSpanPartsAndShareRequests(): void {
+        $first_path = str_repeat('a', 180);
+        $second_path = str_repeat('b', 180);
+        $this->write_source($first_path, 'first');
+        $this->write_source($second_path, 'second');
+        $first = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $first['exit_code'], $first['stderr']);
+        $requests_before_delete = $this->endpoint_count('staged_session_upload');
+
+        unlink($this->source . '/' . $first_path);
+        unlink($this->source . '/' . $second_path);
+        $second = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $second['exit_code'], $second['stderr']);
+        $this->assertFileDoesNotExist($this->target . '/' . $first_path);
+        $this->assertFileDoesNotExist($this->target . '/' . $second_path);
+        // Four bounded data parts share one request; the second request carries
+        // only the explicit delete-stream completion declaration.
+        $this->assertSame(2, $this->endpoint_count('staged_session_upload') - $requests_before_delete);
+    }
+
+    public function testLostBatchedDeleteResponseResumesFromTheTargetRawSize(): void {
+        $first_path = str_repeat('c', 180);
+        $second_path = str_repeat('d', 180);
+        $this->write_source($first_path, 'first');
+        $this->write_source($second_path, 'second');
+        $first = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $first['exit_code'], $first['stderr']);
+
+        $this->drop_upload_response_marker = $this->case_root . '/dropped-delete-response';
+        $this->configure_server();
+        $status_requests_before_delete = $this->endpoint_count('staged_session_status');
+        unlink($this->source . '/' . $first_path);
+        unlink($this->source . '/' . $second_path);
+
+        $second = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $second['exit_code'], $second['stderr']);
+        $this->assertFileExists($this->drop_upload_response_marker);
+        $this->assertFileDoesNotExist($this->target . '/' . $first_path);
+        $this->assertFileDoesNotExist($this->target . '/' . $second_path);
+        $this->assertGreaterThan(
+            $status_requests_before_delete,
+            $this->endpoint_count('staged_session_status')
+        );
+    }
+
+    public function testSenderDeathAfterTargetAcceptsDeletesResumesFromSignedStatus(): void {
+        $this->write_source('delete-before-sender-death.txt', 'delete me');
+        $initial = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $initial['exit_code'], $initial['stderr']);
+        unlink($this->source . '/delete-before-sender-death.txt');
+
+        $this->pause_after_upload_marker = $this->case_root . '/delete-accepted-before-sender-death';
+        $this->resume_upload_response_marker = $this->case_root . '/release-dead-sender-response';
+        $this->configure_server();
+        $entry = realpath(__DIR__ . '/../../importer/import.php');
+        $this->assertNotFalse($entry);
+        $process = proc_open([
+            PHP_BINARY,
+            $entry,
+            'push',
+            self::$base_url,
+            '--state-dir=' . $this->state,
+            '--secret=' . self::SECRET,
+            '--allow-http',
+            '--source-root=' . $this->source,
+        ], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $this->case_root);
+        $this->assertIsResource($process);
+        for ($attempt = 0; $attempt < 100; ++$attempt) {
+            if (is_file($this->pause_after_upload_marker)) {
+                break;
+            }
+            usleep(100000);
+        }
+        $this->assertFileExists($this->pause_after_upload_marker, 'The target never accepted the delete stream before sender interruption.');
+        $target_stream_paths = glob($this->storage . '/apply-sessions/[a-f0-9]*/work/deletes') ?: [];
+        $this->assertCount(1, $target_stream_paths);
+        $this->assertSame("delete-before-sender-death.txt\0", file_get_contents($target_stream_paths[0]));
+        $checkpoint_paths = glob($this->state . '/push/*/session.json') ?: [];
+        $this->assertCount(1, $checkpoint_paths);
+        $checkpoint = json_decode( (string) file_get_contents($checkpoint_paths[0]), true);
+        $this->assertIsArray($checkpoint);
+        $this->assertSame(0, $checkpoint['delete_offset'] ?? null);
+
+        $process_status = proc_get_status($process);
+        $this->assertTrue($process_status['running'] ?? false, 'The sender exited before it could be killed after target acceptance.');
+        $this->assertTrue(proc_terminate($process, 9));
+        file_put_contents($this->resume_upload_response_marker, "release\n");
+        stream_get_contents($pipes[1]);
+        stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        proc_close($process);
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertSame('complete', $resumed['json']['status'] ?? null);
+        $this->assertFileDoesNotExist($this->target . '/delete-before-sender-death.txt');
+    }
+
+    public function testDeleteUploadDeclaresActualLengthAfterAShortReadAndContinuesAtThatOffset(): void {
+        $interrupted = $this->begin_rejected_delete_push();
+        $padding_path = 'missing-short-read-root';
+        $padding_segment = str_repeat('p', 200);
+        $padding_path_bytes = strlen($padding_path);
+        $padding_segment_bytes = strlen($padding_segment);
+        while ($padding_path_bytes + $padding_segment_bytes + 1 <= 4090) {
+            $padding_path .= '/' . $padding_segment;
+            $padding_path_bytes += $padding_segment_bytes + 1;
+        }
+        $padding_record = $padding_path . "\0";
+        // A 1 MiB request fits three 256 KiB payloads plus 261432 bytes after
+        // reserving their MIME headers and the close. Ending one byte earlier
+        // makes the fourth fread() short while still exhausting this request.
+        $short_stream_size = 1047863;
+        $padding_records = intdiv(
+            $short_stream_size + strlen($padding_record) - strlen($interrupted['local_stream']),
+            strlen($padding_record)
+        ) + 1;
+        $original_stream = $interrupted['local_stream'] . str_repeat($padding_record, $padding_records);
+        $this->assertGreaterThan($short_stream_size, strlen($original_stream));
+        file_put_contents($interrupted['local_stream_path'], $original_stream);
+
+        $checkpoint = json_decode( (string) file_get_contents($interrupted['checkpoint_path']), true);
+        $this->assertIsArray($checkpoint);
+        $checkpoint['delete_offset'] = 0;
+        $checkpoint['max_frame_bytes'] = 2 * 1024 * 1024;
+        $checkpoint['sizer'] = [
+            'request_body_bytes' => 1024 * 1024,
+            'ceiling_bytes' => 1024 * 1024,
+            'growth_holdoff_remaining' => 0,
+        ];
+        file_put_contents($interrupted['checkpoint_path'], json_encode($checkpoint, JSON_UNESCAPED_SLASHES));
+
+        $this->reject_upload_marker = null;
+        $this->max_frame_bytes = 2 * 1024 * 1024;
+        $this->pause_status_response_marker = $this->case_root . '/delete-status-paused';
+        $this->resume_status_response_marker = $this->case_root . '/release-delete-status';
+        $this->pause_after_upload_marker = $this->case_root . '/short-delete-upload-accepted';
+        $this->resume_upload_response_marker = $this->case_root . '/release-short-delete-response';
+        $this->return_paused_upload_response = true;
+        $this->configure_server();
+
+        $entry = realpath(__DIR__ . '/../../importer/import.php');
+        $this->assertNotFalse($entry);
+        $process = proc_open([
+            PHP_BINARY,
+            $entry,
+            'push',
+            self::$base_url,
+            '--state-dir=' . $this->state,
+            '--secret=' . self::SECRET,
+            '--allow-http',
+            '--source-root=' . $this->source,
+        ], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $this->case_root);
+        $this->assertIsResource($process);
+
+        for ($attempt = 0; $attempt < 100; ++$attempt) {
+            if (is_file($this->pause_status_response_marker)) {
+                break;
+            }
+            usleep(100000);
+        }
+        $this->assertFileExists($this->pause_status_response_marker, 'The sender did not pause after sampling the local delete-stream size.');
+        $status = json_decode( (string) file_get_contents($this->pause_status_response_marker), true);
+        $this->assertIsArray($status);
+        $this->assertSame(0, $status['delete_bytes'] ?? null);
+
+        $stream_identity = lstat($interrupted['local_stream_path']);
+        $this->assertIsArray($stream_identity);
+        $stream_handle = fopen($interrupted['local_stream_path'], 'r+b');
+        $this->assertIsResource($stream_handle);
+        $this->assertTrue(ftruncate($stream_handle, $short_stream_size));
+        $this->assertTrue(fflush($stream_handle));
+        fclose($stream_handle);
+        clearstatcache(true, $interrupted['local_stream_path']);
+        $this->assertSame($short_stream_size, filesize($interrupted['local_stream_path']));
+        file_put_contents($this->resume_status_response_marker, "release\n");
+
+        for ($attempt = 0; $attempt < 150; ++$attempt) {
+            if (is_file($this->pause_after_upload_marker)) {
+                break;
+            }
+            usleep(100000);
+        }
+        $this->assertFileExists($this->pause_after_upload_marker, 'The target did not accept the short-read delete request.');
+        $response = json_decode( (string) file_get_contents($this->pause_after_upload_marker), true);
+        $this->assertIsArray($response);
+        $accepted = is_array($response['accepted'] ?? null) ? $response['accepted'] : [];
+        $this->assertSame(
+            [262144, 524288, 786432, $short_stream_size],
+            array_map(static function (array $confirmation): int {
+                return (int) ( $confirmation['accepted_bytes'] ?? -1 );
+            }, $accepted)
+        );
+        $this->assertSame(substr($original_stream, 0, $short_stream_size), file_get_contents($interrupted['target_stream_path']));
+
+        $checkpoint = json_decode( (string) file_get_contents($interrupted['checkpoint_path']), true);
+        $this->assertIsArray($checkpoint);
+        $this->assertSame(0, $checkpoint['delete_offset'] ?? null);
+        $this->assertArrayNotHasKey('delete_plan_offset', $checkpoint);
+        $this->assertArrayNotHasKey('delete_record_offset', $checkpoint);
+
+        $stream_handle = fopen($interrupted['local_stream_path'], 'r+b');
+        $this->assertIsResource($stream_handle);
+        $this->assertTrue(ftruncate($stream_handle, 0));
+        $written_bytes = 0;
+        $original_stream_size = strlen($original_stream);
+        while ($written_bytes < $original_stream_size) {
+            $written = fwrite($stream_handle, substr($original_stream, $written_bytes));
+            if (!is_int($written) || $written === 0) {
+                self::fail('Could not restore the local delete stream in place after the short read.');
+            }
+            $written_bytes += $written;
+        }
+        $this->assertTrue(fflush($stream_handle));
+        fclose($stream_handle);
+        clearstatcache(true, $interrupted['local_stream_path']);
+        $restored_identity = lstat($interrupted['local_stream_path']);
+        $this->assertIsArray($restored_identity);
+        $this->assertSame($stream_identity['ino'] ?? null, $restored_identity['ino'] ?? null);
+        $this->assertSame($original_stream_size, filesize($interrupted['local_stream_path']));
+        file_put_contents($this->resume_upload_response_marker, "release\n");
+
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exit_code = proc_close($process);
+        $lines = array_values(array_filter(preg_split('/\R/', trim( (string) $stdout)) ?: [], static function (string $line): bool {
+            return $line !== '';
+        }));
+        $result = $lines === [] ? null : json_decode( (string) end($lines), true);
+
+        $this->assertSame(0, $exit_code, (string) $stderr);
+        $this->assertSame('complete', is_array($result) ? ( $result['status'] ?? null ) : null);
+        $this->assertFileDoesNotExist($this->target . '/first-delete.txt');
+        $this->assertFileDoesNotExist($this->target . '/second-delete.txt');
+    }
+
+    public function testProcessRestartSeeksToATargetOffsetInTheMiddleOfADeleteRecord(): void {
+        $interrupted = $this->begin_rejected_delete_push();
+        file_put_contents($interrupted['target_stream_path'], substr($interrupted['local_stream'], 0, 3));
+        $request_lines_before = count(file($this->request_log, FILE_IGNORE_NEW_LINES) ?: []);
+        $this->reject_upload_marker = null;
+        $this->capture_upload_body_path = $this->case_root . '/mid-record-resume-body';
+        $this->configure_server();
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertSame('complete', $resumed['json']['status'] ?? null);
+        $this->assertStringContainsString(
+            "X-Chunk-Type: delete-list\r\nX-Delete-Offset: 3\r\n",
+            (string) file_get_contents($this->capture_upload_body_path)
+        );
+        $new_requests = array_slice(file($this->request_log, FILE_IGNORE_NEW_LINES) ?: [], $request_lines_before);
+        $new_endpoints = array_map(static function (string $line): ?string {
+            $request = json_decode($line, true);
+            return is_array($request) && is_string($request['endpoint'] ?? null) ? $request['endpoint'] : null;
+        }, $new_requests);
+        $this->assertSame(['staged_session_status', 'staged_session_upload'], array_slice($new_endpoints, 0, 2));
+        $this->assertFileDoesNotExist($this->target . '/first-delete.txt');
+        $this->assertFileDoesNotExist($this->target . '/second-delete.txt');
+    }
+
+    public function testProcessRestartRewindsATargetBehindTheCheckpointAtARecordBoundary(): void {
+        $interrupted = $this->begin_rejected_delete_push();
+        $boundary_offset = strlen("first-delete.txt\0");
+        file_put_contents($interrupted['target_stream_path'], substr($interrupted['local_stream'], 0, $boundary_offset));
+        $checkpoint = json_decode( (string) file_get_contents($interrupted['checkpoint_path']), true);
+        $this->assertIsArray($checkpoint);
+        $checkpoint['delete_offset'] = strlen($interrupted['local_stream']);
+        file_put_contents($interrupted['checkpoint_path'], json_encode($checkpoint, JSON_UNESCAPED_SLASHES));
+        $this->reject_upload_marker = null;
+        $this->capture_upload_body_path = $this->case_root . '/record-boundary-resume-body';
+        $this->configure_server();
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertSame('complete', $resumed['json']['status'] ?? null);
+        $this->assertStringContainsString(
+            "X-Chunk-Type: delete-list\r\nX-Delete-Offset: " . $boundary_offset . "\r\n",
+            (string) file_get_contents($this->capture_upload_body_path)
+        );
+        $this->assertFileDoesNotExist($this->target . '/first-delete.txt');
+        $this->assertFileDoesNotExist($this->target . '/second-delete.txt');
+    }
+
+    public function testProcessRestartAcceptsATargetDeleteOffsetAtLocalEof(): void {
+        $interrupted = $this->begin_rejected_delete_push();
+        file_put_contents($interrupted['target_stream_path'], $interrupted['local_stream']);
+        $this->reject_upload_marker = null;
+        $this->capture_upload_body_path = $this->case_root . '/eof-resume-body';
+        $this->configure_server();
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertSame('complete', $resumed['json']['status'] ?? null);
+        $captured_body = (string) file_get_contents($this->capture_upload_body_path);
+        $this->assertSame(1, substr_count($captured_body, 'X-Chunk-Type: delete-list'));
+        $this->assertStringContainsString(
+            "X-Delete-Offset: " . strlen($interrupted['local_stream']) . "\r\nX-Delete-Complete: 1\r\n",
+            $captured_body
+        );
+        $this->assertStringContainsString("Content-Length: 0\r\n", $captured_body);
+        $this->assertFileDoesNotExist($this->target . '/first-delete.txt');
+        $this->assertFileDoesNotExist($this->target . '/second-delete.txt');
+    }
+
+    public function testProcessRestartRejectsATargetDeleteOffsetBeyondLocalEof(): void {
+        $interrupted = $this->begin_rejected_delete_push();
+        file_put_contents($interrupted['target_stream_path'], $interrupted['local_stream'] . "unexpected\0");
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertNotSame(0, $resumed['exit_code']);
+        $this->assertStringContainsString('beyond the', $resumed['stderr']);
+        $this->assertStringContainsString('local delete stream', $resumed['stderr']);
+        $this->assertFileExists($this->target . '/first-delete.txt');
+        $this->assertFileExists($this->target . '/second-delete.txt');
+    }
+
+    public function testMissingRawDeleteStreamRequiresAbortWithoutPreventingIt(): void {
+        $interrupted = $this->begin_rejected_delete_push();
+        unlink($interrupted['local_stream_path']);
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertNotSame(0, $resumed['exit_code']);
+        $this->assertStringContainsString('The local delete stream is missing or unreadable', $resumed['stderr']);
+        $this->assertStringContainsString('Run push with --abort, then start it again.', $resumed['stderr']);
+
+        $aborted = $this->run_cli('push', ['--source-root=' . $this->source, '--abort']);
+        $this->assertSame(0, $aborted['exit_code'], $aborted['stderr']);
+        $this->assertSame('aborted', $aborted['json']['status'] ?? null);
+    }
+
+    public function testSignedStatusRejectsANegativeDeleteOffsetBeforeUpload(): void {
+        $this->write_source('delete-after-negative-status.txt', 'delete me');
+        $initial = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $initial['exit_code'], $initial['stderr']);
+        unlink($this->source . '/delete-after-negative-status.txt');
+
+        $this->negative_delete_status_marker = $this->case_root . '/negative-delete-status';
+        $this->configure_server();
+        $upload_requests_before = $this->endpoint_count('staged_session_upload');
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertNotSame(0, $result['exit_code']);
+        $this->assertFileExists($this->negative_delete_status_marker);
+        $this->assertStringContainsString('Target status delete_bytes must be a nonnegative integer; observed -1.', $result['stderr']);
+        $this->assertSame($upload_requests_before, $this->endpoint_count('staged_session_upload'));
+        $this->assertFileExists($this->target . '/delete-after-negative-status.txt');
+    }
+
+    public function testProcessRestartRejectsCompletedTargetDeleteStateAtTheWrongSize(): void {
+        $interrupted = $this->begin_rejected_delete_push();
+        $metadata_path = dirname($interrupted['target_stream_path'], 2) . '/session.json';
+        $metadata = json_decode( (string) file_get_contents($metadata_path), true);
+        $this->assertIsArray($metadata);
+        $metadata['delete_upload_complete'] = true;
+        file_put_contents($metadata_path, json_encode($metadata, JSON_UNESCAPED_SLASHES));
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertNotSame(0, $resumed['exit_code']);
+        $this->assertStringContainsString('delete_upload_complete is true', $resumed['stderr']);
+        $this->assertStringContainsString('local delete stream contains', $resumed['stderr']);
+        $this->assertFileExists($this->target . '/first-delete.txt');
+        $this->assertFileExists($this->target . '/second-delete.txt');
+    }
+
+    public function testAcceptedDeleteResponseAheadOfTheSentChunkReconcilesThroughSignedStatus(): void {
+        $this->write_source('delete-after-ahead-response.txt', 'delete me');
+        $initial = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $initial['exit_code'], $initial['stderr']);
+        unlink($this->source . '/delete-after-ahead-response.txt');
+
+        $this->inflate_delete_response_marker = $this->case_root . '/inflated-delete-response';
+        $this->configure_server();
+        $status_requests_before = $this->endpoint_count('staged_session_status');
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        $this->assertSame('complete', $result['json']['status'] ?? null);
+        $this->assertFileExists($this->inflate_delete_response_marker);
+        $this->assertFileDoesNotExist($this->target . '/delete-after-ahead-response.txt');
+        $this->assertGreaterThanOrEqual(
+            $status_requests_before + 2,
+            $this->endpoint_count('staged_session_status')
+        );
+    }
+
+    public function testLostDeleteCompletionResponseReplaysTheIdempotentDeclaration(): void {
+        $this->write_source('delete-before-lost-completion.txt', 'delete me');
+        $initial = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $initial['exit_code'], $initial['stderr']);
+        unlink($this->source . '/delete-before-lost-completion.txt');
+
+        $this->drop_delete_completion_response_marker = $this->case_root . '/dropped-delete-completion';
+        $this->configure_server();
+        $upload_requests_before = $this->endpoint_count('staged_session_upload');
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        $this->assertSame('complete', $result['json']['status'] ?? null);
+        $this->assertFileExists($this->drop_delete_completion_response_marker);
+        $this->assertFileDoesNotExist($this->target . '/delete-before-lost-completion.txt');
+        $this->assertGreaterThanOrEqual(
+            $upload_requests_before + 3,
+            $this->endpoint_count('staged_session_upload')
+        );
     }
 
     public function testDryRunDoesNotCreateARemoteSessionOrPublishABaseline(): void {
@@ -281,7 +727,13 @@ final class MultipartPushTest extends TestCase {
         $this->assertStringContainsString('dry-run', $dry_run['stderr']);
         $this->assertStringContainsString('active push', $dry_run['stderr']);
         $this->assertSame($requests_before_dry_run, file_get_contents($this->request_log));
-        $this->assertCount(1, glob($this->state . '/push/*/session.json') ?: []);
+        $checkpoints = glob($this->state . '/push/*/session.json') ?: [];
+        $this->assertCount(1, $checkpoints);
+        $checkpoint = json_decode( (string) file_get_contents($checkpoints[0]), true);
+        $this->assertIsArray($checkpoint);
+        $this->assertArrayHasKey('delete_offset', $checkpoint);
+        $this->assertArrayNotHasKey('delete_plan_offset', $checkpoint);
+        $this->assertArrayNotHasKey('delete_record_offset', $checkpoint);
         $this->assertFileDoesNotExist($this->target . '/active.txt');
     }
 
@@ -515,7 +967,7 @@ final class MultipartPushTest extends TestCase {
         $result = $this->run_cli('push', ['--source-root=' . $this->source]);
 
         $this->assertNotSame(0, $result['exit_code']);
-        $this->assertStringContainsString('one filesystem', $result['stderr']);
+        $this->assertStringContainsString('same-filesystem rename', $result['stderr']);
         $this->assertFileDoesNotExist($this->target . '/must-not-arrive.txt');
         $this->assertSame(1, $this->endpoint_count('staged_session_create'));
     }
@@ -561,22 +1013,60 @@ final class MultipartPushTest extends TestCase {
         file_put_contents($path, $contents);
     }
 
+    /**
+     * @return array{local_stream:string,local_stream_path:string,target_stream_path:string,checkpoint_path:string}
+     */
+    private function begin_rejected_delete_push(): array {
+        $this->write_source('first-delete.txt', 'first');
+        $this->write_source('second-delete.txt', 'second');
+        $initial = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $initial['exit_code'], $initial['stderr']);
+        unlink($this->source . '/first-delete.txt');
+        unlink($this->source . '/second-delete.txt');
+
+        $this->reject_upload_marker = $this->case_root . '/rejected-delete-upload';
+        $this->configure_server();
+        $interrupted = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertNotSame(0, $interrupted['exit_code']);
+        $this->assertFileExists($this->reject_upload_marker);
+
+        $local_stream_paths = glob($this->state . '/push/*/local-delete-stream.bin') ?: [];
+        $this->assertCount(1, $local_stream_paths);
+        $local_stream = file_get_contents($local_stream_paths[0]);
+        $this->assertSame("first-delete.txt\0second-delete.txt\0", $local_stream);
+        $session_directories = glob($this->storage . '/apply-sessions/[a-f0-9]*', GLOB_ONLYDIR) ?: [];
+        $this->assertCount(1, $session_directories);
+        $checkpoint_paths = glob($this->state . '/push/*/session.json') ?: [];
+        $this->assertCount(1, $checkpoint_paths);
+        $target_stream_path = $session_directories[0] . '/work/deletes';
+        $this->assertSame('', file_get_contents($target_stream_path));
+
+        return [
+            'local_stream' => $local_stream,
+            'local_stream_path' => $local_stream_paths[0],
+            'target_stream_path' => $target_stream_path,
+            'checkpoint_path' => $checkpoint_paths[0],
+        ];
+    }
+
     private function configure_server(): void {
         file_put_contents(self::$config_path, json_encode([
             'staging_dir' => $this->storage,
             'secret' => self::SECRET,
             'apply_target_root' => $this->target,
-            'apply_sessions_enabled' => true,
             // Make the real CLI split the large file into several MIME parts.
-            'max_frame_bytes' => 128,
-            // Make those parts cross real HTTP request boundaries as well as
-            // the multipart reader's bounded body-piece boundary.
-            'max_upload_parts' => 2,
-            'max_commit_steps' => 1,
+            'max_frame_bytes' => $this->max_frame_bytes,
             'request_log' => $this->request_log,
             'drop_upload_response_marker' => $this->drop_upload_response_marker,
+            'drop_delete_completion_response_marker' => $this->drop_delete_completion_response_marker,
+            'inflate_delete_response_marker' => $this->inflate_delete_response_marker,
+            'negative_delete_status_marker' => $this->negative_delete_status_marker,
+            'pause_status_response_marker' => $this->pause_status_response_marker,
+            'resume_status_response_marker' => $this->resume_status_response_marker,
+            'capture_upload_body_path' => $this->capture_upload_body_path,
             'pause_after_upload_marker' => $this->pause_after_upload_marker,
             'resume_upload_response_marker' => $this->resume_upload_response_marker,
+            'return_paused_upload_response' => $this->return_paused_upload_response,
             'reject_upload_marker' => $this->reject_upload_marker,
             'drop_discard_response_marker' => $this->drop_discard_response_marker,
             'make_checkpoint_unremovable_after_discard' => $this->make_checkpoint_unremovable_after_discard,
@@ -682,6 +1172,38 @@ if (!is_array(\$config)) {
     return true;
 }
 file_put_contents((string) \$config['request_log'], json_encode(['endpoint' => \$_GET['endpoint'] ?? null]) . "\\n", FILE_APPEND);
+if ((\$_GET['endpoint'] ?? null) === 'staged_session_status'
+    && is_string(\$config['pause_status_response_marker'] ?? null)
+    && \$config['pause_status_response_marker'] !== ''
+    && !file_exists(\$config['pause_status_response_marker'])) {
+    ob_start();
+    (new Site_Export_HTTP_Server(['staged' => \$config]))->handle_request();
+    \$response_body = ob_get_clean();
+    file_put_contents(\$config['pause_status_response_marker'], (string) \$response_body);
+    \$resume_marker = \$config['resume_status_response_marker'] ?? null;
+    \$deadline = microtime(true) + 15;
+    while (is_string(\$resume_marker) && !file_exists(\$resume_marker) && microtime(true) < \$deadline) {
+        usleep(10000);
+    }
+    echo \$response_body;
+    return true;
+}
+if ((\$_GET['endpoint'] ?? null) === 'staged_session_status'
+    && is_string(\$config['negative_delete_status_marker'] ?? null)
+    && \$config['negative_delete_status_marker'] !== ''
+    && !file_exists(\$config['negative_delete_status_marker'])) {
+    ob_start();
+    (new Site_Export_HTTP_Server(['staged' => \$config]))->handle_request();
+    \$response_body = ob_get_clean();
+    \$response = json_decode((string) \$response_body, true);
+    if (is_array(\$response)) {
+        \$response['delete_bytes'] = -1;
+        \$response_body = json_encode(\$response);
+    }
+    file_put_contents(\$config['negative_delete_status_marker'], "returned negative delete_bytes\\n");
+    echo \$response_body;
+    return true;
+}
 if ((\$_GET['endpoint'] ?? null) === 'staged_session_upload'
     && is_string(\$config['reject_upload_marker'] ?? null)
     && \$config['reject_upload_marker'] !== ''
@@ -693,17 +1215,84 @@ if ((\$_GET['endpoint'] ?? null) === 'staged_session_upload'
     return true;
 }
 if ((\$_GET['endpoint'] ?? null) === 'staged_session_upload'
+    && is_string(\$config['capture_upload_body_path'] ?? null)
+    && \$config['capture_upload_body_path'] !== ''
+    && !file_exists(\$config['capture_upload_body_path'])) {
+    \$endpoints = new Site_Export_Staged_Endpoints(\$config);
+    \$response = \$endpoints->pre_authenticate_envelope(\$_SERVER, 'staged_session_upload');
+    if (\$response === null) {
+        \$request_body = file_get_contents('php://input');
+        file_put_contents(\$config['capture_upload_body_path'], (string) \$request_body);
+        \$input = fopen('php://temp', 'w+b');
+        fwrite(\$input, (string) \$request_body);
+        rewind(\$input);
+        \$response = \$endpoints->session_upload(\$config, \$_SERVER, \$input);
+        fclose(\$input);
+    }
+    http_response_code((int) (\$response['http_code'] ?? 500));
+    header('Content-Type: application/json');
+    echo json_encode(\$response['body'] ?? []);
+    return true;
+}
+if ((\$_GET['endpoint'] ?? null) === 'staged_session_upload'
+    && is_string(\$config['inflate_delete_response_marker'] ?? null)
+    && \$config['inflate_delete_response_marker'] !== ''
+    && !file_exists(\$config['inflate_delete_response_marker'])) {
+    ob_start();
+    (new Site_Export_HTTP_Server(['staged' => \$config]))->handle_request();
+    \$response_body = ob_get_clean();
+    \$response = json_decode((string) \$response_body, true);
+    if (is_array(\$response) && is_array(\$response['accepted'] ?? null)) {
+        foreach (\$response['accepted'] as &\$accepted) {
+            if (is_array(\$accepted) && (\$accepted['type'] ?? null) === 'delete-list') {
+                \$accepted['accepted_bytes'] = (int) (\$accepted['accepted_bytes'] ?? 0) + 1;
+                break;
+            }
+        }
+        unset(\$accepted);
+        \$response_body = json_encode(\$response);
+    }
+    file_put_contents(\$config['inflate_delete_response_marker'], "inflated accepted_bytes\\n");
+    echo \$response_body;
+    return true;
+}
+if ((\$_GET['endpoint'] ?? null) === 'staged_session_upload'
+    && is_string(\$config['drop_delete_completion_response_marker'] ?? null)
+    && \$config['drop_delete_completion_response_marker'] !== ''
+    && !file_exists(\$config['drop_delete_completion_response_marker'])) {
+    ob_start();
+    (new Site_Export_HTTP_Server(['staged' => \$config]))->handle_request();
+    \$response_body = ob_get_clean();
+    \$response = json_decode((string) \$response_body, true);
+    \$accepted = is_array(\$response) && is_array(\$response['accepted'] ?? null)
+        ? \$response['accepted']
+        : [];
+    foreach (\$accepted as \$confirmation) {
+        if (is_array(\$confirmation)
+            && (\$confirmation['type'] ?? null) === 'delete-list'
+            && (\$confirmation['state'] ?? null) === 'complete') {
+            file_put_contents(\$config['drop_delete_completion_response_marker'], "dropped completion response\\n");
+            return true;
+        }
+    }
+    echo \$response_body;
+    return true;
+}
+if ((\$_GET['endpoint'] ?? null) === 'staged_session_upload'
     && is_string(\$config['pause_after_upload_marker'] ?? null)
     && \$config['pause_after_upload_marker'] !== ''
     && !file_exists(\$config['pause_after_upload_marker'])) {
     ob_start();
     (new Site_Export_HTTP_Server(['staged' => \$config]))->handle_request();
-    ob_end_clean();
-    file_put_contents(\$config['pause_after_upload_marker'], "accepted before source edit\\n");
+    \$response_body = ob_get_clean();
+    file_put_contents(\$config['pause_after_upload_marker'], (string) \$response_body);
     \$resume_marker = \$config['resume_upload_response_marker'] ?? null;
     \$deadline = microtime(true) + 15;
     while (is_string(\$resume_marker) && !file_exists(\$resume_marker) && microtime(true) < \$deadline) {
         usleep(10000);
+    }
+    if (!empty(\$config['return_paused_upload_response'])) {
+        echo \$response_body;
     }
     return true;
 }

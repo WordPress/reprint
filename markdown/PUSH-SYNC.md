@@ -15,13 +15,14 @@ but neither is another logical change.
 ## Sender state and resume
 
 For each target URL, the sender keeps an on-disk current snapshot, positive
-change list, delete list, active session checkpoint, and successful baseline:
+change plan, raw delete stream, active session checkpoint, and successful
+baseline:
 
 ~~~
 <state-dir>/push/<target>/
   current-local-files.jsonl
   local-paths-to-push.jsonl
-  local-paths-to-delete.jsonl
+  local-delete-stream.bin
   session.json
   last-sync-local-files.jsonl
 ~~~
@@ -30,13 +31,24 @@ The source scan reads directory entries one at a time into an unsorted JSONL
 file. A bounded external merge sort then orders that disk file for the streaming
 baseline diff; no directory listing or complete snapshot is retained in memory.
 
-The JSONL files carry base64 paths because file names are arbitrary bytes. The
-active checkpoint stores the target-issued session ID and only byte offsets
-that the target has confirmed. It also stores a source fingerprint—size and
-ctime—for a partial file. Before resuming, the sender reads the file again:
-matching fingerprints permit the target-confirmed offset; a mismatch restarts
-that file at offset zero. It never appends new-version bytes to an old staged
-prefix.
+The snapshot, positive plan, and baseline are JSONL and carry base64 paths
+because file names are arbitrary bytes. The delete stream is already the exact
+`path\0path\0` representation sent on the wire and stored by the target; a
+filesystem path cannot contain its NUL delimiter. The active checkpoint stores
+the target-issued session ID and only byte offsets that the target has
+confirmed. Its one `delete_offset` has the same meaning in the local stream, on
+the wire, and in target status.
+
+Before a process sends delete bytes, it replaces its checkpoint offset with
+signed target status. A target ahead advances the local seek and a target behind
+rewinds it; zero, a record boundary, the middle of a record, and EOF are ordinary
+byte positions. A reported size beyond the local stream is inconsistent. A
+completed target delete upload is valid only when its size equals local EOF.
+
+The checkpoint also stores a source fingerprint—size and ctime—for a partial
+file. Before resuming, the sender reads the file again: matching fingerprints
+permit the target-confirmed offset; a mismatch restarts that file at offset
+zero. It never appends new-version bytes to an old staged prefix.
 
 An interrupted response is an unknown outcome, not a successful upload. The
 sender asks status for the affected path and persists the result derived from
@@ -138,7 +150,10 @@ offset. An offset before the stored end is an exact replay: matching bytes are
 accepted and a matching suffix may continue the stream, while different bytes
 are rejected. An offset beyond the actual file size is a gap and is rejected.
 Status reports that actual size as `delete_bytes`; it never trusts a claimed
-cursor.
+cursor. A path may span parts when the target's part ceiling is smaller than
+its record, and the sender packs successive bounded parts into each request.
+The sender reads directly from that same local byte position; there is no JSONL
+record cursor or translation layer.
 
 After the last delete byte is confirmed, the sender sends an empty part with
 `X-Delete-Complete: 1` at the actual end offset. That explicit declaration is
@@ -280,8 +295,9 @@ renames consume the staged values, so the remaining tree is the queue.
 
 commit.json contains the delete byte offset, at most one current deletion, at
 most one current installation, and a path-depth-bounded structural traversal
-stack. The target persists the current operation before live mutation. On
-restart it resolves that operation from the actual staged and live entries:
+stack whose frames store only one base64 path component each. The target
+persists the current operation before live mutation. On restart it resolves
+that operation from the actual staged and live entries:
 the value is either still staged and must be installed, or is already live and
 can be acknowledged. The same rules cover interruption between delete steps,
 directory creation, rename, and checkpoint persistence without planning or
@@ -310,10 +326,7 @@ error and maintenance remains active; rerunning commit returns the same error
 rather than guessing or forcing through it.
 
 A corrupt checkpoint is terminal as well, and discard refuses to assume a
-session was upload-only after commit began. Site_Export_Staged_Session_Recovery_Server::serve($options)
-is a small non-WordPress bootstrap exposing the same authenticated status,
-commit, and discard endpoints for a host emergency route. It is the escape
-hatch if a broken plugin or theme prevents normal WordPress boot.
+session was upload-only after commit began.
 
 After commit completes, the sender publishes its successful baseline, records a
 local `cleaning` phase, and discards the completed target workspace. The target

@@ -25,11 +25,12 @@
  *
  * run() is intentionally resumable rather than a one-shot transaction. Its
  * target-specific state directory contains the current source snapshot, the
- * changed/delete plan files maintained by PushJournal, and one `session.json`
- * checkpoint. The checkpoint is written before ambiguous operations and holds
- * local phase/plan cursors, source tokens, target-issued ids, and learned request
- * sizing. Every stored accepted byte count comes from target confirmation. It
- * never contains a materialized request body or future in-memory frame list.
+ * changed-path plan and raw delete stream maintained by PushJournal, and one
+ * `session.json` checkpoint. The checkpoint is written before ambiguous
+ * operations and holds the local phase, changed-plan cursor, delete byte
+ * offset, source tokens, target-issued ids, and learned request sizing. Every
+ * stored accepted byte count comes from target confirmation. It never contains
+ * a materialized request body or future in-memory frame list.
  *
  * File cursors carry a source token made from size and ctime. If the source
  * changes between pieces, the next request restarts that logical file at offset
@@ -58,7 +59,7 @@ class MultipartPush
      * Sender-side ceiling for one NUL-delimited delete-list payload.
      *
      * The target's advertised part limit may reduce it further. Keeping delete
-     * payloads at 256 KiB also bounds the string assembled from JSONL records.
+     * payloads at 256 KiB also bounds the string read from the raw stream.
      */
     private const DELETE_PART_BYTES = 256 * 1024;
 
@@ -71,7 +72,7 @@ class MultipartPush
     private const MAX_PARTS_PER_REQUEST = 128;
 
     /**
-     * Maximum bytes read for one JSONL changed/delete plan record.
+     * Maximum bytes read for one JSONL changed-path plan record.
      *
      * Plan lines contain metadata for one path. The cap detects an incomplete
      * or corrupted file without reading an unbounded line into memory.
@@ -109,7 +110,7 @@ class MultipartPush
     private bool $status_only;
 
     /**
-     * Maintains the completed baseline and disk-backed changed/delete plans.
+     * Maintains the completed baseline, changed plan, and raw delete stream.
      *
      * @var PushJournal
      */
@@ -245,15 +246,11 @@ class MultipartPush
                 // the same server-derived target session, never creates two.
                 'create_token' => bin2hex(random_bytes(16)),
                 'session_id' => null,
-                'delete_plan_offset' => 0,
                 'delete_offset' => 0,
-                'delete_plan_complete' => false,
-                'deletes_complete' => false,
                 'plan_offset' => 0,
                 'current' => null,
                 'sizer' => [],
                 'max_frame_bytes' => null,
-                'max_upload_parts' => null,
                 'summary' => $summary,
             ];
             $this->write_state($state);
@@ -402,14 +399,9 @@ class MultipartPush
         if (!is_numeric($max_frame_bytes) || (int) $max_frame_bytes <= 0) {
             throw new RuntimeException('Target create response has no positive max_frame_bytes limit.');
         }
-        $max_upload_parts = $response['max_upload_parts'] ?? null;
-        if (!is_numeric($max_upload_parts) || (int) $max_upload_parts <= 0) {
-            throw new RuntimeException('Target create response has no positive max_upload_parts limit.');
-        }
         $state['session_id'] = $session_id;
         $state['phase'] = 'uploading';
         $state['max_frame_bytes'] = (int) $max_frame_bytes;
-        $state['max_upload_parts'] = (int) $max_upload_parts;
         $client->apply_reported_limits([$response['post_max_bytes'] ?? null]);
         $client->set_max_part_bytes($state['max_frame_bytes']);
         $state['sizer'] = $client->get_request_sizer_state();
@@ -417,7 +409,7 @@ class MultipartPush
     }
 
     /**
-     * Writes a sorted source snapshot and disk-backed changed/delete plans.
+     * Writes a sorted source snapshot, changed plan, and raw delete stream.
      *
      * The recursive scan writes in filesystem order to a temporary JSONL file;
      * ExternalMergeSort then orders decoded path bytes within a fixed memory
@@ -554,67 +546,153 @@ class MultipartPush
     }
 
     /**
-     * Sends bounded delete-list parts and persists only target-confirmed offsets.
+     * Sends bounded pieces of the exact local delete stream.
      *
-     * The target accepts only an exact replay of its stored raw bytes, so an
-     * indeterminate response retries the same complete NUL-delimited records.
-     * The JSONL plan offset moves only after the target confirms its actual raw
-     * delete-stream size.
+     * Each process first replaces its checkpoint offset with signed target
+     * status. The resulting byte offset is the cursor in local storage, on the
+     * wire, and in target storage, so target-ahead and target-behind recovery
+     * both reduce to one seek. Each payload is read before its Content-Length is
+     * declared and is discarded after send_part().
      *
      * @param array<string,mixed> $state
      * @param MultipartPushStreamClient $client Active target client.
      */
     private function upload_deletes(array &$state, MultipartPushStreamClient $client): void
     {
-        if (!empty($state['delete_plan_complete'])) {
+        $local_stream_size = $this->local_delete_stream_size();
+        $this->reconcile_delete_upload_status($state, $client, $local_stream_size);
+        $this->write_state($state);
+        if ( (int) $state['delete_offset'] === $local_stream_size) {
             return;
         }
-        while (true) {
-            $plan_start = (int) ($state['delete_plan_offset'] ?? 0);
-            $target_start = (int) ($state['delete_offset'] ?? 0);
-            [$payload, $plan_end] = $this->read_delete_part($plan_start, $this->maximum_part_bytes($state));
-            if ($payload === '') {
-                $state['delete_plan_complete'] = true;
+        $handle = @fopen($this->journal->local_delete_stream_path, 'rb');
+        if ($handle === false) {
+            throw new RuntimeException('Could not open the local delete stream: ' . $this->journal->local_delete_stream_path . '.');
+        }
+        try {
+            while ( (int) $state['delete_offset'] < $local_stream_size) {
+                $target_start = (int) ( $state['delete_offset'] ?? 0 );
+                if (fseek($handle, $target_start, SEEK_SET) !== 0) {
+                    throw new RuntimeException('Could not seek the local delete stream to target-confirmed byte ' . $target_start . '.');
+                }
+                $session_id = $this->session_id_from_state($state);
+                if (!$client->start_upload_request($session_id)) {
+                    throw new RuntimeException('Could not open delete-list upload: ' . $client->get_last_error());
+                }
+                $sent = [];
+                $working_target_offset = $target_start;
+                $sent_count = 0;
+                while ($sent_count < self::MAX_PARTS_PER_REQUEST
+                    && $working_target_offset < $local_stream_size
+                    && !$client->should_finish_request()) {
+                    $payload_bytes = min(
+                        self::DELETE_PART_BYTES,
+                        $local_stream_size - $working_target_offset,
+                        $client->next_delete_body_bytes($working_target_offset)
+                    );
+                    if ($payload_bytes === 0) {
+                        break;
+                    }
+                    $payload = fread($handle, $payload_bytes);
+                    if ($payload === false) {
+                        throw new RuntimeException('Could not read the local delete stream at byte ' . $working_target_offset . '.');
+                    }
+                    if ($payload === '') {
+                        throw new RuntimeException(
+                            'The local delete stream ended at byte ' . $working_target_offset
+                            . ', before its observed size of ' . $local_stream_size . ' bytes.'
+                        );
+                    }
+                    $payload_length = strlen($payload);
+                    $part_sent = $client->send_part([
+                        'type' => 'delete-list',
+                        'offset' => $working_target_offset,
+                        'payload' => $payload,
+                    ]);
+                    unset($payload);
+                    if (!$part_sent) {
+                        break;
+                    }
+                    $working_target_offset += $payload_length;
+                    $sent[] = $working_target_offset;
+                    ++$sent_count;
+                }
+                $result = $client->finish_request();
+                if ($sent === []) {
+                    if ($result['status'] === 'failed') {
+                        $this->handle_unknown_upload_result($state, $client, $result, null);
+                    }
+                    $this->reconcile_delete_upload_status($state, $client, $local_stream_size);
+                    if ( (int) $state['delete_offset'] !== $target_start) {
+                        $state['sizer'] = $client->get_request_sizer_state();
+                        $this->write_state($state);
+                        continue;
+                    }
+                    if ($result['status'] === 'complete') {
+                        throw new RuntimeException('Multipart request could not fit one delete-list part inside its request-body budget.');
+                    }
+                    $this->handle_unknown_upload_result($state, $client, $result, null);
+                    continue;
+                }
+                if ($result['status'] !== 'complete') {
+                    if ($result['status'] !== 'failed') {
+                        $this->reconcile_delete_upload_status($state, $client, $local_stream_size);
+                    }
+                    $this->handle_unknown_upload_result($state, $client, $result, null);
+                    continue;
+                }
+                $accepted = $result['response']['accepted'] ?? null;
+                if (!is_array($accepted) || count($accepted) !== $sent_count) {
+                    throw new RuntimeException('Target did not confirm every delete-list part it accepted.');
+                }
+                $response_ahead = false;
+                foreach ($sent as $index => $expected_offset) {
+                    $confirmation = $accepted[$index];
+                    if (!is_array($confirmation) || ( $confirmation['type'] ?? null ) !== 'delete-list') {
+                        throw new RuntimeException('Target did not identify an accepted delete-list part.');
+                    }
+                    $accepted_offset = $this->require_non_negative_delete_offset(
+                        $confirmation['accepted_bytes'] ?? null,
+                        'Target accepted delete offset'
+                    );
+                    if ($accepted_offset > $expected_offset) {
+                        $response_ahead = true;
+                        break;
+                    }
+                    if ($accepted_offset !== $expected_offset) {
+                        throw new RuntimeException(
+                            'Target confirmed delete offset ' . $accepted_offset
+                            . ', expected its actual stored size ' . $expected_offset . '.'
+                        );
+                    }
+                }
+                if ($response_ahead) {
+                    $this->reconcile_delete_upload_status($state, $client, $local_stream_size);
+                    $state['sizer'] = $client->get_request_sizer_state();
+                    $this->write_state($state);
+                    continue;
+                }
+                $state['delete_offset'] = $sent[$sent_count - 1];
+                $state['sizer'] = $client->get_request_sizer_state();
                 $this->write_state($state);
-                return;
             }
-            $session_id = $this->session_id_from_state($state);
-            if (!$client->start_upload_request($session_id)) {
-                throw new RuntimeException('Could not open delete-list upload: ' . $client->get_last_error());
-            }
-            $sent = $client->send_part(['type' => 'delete-list', 'offset' => $target_start, 'payload' => $payload]);
-            $result = $client->finish_request();
-            if (!$sent || $result['status'] !== 'complete') {
-                $this->handle_unknown_upload_result($state, $client, $result, null);
-                continue;
-            }
-            $accepted = $result['response']['accepted'] ?? null;
-            if (!is_array($accepted) || !isset($accepted[0]) || ($accepted[0]['type'] ?? null) !== 'delete-list') {
-                throw new RuntimeException('Target did not confirm the delete-list part it accepted.');
-            }
-            $accepted_bytes = $accepted[0]['accepted_bytes'] ?? null;
-            $expected_bytes = $target_start + strlen($payload);
-            if (!is_numeric($accepted_bytes) || (int) $accepted_bytes !== $expected_bytes) {
-                throw new RuntimeException('Target confirmed delete offset ' . json_encode($accepted_bytes) . ', expected its actual stored size ' . $expected_bytes . '.');
-            }
-            $state['delete_offset'] = $expected_bytes;
-            $state['delete_plan_offset'] = $plan_end;
-            $state['sizer'] = $client->get_request_sizer_state();
-            $this->write_state($state);
+        } finally {
+            fclose($handle);
         }
     }
 
     /** Declares the already uploaded raw delete stream complete. */
     private function complete_delete_upload(array &$state, MultipartPushStreamClient $client): void
     {
-        if (!empty($state['deletes_complete'])) {
-            return;
-        }
-        if (empty($state['delete_plan_complete'])) {
-            throw new LogicException('Delete upload completion was requested before the local delete plan reached EOF.');
+        $local_stream_size = $this->local_delete_stream_size();
+        if ( (int) ( $state['delete_offset'] ?? -1 ) !== $local_stream_size) {
+            throw new LogicException(
+                'Delete upload completion was requested at byte ' . (int) ( $state['delete_offset'] ?? -1 )
+                . ', before the ' . $local_stream_size . '-byte local delete stream reached EOF.'
+            );
         }
         while (true) {
-            $target_offset = (int) ($state['delete_offset'] ?? 0);
+            $target_offset = (int) ( $state['delete_offset'] ?? 0 );
             if (!$client->start_upload_request($this->session_id_from_state($state))) {
                 throw new RuntimeException('Could not open delete completion upload: ' . $client->get_last_error());
             }
@@ -630,72 +708,81 @@ class MultipartPush
                 continue;
             }
             $accepted = $result['response']['accepted'] ?? null;
-            if (!is_array($accepted) || !isset($accepted[0]) || ($accepted[0]['type'] ?? null) !== 'delete-list'
-                || ($accepted[0]['state'] ?? null) !== 'complete'
-                || (int) ($accepted[0]['accepted_bytes'] ?? -1) !== $target_offset) {
+            $confirmation = is_array($accepted) && isset($accepted[0]) && is_array($accepted[0])
+                ? $accepted[0]
+                : null;
+            $accepted_offset = is_array($confirmation)
+                ? $this->require_non_negative_delete_offset($confirmation['accepted_bytes'] ?? null, 'Target accepted delete offset')
+                : null;
+            if (is_int($accepted_offset) && $accepted_offset > $target_offset) {
+                $this->reconcile_delete_upload_status($state, $client, $local_stream_size);
+                $this->write_state($state);
+                continue;
+            }
+            if (!is_array($confirmation) || ( $confirmation['type'] ?? null ) !== 'delete-list'
+                || ( $confirmation['state'] ?? null ) !== 'complete' || $accepted_offset !== $target_offset) {
                 throw new RuntimeException('Target did not confirm delete upload completion at its actual stored size.');
             }
-            $state['deletes_complete'] = true;
             $state['sizer'] = $client->get_request_sizer_state();
             $this->write_state($state);
             return;
         }
     }
 
-    /**
-     * Reads complete delete records up to one bounded MIME-part payload.
-     *
-     * The returned offset always lands after a complete JSONL source record;
-     * the payload always lands after a NUL path delimiter. One record too large
-     * for the target part ceiling fails explicitly instead of being split.
-     *
-     * @param int $offset Confirmed byte offset in the JSONL delete plan.
-     * @param int $maximum_bytes Target-advertised one-part ceiling.
-     * @return array{0:string,1:int}
-     */
-    private function read_delete_part(int $offset, int $maximum_bytes): array
+    /** Returns the stable raw delete-stream size for the active push. */
+    private function local_delete_stream_size(): int
     {
-        if (!is_file($this->journal->local_paths_to_delete)) {
-            return ['', $offset];
+        clearstatcache(true, $this->journal->local_delete_stream_path);
+        $size = @filesize($this->journal->local_delete_stream_path);
+        if (!is_int($size)) {
+            throw new RuntimeException(
+                'The local delete stream is missing or unreadable: ' . $this->journal->local_delete_stream_path
+                . '. Run push with --abort, then start it again.'
+            );
         }
-        $handle = @fopen($this->journal->local_paths_to_delete, 'rb');
-        if ($handle === false || fseek($handle, $offset, SEEK_SET) !== 0) {
-            if (is_resource($handle)) {
-                fclose($handle);
-            }
-            throw new RuntimeException('Could not resume the local delete list at byte ' . $offset . '.');
+        return $size;
+    }
+
+    /** Validates a protocol byte offset before casting numeric strings. */
+    private function require_non_negative_delete_offset($value, string $description): int
+    {
+        if (!is_numeric($value)
+            || (float) $value < 0
+            || (float) $value !== floor( (float) $value )
+            || (float) $value > PHP_INT_MAX) {
+            throw new RuntimeException($description . ' must be a nonnegative integer; observed ' . json_encode($value) . '.');
         }
-        $payload = '';
-        $end = $offset;
-        try {
-            while (($line = fgets($handle, self::MAX_PLAN_LINE_BYTES + 1)) !== false) {
-                if (strlen($line) > self::MAX_PLAN_LINE_BYTES || substr($line, -1) !== "\n") {
-                    throw new RuntimeException('Local delete list contains an oversized or incomplete path record.');
-                }
-                $entry = json_decode($line, true);
-                $path = is_array($entry) && isset($entry['path']) && is_string($entry['path']) ? base64_decode($entry['path'], true) : false;
-                if ($path === false || $path === '') {
-                    throw new RuntimeException('Local delete list contains an invalid path record.');
-                }
-                $record = $path . "\0";
-                $part_limit = min(self::DELETE_PART_BYTES, $maximum_bytes);
-                if (strlen($record) > $part_limit) {
-                    throw new RuntimeException(
-                        'Delete path ' . $this->display_path($path) . ' cannot fit inside the target multipart part limit of '
-                        . $part_limit . ' bytes.'
-                    );
-                }
-                if ($payload !== '' && strlen($payload) + strlen($record) > $part_limit) {
-                    fseek($handle, -strlen($line), SEEK_CUR);
-                    break;
-                }
-                $payload .= $record;
-                $end = ftell($handle);
-            }
-        } finally {
-            fclose($handle);
+        return (int) $value;
+    }
+
+    /** Replaces the local delete cursor with signed target status. */
+    private function reconcile_delete_upload_status(array &$state, MultipartPushStreamClient $client, int $local_stream_size): void
+    {
+        $response = $client->control_request('GET', 'staged_session_status', [
+            'session_id' => $this->session_id_from_state($state),
+        ]);
+        $this->require_control_status($response, 'ok');
+        $target_offset = $this->require_non_negative_delete_offset(
+            $response['delete_bytes'] ?? null,
+            'Target status delete_bytes'
+        );
+        if ($target_offset > $local_stream_size) {
+            throw new RuntimeException(
+                'Target status reports ' . $target_offset . ' delete bytes, beyond the '
+                . $local_stream_size . '-byte local delete stream.'
+            );
         }
-        return [$payload, $end];
+        $delete_upload_complete = $response['delete_upload_complete'] ?? null;
+        if (!is_bool($delete_upload_complete)) {
+            throw new RuntimeException('Target status returned invalid delete_upload_complete ' . json_encode($delete_upload_complete) . '; expected a boolean.');
+        }
+        if ($delete_upload_complete && $target_offset !== $local_stream_size) {
+            throw new RuntimeException(
+                'Target status is inconsistent: delete_upload_complete is true at ' . $target_offset
+                . ' bytes, but the local delete stream contains ' . $local_stream_size . ' bytes.'
+            );
+        }
+        $state['delete_offset'] = $target_offset;
     }
 
     /**
@@ -718,7 +805,7 @@ class MultipartPush
             $sent = [];
             $working_offset = (int) $state['plan_offset'];
             $working_file = null;
-            while (count($sent) < $this->maximum_upload_parts($state) && !$client->should_finish_request()) {
+            while (count($sent) < self::MAX_PARTS_PER_REQUEST && !$client->should_finish_request()) {
                 $entry = $this->read_plan_entry($working_offset);
                 if ($entry === null) {
                     break;
@@ -1168,7 +1255,7 @@ class MultipartPush
         do {
             $response = $client->control_request('POST', 'staged_session_commit', ['session_id' => $session_id]);
             $this->require_control_status($response, 'ok');
-            $this->log('Commit phase ' . ($response['phase'] ?? 'unknown') . ', ' . (int) ($response['files_remaining'] ?? 0) . ' live entries remaining.');
+            $this->log('Commit phase ' . ($response['phase'] ?? 'unknown') . '.');
         } while (!empty($response['send_next_request']));
     }
 
@@ -1405,36 +1492,6 @@ class MultipartPush
             $options['max_part_bytes'] = $max_part_bytes;
         }
         return new MultipartPushStreamClient($options);
-    }
-
-    /**
-     * Returns the target-advertised maximum payload bytes for one MIME part.
-     *
-     * @param array<string,mixed> $state Active local session checkpoint.
-     * @return int Positive one-part ceiling.
-     */
-    private function maximum_part_bytes(array $state): int
-    {
-        $maximum = $state['max_frame_bytes'] ?? null;
-        if (!is_numeric($maximum) || (int) $maximum <= 0) {
-            throw new RuntimeException('Local push session checkpoint has no positive target max_frame_bytes limit.');
-        }
-        return (int) $maximum;
-    }
-
-    /**
-     * Returns the smaller of target and sender MIME-part count ceilings.
-     *
-     * @param array<string,mixed> $state Active local session checkpoint.
-     * @return int Positive per-request part count.
-     */
-    private function maximum_upload_parts(array $state): int
-    {
-        $maximum = $state['max_upload_parts'] ?? self::MAX_PARTS_PER_REQUEST;
-        if (!is_numeric($maximum) || (int) $maximum <= 0) {
-            throw new RuntimeException('Local push session checkpoint has no positive target max_upload_parts limit.');
-        }
-        return min(self::MAX_PARTS_PER_REQUEST, (int) $maximum);
     }
 
     /**

@@ -217,7 +217,6 @@ function _site_export_staged_options(array $options): array {
         'apply_protected_paths' => array_values(array_filter($protected_paths, static function ($path): bool {
             return is_string($path) && $path !== '';
         })),
-        'apply_sessions_enabled' => true,
     ];
 }
 

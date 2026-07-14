@@ -12,7 +12,7 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push
  * The diff drives real uploads and deletions later in a push, so the tests
  * pin the classification exactly: new, ctime-changed, size-changed,
  * type-changed, deleted, unchanged — plus the two boundary situations
- * (no baseline yet; stale lists from an earlier run), the encoding
+ * (no baseline yet; stale outputs from an earlier run), the encoding
  * round-trip for paths that need base64 in the first place, and the JSON
  * parsing behavior that keeps the diff independent from field order.
  */
@@ -113,7 +113,7 @@ final class PushJournalTest extends TestCase
             ['index.php', 'wp-content', 'wp-content/themes/foo/style.css'],
             $this->listPaths($journal->local_paths_to_push)
         );
-        $this->assertSame([], $this->listPaths($journal->local_paths_to_delete));
+        $this->assertSame([], $this->deletePaths($journal->local_delete_stream_path));
 
         // Push plans retain the normalized entry type. The sender re-stats
         // before reading it, but does not rescan the complete snapshot for
@@ -125,7 +125,7 @@ final class PushJournalTest extends TestCase
         );
     }
 
-    public function testUnchangedIndexProducesEmptyLists(): void
+    public function testUnchangedIndexProducesEmptyOutputs(): void
     {
         $journal = $this->makeJournal();
         $index = $this->writeIndex([
@@ -136,7 +136,28 @@ final class PushJournalTest extends TestCase
 
         $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($index));
         $this->assertSame([], $this->listPaths($journal->local_paths_to_push));
-        $this->assertSame([], $this->listPaths($journal->local_paths_to_delete));
+        $this->assertSame([], $this->deletePaths($journal->local_delete_stream_path));
+    }
+
+    public function testDeleteStreamIsTheExactRawNulDelimitedStream(): void
+    {
+        $journal = $this->makeJournal();
+        $first_path = "line\nbreak-\xff";
+        $second_path = 'plain.txt';
+        $journal->capture_local_files_baseline($this->writeIndex([
+            $first_path => [100, 5, 'file'],
+            $second_path => [100, 5, 'file'],
+        ]));
+
+        $this->assertSame(
+            ['changed' => 0, 'deleted' => 2],
+            $journal->diff_local_files($this->writeIndex([]))
+        );
+        $this->assertSame(
+            $first_path . "\0" . $second_path . "\0",
+            file_get_contents($journal->local_delete_stream_path)
+        );
+        $this->assertFileDoesNotExist($journal->local_delete_stream_path . '.tmp');
     }
 
     public function testCtimeSizeOrTypeChangeEachMarkThePathChanged(): void
@@ -220,7 +241,7 @@ final class PushJournalTest extends TestCase
                     : (($currentType === 'empty' && $previousType === 'empty') ? [] : ['value']);
 
                 $message = $previousType . ' to ' . $currentType;
-                $this->assertSame($expectedDeletes, $this->listPaths($journal->local_paths_to_delete), $message);
+                $this->assertSame($expectedDeletes, $this->deletePaths($journal->local_delete_stream_path), $message);
                 $this->assertSame($expectedPushes, $this->listPaths($journal->local_paths_to_push), $message);
                 $this->assertStringNotContainsString('directory-mode', (string) file_get_contents($journal->local_paths_to_push), $message);
             }
@@ -245,7 +266,7 @@ final class PushJournalTest extends TestCase
         $this->assertSame(['changed' => 2, 'deleted' => 1], $counts);
         // Output order follows the sorted index order.
         $this->assertSame(['added.txt', 'changed.txt'], $this->listPaths($journal->local_paths_to_push));
-        $this->assertSame(['deleted.txt'], $this->listPaths($journal->local_paths_to_delete));
+        $this->assertSame(['deleted.txt'], $this->deletePaths($journal->local_delete_stream_path));
     }
 
     public function testReplacementRootSurvivesLexicallyInterleavedSiblingPaths(): void
@@ -265,10 +286,10 @@ final class PushJournalTest extends TestCase
         $journal->capture_local_files_baseline($baseline);
 
         $this->assertSame(['changed' => 2, 'deleted' => 1], $journal->diff_local_files($current));
-        $this->assertSame(['a'], $this->listPaths($journal->local_paths_to_delete));
+        $this->assertSame(['a'], $this->deletePaths($journal->local_delete_stream_path));
     }
 
-    public function testDiffReplacesListsFromAnEarlierRun(): void
+    public function testDiffReplacesOutputsFromAnEarlierRun(): void
     {
         $journal = $this->makeJournal();
         $index = $this->writeIndex(['a.txt' => [100, 5, 'file']]);
@@ -277,12 +298,40 @@ final class PushJournalTest extends TestCase
         $journal->diff_local_files($index);
         $this->assertSame(['a.txt'], $this->listPaths($journal->local_paths_to_push));
 
-        // Capture and rerun: the old list must be replaced, not appended to.
+        // Capture and rerun: the old outputs must be replaced, not appended to.
         $journal->capture_local_files_baseline($index);
         $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($index));
         $this->assertSame([], $this->listPaths($journal->local_paths_to_push));
         $this->assertFileDoesNotExist($journal->local_paths_to_push . '.tmp');
-        $this->assertFileDoesNotExist($journal->local_paths_to_delete . '.tmp');
+        $this->assertFileDoesNotExist($journal->local_delete_stream_path . '.tmp');
+    }
+
+    public function testFailedDiffDoesNotReplaceThePublishedDeleteStream(): void
+    {
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'prior-delete.txt' => [1, 1, 'file'],
+        ]));
+        $journal->diff_local_files($this->writeIndex([]));
+        $this->assertSame("prior-delete.txt\0", file_get_contents($journal->local_delete_stream_path));
+
+        $next_baseline = $this->writeIndex([
+            'a-next-delete.txt' => [1, 1, 'file'],
+        ]);
+        $journal->capture_local_files_baseline($next_baseline);
+        $invalid_current = $this->tempDir . '/invalid-after-first-entry.jsonl';
+        file_put_contents(
+            $invalid_current,
+            $this->indexLine('z-new.txt', 1, 1, 'file') . "\nnot-json\n"
+        );
+
+        try {
+            $journal->diff_local_files($invalid_current);
+            self::fail('The invalid index unexpectedly produced a delete stream.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('not valid JSON', $exception->getMessage());
+        }
+        $this->assertSame("prior-delete.txt\0", file_get_contents($journal->local_delete_stream_path));
     }
 
     public function testPathsThatNeedBase64SurviveTheRoundTrip(): void
@@ -326,7 +375,7 @@ final class PushJournalTest extends TestCase
 
         $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($current));
         $this->assertSame([], $this->listPaths($journal->local_paths_to_push));
-        $this->assertSame([], $this->listPaths($journal->local_paths_to_delete));
+        $this->assertSame([], $this->deletePaths($journal->local_delete_stream_path));
     }
 
     public function testDiffRejectsLinesTheIndexWritersDoNotProduce(): void
@@ -497,12 +546,7 @@ PHP;
         return $path;
     }
 
-    /**
-     * Decode paths from either the full changed-entry list or the compact
-     * delete list.
-     *
-     * @return list<string>
-     */
+    /** @return list<string> */
     private function listPaths(string $file): array
     {
         $this->assertFileExists($file);
@@ -512,6 +556,19 @@ PHP;
             $paths[] = base64_decode($data['path'], true);
         }
         return $paths;
+    }
+
+    /** @return list<string> */
+    private function deletePaths(string $file): array
+    {
+        $this->assertFileExists($file);
+        $stream = file_get_contents($file);
+        $this->assertIsString($stream);
+        if ($stream === '') {
+            return [];
+        }
+        $this->assertStringEndsWith("\0", $stream);
+        return explode("\0", substr($stream, 0, -1));
     }
 
     private function recursiveDelete(string $dir): void

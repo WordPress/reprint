@@ -70,20 +70,20 @@ final class Site_Export_Staged_Endpoints {
     private const DEFAULT_MAX_FRAME_BYTES = 4194304;
 
     /**
-     * Default number of delete or direct-install steps per commit request.
+     * Fixed number of delete or direct-install steps per commit request.
      *
      * Bounding work lets ordinary PHP HTTP runtimes checkpoint and return
      * before their execution limits while the sender drives later requests.
      */
-    private const DEFAULT_COMMIT_STEPS = 8;
+    private const COMMIT_STEPS = 8;
 
     /**
-     * Default maximum complete MIME parts accepted from one upload request.
+     * Fixed maximum complete MIME parts accepted from one upload request.
      *
      * The endpoint pauses only between durable parts, never midway through a
      * body, so this cap limits per-request metadata and response cardinality.
      */
-    private const DEFAULT_MAX_UPLOAD_PARTS = 128;
+    private const MAX_UPLOAD_PARTS = 128;
 
     /**
      * Maximum paths whose target-derived state one status request may expose.
@@ -138,16 +138,6 @@ final class Site_Export_Staged_Endpoints {
     private $apply_protected_paths;
 
     /**
-     * Whether target configuration permits the staged-apply endpoint family.
-     *
-     * When false, preflight explains that push is unavailable and operations
-     * fail with `apply_not_configured` before any session path is opened.
-     *
-     * @var bool
-     */
-    private $apply_sessions_enabled;
-
-    /**
      * Maximum age or future skew accepted for an HMAC timestamp, in seconds.
      *
      * The value is applied uniformly to the pre-body authentication gate and
@@ -169,28 +159,6 @@ final class Site_Export_Staged_Endpoints {
     private $max_frame_bytes;
 
     /**
-     * Maximum bounded commit work units advanced during one endpoint call.
-     *
-     * One unit advances one deletion root, installs one staged value, or
-     * creates or consumes one structural directory. The session checkpoints
-     * each bounded slice and returns `send_next_request` while work remains.
-     *
-     * @var int
-     */
-    private $max_commit_steps;
-
-    /**
-     * Maximum complete multipart changes accepted from one HTTP request.
-     *
-     * The endpoint stops only after a part is durably staged. This independently
-     * bounds the `accepted` response array even when the remote HTTP stack
-     * permits a much larger entity body.
-     *
-     * @var int
-     */
-    private $max_upload_parts;
-
-    /**
      * PHP's parsed post_max_size in bytes, or null when PHP reports no useful cap.
      *
      * This seeds sender request sizing. A front proxy may enforce a smaller
@@ -204,10 +172,9 @@ final class Site_Export_Staged_Endpoints {
      * Configures signed endpoint policy and snapshots PHP's request-body limit.
      *
      * Supported options are `staging_dir`, `secret`, `apply_target_root`,
-     * `apply_protected_paths`, `apply_sessions_enabled`, `timestamp_tolerance`, `max_frame_bytes`,
-     * `max_commit_steps`, and `max_upload_parts`. Optional values receive the
-     * constants documented above; a supplied invalid value throws instead of
-     * silently selecting its default.
+     * `apply_protected_paths`, `timestamp_tolerance`, and `max_frame_bytes`.
+     * Optional values receive the constants documented above; a supplied
+     * invalid value throws instead of silently selecting its default.
      *
      * @param array<string,mixed> $options Server-owned configuration.
      *
@@ -239,12 +206,6 @@ final class Site_Export_Staged_Endpoints {
         }
         $this->apply_protected_paths = $protected_paths;
 
-        $enabled = $options['apply_sessions_enabled'] ?? true;
-        if (!is_bool($enabled)) {
-            throw new InvalidArgumentException('Staged session apply_sessions_enabled must be a boolean.');
-        }
-        $this->apply_sessions_enabled = $enabled;
-
         $tolerance = $options['timestamp_tolerance'] ?? 300;
         if (!is_numeric($tolerance) || (int) $tolerance <= 0) {
             throw new InvalidArgumentException('Staged session timestamp_tolerance must be a positive integer.');
@@ -256,18 +217,6 @@ final class Site_Export_Staged_Endpoints {
             throw new InvalidArgumentException('Staged session max_frame_bytes must be a positive integer.');
         }
         $this->max_frame_bytes = (int) $max_frame_bytes;
-
-        $max_commit_steps = $options['max_commit_steps'] ?? self::DEFAULT_COMMIT_STEPS;
-        if (!is_numeric($max_commit_steps) || (int) $max_commit_steps <= 0) {
-            throw new InvalidArgumentException('Staged session max_commit_steps must be a positive integer.');
-        }
-        $this->max_commit_steps = (int) $max_commit_steps;
-
-        $max_upload_parts = $options['max_upload_parts'] ?? self::DEFAULT_MAX_UPLOAD_PARTS;
-        if (!is_numeric($max_upload_parts) || (int) $max_upload_parts <= 0) {
-            throw new InvalidArgumentException('Staged session max_upload_parts must be a positive integer.');
-        }
-        $this->max_upload_parts = (int) $max_upload_parts;
 
         $post_max_size = ini_get('post_max_size');
         $post_max_bytes = is_string($post_max_size) && $post_max_size !== '' ? parse_size($post_max_size) : 0;
@@ -312,13 +261,8 @@ final class Site_Export_Staged_Endpoints {
             'filesystem_ok' => false,
             'reason' => null,
             'max_frame_bytes' => $this->max_frame_bytes,
-            'max_upload_parts' => $this->max_upload_parts,
             'post_max_bytes' => $this->post_max_bytes,
         ];
-        if (!$this->apply_sessions_enabled) {
-            $capability['reason'] = 'Staged apply sessions are disabled by server configuration.';
-            return $capability;
-        }
         if ($this->secret === null || $this->secret === '') {
             $capability['reason'] = 'The staged push shared secret is not configured.';
             return $capability;
@@ -405,7 +349,6 @@ final class Site_Export_Staged_Endpoints {
                     'phase' => $status['phase'],
                     // This bounds one MIME part, not the HTTP entity body.
                     'max_frame_bytes' => $this->max_frame_bytes,
-                    'max_upload_parts' => $this->max_upload_parts,
                     'post_max_bytes' => $this->post_max_bytes,
                     'send_next_request' => false,
                 ],
@@ -420,7 +363,7 @@ final class Site_Export_Staged_Endpoints {
      * processor is created. The endpoint then drives one complete part at a
      * time and retains only the target-confirmed result records needed for this
      * response.
-     * If the configured part-count cap is reached, parsing stops between parts
+     * If the fixed part-count cap is reached, parsing stops between parts
      * and `send_next_request` tells the sender to open another request. No part
      * is acknowledged before its contents or metadata have been flushed into
      * private storage.
@@ -457,7 +400,7 @@ final class Site_Export_Staged_Endpoints {
             );
             $accepted = [];
             $paused = false;
-            $session->accept_upload($input, $multipart, $this->max_frame_bytes, $this->max_upload_parts);
+            $session->accept_upload($input, $multipart, $this->max_frame_bytes);
             try {
                 while ($session->next_change()) {
                     $change = $session->get_current_change();
@@ -468,7 +411,7 @@ final class Site_Export_Staged_Endpoints {
                     // uses the same cap, so normal requests close here; a
                     // larger client request is deliberately left for its
                     // next request rather than buffering or parsing ahead.
-                    if (count($accepted) >= $this->max_upload_parts) {
+                    if (count($accepted) >= self::MAX_UPLOAD_PARTS) {
                         $paused = true;
                         break;
                     }
@@ -521,7 +464,7 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
-     * Advances a commit by the configured number of bounded filesystem steps.
+     * Advances a commit by a fixed number of bounded filesystem steps.
      *
      * The sender repeats this endpoint while `send_next_request` is true. Each
      * response reflects the durable checkpoint after that bounded slice, so a
@@ -540,7 +483,7 @@ final class Site_Export_Staged_Endpoints {
         }
         return $this->session_action(function () use ($config, $headers): array {
             $session = $this->open_session($config, $headers);
-            $result = $session->commit($this->max_commit_steps);
+            $result = $session->commit(self::COMMIT_STEPS);
             $result['status'] = 'ok';
             return ['http_code' => 200, 'body' => $result];
         });
@@ -624,10 +567,10 @@ final class Site_Export_Staged_Endpoints {
      * @throws Site_Export_Staged_Apply_Exception If staged apply is unavailable.
      */
     private function require_apply_configuration(): void {
-        if (!$this->apply_sessions_enabled || $this->apply_target_root === null) {
+        if ($this->apply_target_root === null) {
             throw new Site_Export_Staged_Apply_Exception(
                 self::ERROR_APPLY_NOT_CONFIGURED,
-                'Server configuration has not enabled staged apply sessions.'
+                'Server configuration has no staged apply target root.'
             );
         }
     }

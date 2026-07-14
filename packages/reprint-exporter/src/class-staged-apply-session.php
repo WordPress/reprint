@@ -72,10 +72,6 @@ final class Site_Export_Staged_Apply_Session {
     private $current_change = null;
     /** @var int */
     private $maximum_upload_part_bytes = PHP_INT_MAX;
-    /** @var int */
-    private $maximum_upload_parts = 128;
-    /** @var int */
-    private $upload_parts_read = 0;
 
     /**
      * Derives private paths without touching the filesystem.
@@ -204,15 +200,15 @@ final class Site_Export_Staged_Apply_Session {
      *
      * @param resource $input
      */
-    public function accept_upload($input, Site_Export_Multipart_Processor $processor, int $maximum_part_bytes = PHP_INT_MAX, int $maximum_parts = 128): void {
+    public function accept_upload($input, Site_Export_Multipart_Processor $processor, int $maximum_part_bytes = PHP_INT_MAX): void {
         if ($this->upload_lock !== null) {
             throw new LogicException('A staged apply upload is already open; call finish_upload() first.');
         }
         if (!is_resource($input)) {
             throw new InvalidArgumentException('Staged apply multipart input must be a readable stream resource; received ' . gettype($input) . '.');
         }
-        if ($maximum_part_bytes <= 0 || $maximum_parts <= 0) {
-            throw new InvalidArgumentException('Multipart part byte and count limits must both be greater than zero.');
+        if ($maximum_part_bytes <= 0) {
+            throw new InvalidArgumentException('Multipart part byte limit must be greater than zero.');
         }
         if (!is_dir($this->session_dir)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_SESSION_NOT_FOUND, 'The staged apply session does not exist: ' . $this->session_id . '.');
@@ -236,8 +232,6 @@ final class Site_Export_Staged_Apply_Session {
             $this->current_upload_part_ended = false;
             $this->current_change = null;
             $this->maximum_upload_part_bytes = $maximum_part_bytes;
-            $this->maximum_upload_parts = $maximum_parts;
-            $this->upload_parts_read = 0;
         } catch (Throwable $exception) {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -259,10 +253,6 @@ final class Site_Export_Staged_Apply_Session {
             if ($this->upload_processor->get_token_type() !== Site_Export_Multipart_Processor::TOKEN_PART_START) {
                 throw new LogicException('Expected a multipart part-start token before the next change.');
             }
-            if ($this->upload_parts_read >= $this->maximum_upload_parts) {
-                throw new InvalidArgumentException('Multipart upload contains more than the target maximum of ' . $this->maximum_upload_parts . ' parts per request.');
-            }
-            ++$this->upload_parts_read;
             $headers = $this->upload_processor->get_current_headers();
             $part_bytes = $this->require_non_negative_header($headers, 'content-length');
             if ($part_bytes > $this->maximum_upload_part_bytes) {
@@ -304,8 +294,6 @@ final class Site_Export_Staged_Apply_Session {
         $this->current_upload_part_ended = false;
         $this->current_change = null;
         $this->maximum_upload_part_bytes = PHP_INT_MAX;
-        $this->maximum_upload_parts = 128;
-        $this->upload_parts_read = 0;
         flock($lock, LOCK_UN);
         fclose($lock);
     }
@@ -384,17 +372,16 @@ final class Site_Export_Staged_Apply_Session {
                 $this->throw_terminal_error($state['terminal_error']);
             }
             if ($state['phase'] === 'complete') {
-                return $this->commit_result($state, 0);
+                return $this->commit_result($state);
             }
             $this->claim_target();
             $this->publish_or_refresh_maintenance_marker($state);
-            $files_applied = 0;
             try {
                 for ($step = 0; $step < $maximum_steps && $state['phase'] !== 'complete'; ++$step) {
                     if ($state['phase'] === 'deleting') {
                         $this->advance_deletion($state);
                     } else {
-                        $files_applied += $this->advance_installation($state);
+                        $this->advance_installation($state);
                     }
                 }
             } catch (Site_Export_Staged_Apply_Exception $exception) {
@@ -408,7 +395,7 @@ final class Site_Export_Staged_Apply_Session {
                 }
                 throw $exception;
             }
-            return $this->commit_result($state, $files_applied);
+            return $this->commit_result($state);
         });
     }
 
@@ -721,7 +708,7 @@ final class Site_Export_Staged_Apply_Session {
             'traversal_stack' => [],
             'maintenance_token' => bin2hex(random_bytes(16)),
             'deletions_applied' => 0,
-            'files_applied' => 0,
+            'values_applied' => 0,
         ];
         $this->write_json($this->commit_path, $state);
         return $state;
@@ -800,9 +787,10 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /** @param array<string,mixed> $state */
-    private function advance_installation(array &$state): int {
+    private function advance_installation(array &$state): void {
         if ($state['current_installation'] !== null) {
-            return $this->resolve_current_installation($state);
+            $this->resolve_current_installation($state);
+            return;
         }
 
         $stack_size = count($state['traversal_stack']);
@@ -810,17 +798,17 @@ final class Site_Export_Staged_Apply_Session {
             $parent_path = '';
             $staged_directory = $this->files_dir;
         } else {
-            $frame = $state['traversal_stack'][$stack_size - 1];
-            $parent_path = $this->decode_commit_path($frame['path_b64'], 'traversal frame');
+            $parent_path = $this->traversal_path($state['traversal_stack']);
             $staged_directory = $this->private_path($this->files_dir, $parent_path);
         }
         $entry = $this->first_directory_entry($staged_directory);
         if ($entry === null) {
             if ($stack_size === 0) {
                 $this->finish_commit($state);
-                return 0;
+                return;
             }
-            return $this->cleanup_structural_directory($state, $parent_path, $staged_directory);
+            $this->cleanup_structural_directory($state, $parent_path, $staged_directory);
+            return;
         }
 
         $path = $parent_path === '' ? $entry : $parent_path . '/' . $entry;
@@ -831,19 +819,20 @@ final class Site_Export_Staged_Apply_Session {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Selected staged path disappeared before installation: ' . base64_encode($path) . '.');
         }
         if ($identity['type'] === 'directory' && $this->first_directory_entry($staged_path) !== null) {
-            $state['traversal_stack'][] = ['path_b64' => base64_encode($path), 'kind' => 'structural'];
+            $state['traversal_stack'][] = ['component_b64' => base64_encode($entry)];
             $this->write_json($this->commit_path, $state);
             $this->prepare_structural_directory($path, $this->first_staged_leaf_path($staged_path, $path));
-            return 0;
+            return;
         }
         if (!in_array($identity['type'], ['file', 'directory', 'symlink'], true)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Staged path ' . base64_encode($path) . ' has unsupported type ' . $identity['type'] . '.');
         }
-        return $this->install_staged_value($state, $path, $identity['type'], false);
+        $this->install_staged_value($state, $path, $identity['type'], false);
     }
 
     /** @param array<string,mixed> $state */
-    private function cleanup_structural_directory(array &$state, string $path, string $staged_path): int {
+    private function cleanup_structural_directory(array &$state, string $path, string $staged_path): void {
+        $this->assert_live_ancestors($path, 'install', 'directory');
         $live = $this->path_identity($this->target_path($path));
         if ($live === null || $live['type'] !== 'directory') {
             $this->throw_live_tree_changed('install', $path, $path, 'directory', ['directory'], $live);
@@ -855,9 +844,8 @@ final class Site_Export_Staged_Apply_Session {
         }
         $state['current_installation'] = null;
         array_pop($state['traversal_stack']);
-        ++$state['files_applied'];
+        ++$state['values_applied'];
         $this->write_json($this->commit_path, $state);
-        return 1;
     }
 
     private function prepare_structural_directory(string $path, string $requested_path): void {
@@ -879,7 +867,7 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /** @param array<string,mixed> $state */
-    private function install_staged_value(array &$state, string $path, string $expected_type, bool $recovering): int {
+    private function install_staged_value(array &$state, string $path, string $expected_type, bool $recovering): void {
         $staged_path = $this->private_path($this->files_dir, $path);
         $staged = $this->path_identity($staged_path);
         if ($staged === null || $staged['type'] !== $expected_type) {
@@ -902,27 +890,29 @@ final class Site_Export_Staged_Apply_Session {
         }
         $this->rename_into_live($staged_path, $live_path, $path, $staged['dev'], $parent_device);
         $state['current_installation'] = null;
-        ++$state['files_applied'];
+        ++$state['values_applied'];
         $this->write_json($this->commit_path, $state);
-        return 1;
     }
 
     /** @param array<string,mixed> $state */
-    private function resolve_current_installation(array &$state): int {
+    private function resolve_current_installation(array &$state): void {
         $installation = $state['current_installation'];
         $path = $this->decode_commit_path($installation['path_b64'], 'current installation');
         $expected_type = $installation['expected_type'];
         $stack_size = count($state['traversal_stack']);
         $structural_cleanup = false;
         if ($stack_size > 0) {
-            $top = $state['traversal_stack'][$stack_size - 1];
-            $structural_cleanup = hash_equals($top['path_b64'], $installation['path_b64']);
+            $structural_cleanup = hash_equals(
+                $this->traversal_path($state['traversal_stack']),
+                $path
+            );
         }
         $staged_path = $this->private_path($this->files_dir, $path);
         $staged = $this->path_identity($staged_path);
-        $live = $this->path_identity($this->target_path($path));
 
         if ($structural_cleanup) {
+            $this->assert_live_ancestors($path, 'install', 'directory');
+            $live = $this->path_identity($this->target_path($path));
             if ($staged !== null) {
                 if ($staged['type'] !== 'directory' || $this->first_directory_entry($staged_path) !== null) {
                     $this->throw_live_tree_changed('install', $path, $path, 'directory', ['directory'], $live);
@@ -938,21 +928,23 @@ final class Site_Export_Staged_Apply_Session {
             }
             $state['current_installation'] = null;
             array_pop($state['traversal_stack']);
-            ++$state['files_applied'];
+            ++$state['values_applied'];
             $this->write_json($this->commit_path, $state);
-            return 1;
+            return;
         }
 
         if ($staged !== null) {
-            return $this->install_staged_value($state, $path, $expected_type, true);
+            $this->install_staged_value($state, $path, $expected_type, true);
+            return;
         }
+        $this->assert_live_ancestors($path, 'install', $expected_type);
+        $live = $this->path_identity($this->target_path($path));
         if ($live === null || $live['type'] !== $expected_type) {
             $this->throw_live_tree_changed('install', $path, $path, $expected_type, [$expected_type], $live);
         }
         $state['current_installation'] = null;
-        ++$state['files_applied'];
+        ++$state['values_applied'];
         $this->write_json($this->commit_path, $state);
-        return 1;
     }
 
     /** @param array<string,mixed> $state */
@@ -973,19 +965,12 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /** @param array<string,mixed> $state @return array<string,mixed> */
-    private function commit_result(array $state, int $files_applied): array {
+    private function commit_result(array $state): array {
         $complete = $state['phase'] === 'complete';
-        $result = [
+        return [
             'phase' => $state['phase'],
-            'files_applied' => $files_applied,
-            'deletions_applied' => (int) $state['deletions_applied'],
-            'errors' => [],
             'send_next_request' => !$complete,
         ];
-        if ($complete) {
-            $result['files_remaining'] = 0;
-        }
-        return $result;
     }
 
     /** @param array<string,mixed> $terminal_error */
@@ -1362,7 +1347,7 @@ final class Site_Export_Staged_Apply_Session {
             if (is_string($active) && trim($active) !== '' && trim($active) !== $this->session_id) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_BUSY, 'Another staged apply session is already committing this target: ' . trim($active) . '.');
             }
-            $this->write_target_coordinator_file($active_path, $this->session_id . "\n");
+            $this->write_atomic_file($active_path, $this->session_id . "\n", 0600);
         });
     }
 
@@ -1393,13 +1378,6 @@ final class Site_Export_Staged_Apply_Session {
             flock($lock, LOCK_UN);
             fclose($lock);
         }
-    }
-
-    private function write_target_coordinator_file(string $path, string $contents): void {
-        if (dirname($path) !== $this->storage_dir . '/apply-sessions') {
-            throw new LogicException('The target coordinator path escaped its storage directory.');
-        }
-        $this->write_atomic_file($path, $contents, 0600);
     }
 
     /** @return mixed */
@@ -1449,6 +1427,9 @@ final class Site_Export_Staged_Apply_Session {
         if (!is_string($contents)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Could not encode bounded staged apply metadata.');
         }
+        if (strlen($contents) > self::MAX_METADATA_BYTES) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Encoded staged apply metadata exceeds the maximum of ' . self::MAX_METADATA_BYTES . ' bytes.');
+        }
         $this->write_atomic_file($path, $contents, 0600);
     }
 
@@ -1497,7 +1478,7 @@ final class Site_Export_Staged_Apply_Session {
         if (!in_array($state['phase'] ?? null, ['deleting', 'applying', 'complete'], true)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint has an invalid phase.');
         }
-        foreach (['delete_offset', 'deletions_applied', 'files_applied'] as $field) {
+        foreach (['delete_offset', 'deletions_applied', 'values_applied'] as $field) {
             if (!isset($state[$field]) || !is_int($state[$field]) || $state[$field] < 0) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint field ' . $field . ' must be a non-negative integer.');
             }
@@ -1520,11 +1501,11 @@ final class Site_Export_Staged_Apply_Session {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint has an invalid traversal stack.');
         }
         foreach ($state['traversal_stack'] as $frame) {
-            if (!is_array($frame) || ( $frame['kind'] ?? null ) !== 'structural' || !is_string($frame['path_b64'] ?? null)) {
+            if (!is_array($frame) || array_keys($frame) !== ['component_b64'] || !is_string($frame['component_b64'])) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint has an invalid structural traversal frame.');
             }
-            $this->decode_commit_path($frame['path_b64'], 'traversal frame');
         }
+        $this->traversal_path($state['traversal_stack']);
         if (isset($state['terminal_error'])) {
             $error = $state['terminal_error'];
             if (!is_array($error) || !in_array($error['reason'] ?? null, [self::ERROR_LIVE_TREE_CHANGED, self::ERROR_CROSS_DEVICE_FILESYSTEM], true)
@@ -1543,6 +1524,26 @@ final class Site_Export_Staged_Apply_Session {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit ' . $description . ' path is not valid base64.');
         }
         $this->validate_path($path);
+        return $path;
+    }
+
+    /** @param array<int,array<string,mixed>> $stack */
+    private function traversal_path(array $stack): string {
+        $path = '';
+        foreach ($stack as $frame) {
+            $encoded = $frame['component_b64'] ?? null;
+            $component = is_string($encoded) ? base64_decode($encoded, true) : false;
+            if (!is_string($component) || $component === '' || strpos($component, '/') !== false) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit traversal frame does not contain one valid base64 path component.');
+            }
+            $path = $path === '' ? $component : $path . '/' . $component;
+            if (strlen($path) > self::MAX_PATH_BYTES) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit traversal path exceeds the maximum of ' . self::MAX_PATH_BYTES . ' bytes.');
+            }
+        }
+        if ($path !== '') {
+            $this->validate_path($path);
+        }
         return $path;
     }
 

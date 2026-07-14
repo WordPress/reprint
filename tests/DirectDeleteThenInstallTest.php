@@ -417,13 +417,35 @@ final class DirectDeleteThenInstallTest extends TestCase {
             'current_installation',
             'delete_offset',
             'deletions_applied',
-            'files_applied',
             'maintenance_token',
             'phase',
             'traversal_stack',
+            'values_applied',
             'version',
         ], $checkpoint_keys);
         $this->assertStringNotContainsString("line\nbreak", (string) file_get_contents($session->get_session_directory() . '/commit.json'));
+    }
+
+    public function testDeepTraversalCheckpointGrowsWithPathLengthRatherThanEveryPathPrefix(): void {
+        $session = $this->session('89898989898989898989898989898989');
+        $directory_depth = 300;
+        $path = implode('/', array_fill(0, $directory_depth, 'd')) . '/leaf.txt';
+        $this->stage_file($session, $path, 'value');
+        $this->complete_delete_upload($session);
+
+        $session->commit($directory_depth + 1);
+        $checkpoint_path = $session->get_session_directory() . '/commit.json';
+        $checkpoint = $this->checkpoint($session);
+
+        $this->assertCount($directory_depth, $checkpoint['traversal_stack']);
+        $this->assertLessThan(32768, filesize($checkpoint_path));
+        foreach ($checkpoint['traversal_stack'] as $frame) {
+            $this->assertSame(['component_b64'], array_keys($frame));
+            $this->assertSame('d', base64_decode($frame['component_b64'], true));
+        }
+
+        $this->commit_all($this->reopen($session));
+        $this->assertSame('value', file_get_contents($this->target . '/' . $path));
     }
 
     public function testInterruptedInstallationWithStagedEntryPresentRemainsPending(): void {
@@ -454,6 +476,30 @@ final class DirectDeleteThenInstallTest extends TestCase {
         $this->commit_all($this->reopen($session));
 
         $this->assertSame('new', file_get_contents($this->target . '/installed.txt'));
+    }
+
+    public function testInterruptedInstallationRejectsASymlinkAncestorBeforeInspectingTheDestination(): void {
+        mkdir($this->target . '/outside', 0700, true);
+        file_put_contents($this->target . '/outside/installed.txt', 'outside');
+        $session = $this->session('abababababababababababababababab');
+        $this->stage_file($session, 'parent/installed.txt', 'new');
+        $this->complete_delete_upload($session);
+        $session->commit(1);
+        $this->set_current_installation($session, 'parent/installed.txt', 'file');
+        unlink($session->get_session_directory() . '/work/files/parent/installed.txt');
+        symlink('outside', $this->target . '/parent');
+
+        try {
+            $this->reopen($session)->commit(1);
+            $this->fail('Interrupted installation followed a symlink ancestor.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('live_tree_changed', $exception->get_error_code());
+            $this->assertSame('parent/installed.txt', base64_decode($exception->get_context()['path_b64'], true));
+            $this->assertSame('parent', base64_decode($exception->get_context()['conflict_path_b64'], true));
+        }
+
+        $this->assertSame('outside', file_get_contents($this->target . '/outside/installed.txt'));
+        $this->assertFileExists($this->target . '/.maintenance');
     }
 
     public function testInterruptedInstallationWithBothEntriesAbsentIsTerminal(): void {
@@ -504,7 +550,7 @@ final class DirectDeleteThenInstallTest extends TestCase {
         $session->commit(1);
 
         $checkpoint = $this->checkpoint($session);
-        $this->assertSame('structural', $checkpoint['traversal_stack'][0]['kind']);
+        $this->assertSame('tree', base64_decode($checkpoint['traversal_stack'][0]['component_b64'], true));
         $this->assertDirectoryExists($this->target . '/tree');
 
         $this->commit_all($this->reopen($session));

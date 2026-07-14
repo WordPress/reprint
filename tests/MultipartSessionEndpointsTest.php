@@ -47,9 +47,9 @@ final class MultipartSessionEndpointsTest extends TestCase {
         ]], $status['body']['paths']);
     }
 
-    public function testDisabledApplyReturnsItsStringErrorCode(): void {
+    public function testMissingApplyTargetReturnsItsStringErrorCode(): void {
         $options = $this->options();
-        $options['apply_sessions_enabled'] = false;
+        unset($options['apply_target_root']);
         $endpoints = new Site_Export_Staged_Endpoints($options);
         $token = str_repeat('a', 32);
         $create_uri = '/?endpoint=staged_session_create&create_token=' . $token;
@@ -224,10 +224,8 @@ final class MultipartSessionEndpointsTest extends TestCase {
         $this->assertArrayNotHasKey('secret', $reported);
     }
 
-    public function testUploadStopsAtTheConfiguredPartCapBetweenDurableParts(): void {
-        $options = $this->options();
-        $options['max_upload_parts'] = 1;
-        $endpoints = new Site_Export_Staged_Endpoints($options);
+    public function testUploadStopsAtTheFixedPartCapBetweenDurableParts(): void {
+        $endpoints = $this->endpoints();
         $token = str_repeat('d', 32);
         $create_uri = '/?endpoint=staged_session_create&create_token=' . $token;
         $created = $endpoints->session_create(['create_token' => $token], $this->headers('POST', $create_uri));
@@ -235,15 +233,14 @@ final class MultipartSessionEndpointsTest extends TestCase {
         $this->assertIsString($session_id);
 
         $boundary = 'part-cap';
-        $body = '--' . $boundary . "\r\n"
-            . "X-Chunk-Type: directory\r\n"
-            . 'X-Directory-Path: ' . base64_encode('first-empty') . "\r\n"
-            . "Content-Length: 0\r\n\r\n\r\n"
-            . '--' . $boundary . "\r\n"
-            . "X-Chunk-Type: directory\r\n"
-            . 'X-Directory-Path: ' . base64_encode('must-wait') . "\r\n"
-            . "Content-Length: 0\r\n\r\n\r\n"
-            . '--' . $boundary . "--\r\n";
+        $body = '';
+        for ($index = 0; $index <= 128; ++$index) {
+            $body .= '--' . $boundary . "\r\n"
+                . "X-Chunk-Type: directory\r\n"
+                . 'X-Directory-Path: ' . base64_encode('empty-' . $index) . "\r\n"
+                . "Content-Length: 0\r\n\r\n\r\n";
+        }
+        $body .= '--' . $boundary . "--\r\n";
         $input = fopen('php://temp', 'w+b');
         fwrite($input, $body);
         rewind($input);
@@ -258,51 +255,15 @@ final class MultipartSessionEndpointsTest extends TestCase {
 
         $this->assertSame(200, $response['http_code']);
         $this->assertTrue($response['body']['send_next_request']);
-        $this->assertCount(1, $response['body']['accepted']);
+        $this->assertCount(128, $response['body']['accepted']);
         $status_uri = '/?endpoint=staged_session_status&session_id=' . $session_id
-            . '&paths=' . rawurlencode(json_encode([base64_encode('first-empty'), base64_encode('must-wait')]));
+            . '&paths=' . rawurlencode(json_encode([base64_encode('empty-127'), base64_encode('empty-128')]));
         $status = $endpoints->session_status(
             ['session_id' => $session_id],
             $this->headers('GET', $status_uri)
         );
         $this->assertSame('complete', $status['body']['paths'][0]['state']);
         $this->assertSame('missing', $status['body']['paths'][1]['state']);
-    }
-
-    public function testStandaloneRecoveryServerUsesTheNormalStatusSemanticsWithoutWordPress(): void {
-        $endpoints = $this->endpoints();
-        $token = str_repeat('c', 32);
-        $create_uri = '/?endpoint=staged_session_create&create_token=' . $token;
-        $created = $endpoints->session_create(['create_token' => $token], $this->headers('POST', $create_uri));
-        $session_id = $created['body']['session_id'];
-        $this->assertIsString($session_id);
-        $path = base64_encode('recoverable.txt');
-        $status_uri = '/?endpoint=staged_session_status&session_id=' . $session_id . '&path=' . rawurlencode($path);
-
-        $old_get = $_GET;
-        $old_server = $_SERVER;
-        $_GET = ['endpoint' => 'staged_session_status', 'session_id' => $session_id, 'path' => $path];
-        $_SERVER = $this->headers('GET', $status_uri);
-        ob_start();
-        try {
-            Site_Export_Staged_Session_Recovery_Server::serve($this->options());
-            $body = ob_get_clean();
-        } catch (Throwable $exception) {
-            ob_end_clean();
-            throw $exception;
-        } finally {
-            $_GET = $old_get;
-            $_SERVER = $old_server;
-        }
-
-        $response = json_decode((string) $body, true);
-        $this->assertIsArray($response);
-        $this->assertSame('ok', $response['status']);
-        $this->assertSame([[
-            'path_b64' => $path,
-            'state' => 'missing',
-            'accepted_bytes' => 0,
-        ]], $response['paths']);
     }
 
     public function testLiveTreeConflictResponseIncludesTheAuthenticatedSchema(): void {
@@ -442,7 +403,6 @@ final class MultipartSessionEndpointsTest extends TestCase {
             'staging_dir' => $this->storage,
             'secret' => self::SECRET,
             'apply_target_root' => $this->target,
-            'apply_sessions_enabled' => true,
             'max_frame_bytes' => 1024,
         ];
     }
