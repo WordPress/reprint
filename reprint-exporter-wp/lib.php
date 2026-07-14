@@ -245,6 +245,8 @@ function _site_export_staged_options(array $options): array {
  * @param array $options Optional overrides:
  *   - 'authenticate' (callable): Called to authenticate the request.
  *        Defaults to _site_export_default_authenticate().
+ *   - 'staging_dir' (string): Durable same-filesystem storage which enables
+ *        staged push endpoints. With no path, this router remains pull-only.
  */
 function _site_export_handle_api_request(array $options = []): void {
     // Revert WordPress error display settings (wp_debug_mode may
