@@ -8928,7 +8928,8 @@ class ImportClient
             }
         }
 
-        // A followed target outside the original export scope goes underneath the bundle directory.
+        // Following symlinks is currently the only way paths outside the original export scope reach this mapper.
+        // Use the same bundle mapping for copied content and rewritten symlink targets so the links do not dangle.
         if ($this->symlink_bundle_directory !== null
             && !$this->path_is_within_original_export_scope($path)) {
             return $this->symlink_bundle_directory . $path;
