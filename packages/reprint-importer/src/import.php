@@ -232,37 +232,19 @@ function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn, i
 }
 
 
-/**
- * Pull responses still use their callback-oriented parser. It belongs to the
- * exporter package because that package defines the response format. Staged
- * push requests use a separate, stricter caller-driven reader: pull must retain
- * compatibility with historical boundary-framed responses and LF line endings.
+/*
+ * Pull responses and push requests share the same strict byte-fed processor.
+ * Composer normally loads it from reprint-exporter; the source fallback keeps
+ * the monorepo importer executable usable without a generated autoloader.
  */
-if (!class_exists('Site_Export_Multipart_Stream_Parser')) {
-    $multipart_parser_source = __DIR__ . '/../../reprint-exporter/src/class-multipart-stream-parser.php';
-    if (is_file($multipart_parser_source)) {
-        require_once $multipart_parser_source;
+if (!class_exists('Site_Export_Multipart_Processor')) {
+    $multipart_processor_source = __DIR__ . '/../../reprint-exporter/src/class-multipart-processor.php';
+    if (is_file($multipart_processor_source)) {
+        require_once $multipart_processor_source;
     }
 }
-if (!class_exists('Site_Export_Multipart_Stream_Parser', false)) {
-    throw new RuntimeException('The Reprint exporter multipart parser is not installed. Refresh the exporter package.');
-}
-
-/**
- * Preserves the importer's historical name for the pull-response MIME parser.
- *
- * The implementation and callback event contract live in
- * Site_Export_Multipart_Stream_Parser. Keeping this empty subclass avoids
- * duplicating parser state while existing importer code can continue to use:
- *
- *     $parser = new MultipartStreamParser($boundary, $event_handler);
- *     $parser->feed($network_fragment);
- *
- * This adapter is for streamed pull responses only. Multipart push request
- * bodies are read on the target by Site_Export_Multipart_Stream_Input.
- */
-class MultipartStreamParser extends Site_Export_Multipart_Stream_Parser
-{
+if (!class_exists('Site_Export_Multipart_Processor', false)) {
+    throw new RuntimeException('The Reprint multipart processor is not installed. Refresh the exporter package.');
 }
 
 /**
@@ -9905,7 +9887,59 @@ class ImportClient
     }
 
     /**
-     * Build the multipart chunk handler callback shared by both parser
+     * Feeds bounded response bytes into the shared processor and emits pull events.
+     *
+     * cURL normally supplies small write-callback fragments, but this method
+     * still splits any larger value at the processor's public ceiling. Tokens
+     * are drained before the next fragment is appended, so a large file body is
+     * handed to the existing chunk handler incrementally rather than retained.
+     * PART_START needs no legacy event: BODY and PART_END carry the same header
+     * snapshot expected by the pull pipeline.
+     *
+     * @param Site_Export_Multipart_Processor $processor Current response processor.
+     * @param string $bytes Raw response bytes supplied by cURL or the body fallback.
+     * @param callable(array<string,mixed>):void $chunk_handler Existing pull event consumer.
+     */
+    private function consume_multipart_bytes(
+        Site_Export_Multipart_Processor $processor,
+        string $bytes,
+        callable $chunk_handler
+    ): void {
+        $offset = 0;
+        $bytes_length = strlen($bytes);
+        while ($offset < $bytes_length) {
+            $piece = substr($bytes, $offset, Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES);
+            $offset += strlen($piece);
+            $processor->append_bytes($piece);
+            while ($processor->next_token()) {
+                $token_type = $processor->get_token_type();
+                if ($token_type === Site_Export_Multipart_Processor::TOKEN_PART_START) {
+                    continue;
+                }
+                if ($token_type === Site_Export_Multipart_Processor::TOKEN_BODY) {
+                    $chunk_handler([
+                        'type' => 'body',
+                        'headers' => $processor->get_current_headers(),
+                        'data' => $processor->get_current_body_piece(),
+                    ]);
+                    continue;
+                }
+                if ($token_type === Site_Export_Multipart_Processor::TOKEN_PART_END) {
+                    $chunk_handler([
+                        'type' => 'complete',
+                        'headers' => $processor->get_current_headers(),
+                    ]);
+                    continue;
+                }
+                throw new LogicException(
+                    'The multipart processor returned unknown token type ' . json_encode($token_type) . '.'
+                );
+            }
+        }
+    }
+
+    /**
+     * Build the multipart chunk handler callback shared by both processor
      * creation sites inside fetch_streaming.
      *
      * File parts are forwarded as body data arrives so large files are written
@@ -9934,7 +9968,7 @@ class ImportClient
                         if (!empty($current_chunk["started"])) {
                             $stream_headers["x-first-chunk"] = "0";
                         }
-                        // The parser emits a separate complete event after the
+                        // The processor emits a separate complete event after the
                         // last body bytes, so close/index the file from there.
                         $stream_headers["x-last-chunk"] = "0";
                         ($context->on_chunk)([
@@ -10382,8 +10416,9 @@ class ImportClient
         reprint_apply_curl_proxy_from_env($ch);
         reprint_apply_curl_ca_bundle($ch);
 
-        $parser = null;
+        $multipart_processor = null;
         $current_chunk = null;
+        $chunk_handler = $this->make_chunk_handler($context, $current_chunk);
         $bytes_received = 0;
         $last_heartbeat = microtime(true);
         $last_progress_check = microtime(true);
@@ -10458,68 +10493,39 @@ class ImportClient
                 },
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (
-                &$parser,
-                $context,
-                &$current_chunk
+                &$multipart_processor
             ) {
                 $len = strlen($header_line);
 
-                // Parse Content-Type to extract boundary
+                // Construct the processor before cURL delivers the first body
+                // fragment. Invalid response MIME fails before any part data
+                // can be interpreted under a competing grammar.
                 if (stripos($header_line, "Content-Type:") === 0) {
-                    // Find boundary parameter
-                    $pos = stripos($header_line, "boundary=");
-                    if ($pos !== false) {
-                        $boundary_start = $pos + 9; // length of 'boundary='
-                        $boundary_value = substr($header_line, $boundary_start);
-                        $boundary_value = trim($boundary_value);
-
-                        // Remove quotes if present
-                        if ($boundary_value[0] === '"') {
-                            $quote_end = strpos($boundary_value, '"', 1);
-                            if ($quote_end !== false) {
-                                $boundary_value = substr(
-                                    $boundary_value,
-                                    1,
-                                    $quote_end - 1,
-                                );
-                            }
-                        } else {
-                            // Find end (semicolon, comma, or whitespace)
-                            $end_pos = strcspn($boundary_value, ";,\r\n \t");
-                            $boundary_value = substr(
-                                $boundary_value,
-                                0,
-                                $end_pos,
-                            );
-                        }
-
-                        if ($boundary_value !== "") {
-                            $this->audit_log(
-                                "Creating multipart parser with boundary: $boundary_value",
-                                false,
-                            );
-                            $parser = new MultipartStreamParser(
-                                $boundary_value,
-                                $this->make_chunk_handler($context, $current_chunk),
-                            );
-                        }
+                    $content_type = trim(substr($header_line, strlen('Content-Type:')));
+                    $content_type_segments = explode(';', $content_type, 2);
+                    if (strtolower(trim($content_type_segments[0])) === 'multipart/mixed') {
+                        $boundary = Site_Export_Multipart_Processor::boundary_from_content_type($content_type);
+                        $this->audit_log(
+                            "Creating multipart processor with boundary: $boundary",
+                            false,
+                        );
+                        $multipart_processor = new Site_Export_Multipart_Processor($boundary);
                     }
                 }
 
                 return $len;
             },
             CURLOPT_WRITEFUNCTION => function ($ch, $data) use (
-                &$parser,
-                &$current_chunk,
-                $context,
+                &$multipart_processor,
                 &$bytes_received,
                 &$last_heartbeat,
                 &$last_progress_check,
                 &$last_bytes_received,
-                &$error_body
+                &$error_body,
+                $chunk_handler
             ) {
-                // If no parser yet, we might be receiving an error response
-                if (!$parser) {
+                // If no multipart processor exists yet, we might be receiving an error response
+                if (!$multipart_processor) {
                     $error_body .= $data;
                     if (strlen($error_body) > 65536) {
                         $error_body = substr($error_body, -65536);
@@ -10537,30 +10543,25 @@ class ImportClient
                                         "Detected boundary in body (no Content-Type): {$boundary}",
                                         false,
                                     );
-                                    $parser = new MultipartStreamParser(
-                                        $boundary,
-                                        $this->make_chunk_handler($context, $current_chunk),
-                                    );
-                                    $parser->feed($error_body);
+                                    $multipart_processor = new Site_Export_Multipart_Processor($boundary);
+                                    $this->consume_multipart_bytes($multipart_processor, $error_body, $chunk_handler);
                                     $error_body = "";
                                 }
                             }
                         }
                     }
 
-                    static $logged_no_parser = false;
-                    if (!$logged_no_parser && strlen($error_body) > 0) {
+                    static $logged_no_multipart_processor = false;
+                    if (!$logged_no_multipart_processor && strlen($error_body) > 0) {
                         $this->audit_log(
-                            "No parser, accumulating error body (first 500 chars): " .
+                            "No multipart processor, accumulating error body (first 500 chars): " .
                                 substr($error_body, 0, 500),
                             false,
                         );
-                        $logged_no_parser = true;
+                        $logged_no_multipart_processor = true;
                     }
-                }
-
-                if ($parser) {
-                    $parser->feed($data);
+                } else {
+                    $this->consume_multipart_bytes($multipart_processor, $data, $chunk_handler);
                 }
 
                 $bytes_received += strlen($data);
@@ -10685,13 +10686,18 @@ class ImportClient
             throw new RuntimeException($error_msg);
         }
 
-        if (!$parser) {
+        if (!$multipart_processor) {
             $snippet = $error_body ? substr($error_body, 0, 500) : "";
             throw new RuntimeException(
                 "Invalid response: missing multipart boundary. " .
                     ($snippet !== "" ? "Body: {$snippet}" : ""),
             );
         }
+
+        // Every response part may already have been delivered, but the MIME
+        // close is still protocol evidence. Reject a transport which ended
+        // after a plausible completion part but before its closing boundary.
+        $multipart_processor->finish_input();
 
         if (!$context->saw_completion) {
             throw new RuntimeException(

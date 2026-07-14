@@ -347,7 +347,7 @@ final class StagedApplySessionTest extends TestCase {
         $input = fopen('php://temp', 'w+b');
         fwrite($input, $body);
         rewind($input);
-        $session->accept_upload(new Site_Export_Multipart_Stream_Input($input, $boundary));
+        $session->accept_upload($input, new Site_Export_Multipart_Processor($boundary));
         try {
             try {
                 $session->next_change();
@@ -978,8 +978,7 @@ final class StagedApplySessionTest extends TestCase {
         $input = fopen('php://temp', 'w+b');
         fwrite($input, $body);
         rewind($input);
-        $reader = new Site_Export_Multipart_Stream_Input($input, $boundary);
-        $session->accept_upload($reader);
+        $session->accept_upload($input, new Site_Export_Multipart_Processor($boundary));
         try {
             while ($session->next_change()) {
             }

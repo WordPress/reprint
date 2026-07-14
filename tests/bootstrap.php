@@ -25,8 +25,7 @@ if (!class_exists('Site_Export_HMAC_Server', false)) {
 // The exporter is installed from a Composer path package in CI and release
 // tests. Require the checkout copies here so tests exercise a changed source
 // file before the package mirror is refreshed.
-require_once __DIR__ . '/../packages/reprint-exporter/src/class-multipart-stream-parser.php';
-require_once __DIR__ . '/../packages/reprint-exporter/src/class-multipart-stream-input.php';
+require_once __DIR__ . '/../packages/reprint-exporter/src/class-multipart-processor.php';
 require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-apply-session.php';
 require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-endpoints.php';
 require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-session-recovery-server.php';

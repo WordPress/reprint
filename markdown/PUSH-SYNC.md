@@ -134,7 +134,8 @@ the outer loop and the session owns one current part. There are no callbacks
 into the endpoint and no buffered request body.
 
 ~~~php
-$session->accept_upload($input);
+$multipart = new Site_Export_Multipart_Processor($boundary);
+$session->accept_upload($input, $multipart);
 try {
     while ($session->next_change()) {
     }
@@ -143,20 +144,34 @@ try {
 }
 ~~~
 
-The input is Site_Export_Multipart_Stream_Input, a strict,
-boundary-validated reader over php://input. It requires a Content-Length on
-every part, accumulates short physical-line reads within fixed header bounds,
-and unfolds space- or tab-prefixed MIME header continuations before validation.
-It retains only a small current body piece and refuses to move to another part
-until the current one is drained. A malformed header, truncated body, invalid
-path, or offset gap throws before any later part is read. finish_upload()
-releases the session lock even after failure; completed staging stays durable.
+Site_Export_Multipart_Processor is the one multipart implementation for both
+pull responses and push requests. It owns no stream and invokes no callbacks.
+A transport appends one bounded byte fragment, then the caller advances through
+part-start, body, and part-end tokens until the processor asks for more input.
+The pull cURL callback drains those tokens before returning. The push session
+reads a bounded fragment from php://input only when needed and stops after one
+part-end has been durably staged.
 
-The older callback-oriented MultipartStreamParser was extracted into the
-exporter package as Site_Export_Multipart_Stream_Parser, where the importer
-keeps a backwards-compatible adapter for pull responses. It retains pull's
-optional-length behavior. The request reader is deliberately separate: push
-never inherits that fallback or its large emergency buffer.
+The processor requires the framing Reprint has emitted since its first
+multipart exporter: the message starts with its first boundary, syntax uses
+CRLF, every part has one decimal Content-Length, header names are unique, and a
+closing boundary is required. Bounded MIME header continuation lines remain
+valid because unfolding them does not make body framing ambiguous. The
+processor does not carry the old parser's generic-MIME tolerance for LF-only
+syntax, boundary-framed bodies, malformed or duplicate headers, or preambles
+and epilogues. Those forms were capabilities of the original parser, not
+formats emitted by Reprint. Mandatory lengths let arbitrary file bytes pass
+without a boundary search and make premature EOF distinguishable from a clean
+close; one grammar also prevents the authenticated upload endpoint from being
+accidentally constructed in a permissive mode.
+
+The processor retains only a bounded input fragment, bounded headers, and one
+current body token. A malformed header, truncated body, invalid path, or offset
+gap throws before any later part is staged. finish_upload() releases the session
+lock even after failure; completed staging stays durable. When the target's
+part-count cap is reached, it deliberately stops after the accepted part's
+declared body and leaves the request suffix unread; `send_next_request` then
+makes the sender continue in a fresh request.
 
 On the sender, MultipartPushStreamClient holds one cURL multi handle across
 requests and uses CURL_READFUNC_PAUSE. send_part() pumps cURL until the

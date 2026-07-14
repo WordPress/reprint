@@ -30,7 +30,7 @@
             <file>FileIndexSkipDefaultsTest.php</file>
             <file>HmacServerTest.php</file>
             <file>SiteExportSecretTest.php</file>
-            <file>MultipartStreamInputTest.php</file>
+            <file>MultipartProcessorTest.php</file>
             <file>StagedApplySessionTest.php</file>
             <file>MultipartSessionEndpointsTest.php</file>
             <file>WordPressStagedOptionsTest.php</file>

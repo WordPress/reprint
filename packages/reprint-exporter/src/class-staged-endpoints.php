@@ -4,8 +4,8 @@
 
 use function WordPress\Reprint\Exporter\parse_size;
 
-if (!class_exists('Site_Export_Multipart_Stream_Input', false)) {
-    require_once __DIR__ . '/class-multipart-stream-input.php';
+if (!class_exists('Site_Export_Multipart_Processor', false)) {
+    require_once __DIR__ . '/class-multipart-processor.php';
 }
 if (!class_exists('Site_Export_Staged_Apply_Session', false)) {
     require_once __DIR__ . '/class-staged-apply-session.php';
@@ -31,7 +31,7 @@ if (!class_exists('Site_Export_Staged_Apply_Session', false)) {
  * including endpoint and session parameters. The router must call
  * pre_authenticate_envelope() before opening `php://input`; session_upload()
  * repeats that authentication defensively before constructing the streaming
- * multipart reader. This prevents an unauthenticated request from making the
+ * multipart processor. This prevents an unauthenticated request from making the
  * target spend time or storage parsing a large body.
  *
  * Endpoint methods return an HTTP-neutral envelope instead of emitting output:
@@ -364,9 +364,10 @@ final class Site_Export_Staged_Endpoints {
     /**
      * Streams one multipart/mixed request into the session workspace.
      *
-     * Authentication and session identity are resolved before the body reader
-     * is created. The endpoint then drives one complete part at a time and
-     * retains only the target-confirmed result records needed for this response.
+     * Authentication and session identity are resolved before the byte-fed
+     * processor is created. The endpoint then drives one complete part at a
+     * time and retains only the target-confirmed result records needed for this
+     * response.
      * If the configured part-count cap is reached, parsing stops between parts
      * and `send_next_request` tells the sender to open another request. No part
      * is acknowledged before its contents or metadata have been flushed into
@@ -396,13 +397,12 @@ final class Site_Export_Staged_Endpoints {
             if ($content_type === null) {
                 throw new InvalidArgumentException('staged_session_upload requires a multipart/mixed Content-Type header.');
             }
-            $input_reader = new Site_Export_Multipart_Stream_Input(
-                $input,
-                Site_Export_Multipart_Stream_Input::boundary_from_content_type($content_type)
+            $multipart = new Site_Export_Multipart_Processor(
+                Site_Export_Multipart_Processor::boundary_from_content_type($content_type)
             );
             $accepted = [];
             $paused = false;
-            $session->accept_upload($input_reader, $this->max_frame_bytes, $this->max_upload_parts);
+            $session->accept_upload($input, $multipart, $this->max_frame_bytes, $this->max_upload_parts);
             try {
                 while ($session->next_change()) {
                     $change = $session->get_current_change();

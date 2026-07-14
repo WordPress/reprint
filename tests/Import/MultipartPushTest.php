@@ -665,7 +665,7 @@ final class MultipartPushTest extends TestCase {
 require_once '{$root}/packages/reprint-exporter/src/utils.php';
 require_once '{$root}/packages/reprint-exporter/src/class-hmac-client.php';
 require_once '{$root}/packages/reprint-exporter/src/class-hmac-server.php';
-require_once '{$root}/packages/reprint-exporter/src/class-multipart-stream-input.php';
+require_once '{$root}/packages/reprint-exporter/src/class-multipart-processor.php';
 require_once '{$root}/packages/reprint-exporter/src/class-staged-apply-session.php';
 require_once '{$root}/packages/reprint-exporter/src/class-staged-endpoints.php';
 require_once '{$root}/packages/reprint-exporter/src/class-http-server.php';

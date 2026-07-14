@@ -2,8 +2,8 @@
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Session errors become authenticated API JSON, never HTML output.
 
-if (!class_exists('Site_Export_Multipart_Stream_Input', false)) {
-    require_once __DIR__ . '/class-multipart-stream-input.php';
+if (!class_exists('Site_Export_Multipart_Processor', false)) {
+    require_once __DIR__ . '/class-multipart-processor.php';
 }
 
 /**
@@ -41,7 +41,8 @@ if (!class_exists('Site_Export_Multipart_Stream_Input', false)) {
  * Uploads are caller-driven so every part is persisted before next_change()
  * returns. The lock must always be released in a finally block:
  *
- *     $session->accept_upload($input);
+ *     $multipart = new Site_Export_Multipart_Processor($boundary);
+ *     $session->accept_upload($input, $multipart);
  *     try {
  *         while ($session->next_change()) {
  *             $accepted_change = $session->get_current_change();
@@ -85,12 +86,12 @@ final class Site_Export_Staged_Apply_Session {
     private const MAX_PATH_BYTES = 4096;
 
     /**
-     * Maximum upload body piece read before it is written to private storage.
+     * Maximum source-file bytes copied by one bounded preparation step.
      *
-     * This matches Site_Export_Multipart_Stream_Input's hard per-read ceiling,
-     * keeping the target's in-memory payload unit at 256 KiB.
+     * A large candidate file persists its accepted byte cursor after each
+     * piece, so a commit request never has to copy the whole file in memory.
      */
-    private const BODY_PIECE_BYTES = 262144;
+    private const PREPARATION_FILE_PIECE_BYTES = 262144;
 
     /**
      * Maximum bytes read from one session or commit JSON metadata file.
@@ -226,11 +227,36 @@ final class Site_Export_Staged_Apply_Session {
     private $upload_lock = null;
 
     /**
-     * Multipart input currently driven by next_change(), or null outside upload.
+     * Request-body stream currently driven by next_change(), or null outside upload.
      *
-     * @var Site_Export_Multipart_Stream_Input|null
+     * The session owns only this request's reads and never closes the caller's
+     * stream. Reads are capped at
+     * Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES.
+     *
+     * @var resource|null
      */
     private $upload_input = null;
+
+    /**
+     * Transport-independent multipart state currently driven by next_change().
+     *
+     * Null outside an upload or after a terminal part error. The processor may
+     * retain a bounded read-ahead tail, which finish_upload() discards together
+     * with the rest of this HTTP request's in-memory state.
+     *
+     * @var Site_Export_Multipart_Processor|null
+     */
+    private $upload_processor = null;
+
+    /**
+     * Whether TOKEN_PART_END was consumed for the part being staged.
+     *
+     * Body-consuming handlers set this while reading. Metadata handlers leave
+     * it false until next_change() verifies their required empty body.
+     *
+     * @var bool
+     */
+    private $current_upload_part_ended = false;
 
     /**
      * Target-confirmed result of the most recent successful next_change() call.
@@ -478,7 +504,8 @@ final class Site_Export_Staged_Apply_Session {
      * The caller must invoke finish_upload() in a finally block after this
      * method succeeds, including when next_change() throws.
      *
-     * @param Site_Export_Multipart_Stream_Input $input Validated request-body reader.
+     * @param resource $input Readable HTTP request body owned by the caller.
+     * @param Site_Export_Multipart_Processor $processor Boundary-validated multipart state.
      * @param int $maximum_part_bytes Largest declared part body allowed by target policy.
      * @param int $maximum_parts Largest number of parts allowed in this request.
      *
@@ -486,9 +513,14 @@ final class Site_Export_Staged_Apply_Session {
      * @throws InvalidArgumentException If either request limit is not positive.
      * @throws RuntimeException If the session is busy, missing, or already committing.
      */
-    public function accept_upload(Site_Export_Multipart_Stream_Input $input, int $maximum_part_bytes = PHP_INT_MAX, int $maximum_parts = 128): void {
+    public function accept_upload($input, Site_Export_Multipart_Processor $processor, int $maximum_part_bytes = PHP_INT_MAX, int $maximum_parts = 128): void {
         if ($this->upload_lock !== null) {
             throw new LogicException('A staged apply upload is already open; call finish_upload() first.');
+        }
+        if (!is_resource($input)) {
+            throw new InvalidArgumentException(
+                'Staged apply multipart input must be a readable stream resource; received ' . gettype($input) . '.'
+            );
         }
         if ($maximum_part_bytes <= 0) {
             throw new InvalidArgumentException('The staged apply maximum multipart part size must be greater than zero.');
@@ -516,6 +548,8 @@ final class Site_Export_Staged_Apply_Session {
             $this->repair_staged_paths_tail();
             $this->upload_lock = $lock;
             $this->upload_input = $input;
+            $this->upload_processor = $processor;
+            $this->current_upload_part_ended = false;
             $this->current_change = null;
             $this->maximum_upload_part_bytes = $maximum_part_bytes;
             $this->maximum_upload_parts = $maximum_parts;
@@ -549,14 +583,23 @@ final class Site_Export_Staged_Apply_Session {
      * @throws RuntimeException If request input or durable storage fails.
      */
     public function next_change(): bool {
-        if ($this->upload_lock === null || $this->upload_input === null) {
+        if ($this->upload_lock === null || $this->upload_input === null || $this->upload_processor === null) {
             throw new LogicException('Accept an upload before reading changes.');
         }
         $this->current_change = null;
+        $this->current_upload_part_ended = false;
         try {
-            if (!$this->upload_input->next_part()) {
+            if (!$this->next_upload_token()) {
                 return false;
             }
+            $token_type = $this->upload_processor->get_token_type();
+            if ($token_type !== Site_Export_Multipart_Processor::TOKEN_PART_START) {
+                throw new LogicException(
+                    'Expected a multipart part-start token before staging the next change; received '
+                    . json_encode($token_type) . '.'
+                );
+            }
+            $headers = $this->upload_processor->get_current_headers();
             if ($this->upload_parts_read >= $this->maximum_upload_parts) {
                 throw new InvalidArgumentException(
                     'Multipart upload contains more than the target maximum of '
@@ -564,7 +607,6 @@ final class Site_Export_Staged_Apply_Session {
                 );
             }
             ++$this->upload_parts_read;
-            $headers = $this->upload_input->get_current_headers();
             $part_bytes = $this->require_non_negative_header($headers, 'content-length');
             if ($part_bytes > $this->maximum_upload_part_bytes) {
                 throw new InvalidArgumentException(
@@ -589,11 +631,21 @@ final class Site_Export_Staged_Apply_Session {
             } else {
                 throw new InvalidArgumentException('Unsupported multipart X-Chunk-Type ' . json_encode($type) . '.');
             }
+            // Body-consuming handlers normally consume PART_END themselves.
+            // Empty metadata handlers reach it here. Never discard body bytes
+            // which a handler unexpectedly left unread.
+            $piece = $this->read_current_upload_body_piece();
+            if ($piece !== null) {
+                throw new LogicException(
+                    'The multipart part handler returned with ' . strlen($piece) . ' unread body bytes.'
+                );
+            }
             return true;
         } catch (Throwable $exception) {
             // A malformed part is terminal for this request. Existing durable
             // partial bytes remain useful evidence for the next request.
             $this->upload_input = null;
+            $this->upload_processor = null;
             throw $exception;
         }
     }
@@ -614,6 +666,8 @@ final class Site_Export_Staged_Apply_Session {
         $lock = $this->upload_lock;
         $this->upload_lock = null;
         $this->upload_input = null;
+        $this->upload_processor = null;
+        $this->current_upload_part_ended = false;
         $this->current_change = null;
         $this->maximum_upload_part_bytes = PHP_INT_MAX;
         $this->maximum_upload_parts = 128;
@@ -705,6 +759,73 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
+     * Returns one body token for the current part, or null at its part-end token.
+     *
+     * Bytes remain bounded by the processor's input ceiling and are returned
+     * directly to the file or delete-list writer. Calling this after PART_END
+     * remains null so next_change() can verify both body-consuming and empty
+     * metadata handlers through the same completion path.
+     *
+     * @return string|null Current body bytes, or null after the part ends.
+     *
+     * @throws LogicException If a new part or message close appears before PART_END.
+     * @throws RuntimeException If the request stream is truncated.
+     */
+    private function read_current_upload_body_piece(): ?string {
+        if ($this->current_upload_part_ended) {
+            return null;
+        }
+        if (!$this->next_upload_token()) {
+            throw new LogicException('Multipart input closed before the current part-end token.');
+        }
+        $token_type = $this->upload_processor->get_token_type();
+        if ($token_type === Site_Export_Multipart_Processor::TOKEN_BODY) {
+            return $this->upload_processor->get_current_body_piece();
+        }
+        if ($token_type === Site_Export_Multipart_Processor::TOKEN_PART_END) {
+            $this->current_upload_part_ended = true;
+            return null;
+        }
+        throw new LogicException(
+            'Expected multipart body or part-end while staging the current change; received '
+            . json_encode($token_type) . '.'
+        );
+    }
+
+    /**
+     * Advances one token, reading another bounded request fragment when needed.
+     *
+     * False means the processor consumed a clean closing boundary. An empty
+     * stream read is treated as transport EOF and finish_input() then reports
+     * any incomplete MIME construct with its precise state.
+     *
+     * @return bool True when a token is current, false after clean completion.
+     *
+     * @throws LogicException If the processor pauses without accepting input.
+     * @throws RuntimeException If the request stream fails or ends prematurely.
+     */
+    private function next_upload_token(): bool {
+        while (!$this->upload_processor->next_token()) {
+            if ($this->upload_processor->is_complete()) {
+                return false;
+            }
+            if (!$this->upload_processor->paused_at_incomplete_input()) {
+                throw new LogicException('Multipart processor stopped without completing or requesting input.');
+            }
+            $bytes = fread($this->upload_input, Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES);
+            if ($bytes === false) {
+                throw new RuntimeException('Could not read the multipart upload request body.', self::ERROR_RETRYABLE_IO);
+            }
+            if ($bytes === '') {
+                $this->upload_processor->finish_input();
+                return false;
+            }
+            $this->upload_processor->append_bytes($bytes);
+        }
+        return true;
+    }
+
+    /**
      * Appends one file part at the offset confirmed by work/partial/.
      *
      * Offset zero always replaces any earlier partial or complete artifact.
@@ -772,8 +893,11 @@ final class Site_Export_Staged_Apply_Session {
             if (fseek($file, $offset, SEEK_SET) !== 0) {
                 throw new RuntimeException('Could not seek partial file ' . $this->describe_path($path) . ' to offset ' . $offset . '.', self::ERROR_RETRYABLE_IO);
             }
-            while ($this->upload_input->remaining_body_bytes() > 0) {
-                $piece = $this->upload_input->read_body_piece(self::BODY_PIECE_BYTES);
+            while (true) {
+                $piece = $this->read_current_upload_body_piece();
+                if ($piece === null) {
+                    break;
+                }
                 $this->write_all($file, $piece, 'partial file ' . $this->describe_path($path));
             }
             if (!fflush($file)) {
@@ -970,8 +1094,12 @@ final class Site_Export_Staged_Apply_Session {
         $tail = '';
         $accepted = 0;
         try {
-            while ($this->upload_input->remaining_body_bytes() > 0) {
-                $tail .= $this->upload_input->read_body_piece(self::BODY_PIECE_BYTES);
+            while (true) {
+                $piece = $this->read_current_upload_body_piece();
+                if ($piece === null) {
+                    break;
+                }
+                $tail .= $piece;
                 while (($delimiter = strpos($tail, "\0")) !== false) {
                     $path = substr($tail, 0, $delimiter);
                     $tail = (string) substr($tail, $delimiter + 1);
@@ -1798,9 +1926,9 @@ final class Site_Export_Staged_Apply_Session {
      * Advances one bounded preparation operation for the current action.
      *
      * Directory children and deferred modes live in disk-backed plans, while
-     * regular files advance by at most BODY_PIECE_BYTES. Reopening a session
-     * therefore resumes a large candidate tree, read-only mode finalization,
-     * and an individual large file from durable cursors.
+     * regular files advance by at most PREPARATION_FILE_PIECE_BYTES. Reopening
+     * a session therefore resumes a large candidate tree, read-only mode
+     * finalization, and an individual large file from durable cursors.
      *
      * @param array<string,mixed> $prepare Mutable current-action cursor.
      * @return bool True only after the candidate identity has been verified.
@@ -2250,7 +2378,7 @@ final class Site_Export_Staged_Apply_Session {
             }
             $remaining = (int) $identity['size'] - $accepted_bytes;
             if ($remaining > 0) {
-                $piece = fread($input, min(self::BODY_PIECE_BYTES, $remaining));
+                $piece = fread($input, min(self::PREPARATION_FILE_PIECE_BYTES, $remaining));
                 if (!is_string($piece) || $piece === '') {
                     throw new RuntimeException('Could not read source file while preparing ' . $this->describe_path($path) . '.', self::ERROR_RETRYABLE_IO);
                 }
