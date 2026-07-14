@@ -29,7 +29,6 @@
  *             'path' => $path,
  *             'total_bytes' => $total_bytes,
  *             'offset' => $offset,
- *             'mode' => $mode,
  *             'payload' => $payload,
  *         ])) {
  *             break;
@@ -397,13 +396,12 @@ class MultipartPushStreamClient
      * @param string $path Raw target-relative file path.
      * @param int $total_bytes Current source file size.
      * @param int $offset Target-confirmed offset for the next piece.
-     * @param int|null $mode Permission bits which send_part() will put on the wire.
      * @return int Maximum payload bytes to read, or zero when no part fits.
      *
      * @throws InvalidArgumentException If total or offset is inconsistent.
      * @throws RuntimeException If no upload request is open.
      */
-    public function next_file_body_bytes(string $path, int $total_bytes, int $offset, ?int $mode = null): int
+    public function next_file_body_bytes(string $path, int $total_bytes, int $offset): int
     {
         if ($this->curl_handle === null) {
             throw new RuntimeException('No upload request is open; call start_upload_request() before next_file_body_bytes().');
@@ -418,7 +416,6 @@ class MultipartPushStreamClient
             'path' => $path,
             'total_bytes' => $total_bytes,
             'offset' => $offset,
-            'mode' => $mode,
             'payload' => '',
         ], 0);
         $headers['Content-Length'] = (string) PHP_INT_MAX;
@@ -685,8 +682,8 @@ class MultipartPushStreamClient
             );
         }
         $type = $part['type'] ?? null;
-        if (!is_string($type) || !in_array($type, ['file', 'directory', 'directory-mode', 'symlink', 'delete-list'], true)) {
-            throw new InvalidArgumentException('Multipart push part type must be file, directory, directory-mode, symlink, or delete-list.');
+        if (!is_string($type) || !in_array($type, ['file', 'directory', 'symlink', 'delete-list'], true)) {
+            throw new InvalidArgumentException('Multipart push part type must be file, directory, symlink, or delete-list.');
         }
         $headers = ['X-Chunk-Type' => $type];
         if ($type === 'file') {
@@ -699,20 +696,11 @@ class MultipartPushStreamClient
             $headers['X-File-Path'] = base64_encode($path);
             $headers['X-File-Size'] = (string) $total;
             $headers['X-Chunk-Offset'] = (string) $offset;
-            if (isset($part['mode'])) {
-                $headers['X-File-Mode'] = $this->mode_header($part['mode'], 'file');
-            }
-        } elseif ($type === 'directory' || $type === 'directory-mode') {
+        } elseif ($type === 'directory') {
             if ($payload_bytes !== 0) {
-                throw new InvalidArgumentException('Directory and directory-mode parts must have an empty body.');
+                throw new InvalidArgumentException('Directory parts must have an empty body.');
             }
             $headers['X-Directory-Path'] = base64_encode($this->non_empty_string_part_field($part, 'path', $type));
-            if ($type === 'directory-mode' && !isset($part['mode'])) {
-                throw new InvalidArgumentException('Multipart directory-mode part requires a mode.');
-            }
-            if (isset($part['mode'])) {
-                $headers['X-Directory-Mode'] = $this->mode_header($part['mode'], $type);
-            }
         } elseif ($type === 'symlink') {
             if ($payload_bytes !== 0) {
                 throw new InvalidArgumentException('Symlink parts must have an empty body.');
@@ -724,22 +712,18 @@ class MultipartPushStreamClient
             }
             $headers['X-Symlink-Target'] = base64_encode($target);
         } else {
-            if ($payload_bytes > 0 && substr((string) ($part['payload'] ?? ''), -1) !== "\0") {
-                throw new InvalidArgumentException('Delete-list parts must end at a NUL path boundary.');
+            $offset = $part['offset'] ?? null;
+            if (!is_int($offset) || $offset < 0) {
+                throw new InvalidArgumentException('Delete-list parts require a non-negative target-confirmed offset.');
+            }
+            $headers['X-Delete-Offset'] = (string) $offset;
+            if (!empty($part['complete'])) {
+                $headers['X-Delete-Complete'] = '1';
             }
             $headers['Content-Type'] = 'application/octet-stream';
         }
         $headers['Content-Length'] = (string) $payload_bytes;
         return $headers;
-    }
-
-    /** @param mixed $mode */
-    private function mode_header($mode, string $type): string
-    {
-        if (!is_int($mode) || $mode < 0 || $mode > 07777) {
-            throw new InvalidArgumentException('Multipart ' . $type . ' part mode must contain only permission bits.');
-        }
-        return sprintf('0%03o', $mode);
     }
 
     /**

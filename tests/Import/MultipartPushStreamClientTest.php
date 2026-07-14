@@ -48,6 +48,14 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertStringContainsString('Content-Type: multipart/mixed; boundary=reprint-', $received);
         $this->assertStringContainsString('X-Chunk-Type: file', $received);
         $this->assertStringContainsString("a\0b", $received, 'The raw part payload is on the network before finish_request().');
+        $this->assertTrue($client->send_part([
+            'type' => 'delete-list',
+            'offset' => 7,
+            'payload' => "gone\0",
+        ]));
+        $received .= $this->read_available($connection);
+        $this->assertStringContainsString('X-Chunk-Type: delete-list', $received);
+        $this->assertStringContainsString('X-Delete-Offset: 7', $received);
 
         $response = (string) json_encode(['status' => 'accepted', 'accepted' => []]);
         fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($response) . "\r\nConnection: close\r\n\r\n" . $response);
@@ -56,7 +64,7 @@ final class MultipartPushStreamClientTest extends TestCase {
 
         $result = $client->finish_request();
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
-        $this->assertSame(1, $result['parts_sent']);
+        $this->assertSame(2, $result['parts_sent']);
     }
 
     public function testTargetPartLimitBoundsTheNextSourceRead(): void {
@@ -85,7 +93,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client->finish_request();
     }
 
-    public function testNextSourceReadReservesTheFileModeHeaderItWillSend(): void {
+    public function testNextSourceReadAndPartOmitModeTransport(): void {
         if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
             $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');
         }
@@ -110,18 +118,17 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertNotFalse($connection);
         $this->read_available($connection);
 
-        $maximum = $client->next_file_body_bytes('mode.bin', 1000, 0, 0001);
+        $maximum = $client->next_file_body_bytes('mode.bin', 1000, 0);
         $this->assertGreaterThan(0, $maximum);
         $this->assertTrue($client->send_part([
             'type' => 'file',
             'path' => 'mode.bin',
             'total_bytes' => 1000,
             'offset' => 0,
-            'mode' => 0001,
             'payload' => str_repeat('x', $maximum),
-        ]), 'The read budget omitted bytes that send_part() adds for X-File-Mode.');
+        ]));
         $received = $this->read_available($connection);
-        $this->assertStringContainsString('X-File-Mode: 0001', $received);
+        $this->assertStringNotContainsString('X-File-Mode', $received);
 
         $response = (string) json_encode(['status' => 'accepted', 'accepted' => []]);
         fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($response) . "\r\nConnection: close\r\n\r\n" . $response);

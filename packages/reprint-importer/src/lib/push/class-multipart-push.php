@@ -10,7 +10,7 @@
  * it with the last completed baseline. Changed and deleted paths remain as
  * disk-backed streaming plans. The driver then creates one target workspace,
  * uploads many bounded parts per HTTP request, and repeats bounded commit calls
- * until the target has switched and cleaned every live action.
+ * until the target has deleted and directly installed every planned value.
  *
  * Example:
  *
@@ -31,7 +31,7 @@
  * sizing. Every stored accepted byte count comes from target confirmation. It
  * never contains a materialized request body or future in-memory frame list.
  *
- * File cursors carry a source token made from size, ctime, and mode. If the source
+ * File cursors carry a source token made from size and ctime. If the source
  * changes between pieces, the next request restarts that logical file at offset
  * zero so new bytes are never appended behind an old-version prefix. As with
  * the journal signals, a same-size edit whose ctime lands in the same timestamp
@@ -245,7 +245,9 @@ class MultipartPush
                 // the same server-derived target session, never creates two.
                 'create_token' => bin2hex(random_bytes(16)),
                 'session_id' => null,
+                'delete_plan_offset' => 0,
                 'delete_offset' => 0,
+                'delete_plan_complete' => false,
                 'deletes_complete' => false,
                 'plan_offset' => 0,
                 'current' => null,
@@ -270,6 +272,7 @@ class MultipartPush
         if (($state['phase'] ?? null) === 'uploading') {
             $this->upload_deletes($state, $client);
             $this->upload_changes($state, $client);
+            $this->complete_delete_upload($state, $client);
             $state['phase'] = 'committing';
             $state['sizer'] = $client->get_request_sizer_state();
             $this->write_state($state);
@@ -433,7 +436,7 @@ class MultipartPush
             throw new RuntimeException('Could not write local push snapshot ' . $temporary . '.');
         }
         try {
-            $this->scan_directory($this->source_root, '', $handle, null, null);
+            $this->scan_directory($this->source_root, '', $handle, null);
         } finally {
             fclose($handle);
         }
@@ -459,9 +462,8 @@ class MultipartPush
      * @param string $relative_path Target-relative path of that directory.
      * @param resource $handle Writable unsorted snapshot stream.
      * @param int|null $directory_ctime Parent-supplied lstat ctime for this directory.
-     * @param int|null $directory_mode Parent-supplied permission bits for this directory.
      */
-    private function scan_directory(string $directory, string $relative_path, $handle, ?int $directory_ctime, ?int $directory_mode): void
+    private function scan_directory(string $directory, string $relative_path, $handle, ?int $directory_ctime): void
     {
         $directory_handle = @opendir($directory);
         if ($directory_handle === false) {
@@ -484,7 +486,7 @@ class MultipartPush
                         // children create them. Keep an existence-only baseline marker so
                         // deleting a whole non-empty directory also removes the now-empty
                         // directory on the target.
-                        $this->write_snapshot_entry($handle, $relative_path, 'tree-directory', 0, $directory_ctime ?? 0, $directory_mode);
+                        $this->write_snapshot_entry($handle, $relative_path, 'tree-directory', 0, $directory_ctime ?? 0);
                     }
                 }
                 $path = $relative_path === '' ? $entry : $relative_path . '/' . $entry;
@@ -498,15 +500,15 @@ class MultipartPush
                 $mode = (int) $stat['mode'];
                 $type_bits = $mode & 0170000;
                 if ($type_bits === 0040000) {
-                    $this->scan_directory($absolute_path, $path, $handle, (int) $stat['ctime'], $mode & 07777);
+                    $this->scan_directory($absolute_path, $path, $handle, (int) $stat['ctime']);
                 } elseif ($type_bits === 0100000) {
-                    $this->write_snapshot_entry($handle, $path, 'file', (int) $stat['size'], (int) $stat['ctime'], $mode & 07777);
+                    $this->write_snapshot_entry($handle, $path, 'file', (int) $stat['size'], (int) $stat['ctime']);
                 } elseif ($type_bits === 0120000) {
                     $target = @readlink($absolute_path);
                     if (!is_string($target)) {
                         throw new RuntimeException('Could not read source symlink ' . $this->display_path($path) . '.');
                     }
-                    $this->write_snapshot_entry($handle, $path, 'symlink', (int) $stat['size'], (int) $stat['ctime'], null, $target);
+                    $this->write_snapshot_entry($handle, $path, 'symlink', (int) $stat['size'], (int) $stat['ctime'], $target);
                 } else {
                     throw new RuntimeException('Source path ' . $this->display_path($path) . ' has an unsupported filesystem type.');
                 }
@@ -515,7 +517,7 @@ class MultipartPush
             closedir($directory_handle);
         }
         if ($relative_path !== '' && !$has_children) {
-            $this->write_snapshot_entry($handle, $relative_path, 'directory', 0, $directory_ctime ?? 0, $directory_mode);
+            $this->write_snapshot_entry($handle, $relative_path, 'directory', 0, $directory_ctime ?? 0);
         }
     }
 
@@ -523,7 +525,7 @@ class MultipartPush
      * Writes one binary-safe source identity record to the unsorted snapshot.
      *
      * Paths and symlink targets are base64 because JSON accepts only UTF-8 text.
-     * File size, ctime, and mode are the same drift signals stored beside
+     * File size and ctime are the same drift signals stored beside
      * resumable cursors; the logical type distinguishes files, links, empty
      * directories, and private non-empty tree markers.
      *
@@ -532,10 +534,9 @@ class MultipartPush
      * @param string $type Snapshot logical type.
      * @param int $size lstat size in bytes.
      * @param int $ctime lstat change timestamp in seconds.
-     * @param int|null $mode Permission bits for files and directories.
      * @param string|null $target Literal symlink target, when applicable.
      */
-    private function write_snapshot_entry($handle, string $path, string $type, int $size, int $ctime, ?int $mode = null, ?string $target = null): void
+    private function write_snapshot_entry($handle, string $path, string $type, int $size, int $ctime, ?string $target = null): void
     {
         $entry = [
             'path' => base64_encode($path),
@@ -543,9 +544,6 @@ class MultipartPush
             'size' => $size,
             'ctime' => $ctime,
         ];
-        if ($mode !== null) {
-            $entry['mode'] = $mode;
-        }
         if ($target !== null) {
             $entry['target'] = base64_encode($target);
         }
@@ -558,23 +556,25 @@ class MultipartPush
     /**
      * Sends bounded delete-list parts and persists only target-confirmed offsets.
      *
-     * Delete replay is idempotent at commit planning, so an indeterminate
-     * response retries the same complete NUL-delimited records. The JSONL byte
-     * offset moves only after an accepted response confirms the part type.
+     * The target accepts only an exact replay of its stored raw bytes, so an
+     * indeterminate response retries the same complete NUL-delimited records.
+     * The JSONL plan offset moves only after the target confirms its actual raw
+     * delete-stream size.
      *
      * @param array<string,mixed> $state
      * @param MultipartPushStreamClient $client Active target client.
      */
     private function upload_deletes(array &$state, MultipartPushStreamClient $client): void
     {
-        if (!empty($state['deletes_complete'])) {
+        if (!empty($state['delete_plan_complete'])) {
             return;
         }
         while (true) {
-            $start = (int) ($state['delete_offset'] ?? 0);
-            [$payload, $end] = $this->read_delete_part($start, $this->maximum_part_bytes($state));
+            $plan_start = (int) ($state['delete_plan_offset'] ?? 0);
+            $target_start = (int) ($state['delete_offset'] ?? 0);
+            [$payload, $plan_end] = $this->read_delete_part($plan_start, $this->maximum_part_bytes($state));
             if ($payload === '') {
-                $state['deletes_complete'] = true;
+                $state['delete_plan_complete'] = true;
                 $this->write_state($state);
                 return;
             }
@@ -582,7 +582,7 @@ class MultipartPush
             if (!$client->start_upload_request($session_id)) {
                 throw new RuntimeException('Could not open delete-list upload: ' . $client->get_last_error());
             }
-            $sent = $client->send_part(['type' => 'delete-list', 'payload' => $payload]);
+            $sent = $client->send_part(['type' => 'delete-list', 'offset' => $target_start, 'payload' => $payload]);
             $result = $client->finish_request();
             if (!$sent || $result['status'] !== 'complete') {
                 $this->handle_unknown_upload_result($state, $client, $result, null);
@@ -592,9 +592,53 @@ class MultipartPush
             if (!is_array($accepted) || !isset($accepted[0]) || ($accepted[0]['type'] ?? null) !== 'delete-list') {
                 throw new RuntimeException('Target did not confirm the delete-list part it accepted.');
             }
-            $state['delete_offset'] = $end;
+            $accepted_bytes = $accepted[0]['accepted_bytes'] ?? null;
+            $expected_bytes = $target_start + strlen($payload);
+            if (!is_numeric($accepted_bytes) || (int) $accepted_bytes !== $expected_bytes) {
+                throw new RuntimeException('Target confirmed delete offset ' . json_encode($accepted_bytes) . ', expected its actual stored size ' . $expected_bytes . '.');
+            }
+            $state['delete_offset'] = $expected_bytes;
+            $state['delete_plan_offset'] = $plan_end;
             $state['sizer'] = $client->get_request_sizer_state();
             $this->write_state($state);
+        }
+    }
+
+    /** Declares the already uploaded raw delete stream complete. */
+    private function complete_delete_upload(array &$state, MultipartPushStreamClient $client): void
+    {
+        if (!empty($state['deletes_complete'])) {
+            return;
+        }
+        if (empty($state['delete_plan_complete'])) {
+            throw new LogicException('Delete upload completion was requested before the local delete plan reached EOF.');
+        }
+        while (true) {
+            $target_offset = (int) ($state['delete_offset'] ?? 0);
+            if (!$client->start_upload_request($this->session_id_from_state($state))) {
+                throw new RuntimeException('Could not open delete completion upload: ' . $client->get_last_error());
+            }
+            $sent = $client->send_part([
+                'type' => 'delete-list',
+                'offset' => $target_offset,
+                'complete' => true,
+                'payload' => '',
+            ]);
+            $result = $client->finish_request();
+            if (!$sent || $result['status'] !== 'complete') {
+                $this->handle_unknown_upload_result($state, $client, $result, null);
+                continue;
+            }
+            $accepted = $result['response']['accepted'] ?? null;
+            if (!is_array($accepted) || !isset($accepted[0]) || ($accepted[0]['type'] ?? null) !== 'delete-list'
+                || ($accepted[0]['state'] ?? null) !== 'complete'
+                || (int) ($accepted[0]['accepted_bytes'] ?? -1) !== $target_offset) {
+                throw new RuntimeException('Target did not confirm delete upload completion at its actual stored size.');
+            }
+            $state['deletes_complete'] = true;
+            $state['sizer'] = $client->get_request_sizer_state();
+            $this->write_state($state);
+            return;
         }
     }
 
@@ -687,7 +731,7 @@ class MultipartPush
                         $this->restart_for_structural_source_change($state);
                         return;
                     }
-                    $payload_limit = $client->next_file_body_bytes($path, $file['size'], $file['offset'], $file['mode']);
+                    $payload_limit = $client->next_file_body_bytes($path, $file['size'], $file['offset']);
                     if ($payload_limit === 0) {
                         break;
                     }
@@ -722,7 +766,6 @@ class MultipartPush
                         'path' => $path,
                         'total_bytes' => $file['size'],
                         'offset' => $file['offset'],
-                        'mode' => $file['mode'],
                         'payload' => $payload,
                     ])) {
                         break;
@@ -793,7 +836,7 @@ class MultipartPush
     /**
      * Selects the persisted file offset whose source token still matches.
      *
-     * A persisted cursor is reusable only with the same size, ctime, and mode
+     * A persisted cursor is reusable only with the same size and ctime
      * fingerprint. The fingerprint is checkpointed before any bytes leave.
      * A same-size rewrite within one ctime tick remains indistinguishable to
      * both this token and the snapshot diff, which uses the same signals.
@@ -810,7 +853,7 @@ class MultipartPush
         if ($stat === null) {
             return ['restart_session' => true];
         }
-        $fingerprint = ['size' => $stat['size'], 'ctime' => $stat['ctime'], 'mode' => $stat['mode']];
+        $fingerprint = ['size' => $stat['size'], 'ctime' => $stat['ctime']];
         if ($working_file !== null) {
             if ($working_file['path'] !== $path || $working_file['fingerprint'] !== $fingerprint) {
                 return ['restart_session' => true];
@@ -820,7 +863,6 @@ class MultipartPush
                 'absolute_path' => $absolute_path,
                 'size' => $stat['size'],
                 'offset' => $working_file['offset'],
-                'mode' => $stat['mode'],
                 'fingerprint' => $fingerprint,
             ];
         }
@@ -849,7 +891,6 @@ class MultipartPush
             'absolute_path' => $absolute_path,
             'size' => $stat['size'],
             'offset' => $offset,
-            'mode' => $stat['mode'],
             'fingerprint' => $fingerprint,
         ];
     }
@@ -857,9 +898,8 @@ class MultipartPush
     /**
      * Revalidates a directory or symlink immediately before sending it.
      *
-     * Empty directories must still be empty, directory-mode records must still
-     * name non-empty directories, and symlinks must still be links with non-empty
-     * literal targets. Returning null triggers a fresh whole-tree scan rather
+     * Empty directories must still be empty and symlinks must still be links
+     * with non-empty literal targets. Returning null triggers a fresh whole-tree scan rather
      * than applying metadata from a stale structural plan.
      *
      * @param array<string,mixed> $entry Current disk-plan record.
@@ -875,7 +915,7 @@ class MultipartPush
             return null;
         }
         $type_bits = ((int) ($stat['mode'] ?? 0)) & 0170000;
-        if ($entry['type'] === 'directory' || $entry['type'] === 'directory-mode') {
+        if ($entry['type'] === 'directory') {
             if ($type_bits !== 0040000) {
                 return null;
             }
@@ -898,17 +938,10 @@ class MultipartPush
             } finally {
                 closedir($handle);
             }
-            if (
-                ($entry['type'] === 'directory' && $has_entries)
-                || ($entry['type'] === 'directory-mode' && !$has_entries)
-            ) {
+            if ($has_entries) {
                 return null;
             }
-            $mode = ((int) $stat['mode']) & 07777;
-            if (!isset($entry['mode']) || $entry['mode'] !== $mode) {
-                return null;
-            }
-            return ['type' => $entry['type'], 'path' => $path, 'mode' => $mode, 'payload' => ''];
+            return ['type' => 'directory', 'path' => $path, 'payload' => ''];
         }
         if ($entry['type'] === 'symlink') {
             $target = $type_bits === 0120000 ? @readlink($absolute_path) : false;
@@ -1002,7 +1035,13 @@ class MultipartPush
     private function handle_unknown_upload_result(array &$state, MultipartPushStreamClient $client, array $result, ?array $first_sent): void
     {
         if ($result['status'] === 'failed') {
-            throw new RuntimeException('Multipart upload failed: ' . ($result['reason'] ?? 'unknown') . '. ' . ($result['detail'] ?? ''));
+            $target_response = is_array($result['response'] ?? null)
+                ? json_encode($result['response'], JSON_UNESCAPED_SLASHES)
+                : false;
+            throw new RuntimeException(
+                'Multipart upload failed: ' . ( $result['reason'] ?? 'unknown' ) . '. ' . ( $result['detail'] ?? '' )
+                . ( $target_response === false ? '' : ' Target response: ' . $target_response )
+            );
         }
         // A retry has no sender-confirmed outcome. Ask the target for only
         // the current path before reusing a persisted file cursor.
@@ -1016,7 +1055,7 @@ class MultipartPush
     /**
      * Reconciles the first indeterminate part with target workspace state.
      *
-     * A file cursor is reused only if the current size, ctime, and mode token still
+     * A file cursor is reused only if the current size and ctime token still
      * matches the sent token. Completed metadata advances its plan record;
      * missing metadata remains pending and will be replayed.
      *
@@ -1118,7 +1157,7 @@ class MultipartPush
     }
 
     /**
-     * Drives bounded target commit calls until every deployment action is durable.
+     * Drives bounded target commit calls until every deletion and installation is durable.
      *
      * @param array<string,mixed> $state
      * @param MultipartPushStreamClient $client Signed control client.
@@ -1201,17 +1240,12 @@ class MultipartPush
                 throw new RuntimeException('Local changed-path list contains an invalid path record.');
             }
             $type = $entry['type'] ?? null;
-            if (!is_string($type) || !in_array($type, ['file', 'directory', 'directory-mode', 'symlink'], true)) {
+            if (!is_string($type) || !in_array($type, ['file', 'directory', 'symlink'], true)) {
                 throw new RuntimeException('Local changed-path list contains no supported logical type for ' . $this->display_path($path) . '.');
-            }
-            $mode = $entry['mode'] ?? null;
-            if (in_array($type, ['file', 'directory', 'directory-mode'], true) && (!is_int($mode) || $mode < 0 || $mode > 07777)) {
-                throw new RuntimeException('Local changed-path list contains no valid mode for ' . $this->display_path($path) . '.');
             }
             return [
                 'path' => $path,
                 'type' => $type,
-                'mode' => $mode,
                 'next_offset' => ftell($handle),
             ];
         } finally {
@@ -1220,14 +1254,14 @@ class MultipartPush
     }
 
     /**
-     * Returns the size, ctime, and mode token stored beside a resumable cursor.
+     * Returns the size and ctime token stored beside a resumable cursor.
      *
      * lstat() deliberately rejects a file which became a symlink or another
      * type; ctime catches ordinary replacement/content changes which mtime can
      * hide through touch(), subject to the filesystem timestamp resolution.
      *
      * @param string $path Absolute source path.
-     * @return array{size:int,ctime:int,mode:int}|null
+     * @return array{size:int,ctime:int}|null
      */
     private function regular_file_stat(string $path): ?array
     {
@@ -1239,7 +1273,6 @@ class MultipartPush
         return [
             'size' => (int) $stat['size'],
             'ctime' => (int) $stat['ctime'],
-            'mode' => ((int) $stat['mode']) & 07777,
         ];
     }
 
@@ -1413,9 +1446,11 @@ class MultipartPush
     private function require_control_status(array $response, string $expected_status): void
     {
         if (($response['status'] ?? null) !== $expected_status) {
+            $encoded_response = json_encode($response, JSON_UNESCAPED_SLASHES);
             throw new RuntimeException(
                 'Push control request expected status ' . $expected_status . ', received '
-                . json_encode($response['status'] ?? null) . ': ' . (string) ($response['detail'] ?? $response['reason'] ?? '')
+                . json_encode($response['status'] ?? null) . ': '
+                . ( is_string($encoded_response) ? $encoded_response : (string) ( $response['detail'] ?? $response['reason'] ?? '' ) )
             );
         }
     }

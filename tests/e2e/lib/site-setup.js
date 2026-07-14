@@ -177,6 +177,7 @@ export function createSampleFiles(siteDir) {
  *   customDb: async (dbName, conn) => {} — adds extra tables on top of real WP tables
  *   wpConfig: { DB_USER: '...', ... } — override wp-config.php creds AFTER install
  *   tablePrefix: 'wp_' — table prefix to write into wp-config.php before install
+ *   afterConfig: async (siteDir, dbName) => {} — runs after wp-config.php exists, before WordPress can load it
  *   afterCreate: async (siteDir, dbName) => {} — post-creation hook (dir is writable)
  *   afterPermissions: async (siteDir) => {} — runs after final chown/chmod (for chmod 000 etc.)
  */
@@ -234,7 +235,10 @@ export async function ensureSite(name, options = {}) {
     log('WP template ready');
 
     // Remove old site dir (clean slate), create fresh, copy WP template
-    execSync(`sudo rm -rf "${siteDir}"`, { timeout: 30000 });
+    // A Docker push scenario keeps a nested volume below its site root. A
+    // same-device find removes ordinary prior contents without descending into
+    // or unmounting that deliberate cross-device test fixture.
+    execSync(`sudo mkdir -p "${siteDir}" && sudo find "${siteDir}" -xdev -mindepth 1 -delete || true`, { timeout: 30000 });
     execSync(`sudo mkdir -p "${SITE_ROOT}" && sudo mkdir -p "${siteDir}"`, { timeout: 30000 });
     execSync(`sudo cp -a "${WP_TEMPLATE}/." "${siteDir}/"`, { timeout: 60000 });
     execSync(`sudo chmod -R 777 "${siteDir}"`, { timeout: 30000 });
@@ -245,6 +249,9 @@ export async function ensureSite(name, options = {}) {
 
     // Write full wp-config.php with admin creds (needed for wp core install)
     writeFullWpConfig(siteDir, DB_HOST, dbName, DB_USER, DB_PASS, tablePrefix);
+    if (options.afterConfig) {
+        await options.afterConfig(siteDir, dbName);
+    }
 
     // Copy the built plugin bundle, including its bundled Composer vendor tree.
     cpSync(

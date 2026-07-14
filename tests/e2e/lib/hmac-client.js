@@ -62,4 +62,20 @@ export class HmacClient {
             'X-Auth-Content-Hash': contentHash,
         };
     }
+
+    /** Generate headers for the staged endpoints' unsigned streaming envelope. */
+    getEnvelopeAuthHeaders(method, url) {
+        const nonce = this.generateNonce();
+        const timestamp = this.getTimestamp();
+        const parsed = new URL(url);
+        const requestTarget = parsed.pathname + parsed.search;
+        const contentHash = 'UNSIGNED-PAYLOAD';
+        const message = nonce + timestamp + contentHash + '\n' + method.toUpperCase() + '\n' + requestTarget;
+        return {
+            'X-Auth-Signature': createHmac('sha256', this.secret).update(message).digest('hex'),
+            'X-Auth-Nonce': nonce,
+            'X-Auth-Timestamp': timestamp,
+            'X-Auth-Content-Hash': contentHash,
+        };
+    }
 }

@@ -7,6 +7,9 @@ use function WordPress\Reprint\Exporter\parse_size;
 if (!class_exists('Site_Export_Multipart_Processor', false)) {
     require_once __DIR__ . '/class-multipart-processor.php';
 }
+if (!class_exists('Site_Export_Staged_Apply_Exception', false)) {
+    require_once __DIR__ . '/class-staged-apply-exception.php';
+}
 if (!class_exists('Site_Export_Staged_Apply_Session', false)) {
     require_once __DIR__ . '/class-staged-apply-session.php';
 }
@@ -22,8 +25,8 @@ if (!class_exists('Site_Export_Staged_Apply_Session', false)) {
  *   workspace and reports only bytes which the target durably accepted.
  * - `staged_session_status` reconciles a bounded set of sender paths against
  *   the workspace after a lost or ambiguous upload response.
- * - `staged_session_commit` advances bounded planning, preparation,
- *   live-switch, and cleanup work until `send_next_request` becomes false.
+ * - `staged_session_commit` advances bounded delete and direct-install work
+ *   until `send_next_request` becomes false.
  * - `staged_session_discard` removes abandoned or successfully completed private work
  *   through bounded resumable tombstone cleanup.
  *
@@ -50,6 +53,14 @@ if (!class_exists('Site_Export_Staged_Apply_Session', false)) {
 final class Site_Export_Staged_Endpoints {
 
     /**
+     * The target has not supplied every path and setting required for apply.
+     *
+     * This endpoint-owned reason is separate from session failures because no
+     * private session can be opened until apply configuration is available.
+     */
+    private const ERROR_APPLY_NOT_CONFIGURED = 'apply_not_configured';
+
+    /**
      * Default maximum Content-Length of one MIME part: 4 MiB.
      *
      * This is a frame/body-piece policy, not the maximum HTTP request body.
@@ -59,7 +70,7 @@ final class Site_Export_Staged_Endpoints {
     private const DEFAULT_MAX_FRAME_BYTES = 4194304;
 
     /**
-     * Default number of prepare or live-switch actions performed per commit request.
+     * Default number of delete or direct-install steps per commit request.
      *
      * Bounding work lets ordinary PHP HTTP runtimes checkpoint and return
      * before their execution limits while the sender drives later requests.
@@ -83,7 +94,11 @@ final class Site_Export_Staged_Endpoints {
     private const MAX_STATUS_PATHS = 32;
 
     /**
-     * Server-owned private root in which apply-session workspaces are stored.
+     * Configured path to the server-owned root for staged-apply workspaces.
+     *
+     * The endpoint passes this path to session creation and capability checks.
+     * It never falls back to a temporary directory because uploads and commit
+     * recovery must survive process exits and later HTTP requests.
      *
      * @var string
      */
@@ -92,14 +107,20 @@ final class Site_Export_Staged_Endpoints {
     /**
      * Shared HMAC secret, or null when signed endpoints are unavailable.
      *
-     * The value is never included in capability or endpoint responses.
+     * It authenticates the HTTP method and exact request target before an
+     * upload body is opened. The value is never included in capability or
+     * endpoint responses.
      *
      * @var string|null
      */
     private $secret;
 
     /**
-     * Live site root changed by commit, or null until apply is configured.
+     * Configured path to the live site root changed by commit.
+     *
+     * Null means the server may still answer capability requests but cannot
+     * create or reopen an apply session. Session creation canonicalizes the
+     * path and verifies that it shares a filesystem with $staging_dir.
      *
      * @var string|null
      */
@@ -108,26 +129,65 @@ final class Site_Export_Staged_Endpoints {
     /**
      * Target-relative paths which staged sessions may not replace or traverse.
      *
+     * These values are passed into every create, open, and discard operation so
+     * a later endpoint cannot reopen a workspace under weaker protection than
+     * the request which created it.
+     *
      * @var string[]
      */
     private $apply_protected_paths;
 
-    /** @var string[] Target-relative plugin/theme containers. */
-    private $apply_deployment_roots;
-
-    /** @var bool Whether create, upload, status, commit, and discard are enabled. */
+    /**
+     * Whether target configuration permits the staged-apply endpoint family.
+     *
+     * When false, preflight explains that push is unavailable and operations
+     * fail with `apply_not_configured` before any session path is opened.
+     *
+     * @var bool
+     */
     private $apply_sessions_enabled;
 
-    /** @var int Allowed HMAC timestamp skew in seconds. */
+    /**
+     * Maximum age or future skew accepted for an HMAC timestamp, in seconds.
+     *
+     * The value is applied uniformly to the pre-body authentication gate and
+     * the defensive endpoint-level verification of the same signed envelope.
+     *
+     * @var int
+     */
     private $timestamp_tolerance;
 
-    /** @var int Maximum declared body bytes accepted for one MIME part. */
+    /**
+     * Maximum Content-Length accepted for one multipart part body.
+     *
+     * This limit is reported by preflight and passed to the session before it
+     * reads a part. It bounds one change frame; it is not the HTTP request-body
+     * ceiling because many parts may share a request.
+     *
+     * @var int
+     */
     private $max_frame_bytes;
 
-    /** @var int Maximum deployment actions advanced by one commit request. */
+    /**
+     * Maximum bounded commit work units advanced during one endpoint call.
+     *
+     * One unit advances one deletion root, installs one staged value, or
+     * creates or consumes one structural directory. The session checkpoints
+     * each bounded slice and returns `send_next_request` while work remains.
+     *
+     * @var int
+     */
     private $max_commit_steps;
 
-    /** @var int Maximum complete MIME parts accepted from one upload request. */
+    /**
+     * Maximum complete multipart changes accepted from one HTTP request.
+     *
+     * The endpoint stops only after a part is durably staged. This independently
+     * bounds the `accepted` response array even when the remote HTTP stack
+     * permits a much larger entity body.
+     *
+     * @var int
+     */
     private $max_upload_parts;
 
     /**
@@ -144,8 +204,7 @@ final class Site_Export_Staged_Endpoints {
      * Configures signed endpoint policy and snapshots PHP's request-body limit.
      *
      * Supported options are `staging_dir`, `secret`, `apply_target_root`,
-     * `apply_protected_paths`, `apply_deployment_roots`,
-     * `apply_sessions_enabled`, `timestamp_tolerance`, `max_frame_bytes`,
+     * `apply_protected_paths`, `apply_sessions_enabled`, `timestamp_tolerance`, `max_frame_bytes`,
      * `max_commit_steps`, and `max_upload_parts`. Optional values receive the
      * constants documented above; a supplied invalid value throws instead of
      * silently selecting its default.
@@ -179,12 +238,6 @@ final class Site_Export_Staged_Endpoints {
             throw new InvalidArgumentException('Staged session apply_protected_paths must be an array.');
         }
         $this->apply_protected_paths = $protected_paths;
-
-        $deployment_roots = $options['apply_deployment_roots'] ?? [];
-        if (!is_array($deployment_roots)) {
-            throw new InvalidArgumentException('Staged session apply_deployment_roots must be an array.');
-        }
-        $this->apply_deployment_roots = $deployment_roots;
 
         $enabled = $options['apply_sessions_enabled'] ?? true;
         if (!is_bool($enabled)) {
@@ -341,8 +394,7 @@ final class Site_Export_Staged_Endpoints {
                 $this->staging_dir,
                 (string) $this->apply_target_root,
                 $this->apply_protected_paths,
-                $session_id,
-                $this->apply_deployment_roots
+                $session_id
             );
             $status = $session->get_status();
             return [
@@ -390,7 +442,10 @@ final class Site_Export_Staged_Endpoints {
         }
         return $this->session_action(function () use ($config, $headers, $input): array {
             if (!is_resource($input)) {
-                throw new RuntimeException('Could not open the multipart upload request body.', Site_Export_Staged_Apply_Session::ERROR_RETRYABLE_IO);
+                throw new Site_Export_Staged_Apply_Exception(
+                    Site_Export_Staged_Apply_Session::ERROR_RETRYABLE_IO,
+                    'Could not open the multipart upload request body.'
+                );
             }
             $session = $this->open_session($config, $headers);
             $content_type = $this->header($headers, 'Content-Type');
@@ -466,7 +521,7 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
-     * Advances a commit by the configured number of deployment actions.
+     * Advances a commit by the configured number of bounded filesystem steps.
      *
      * The sender repeats this endpoint while `send_next_request` is true. Each
      * response reflects the durable checkpoint after that bounded slice, so a
@@ -494,11 +549,10 @@ final class Site_Export_Staged_Endpoints {
     /**
      * Discards private work before live mutation or after commit has completed.
      *
-     * Uploading and preparing sessions can be abandoned because neither has
-     * changed the target. A complete session has no remaining recovery role and
-     * is removed as successful cleanup. Switching or cleaning sessions return
-     * `commit_required`; those sessions must finish commit so maintenance and
-     * recovery backups are handled by the checkpointed lifecycle. An active
+     * Uploading sessions can be abandoned because they have not changed the
+     * target. A complete session has no remaining recovery role and is removed
+     * as successful cleanup. Active commits return `commit_required`; they must
+     * finish so maintenance and pending direct work remain recoverable. An active
      * session is renamed to a private tombstone before bounded entry removal;
      * `send_next_request` remains true until that tombstone is gone. Repeating
      * discard after a lost response resumes the same cleanup.
@@ -522,8 +576,7 @@ final class Site_Export_Staged_Endpoints {
                 $this->staging_dir,
                 (string) $this->apply_target_root,
                 $session_id,
-                $this->apply_protected_paths,
-                $this->apply_deployment_roots
+                $this->apply_protected_paths
             );
             return [
                 'http_code' => 200,
@@ -563,16 +616,19 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
-     * Requires the target root and staged-apply switch to be configured.
+     * Requires the target root and staged-apply endpoints to be configured.
      *
      * Secret availability is checked separately by envelope authentication so
      * callers receive the protocol's `not_configured` reason at that boundary.
      *
-     * @throws RuntimeException With endpoint-internal code 2001 when unavailable.
+     * @throws Site_Export_Staged_Apply_Exception If staged apply is unavailable.
      */
     private function require_apply_configuration(): void {
         if (!$this->apply_sessions_enabled || $this->apply_target_root === null) {
-            throw new RuntimeException('Server configuration has not enabled staged apply sessions.', 2001);
+            throw new Site_Export_Staged_Apply_Exception(
+                self::ERROR_APPLY_NOT_CONFIGURED,
+                'Server configuration has not enabled staged apply sessions.'
+            );
         }
     }
 
@@ -595,8 +651,7 @@ final class Site_Export_Staged_Endpoints {
             $this->staging_dir,
             (string) $this->apply_target_root,
             $session_id,
-            $this->apply_protected_paths,
-            $this->apply_deployment_roots
+            $this->apply_protected_paths
         );
     }
 
@@ -748,25 +803,45 @@ final class Site_Export_Staged_Endpoints {
             return $callback();
         } catch (InvalidArgumentException $exception) {
             return $this->rejected(400, 'invalid_session_request', $exception->getMessage());
-        } catch (RuntimeException $exception) {
-            switch ($exception->getCode()) {
-                case 2001:
-                    return $this->rejected(503, 'apply_not_configured', $exception->getMessage());
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $error_code = $exception->get_error_code();
+            switch ($error_code) {
+                case self::ERROR_APPLY_NOT_CONFIGURED:
+                    $http_code = 503;
+                    break;
                 case Site_Export_Staged_Apply_Session::ERROR_BUSY:
-                    return $this->rejected(423, 'busy', $exception->getMessage());
+                    $http_code = 423;
+                    break;
                 case Site_Export_Staged_Apply_Session::ERROR_SESSION_NOT_FOUND:
-                    return $this->rejected(404, 'session_not_found', $exception->getMessage());
+                    $http_code = 404;
+                    break;
                 case Site_Export_Staged_Apply_Session::ERROR_COMMIT_REQUIRED:
-                    return $this->rejected(409, 'commit_required', $exception->getMessage());
+                    $http_code = 409;
+                    break;
                 case Site_Export_Staged_Apply_Session::ERROR_LIVE_TREE_CHANGED:
-                    return $this->rejected(409, 'live_tree_changed', $exception->getMessage());
+                    $http_code = 409;
+                    break;
+                case Site_Export_Staged_Apply_Session::ERROR_CROSS_DEVICE_FILESYSTEM:
+                    $http_code = 409;
+                    break;
                 case Site_Export_Staged_Apply_Session::ERROR_INVALID_STATE:
-                    return $this->rejected(409, 'invalid_session_state', $exception->getMessage());
+                    $http_code = 409;
+                    break;
                 case Site_Export_Staged_Apply_Session::ERROR_RETRYABLE_IO:
-                    return $this->rejected(500, 'retryable_io_error', $exception->getMessage());
+                    $http_code = 500;
+                    break;
                 default:
                     return $this->rejected(409, 'session_rejected', $exception->getMessage());
             }
+            $response = $this->rejected($http_code, $error_code, $exception->getMessage());
+            foreach ($exception->get_context() as $name => $value) {
+                if (!in_array($name, ['status', 'reason'], true)) {
+                    $response['body'][$name] = $value;
+                }
+            }
+            return $response;
+        } catch (RuntimeException $exception) {
+            return $this->rejected(409, 'session_rejected', $exception->getMessage());
         }
     }
 

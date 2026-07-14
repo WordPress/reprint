@@ -39,7 +39,7 @@ PHP;
         $this->assertSame(0, $exitCode, (string) $stdout . (string) $stderr);
     }
 
-    public function testWordPressWrapperDerivesDeploymentRootsWhenExporterLivesOutsideTheTarget(): void {
+    public function testWordPressWrapperDoesNotExposeObsoleteDeploymentRoots(): void {
         $library = realpath(__DIR__ . '/../reprint-exporter-wp/lib.php');
         $this->assertNotFalse($library);
         $root = sys_get_temp_dir() . '/wordpress-staged-roots-' . bin2hex(random_bytes(8));
@@ -50,16 +50,12 @@ PHP;
         mkdir($outsidePlugin, 0700, true);
         $script = <<<'PHP'
 function plugin_dir_path($path) { return dirname($path) . '/'; }
-function get_theme_root() { return $GLOBALS['test_theme_root']; }
 define('ABSPATH', $argv[2] . '/');
 define('SITE_EXPORT_PLUGIN_DIR', $argv[3] . '/');
-define('WP_PLUGIN_DIR', $argv[2] . '/custom-plugins');
-$GLOBALS['test_theme_root'] = $argv[2] . '/custom-themes';
 require $argv[1];
 $options = _site_export_staged_options(['staging_dir' => $argv[2] . '/staging']);
-sort($options['apply_deployment_roots'], SORT_STRING);
-if ($options['apply_deployment_roots'] !== ['custom-plugins', 'custom-themes']) {
-    fwrite(STDERR, json_encode($options['apply_deployment_roots']));
+if (array_key_exists('apply_deployment_roots', $options)) {
+    fwrite(STDERR, json_encode($options));
     exit(1);
 }
 PHP;

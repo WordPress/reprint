@@ -8,7 +8,7 @@ if (!class_exists('Site_Export_Staged_Endpoints', false)) {
  * Dispatches staged-session recovery controls without booting WordPress.
  *
  * Replacing a plugin or theme can make the normal WordPress request bootstrap
- * fail exactly while a checkpointed commit still needs to finish switching or
+ * fail exactly while a checkpointed commit still needs to finish installation or
  * remove its maintenance marker. A host may expose a small standalone PHP
  * route which loads the exporter classes and passes the same server-owned
  * staged options used by the normal router:
@@ -20,7 +20,6 @@ if (!class_exists('Site_Export_Staged_Endpoints', false)) {
  *         'secret' => getenv('REPRINT_PUSH_SECRET'),
  *         'apply_target_root' => '/srv/www',
  *         'apply_protected_paths' => ['wp-content/plugins/reprint'],
- *         'apply_deployment_roots' => ['wp-content/plugins', 'wp-content/themes'],
  *     ]);
  *
  * The route accepts the ordinary signed status, commit, and discard request

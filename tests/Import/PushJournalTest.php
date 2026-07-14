@@ -152,7 +152,7 @@ final class PushJournalTest extends TestCase
         $counts = $journal->diff_local_files($this->writeIndex([
             'ctime-bump.txt' => [101, 5, 'file'],
             'size-bump.txt' => [100, 6, 'file'],
-            'type-swap' => [100, 5, 'link'],
+            'type-swap' => [100, 5, 'symlink'],
             'same.txt' => [100, 5, 'file'],
         ]));
 
@@ -163,7 +163,7 @@ final class PushJournalTest extends TestCase
         );
     }
 
-    public function testNonEmptyDirectoryModesProduceMetadataChanges(): void
+    public function testOldBaselineModesAndModeOnlyChangesAreIgnored(): void
     {
         $journal = $this->makeJournal();
         $baseline = $this->tempDir . '/directory-mode-baseline.jsonl';
@@ -190,12 +190,41 @@ final class PushJournalTest extends TestCase
         ]) . "\n");
         $journal->capture_local_files_baseline($baseline);
 
-        $this->assertSame(['changed' => 2, 'deleted' => 0], $journal->diff_local_files($current));
-        $records = array_map(static function (string $line): array {
-            return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-        }, file($journal->local_paths_to_push, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
-        $this->assertSame(['directory-mode', 'directory-mode'], array_column($records, 'type'));
-        $this->assertSame([0711, 0750], array_column($records, 'mode'));
+        $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($current));
+        $this->assertSame([], file($journal->local_paths_to_push, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
+    }
+
+    public function testEveryLogicalTypeTransitionEmitsOnlyTheRequiredClearAndInstallWork(): void
+    {
+        $types = ['file', 'symlink', 'empty', 'structural'];
+        foreach ($types as $previousType) {
+            foreach ($types as $currentType) {
+                $caseRoot = $this->tempDir . '/' . $previousType . '-to-' . $currentType;
+                $journal = new PushJournal($caseRoot, 'https://example.com/');
+                $baseline = $this->writeLogicalIndex($caseRoot . '-baseline.jsonl', $previousType, 1);
+                $current = $this->writeLogicalIndex($caseRoot . '-current.jsonl', $currentType, 2);
+                $journal->capture_local_files_baseline($baseline);
+
+                $journal->diff_local_files($current);
+
+                $clearRequired = (
+                    in_array($previousType, ['file', 'symlink'], true)
+                    && in_array($currentType, ['empty', 'structural'], true)
+                ) || (
+                    in_array($previousType, ['empty', 'structural'], true)
+                    && in_array($currentType, ['file', 'symlink'], true)
+                ) || ($previousType === 'structural' && $currentType === 'empty');
+                $expectedDeletes = $clearRequired ? ['value'] : [];
+                $expectedPushes = $currentType === 'structural'
+                    ? ['value/child.txt']
+                    : (($currentType === 'empty' && $previousType === 'empty') ? [] : ['value']);
+
+                $message = $previousType . ' to ' . $currentType;
+                $this->assertSame($expectedDeletes, $this->listPaths($journal->local_paths_to_delete), $message);
+                $this->assertSame($expectedPushes, $this->listPaths($journal->local_paths_to_push), $message);
+                $this->assertStringNotContainsString('directory-mode', (string) file_get_contents($journal->local_paths_to_push), $message);
+            }
+        }
     }
 
     public function testNewChangedDeletedAndUnchangedTogether(): void
@@ -235,8 +264,8 @@ final class PushJournalTest extends TestCase
         ]) . "\n");
         $journal->capture_local_files_baseline($baseline);
 
-        $this->assertSame(['changed' => 2, 'deleted' => 0], $journal->diff_local_files($current));
-        $this->assertSame([], file($journal->local_paths_to_delete, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
+        $this->assertSame(['changed' => 2, 'deleted' => 1], $journal->diff_local_files($current));
+        $this->assertSame(['a'], $this->listPaths($journal->local_paths_to_delete));
     }
 
     public function testDiffReplacesListsFromAnEarlierRun(): void
@@ -420,6 +449,52 @@ PHP;
             ['path' => base64_encode($path), 'ctime' => $ctime, 'size' => $size, 'type' => $type],
             JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
         );
+    }
+
+    private function writeLogicalIndex(string $path, string $logicalType, int $version): string
+    {
+        if ($logicalType === 'file') {
+            $entries = [[
+                'path' => base64_encode('value'),
+                'ctime' => $version,
+                'size' => $version,
+                'type' => 'file',
+            ]];
+        } elseif ($logicalType === 'symlink') {
+            $entries = [[
+                'path' => base64_encode('value'),
+                'ctime' => $version,
+                'size' => $version,
+                'type' => 'symlink',
+                'target' => base64_encode('target-' . $version),
+            ]];
+        } elseif ($logicalType === 'empty') {
+            $entries = [[
+                'path' => base64_encode('value'),
+                'ctime' => $version,
+                'size' => 0,
+                'type' => 'directory',
+            ]];
+        } else {
+            $entries = [
+                [
+                    'path' => base64_encode('value'),
+                    'ctime' => $version,
+                    'size' => 0,
+                    'type' => 'tree-directory',
+                ],
+                [
+                    'path' => base64_encode('value/child.txt'),
+                    'ctime' => $version,
+                    'size' => $version,
+                    'type' => 'file',
+                ],
+            ];
+        }
+        file_put_contents($path, implode("\n", array_map(static function (array $entry): string {
+            return json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        }, $entries)) . "\n");
+        return $path;
     }
 
     /**

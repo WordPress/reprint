@@ -333,6 +333,35 @@ export function runImporter(url, outputDir, command, options = {}) {
     return result;
 }
 
+/** Run the real push CLI against one provisioned WordPress target. */
+export function runPush(siteName, sourceDir, stateDir, options = {}) {
+    const args = [
+        IMPORTER_PATH,
+        'push',
+        getSiteUrl(siteName),
+        `--state-dir=${stateDir}`,
+        `--source-root=${sourceDir}`,
+        `--secret=${getSiteSecret(siteName)}`,
+        '--allow-http',
+        ...(options.extraArgs || []),
+    ];
+    try {
+        const stdout = execFileSync(PHP_BINARY, args, {
+            timeout: options.timeout || 180000,
+            encoding: 'utf-8',
+            env: { ...process.env },
+            maxBuffer: 50 * 1024 * 1024,
+        });
+        return { stdout, stderr: '', exitCode: 0 };
+    } catch (error) {
+        return {
+            stdout: error.stdout || '',
+            stderr: error.stderr || '',
+            exitCode: error.status === null ? -1 : (error.status || 1),
+        };
+    }
+}
+
 /**
  * Create a temporary directory for import output.
  */

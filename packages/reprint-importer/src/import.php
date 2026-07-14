@@ -12468,8 +12468,8 @@ if (
             "description" =>
                 "Builds a local on-disk snapshot, compares it with the last successful\n" .
                 "push baseline, then streams changed files, symlinks, empty directories,\n" .
-                "and deletes to one private target session. The target prepares and swaps\n" .
-                "the result only after upload completes. Re-run the same command after an\n" .
+                "and deletes to one private target session. After upload completes, the target\n" .
+                "deletes planned roots and installs staged values directly. Re-run after an\n" .
                 "interruption; it resumes from target-confirmed staging state.\n",
             "extra" =>
                 "Examples:\n" .

@@ -219,21 +219,24 @@ final class MultipartPushTest extends TestCase {
         $this->assertSame($this->lstat_tree($this->source), $this->lstat_tree($this->target));
     }
 
-    public function testPushPreservesNewNonEmptyDirectoryModesAndModeOnlyChanges(): void {
+    public function testPushUsesTargetLocalModesAndIgnoresModeOnlyChanges(): void {
         $this->write_source('mode-tree/child.txt', 'child');
         chmod($this->source . '/mode-tree', 0751);
 
         $first = $this->run_cli('push', ['--source-root=' . $this->source]);
         $this->assertSame(0, $first['exit_code'], $first['stderr']);
-        $this->assertSame(0751, fileperms($this->target . '/mode-tree') & 07777);
+        $target_mode = fileperms($this->target . '/mode-tree') & 07777;
         $this->assertSame('child', file_get_contents($this->target . '/mode-tree/child.txt'));
+
+        $baseline = glob($this->state . '/push/*/last-sync-local-files.jsonl') ?: [];
+        $this->assertCount(1, $baseline);
+        $this->assertStringNotContainsString('"mode"', (string) file_get_contents($baseline[0]));
 
         chmod($this->source . '/mode-tree', 0711);
         $second = $this->run_cli('push', ['--source-root=' . $this->source]);
         $this->assertSame(0, $second['exit_code'], $second['stderr']);
-        // The target mode changed in the server process, outside this PHP process.
         clearstatcache(true, $this->target . '/mode-tree');
-        $this->assertSame(0711, fileperms($this->target . '/mode-tree') & 07777);
+        $this->assertSame($target_mode, fileperms($this->target . '/mode-tree') & 07777);
         $this->assertSame('child', file_get_contents($this->target . '/mode-tree/child.txt'));
     }
 
@@ -563,7 +566,6 @@ final class MultipartPushTest extends TestCase {
             'staging_dir' => $this->storage,
             'secret' => self::SECRET,
             'apply_target_root' => $this->target,
-            'apply_deployment_roots' => ['wp-content/plugins', 'wp-content/themes'],
             'apply_sessions_enabled' => true,
             // Make the real CLI split the large file into several MIME parts.
             'max_frame_bytes' => 128,

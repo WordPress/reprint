@@ -103,7 +103,15 @@ final class Site_Export_Multipart_Processor {
     /** Processor state entered after a syntactically complete closing boundary. */
     private const STATE_COMPLETE = 3;
 
-    /** @var string Complete delimiter token including its leading `--`. */
+    /**
+     * Complete delimiter token derived from the validated boundary parameter.
+     *
+     * The stored value includes the required leading `--` and is compared only
+     * with CRLF-terminated syntax lines. Part bodies are framed by their
+     * Content-Length and are never searched for this byte sequence.
+     *
+     * @var string
+     */
     private $delimiter;
 
     /**
@@ -116,7 +124,14 @@ final class Site_Export_Multipart_Processor {
      */
     private $buffer = '';
 
-    /** @var int One of the STATE_* constants describing the next syntax expected. */
+    /**
+     * Grammar state describing which multipart construct must be consumed next.
+     *
+     * It advances from a boundary to headers to the declared body, then returns
+     * to a boundary until the closing delimiter makes the processor complete.
+     *
+     * @var int One of the STATE_* constants.
+     */
     private $state = self::STATE_BOUNDARY;
 
     /**
@@ -149,7 +164,15 @@ final class Site_Export_Multipart_Processor {
      */
     private $paused_at_incomplete_input = true;
 
-    /** @var string|null One of the TOKEN_* constants, or null between tokens. */
+    /**
+     * Token exposed by the most recent successful next_token() call.
+     *
+     * Null means the processor is between tokens, paused for another fragment,
+     * or complete. Token and value getters reject access in that state so a
+     * caller cannot accidentally reuse information from an earlier part.
+     *
+     * @var string|null One of the TOKEN_* constants when a token is current.
+     */
     private $current_token_type = null;
 
     /**
@@ -162,19 +185,59 @@ final class Site_Export_Multipart_Processor {
      */
     private $current_headers = [];
 
-    /** @var string Body bytes exposed by the current TOKEN_BODY token. */
+    /**
+     * Body bytes exposed by the current TOKEN_BODY token.
+     *
+     * This contains at most one bounded input fragment and is cleared before
+     * the processor advances. Callers therefore consume or hand off each piece
+     * without the processor retaining the complete part body.
+     *
+     * @var string
+     */
     private $current_body_piece = '';
 
-    /** @var int Aggregate physical header bytes consumed for the current part. */
+    /**
+     * Aggregate physical header bytes consumed for the current part.
+     *
+     * The count includes each line's CRLF, including folded continuations and
+     * the empty line ending the block. It enforces a whole-header ceiling in
+     * addition to the limit on any single physical line.
+     *
+     * @var int
+     */
     private $current_header_bytes = 0;
 
-    /** @var string|null Header name waiting for continuations or the next field. */
+    /**
+     * Normalized name of the header field currently being unfolded.
+     *
+     * A field stays pending until another header or the empty terminator line
+     * arrives, because intervening continuation lines belong to the same
+     * logical value. Null means no field has begun for the current part.
+     *
+     * @var string|null
+     */
     private $pending_header_name = null;
 
-    /** @var string Unnormalized value belonging to $pending_header_name. */
+    /**
+     * Physical value bytes accumulated for $pending_header_name.
+     *
+     * Leading whitespace after the colon is removed only when the completed
+     * field is stored. Continuation-line whitespace remains intact while their
+     * separating CRLF bytes are omitted according to MIME unfolding.
+     *
+     * @var string
+     */
     private $pending_header_value = '';
 
-    /** @var int Declared current-part body bytes not yet exposed as BODY tokens. */
+    /**
+     * Number of declared body bytes not yet exposed through TOKEN_BODY.
+     *
+     * It is initialized from the validated decimal Content-Length and reduced
+     * by exactly each emitted piece. Reaching zero emits TOKEN_PART_END before
+     * the following CRLF and boundary are parsed.
+     *
+     * @var int
+     */
     private $remaining_body_bytes = 0;
 
     /**

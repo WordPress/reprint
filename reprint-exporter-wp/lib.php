@@ -183,8 +183,9 @@ function _site_export_default_authenticate(): void {
  * Server-side options for multipart staged-session endpoints.
  *
  * The caller must choose durable storage on the same filesystem as ABSPATH.
- * Commit stores recovery checkpoints and former live entries there, so a
- * system-temporary fallback could turn a reboot or cleanup into live data loss.
+ * Commit stores recovery checkpoints and its only pending positive-work queue
+ * there, so a system-temporary fallback could make an interrupted apply
+ * impossible to resume.
  *
  * @param array<string,mixed> $options Embedding caller configuration.
  */
@@ -196,7 +197,6 @@ function _site_export_staged_options(array $options): array {
 
     $target_root = realpath(ABSPATH);
     $protected_paths = [];
-    $deployment_roots = [];
     $plugin_dir = realpath(SITE_EXPORT_PLUGIN_DIR);
     if (is_string($target_root) && is_string($plugin_dir)) {
         $target_prefix = rtrim($target_root, '/') . '/';
@@ -206,17 +206,6 @@ function _site_export_staged_options(array $options): array {
         $configured_staging_dir = realpath($staging_dir);
         if (is_string($configured_staging_dir) && strpos($configured_staging_dir . '/', $target_prefix) === 0) {
             $protected_paths[] = rtrim(substr($configured_staging_dir, strlen($target_prefix)), '/');
-        }
-        $plugin_root = defined('WP_PLUGIN_DIR') ? WP_PLUGIN_DIR : $target_root . '/wp-content/plugins';
-        $theme_root = function_exists('get_theme_root') ? get_theme_root() : $target_root . '/wp-content/themes';
-        foreach ([$plugin_root, $theme_root] as $deployment_root) {
-            if (!is_string($deployment_root)) {
-                continue;
-            }
-            $resolved_root = realpath($deployment_root);
-            if (is_string($resolved_root) && strpos($resolved_root . '/', $target_prefix) === 0) {
-                $deployment_roots[] = rtrim(substr($resolved_root, strlen($target_prefix)), '/');
-            }
         }
     }
 
@@ -228,9 +217,6 @@ function _site_export_staged_options(array $options): array {
         'apply_protected_paths' => array_values(array_filter($protected_paths, static function ($path): bool {
             return is_string($path) && $path !== '';
         })),
-        'apply_deployment_roots' => array_values(array_unique(array_filter($deployment_roots, static function ($path): bool {
-            return is_string($path) && $path !== '';
-        }))),
         'apply_sessions_enabled' => true,
     ];
 }

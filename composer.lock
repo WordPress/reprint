@@ -362,7 +362,7 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
-                "reference": "814c1c412532cd1c0768372c21ef0a8640e74aa8"
+                "reference": "34b3ba0e5c0c79f655fb65c04affa186feeb7e27"
             },
             "require": {
                 "php": ">=7.2",
@@ -385,6 +385,7 @@
                     "src/class-hmac-server.php",
                     "src/class-http-server.php",
                     "src/class-multipart-processor.php",
+                    "src/class-staged-apply-exception.php",
                     "src/class-staged-apply-session.php",
                     "src/class-staged-endpoints.php",
                     "src/class-staged-session-recovery-server.php",
