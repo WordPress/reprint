@@ -229,6 +229,8 @@ final class MultipartPushTest extends TestCase {
         chmod($this->source . '/mode-tree', 0711);
         $second = $this->run_cli('push', ['--source-root=' . $this->source]);
         $this->assertSame(0, $second['exit_code'], $second['stderr']);
+        // The target mode changed in the server process, outside this PHP process.
+        clearstatcache(true, $this->target . '/mode-tree');
         $this->assertSame(0711, fileperms($this->target . '/mode-tree') & 07777);
         $this->assertSame('child', file_get_contents($this->target . '/mode-tree/child.txt'));
     }
