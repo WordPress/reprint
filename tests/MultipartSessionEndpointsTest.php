@@ -47,6 +47,89 @@ final class MultipartSessionEndpointsTest extends TestCase {
         ]], $status['body']['paths']);
     }
 
+    public function testDiscardRemovesACompletedSessionAndIsIdempotentAfterRemoval(): void {
+        $endpoints = $this->endpoints();
+        $token = str_repeat('e', 32);
+        $create_uri = '/?endpoint=staged_session_create&create_token=' . $token;
+        $created = $endpoints->session_create(['create_token' => $token], $this->headers('POST', $create_uri));
+        $session_id = $created['body']['session_id'];
+        $this->assertIsString($session_id);
+        $session = Site_Export_Staged_Apply_Session::open(
+            $this->storage,
+            $this->target,
+            $session_id,
+            [],
+            ['wp-content/plugins', 'wp-content/themes']
+        );
+        do {
+            $commit = $session->commit(1);
+        } while (!empty($commit['send_next_request']));
+
+        $discard_uri = '/?endpoint=staged_session_discard&session_id=' . $session_id;
+        $first = $endpoints->session_discard(
+            ['session_id' => $session_id],
+            $this->headers('POST', $discard_uri)
+        );
+        $second = $endpoints->session_discard(
+            ['session_id' => $session_id],
+            $this->headers('POST', $discard_uri)
+        );
+
+        $this->assertSame(200, $first['http_code']);
+        $this->assertSame('discarded', $first['body']['status']);
+        $this->assertDirectoryDoesNotExist($this->storage . '/apply-sessions/' . $session_id);
+        $this->assertSame(200, $second['http_code']);
+        $this->assertSame('discarded', $second['body']['status']);
+    }
+
+    public function testCompletedSessionCleanupIsBoundedAndResumesFromItsTombstone(): void {
+        $endpoints = $this->endpoints();
+        $token = str_repeat('f', 32);
+        $create_uri = '/?endpoint=staged_session_create&create_token=' . $token;
+        $created = $endpoints->session_create(['create_token' => $token], $this->headers('POST', $create_uri));
+        $session_id = $created['body']['session_id'];
+        $this->assertIsString($session_id);
+        $session = Site_Export_Staged_Apply_Session::open(
+            $this->storage,
+            $this->target,
+            $session_id,
+            [],
+            ['wp-content/plugins', 'wp-content/themes']
+        );
+        do {
+            $commit = $session->commit(1);
+        } while (!empty($commit['send_next_request']));
+        $load = $session->get_session_directory() . '/work/files/cleanup-load';
+        mkdir($load, 0700);
+        for ($index = 0; $index < 300; ++$index) {
+            file_put_contents($load . '/' . $index, 'x');
+        }
+
+        $discard_uri = '/?endpoint=staged_session_discard&session_id=' . $session_id;
+        $response = $endpoints->session_discard(
+            ['session_id' => $session_id],
+            $this->headers('POST', $discard_uri)
+        );
+
+        $this->assertSame('discarding', $response['body']['status']);
+        $this->assertTrue($response['body']['send_next_request']);
+        $this->assertDirectoryDoesNotExist($this->storage . '/apply-sessions/' . $session_id);
+        $this->assertDirectoryExists($this->storage . '/apply-sessions/.discarding-' . $session_id);
+
+        $requests = 1;
+        while (!empty($response['body']['send_next_request'])) {
+            $response = $this->endpoints()->session_discard(
+                ['session_id' => $session_id],
+                $this->headers('POST', $discard_uri)
+            );
+            ++$requests;
+        }
+
+        $this->assertGreaterThan(1, $requests);
+        $this->assertSame('discarded', $response['body']['status']);
+        $this->assertDirectoryDoesNotExist($this->storage . '/apply-sessions/.discarding-' . $session_id);
+    }
+
     public function testBadEnvelopeIsRejectedBeforeTheHttpServerReadsTheBody(): void {
         $reads = 0;
         $server = new Site_Export_HTTP_Server([

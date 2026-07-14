@@ -208,7 +208,9 @@ class MultipartPush
      * continues the active phase rather than rescanning underneath it.
      *
      * After target commit completes, the starting snapshot atomically becomes
-     * the next local baseline and the active session checkpoint is removed.
+     * the next local baseline. The sender then discards the successful target
+     * workspace before removing its active local checkpoint. Both cleanup
+     * operations remain retryable after an interrupted response or local error.
      * Passing $abort delegates to abort() before any new scan or upload work.
      *
      * @param bool $dry_run Whether to stop after writing the local snapshot and plans.
@@ -227,6 +229,9 @@ class MultipartPush
             return $this->abort();
         }
         $state = $this->read_state();
+        if ($dry_run && $state !== null) {
+            throw new RuntimeException('Cannot run --dry-run while an active push exists. Re-run push without --dry-run to resume it, or use --abort before live mutation begins.');
+        }
         if ($state === null) {
             $summary = $this->prepare_new_push();
             if ($dry_run) {
@@ -273,8 +278,14 @@ class MultipartPush
         if (($state['phase'] ?? null) === 'committing') {
             $this->commit($state, $client);
             $this->journal->capture_local_files_baseline($this->snapshot_path);
+            $state['phase'] = 'cleaning';
+            $this->write_state($state);
+        }
+
+        if (($state['phase'] ?? null) === 'cleaning') {
+            $this->discard_target_session($state, $client);
             $summary = is_array($state['summary'] ?? null) ? $state['summary'] : [];
-            @unlink($this->session_path);
+            $this->remove_session_checkpoint();
             return array_merge(['status' => 'complete'], $summary);
         }
         throw new RuntimeException('Unknown multipart push phase ' . json_encode($state['phase'] ?? null) . '.');
@@ -316,7 +327,7 @@ class MultipartPush
             $response['active_path_b64'] = $current['path_b64'];
             $response['active_accepted_bytes'] = (int) ($current['accepted_bytes'] ?? 0);
         }
-        $response['next_action'] = in_array($state['phase'] ?? null, ['committing'], true)
+        $response['next_action'] = in_array($state['phase'] ?? null, ['committing', 'cleaning'], true)
             ? 'rerun_push'
             : 'rerun_push_or_abort';
         return $response;
@@ -341,6 +352,9 @@ class MultipartPush
         if ($state === null) {
             return ['status' => 'no_active_push'];
         }
+        if (($state['phase'] ?? null) === 'cleaning') {
+            throw new RuntimeException('The push has committed and only successful-session cleanup remains. Re-run push without --abort to finish cleanup.');
+        }
         $client = $this->new_client(
             is_array($state['sizer'] ?? null) ? $state['sizer'] : [],
             is_numeric($state['max_frame_bytes'] ?? null) ? (int) $state['max_frame_bytes'] : null
@@ -355,18 +369,8 @@ class MultipartPush
             }
             $this->create_or_reopen_session($state, $client);
         }
-        $response = $client->control_request('POST', 'staged_session_discard', [
-            'session_id' => $this->session_id_from_state($state),
-        ]);
-        if (($response['reason'] ?? null) === 'commit_required') {
-            throw new RuntimeException(
-                'Push commit has begun on the target. Re-run push to finish it; --abort cannot discard a live mutation.'
-            );
-        }
-        $this->require_control_status($response, 'discarded');
-        if (!@unlink($this->session_path)) {
-            throw new RuntimeException('Could not remove local push session checkpoint ' . $this->session_path . '.');
-        }
+        $this->discard_target_session($state, $client);
+        $this->remove_session_checkpoint();
         return ['status' => 'aborted'];
     }
 
@@ -459,50 +463,59 @@ class MultipartPush
      */
     private function scan_directory(string $directory, string $relative_path, $handle, ?int $directory_ctime, ?int $directory_mode): void
     {
-        $entries = @scandir($directory);
-        if (!is_array($entries)) {
+        $directory_handle = @opendir($directory);
+        if ($directory_handle === false) {
             throw new RuntimeException('Could not scan source directory ' . $directory . '.');
         }
-        $children = [];
-        foreach ($entries as $entry) {
-            if ($entry !== '.' && $entry !== '..') {
-                $children[] = $entry;
-            }
-        }
-        if ($relative_path !== '' && $children === []) {
-            $this->write_snapshot_entry($handle, $relative_path, 'directory', 0, $directory_ctime ?? 0, $directory_mode);
-            return;
-        }
-        if ($relative_path !== '') {
-            // Non-empty directories are not positive upload operations: their
-            // children create them. Keep an existence-only baseline marker so
-            // deleting a whole non-empty directory also removes the now-empty
-            // directory on the target.
-            $this->write_snapshot_entry($handle, $relative_path, 'tree-directory', 0, $directory_ctime ?? 0, $directory_mode);
-        }
-        foreach ($children as $entry) {
-            $path = $relative_path === '' ? $entry : $relative_path . '/' . $entry;
-            $this->validate_relative_path($path);
-            $absolute_path = $directory . '/' . $entry;
-            clearstatcache(true, $absolute_path);
-            $stat = @lstat($absolute_path);
-            if (!is_array($stat) || !isset($stat['mode'], $stat['ctime'], $stat['size'])) {
-                throw new RuntimeException('Could not stat source path ' . $this->display_path($path) . '.');
-            }
-            $type_bits = ((int) $stat['mode']) & 0170000;
-            if ($type_bits === 0040000) {
-                $this->scan_directory($absolute_path, $path, $handle, (int) $stat['ctime'], ((int) $stat['mode']) & 07777);
-            } elseif ($type_bits === 0100000) {
-                $this->write_snapshot_entry($handle, $path, 'file', (int) $stat['size'], (int) $stat['ctime'], ((int) $stat['mode']) & 07777);
-            } elseif ($type_bits === 0120000) {
-                $target = @readlink($absolute_path);
-                if (!is_string($target)) {
-                    throw new RuntimeException('Could not read source symlink ' . $this->display_path($path) . '.');
+        $has_children = false;
+        try {
+            while ( true ) {
+                $entry = readdir($directory_handle);
+                if ($entry === false) {
+                    break;
                 }
-                $this->write_snapshot_entry($handle, $path, 'symlink', (int) $stat['size'], (int) $stat['ctime'], null, $target);
-            } else {
-                throw new RuntimeException('Source path ' . $this->display_path($path) . ' has an unsupported filesystem type.');
+                if ($entry === '.' || $entry === '..') {
+                    continue;
+                }
+                if (!$has_children) {
+                    $has_children = true;
+                    if ($relative_path !== '') {
+                        // Non-empty directories are not positive upload operations: their
+                        // children create them. Keep an existence-only baseline marker so
+                        // deleting a whole non-empty directory also removes the now-empty
+                        // directory on the target.
+                        $this->write_snapshot_entry($handle, $relative_path, 'tree-directory', 0, $directory_ctime ?? 0, $directory_mode);
+                    }
+                }
+                $path = $relative_path === '' ? $entry : $relative_path . '/' . $entry;
+                $this->validate_relative_path($path);
+                $absolute_path = $directory . '/' . $entry;
+                clearstatcache(true, $absolute_path);
+                $stat = @lstat($absolute_path);
+                if (!is_array($stat) || !isset($stat['mode'], $stat['ctime'], $stat['size'])) {
+                    throw new RuntimeException('Could not stat source path ' . $this->display_path($path) . '.');
+                }
+                $mode = (int) $stat['mode'];
+                $type_bits = $mode & 0170000;
+                if ($type_bits === 0040000) {
+                    $this->scan_directory($absolute_path, $path, $handle, (int) $stat['ctime'], $mode & 07777);
+                } elseif ($type_bits === 0100000) {
+                    $this->write_snapshot_entry($handle, $path, 'file', (int) $stat['size'], (int) $stat['ctime'], $mode & 07777);
+                } elseif ($type_bits === 0120000) {
+                    $target = @readlink($absolute_path);
+                    if (!is_string($target)) {
+                        throw new RuntimeException('Could not read source symlink ' . $this->display_path($path) . '.');
+                    }
+                    $this->write_snapshot_entry($handle, $path, 'symlink', (int) $stat['size'], (int) $stat['ctime'], null, $target);
+                } else {
+                    throw new RuntimeException('Source path ' . $this->display_path($path) . ' has an unsupported filesystem type.');
+                }
             }
+        } finally {
+            closedir($directory_handle);
+        }
+        if ($relative_path !== '' && !$has_children) {
+            $this->write_snapshot_entry($handle, $relative_path, 'directory', 0, $directory_ctime ?? 0, $directory_mode);
         }
     }
 
@@ -1075,14 +1088,12 @@ class MultipartPush
     private function restart_for_structural_source_change(array &$state): void
     {
         $this->log('Source changed structurally during push; discarding its private target session and rebuilding the plan.');
-        $session_id = $this->session_id_from_state($state);
         $client = $this->new_client(
             is_array($state['sizer'] ?? null) ? $state['sizer'] : [],
             is_numeric($state['max_frame_bytes'] ?? null) ? (int) $state['max_frame_bytes'] : null
         );
-        $response = $client->control_request('POST', 'staged_session_discard', ['session_id' => $session_id]);
-        $this->require_control_status($response, 'discarded');
-        @unlink($this->session_path);
+        $this->discard_target_session($state, $client);
+        $this->remove_session_checkpoint();
         // The caller returns to its outer invocation; a later `push` builds a
         // fresh normalized tree rather than mixing two source snapshots.
         throw new RuntimeException('Source changed structurally during push. Its staged session was discarded; run push again.');
@@ -1120,6 +1131,39 @@ class MultipartPush
             $this->require_control_status($response, 'ok');
             $this->log('Commit phase ' . ($response['phase'] ?? 'unknown') . ', ' . (int) ($response['files_remaining'] ?? 0) . ' live entries remaining.');
         } while (!empty($response['send_next_request']));
+    }
+
+    /**
+     * Drives bounded idempotent target discard until no private workspace remains.
+     *
+     * This is shared by abort, structural-source restart, and successful cleanup.
+     * A `discarding` response means the target tombstone made durable progress and
+     * needs another request. A lost response is safe because the next request
+     * continues that tombstone or confirms it is already absent.
+     *
+     * @param array<string,mixed> $state
+     * @param MultipartPushStreamClient $client Signed control client.
+     */
+    private function discard_target_session(array $state, MultipartPushStreamClient $client): void
+    {
+        do {
+            $response = $client->control_request('POST', 'staged_session_discard', [
+                'session_id' => $this->session_id_from_state($state),
+            ]);
+            if (( $response['reason'] ?? null ) === 'commit_required') {
+                throw new RuntimeException(
+                    'Push commit has begun on the target. Re-run push to finish it; a live mutation cannot be discarded.'
+                );
+            }
+            $status = $response['status'] ?? null;
+            if ($status !== 'discarding' && $status !== 'discarded') {
+                $this->require_control_status($response, 'discarded');
+            }
+            $send_next_request = $response['send_next_request'] ?? null;
+            if (!is_bool($send_next_request) || ( $status === 'discarding' ) !== $send_next_request) {
+                throw new RuntimeException('Target discard response has inconsistent status and send_next_request fields.');
+            }
+        } while ( $send_next_request );
     }
 
     /**
@@ -1295,6 +1339,14 @@ class MultipartPush
         if (!@rename($temporary, $this->session_path)) {
             @unlink($temporary);
             throw new RuntimeException('Could not publish local push session checkpoint.');
+        }
+    }
+
+    /** Removes the active checkpoint only after checking the filesystem result. */
+    private function remove_session_checkpoint(): void
+    {
+        if (!@unlink($this->session_path)) {
+            throw new RuntimeException('Could not remove local push session checkpoint ' . $this->session_path . '.');
         }
     }
 

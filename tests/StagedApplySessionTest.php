@@ -185,7 +185,6 @@ final class StagedApplySessionTest extends TestCase {
             'stage' => 'prepared',
             'path_b64' => base64_encode($path),
             'expected_live' => $action['expected_live'],
-            'expected_live_tree' => $action['expected_live_tree'],
             'prepared' => $action['prepared'],
             'backup_b64' => base64_encode($path),
         ];
@@ -231,7 +230,6 @@ final class StagedApplySessionTest extends TestCase {
             'stage' => 'prepared',
             'path_b64' => base64_encode($path),
             'expected_live' => $action['expected_live'],
-            'expected_live_tree' => $action['expected_live_tree'],
             'prepared' => $action['prepared'],
             'backup_b64' => base64_encode($path),
         ];
@@ -271,8 +269,23 @@ final class StagedApplySessionTest extends TestCase {
             'body' => 'new plugin file',
         ]]);
 
-        $this->advance_until_first_prepared_action($session);
-        file_put_contents($this->target . '/' . $path . '/external.php', 'external writer');
+        $action = $this->advance_until_first_prepared_action($session);
+        $external_path = $this->target . '/' . $path . '/external.php';
+        for ($attempt = 0; $attempt < 3; ++$attempt) {
+            file_put_contents($external_path, 'external writer');
+            clearstatcache(true, $this->target . '/' . $path);
+            $after = lstat($this->target . '/' . $path);
+            $this->assertIsArray($after);
+            if (
+                (int) $after['ctime'] !== (int) $action['expected_live']['ctime']
+                || (int) $after['size'] !== (int) $action['expected_live']['size']
+            ) {
+                break;
+            }
+            unlink($external_path);
+            sleep(1);
+        }
+        $this->assertFileExists($external_path, 'The test filesystem did not expose the directory identity change.');
 
         try {
             $session->commit(1);
@@ -566,9 +579,8 @@ final class StagedApplySessionTest extends TestCase {
         ]]);
 
         $session->commit(1);
-        $hash = hash('sha256', 'survivor.txt');
-        $index = $session->get_session_directory() . '/work/commit/action-index/'
-            . substr($hash, 0, 2) . '/' . substr($hash, 2) . '.json';
+        $index = $session->get_session_directory()
+            . '/work/commit/action-index/.children/survivor.txt/.record.json';
         mkdir(dirname($index), 0700, true);
         file_put_contents($index, json_encode([
             'path_b64' => base64_encode('survivor.txt'),
@@ -578,6 +590,35 @@ final class StagedApplySessionTest extends TestCase {
 
         $this->commit_all($session);
         $this->assertSame('survivor', file_get_contents($this->target . '/survivor.txt'));
+    }
+
+    public function testDiskBackedPathIndexDoesNotReserveSourcePathNames(): void {
+        $session = $this->session('31313131313131313131313131313131');
+        $this->stage($session, [
+            [
+                'headers' => [
+                    'X-Chunk-Type' => 'file',
+                    'X-File-Path' => base64_encode('.children/.record.json'),
+                    'X-File-Size' => '5',
+                    'X-Chunk-Offset' => '0',
+                ],
+                'body' => 'first',
+            ],
+            [
+                'headers' => [
+                    'X-Chunk-Type' => 'file',
+                    'X-File-Path' => base64_encode('.record.json/.children'),
+                    'X-File-Size' => '6',
+                    'X-Chunk-Offset' => '0',
+                ],
+                'body' => 'second',
+            ],
+        ]);
+
+        $this->commit_all($session);
+
+        $this->assertSame('first', file_get_contents($this->target . '/.children/.record.json'));
+        $this->assertSame('second', file_get_contents($this->target . '/.record.json/.children'));
     }
 
     public function testLargePreparedFileResumesFromBoundedPersistedPieces(): void {
@@ -645,12 +686,29 @@ final class StagedApplySessionTest extends TestCase {
             $session->commit(1);
             $checkpoint = json_decode( (string) file_get_contents($session->get_session_directory() . '/commit.json'), true);
             $current_prepare = $checkpoint['current_prepare'] ?? null;
-            if (is_array($current_prepare) && 'copying' === ( $current_prepare['stage'] ?? null )) {
+            if (
+                is_array($current_prepare)
+                && 'copying' === ( $current_prepare['stage'] ?? null )
+                && is_array($current_prepare['directory'] ?? null)
+                && is_int($current_prepare['directory']['enumeration_offset'] ?? null)
+                && $current_prepare['directory']['enumeration_offset'] > 0
+            ) {
                 break;
             }
         }
         $this->assertIsArray($checkpoint);
         $this->assertIsArray($checkpoint['current_prepare'] ?? null, 'Preparation never exposed a durable resumable tree cursor.');
+        $directory_cursor = $checkpoint['current_prepare']['directory'] ?? null;
+        $this->assertIsArray($directory_cursor, 'Preparation never checkpointed a directory stream cursor.');
+        $this->assertArrayHasKey('enumeration_offset', $directory_cursor);
+        $this->assertIsInt($directory_cursor['enumeration_offset']);
+        $this->assertArrayHasKey('enumeration_index', $directory_cursor);
+        $this->assertArrayNotHasKey('last_entry_b64', $directory_cursor);
+        $this->assertNotSame(
+            [],
+            glob($session->get_session_directory() . '/work/commit/prepare-enumerations/*.jsonl') ?: [],
+            'Directory traversal did not persist its one-pass enumeration.'
+        );
 
         $reopened = Site_Export_Staged_Apply_Session::open(
             $this->storage,
@@ -845,29 +903,14 @@ final class StagedApplySessionTest extends TestCase {
         }
     }
 
-    public function testSameSizeRewriteWithinOneCtimeTickStopsTheSwitch(): void {
-        $session = $this->session('13131313131313131313131313131313');
-        $live = $this->target . '/same-size.txt';
-        $now = microtime(true);
-        while ($now - floor($now) > 0.25) {
-            usleep(10000);
-            $now = microtime(true);
-        }
-        file_put_contents($live, 'AAAA');
-        clearstatcache(true, $live);
-        $before = lstat($live);
-        $fingerprintMethod = new ReflectionMethod(Site_Export_Staged_Apply_Session::class, 'tree_fingerprint');
-        $beforeFingerprint = $fingerprintMethod->invoke($session, $live);
-        file_put_contents($live, 'BBBB');
-        clearstatcache(true, $live);
-        $after = lstat($live);
-        $afterFingerprint = $fingerprintMethod->invoke($session, $live);
-        $this->assertIsArray($before);
-        $this->assertIsArray($after);
-        if ($before['ctime'] !== $after['ctime']) {
-            $this->markTestSkipped('This filesystem exposes sub-second ctime changes through PHP lstat().');
-        }
-        $this->assertNotSame($beforeFingerprint, $afterFingerprint, 'A live fingerprint ignored a same-size content rewrite in one ctime tick.');
+    public function testPreparationNeverHashesTheLiveTree(): void {
+        $source = file_get_contents( (string) ( new ReflectionClass(Site_Export_Staged_Apply_Session::class) )->getFileName());
+
+        $this->assertIsString($source);
+        $this->assertFalse(method_exists(Site_Export_Staged_Apply_Session::class, 'tree_fingerprint'));
+        $this->assertStringNotContainsString('hash(', $source);
+        $this->assertStringNotContainsString('hash_file(', $source);
+        $this->assertStringNotContainsString('hash_init(', $source);
     }
 
     public function testConfiguredDeploymentRootSwitchesAllOfItsChangesTogether(): void {

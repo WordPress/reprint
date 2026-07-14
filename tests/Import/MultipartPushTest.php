@@ -34,6 +34,8 @@ final class MultipartPushTest extends TestCase {
     private ?string $pause_after_upload_marker = null;
     private ?string $resume_upload_response_marker = null;
     private ?string $reject_upload_marker = null;
+    private ?string $drop_discard_response_marker = null;
+    private bool $make_checkpoint_unremovable_after_discard = false;
 
     public static function setUpBeforeClass(): void {
         if (!function_exists('curl_init')) {
@@ -256,6 +258,77 @@ final class MultipartPushTest extends TestCase {
         $this->assertFileDoesNotExist($this->target . '/dry-run.txt');
         $this->assertSame(0, $this->endpoint_count('staged_session_create'));
         $this->assertSame([], glob($this->state . '/push/*/last-sync-local-files.jsonl') ?: []);
+    }
+
+    public function testDryRunRejectsAnActivePushWithoutAdvancingIt(): void {
+        $this->reject_upload_marker = $this->case_root . '/rejected-upload';
+        $this->configure_server();
+        $this->write_source('active.txt', 'leave this push resumable');
+
+        $failed = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertNotSame(0, $failed['exit_code']);
+        $this->assertFileExists($this->reject_upload_marker);
+        $requests_before_dry_run = is_file($this->request_log)
+            ? file_get_contents($this->request_log)
+            : '';
+
+        $dry_run = $this->run_cli('push', ['--source-root=' . $this->source, '--dry-run']);
+
+        $this->assertNotSame(0, $dry_run['exit_code']);
+        $this->assertStringContainsString('dry-run', $dry_run['stderr']);
+        $this->assertStringContainsString('active push', $dry_run['stderr']);
+        $this->assertSame($requests_before_dry_run, file_get_contents($this->request_log));
+        $this->assertCount(1, glob($this->state . '/push/*/session.json') ?: []);
+        $this->assertFileDoesNotExist($this->target . '/active.txt');
+    }
+
+    public function testSuccessfulSessionCleanupResumesAfterItsResponseIsLost(): void {
+        $this->drop_discard_response_marker = $this->case_root . '/discarded-without-response';
+        $this->configure_server();
+        $this->write_source('cleanup.txt', 'committed before cleanup');
+
+        $interrupted = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertNotSame(0, $interrupted['exit_code']);
+        $this->assertFileExists($this->drop_discard_response_marker);
+        $this->assertSame('committed before cleanup', file_get_contents($this->target . '/cleanup.txt'));
+        $this->assertSame([], glob($this->storage . '/apply-sessions/[a-f0-9]*', GLOB_ONLYDIR) ?: []);
+        $this->assertCount(1, glob($this->state . '/push/*/session.json') ?: []);
+        $this->assertCount(1, glob($this->state . '/push/*/last-sync-local-files.jsonl') ?: []);
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertSame('complete', $resumed['json']['status'] ?? null);
+        $this->assertSame([], glob($this->storage . '/apply-sessions/[a-f0-9]*', GLOB_ONLYDIR) ?: []);
+        $this->assertSame([], glob($this->state . '/push/*/session.json') ?: []);
+        $this->assertGreaterThanOrEqual(2, $this->endpoint_count('staged_session_discard'));
+    }
+
+    public function testFailedLocalCheckpointRemovalIsReportedAndRetryable(): void {
+        $this->make_checkpoint_unremovable_after_discard = true;
+        $this->configure_server();
+        $this->write_source('checked-unlink.txt', 'already deployed');
+
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+        try {
+            $this->assertNotSame(0, $result['exit_code']);
+            $this->assertStringContainsString('Could not remove local push session checkpoint', $result['stderr']);
+            $this->assertSame('already deployed', file_get_contents($this->target . '/checked-unlink.txt'));
+            $this->assertCount(1, glob($this->state . '/push/*/session.json') ?: []);
+            $this->assertSame([], glob($this->storage . '/apply-sessions/[a-f0-9]*', GLOB_ONLYDIR) ?: []);
+        } finally {
+            foreach (glob($this->state . '/push/*', GLOB_ONLYDIR) ?: [] as $site_state) {
+                chmod($site_state, 0700);
+            }
+            $this->make_checkpoint_unremovable_after_discard = false;
+            $this->configure_server();
+        }
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertSame('complete', $resumed['json']['status'] ?? null);
+        $this->assertSame([], glob($this->state . '/push/*/session.json') ?: []);
     }
 
     public function testMissingPushRequirementsDoNotCreateTheStateDirectory(): void {
@@ -503,6 +576,9 @@ final class MultipartPushTest extends TestCase {
             'pause_after_upload_marker' => $this->pause_after_upload_marker,
             'resume_upload_response_marker' => $this->resume_upload_response_marker,
             'reject_upload_marker' => $this->reject_upload_marker,
+            'drop_discard_response_marker' => $this->drop_discard_response_marker,
+            'make_checkpoint_unremovable_after_discard' => $this->make_checkpoint_unremovable_after_discard,
+            'local_state_dir' => $this->state,
         ]));
     }
 
@@ -637,6 +713,27 @@ if ((\$_GET['endpoint'] ?? null) === 'staged_session_upload'
     (new Site_Export_HTTP_Server(['staged' => \$config]))->handle_request();
     ob_end_clean();
     file_put_contents(\$config['drop_upload_response_marker'], "accepted without response\\n");
+    return true;
+}
+if ((\$_GET['endpoint'] ?? null) === 'staged_session_discard'
+    && is_string(\$config['drop_discard_response_marker'] ?? null)
+    && \$config['drop_discard_response_marker'] !== ''
+    && !file_exists(\$config['drop_discard_response_marker'])) {
+    ob_start();
+    (new Site_Export_HTTP_Server(['staged' => \$config]))->handle_request();
+    ob_end_clean();
+    file_put_contents(\$config['drop_discard_response_marker'], "discarded without response\\n");
+    return true;
+}
+if ((\$_GET['endpoint'] ?? null) === 'staged_session_discard'
+    && !empty(\$config['make_checkpoint_unremovable_after_discard'])) {
+    ob_start();
+    (new Site_Export_HTTP_Server(['staged' => \$config]))->handle_request();
+    \$response = ob_get_clean();
+    foreach (glob((string) \$config['local_state_dir'] . '/push/*/session.json') ?: [] as \$checkpoint) {
+        chmod(dirname(\$checkpoint), 0500);
+    }
+    echo \$response;
     return true;
 }
 (new Site_Export_HTTP_Server(['staged' => \$config]))->handle_request();

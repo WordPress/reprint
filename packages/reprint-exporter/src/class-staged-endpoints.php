@@ -24,7 +24,8 @@ if (!class_exists('Site_Export_Staged_Apply_Session', false)) {
  *   the workspace after a lost or ambiguous upload response.
  * - `staged_session_commit` advances bounded planning, preparation,
  *   live-switch, and cleanup work until `send_next_request` becomes false.
- * - `staged_session_discard` removes private work only before live mutation.
+ * - `staged_session_discard` removes abandoned or successfully completed private work
+ *   through bounded resumable tombstone cleanup.
  *
  * HMAC authentication covers the HTTP method and exact request target,
  * including endpoint and session parameters. The router must call
@@ -491,12 +492,16 @@ final class Site_Export_Staged_Endpoints {
     }
 
     /**
-     * Discards private work unless live mutation has already begun.
+     * Discards private work before live mutation or after commit has completed.
      *
      * Uploading and preparing sessions can be abandoned because neither has
-     * changed the target. Switching or cleaning sessions return
+     * changed the target. A complete session has no remaining recovery role and
+     * is removed as successful cleanup. Switching or cleaning sessions return
      * `commit_required`; those sessions must finish commit so maintenance and
-     * recovery backups are handled by the checkpointed lifecycle.
+     * recovery backups are handled by the checkpointed lifecycle. An active
+     * session is renamed to a private tombstone before bounded entry removal;
+     * `send_next_request` remains true until that tombstone is gone. Repeating
+     * discard after a lost response resumes the same cleanup.
      *
      * @param array<string,mixed> $config Dispatcher parameters.
      * @param array<string,mixed> $headers Request method, URI, and HMAC headers.
@@ -510,14 +515,22 @@ final class Site_Export_Staged_Endpoints {
             return $auth;
         }
         return $this->session_action(function () use ($config, $headers): array {
-            $session = $this->open_session($config, $headers);
-            $session->discard_workspace();
+            $this->require_apply_configuration();
+            $session_id = $this->session_id_from_headers($headers);
+            $this->require_matching_config_parameter($config, 'session_id', $session_id);
+            $discarded = Site_Export_Staged_Apply_Session::discard(
+                $this->staging_dir,
+                (string) $this->apply_target_root,
+                $session_id,
+                $this->apply_protected_paths,
+                $this->apply_deployment_roots
+            );
             return [
                 'http_code' => 200,
                 'body' => [
-                    'status' => 'discarded',
-                    'session_id' => $this->session_id_from_headers($headers),
-                    'send_next_request' => false,
+                    'status' => $discarded ? 'discarded' : 'discarding',
+                    'session_id' => $session_id,
+                    'send_next_request' => !$discarded,
                 ],
             ];
         });

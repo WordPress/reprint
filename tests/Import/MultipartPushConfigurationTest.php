@@ -73,6 +73,26 @@ final class MultipartPushConfigurationTest extends TestCase {
         self::assertStringContainsString('--state-dir=DIR is required', (string) $stderr);
     }
 
+    public function testLocalSessionCheckpointRemovalIsNeverIgnored(): void
+    {
+        $source = file_get_contents( (string) ( new \ReflectionClass(MultipartPush::class) )->getFileName());
+
+        self::assertIsString($source);
+        self::assertDoesNotMatchRegularExpression(
+            '/^\s*@unlink\(\$this->session_path\);\s*$/m',
+            $source,
+            'A failed session.json removal must leave the push visibly retryable.'
+        );
+    }
+
+    public function testSourceSnapshotDoesNotMaterializeDirectoryListings(): void
+    {
+        $source = file_get_contents( (string) ( new \ReflectionClass(MultipartPush::class) )->getFileName());
+
+        self::assertIsString($source);
+        self::assertStringNotContainsString('scandir(', $source);
+    }
+
     private function push(string $stateDir): MultipartPush
     {
         return new MultipartPush([

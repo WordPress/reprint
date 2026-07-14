@@ -26,6 +26,10 @@ change list, delete list, active session checkpoint, and successful baseline:
   last-sync-local-files.jsonl
 ~~~
 
+The source scan reads directory entries one at a time into an unsorted JSONL
+file. A bounded external merge sort then orders that disk file for the streaming
+baseline diff; no directory listing or complete snapshot is retained in memory.
+
 The JSONL files carry base64 paths because file names are arbitrary bytes. The
 active checkpoint stores the target-issued session ID and only byte offsets
 that the target has confirmed. It also stores a source fingerprint—size, ctime,
@@ -57,7 +61,7 @@ before the upload handler opens php://input.
 | POST | staged_session_upload | Stream multipart parts into that session. |
 | GET | staged_session_status | Report target-derived state for explicitly named paths. |
 | POST | staged_session_commit | Prepare and switch durable staged changes until complete. |
-| POST | staged_session_discard | Remove an upload-only workspace. |
+| POST | staged_session_discard | Remove abandoned private work or a completed session. |
 
 The old artifact, JSON-line, push, and advance routes are not aliases and are
 not a second protocol. Create reports target-owned per-part and per-request
@@ -236,12 +240,16 @@ lstat() and refuses symlinked parents rather than following them.
 The first commit claims a target-wide coordinator, writes commit.json, and
 closes upload. Only one session may prepare or mutate a target at a time. The
 caller repeats commit while send_next_request is true. Materialization consumes
-one staged or deleted path per step into JSONL action files and hashed indexes.
-Preparation consumes one queued directory child or one bounded file piece per
-step, and persists the queue, file cursor, and deepest-first directory-mode
-plans. Exact read-only modes are applied only after their descendants have been
-copied. Reopening the session can therefore resume path planning, a large
-directory traversal, or a large file without rebuilding an in-memory plan.
+one staged or deleted path per step into JSONL action files and disk-backed
+exact-path indexes. Opening a directory streams its names once into an immutable
+private JSONL enumeration without retaining the names in memory. Subsequent
+preparation steps consume one queued directory child or one bounded file piece,
+advancing through the regular enumeration file by byte offset instead of sorting
+or rescanning the directory for every child. The queue, enumeration offset, file
+cursor, and deepest-first directory-mode plans are durable. Exact read-only modes
+are applied only after their descendants have been copied. Reopening the session
+can therefore resume path planning, a directory traversal after its one-pass
+enumeration, or a large file without rebuilding an in-memory plan.
 
 An affected child of each caller-configured plugin or theme container is one
 atomic deployment unit. WordPress supplies its actual plugin and theme roots;
@@ -262,14 +270,15 @@ tree. Current code keeps maintenance on for every visible replacement,
 including static paths; it does not claim a pre-maintenance static-file
 optimization.
 
-At the start of preparation, the target captures the expected live identity
-and a SHA-256 tree fingerprint containing each descendant's relative path,
-lstat identity, symlink target, and regular-file content hash. After the private
-candidate is complete, it records those values with the prepared identity and
-checks them again before switching. This catches a rewritten or added child
-whose parent directory identity alone would not reveal the change, including a
-same-size in-place file rewrite within one timestamp tick. Before a live rename,
-commit.json records the private backup location too.
+At the start of preparation, the target captures the expected live root identity.
+Each source entry is copied from bounded reads and checked against its own lstat
+identity while it is being prepared. After the private candidate is complete,
+the target checks the root identity again before switching. It does not scan or
+hash the complete live tree. Consequently, a same-size descendant rewrite that
+does not change a checked root identity within the filesystem timestamp
+resolution can escape this lightweight guard. Before a live rename, commit.json
+records the expected live identity, prepared identity, and private backup
+location.
 Switching is then:
 
 1. rename the old live entry to work/backups, when present;
@@ -301,6 +310,16 @@ is a small non-WordPress bootstrap exposing the same authenticated status,
 commit, and discard endpoints for a host emergency route. It is the escape
 hatch if a broken plugin or theme prevents normal WordPress boot.
 
+After commit completes, the sender publishes its successful baseline, records a
+local `cleaning` phase, and discards the completed target workspace. The target
+first renames the locked workspace to `.discarding-<id>`, then removes at most
+256 private entries per request. Each removal is durable progress, and later
+discard requests resume the tombstone until it is empty. Discard is idempotent
+when both names are already absent, so a lost cleanup response is resumed without
+recreating or recommitting the session. The local session.json is removed only
+after that confirmation, and a failed local removal is reported rather than
+silently ignored.
+
 ## CLI
 
 The public surface stays deliberately small:
@@ -316,8 +335,9 @@ reprint push-status <target-url> \
 
 push resumes an existing compatible local session by default. --dry-run builds
 and reports the local plan without creating a target session or publishing a
-baseline. --abort removes local state only after target discard confirms; once
-live switching began it refuses and tells the operator to rerun normal push.
+baseline, and rejects when an active push already exists. --abort removes local
+state only after target discard confirms; once live switching began it refuses
+and tells the operator to rerun normal push.
 push-status does not require a source root, does not scan a tree, and never
 creates a session.
 
