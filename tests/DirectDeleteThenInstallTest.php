@@ -653,6 +653,322 @@ final class DirectDeleteThenInstallTest extends TestCase {
         }
     }
 
+    public function testCommitRejectsIncompleteFilesAndNonPositiveEntryBudgets(): void {
+        $session = $this->session('10101010101010101010101010101010');
+        $this->stage($session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'file',
+                'X-File-Path' => base64_encode('partial.bin'),
+                'X-File-Size' => '2',
+                'X-Chunk-Offset' => '0',
+            ],
+            'body' => 'a',
+        ]]);
+        $this->complete_delete_upload($session);
+        try {
+            $session->commit(1);
+            $this->fail('Commit began with an incomplete staged file.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('work/partial', $exception->getMessage());
+        }
+        foreach ([0, -1] as $maximum_entries) {
+            try {
+                $session->commit($maximum_entries);
+                $this->fail('Commit accepted a non-positive entry budget.');
+            } catch (InvalidArgumentException $exception) {
+                $this->assertStringContainsString('greater than zero', $exception->getMessage());
+            }
+        }
+        $this->assertFileDoesNotExist($this->target . '/.maintenance');
+    }
+
+    public function testOneEntryBudgetNeverAdvancesMoreThanOneDurableUnit(): void {
+        $session = $this->session('11112222333344445555666677778888');
+        $this->stage_file($session, 'first.txt', 'first');
+        $this->stage_file($session, 'second.txt', 'second');
+        $this->complete_delete_upload($session);
+
+        do {
+            $before = $this->checkpoint_or_null($session);
+            $result = $session->commit(1);
+            $this->assertSame(1, $result['entries_processed']);
+            $after = $this->checkpoint($session);
+            if ($before !== null) {
+                $work_delta = ( $after['deletions_applied'] - $before['deletions_applied'] )
+                    + ( $after['values_applied'] - $before['values_applied'] );
+                $this->assertLessThanOrEqual(1, $work_delta);
+            }
+        } while ($result['send_next_request']);
+
+        $complete = $session->commit(1);
+        $this->assertSame(0, $complete['entries_processed']);
+        $this->assertFalse($complete['send_next_request']);
+    }
+
+    public function testDeletionResumesBeforeAndAfterTheLiveUnlinkBoundary(): void {
+        foreach ([false, true] as $index => $already_unlinked) {
+            file_put_contents($this->target . '/delete-' . $index, 'old');
+            $session = $this->session(sprintf('%032x', 1500 + $index));
+            $path = 'delete-' . $index;
+            $this->stage($session, [[
+                'headers' => ['X-Chunk-Type' => 'delete-list', 'X-Delete-Offset' => '0'],
+                'body' => $path . "\0",
+            ]]);
+            $this->complete_delete_upload($session);
+            $session->commit(1);
+            $checkpoint = $this->checkpoint($session);
+            $this->assertSame($path, base64_decode($checkpoint['current_deletion_b64'], true));
+            if ($already_unlinked) {
+                unlink($this->target . '/' . $path);
+            }
+
+            $this->commit_all($this->reopen($session));
+            $this->assertFileDoesNotExist($this->target . '/' . $path);
+            $this->assertSame(strlen($path) + 1, $this->checkpoint($session)['delete_offset']);
+        }
+    }
+
+    public function testEveryCheckpointFieldAndNestedShapeIsValidatedBeforeMutation(): void {
+        $session = $this->session('12121212343434345656565678787878');
+        $this->complete_delete_upload($session);
+        $session->commit(1);
+        $path = $session->get_session_directory() . '/commit.json';
+        $valid = $this->checkpoint($session);
+        $invalid_checkpoints = [
+            array_merge($valid, ['version' => 1]),
+            array_merge($valid, ['phase' => 'unknown']),
+            array_merge($valid, ['delete_offset' => -1]),
+            array_merge($valid, ['delete_offset' => '0']),
+            array_merge($valid, ['deletions_applied' => null]),
+            array_merge($valid, ['values_applied' => 1.5]),
+            array_merge($valid, ['maintenance_token' => 'short']),
+            array_merge($valid, ['current_deletion_b64' => '***']),
+            array_merge($valid, ['current_deletion_b64' => base64_encode('../unsafe')]),
+            array_merge($valid, ['current_installation' => []]),
+            array_merge($valid, ['current_installation' => ['path_b64' => '***', 'expected_type' => 'file']]),
+            array_merge($valid, ['current_installation' => ['path_b64' => base64_encode('path'), 'expected_type' => 'other']]),
+            array_merge($valid, ['traversal_stack' => 'not-a-list']),
+            array_merge($valid, ['traversal_stack' => [[]]]),
+            array_merge($valid, ['traversal_stack' => [['component_b64' => base64_encode('a/b')]]]),
+            array_merge($valid, ['terminal_error' => []]),
+            array_merge($valid, ['terminal_error' => ['reason' => 'busy', 'detail' => 'x', 'context' => []]]),
+        ];
+        foreach ($invalid_checkpoints as $index => $checkpoint) {
+            file_put_contents($path, json_encode($checkpoint, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+            try {
+                $session->get_status();
+                $this->fail('Malformed checkpoint case ' . $index . ' was accepted.');
+            } catch (Throwable $exception) {
+                $this->assertInstanceOf(
+                    Site_Export_Staged_Apply_Exception::class,
+                    $exception,
+                    'Checkpoint case ' . $index . ' threw ' . get_class($exception) . ': ' . $exception->getMessage()
+                );
+                $this->assertSame('invalid_session_state', $exception->get_error_code());
+            }
+            $this->assertFileDoesNotExist($this->target . '/unexpected');
+        }
+
+        file_put_contents($path, str_repeat(' ', 1048577));
+        try {
+            $session->get_status();
+            $this->fail('Oversized commit checkpoint was accepted.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('invalid_session_state', $exception->get_error_code());
+        }
+        file_put_contents($path, json_encode($valid, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        $this->commit_all($session);
+    }
+
+    public function testMissingCheckpointAfterCommitStartedIsRejectedInsteadOfRestarted(): void {
+        file_put_contents($this->target . '/delete-me', 'old');
+        $session = $this->session('13131313131313131313131313131313');
+        $this->stage($session, [[
+            'headers' => ['X-Chunk-Type' => 'delete-list', 'X-Delete-Offset' => '0'],
+            'body' => "delete-me\0",
+        ]]);
+        $this->complete_delete_upload($session);
+        $session->commit(1);
+        unlink($session->get_session_directory() . '/commit.json');
+
+        try {
+            $session->commit(1);
+            $this->fail('A committing session silently recreated its missing checkpoint.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('invalid_session_state', $exception->get_error_code());
+        }
+        $this->assertFileExists($this->target . '/delete-me');
+    }
+
+    public function testRetryableIoDoesNotAdvanceAndCanResume(): void {
+        $session = $this->session('14141414141414141414141414141414');
+        $this->stage_file($session, 'installed.txt', 'new');
+        $this->complete_delete_upload($session);
+        chmod($this->target, 0500);
+        try {
+            try {
+                $session->commit(1);
+                $this->fail('Commit mutated an unwritable target.');
+            } catch (Site_Export_Staged_Apply_Exception $exception) {
+                $this->assertSame('retryable_io_error', $exception->get_error_code());
+            }
+            $checkpoint = $this->checkpoint($session);
+            $this->assertSame('deleting', $checkpoint['phase']);
+            $this->assertSame(0, $checkpoint['delete_offset']);
+            $this->assertSame(0, $checkpoint['values_applied']);
+        } finally {
+            chmod($this->target, 0700);
+        }
+        $this->commit_all($this->reopen($session));
+        $this->assertSame('new', file_get_contents($this->target . '/installed.txt'));
+    }
+
+    public function testTerminalFailureIsDurableAcrossReopen(): void {
+        mkdir($this->target . '/conflict');
+        $session = $this->session('15151515151515151515151515151515');
+        $this->stage_file($session, 'conflict', 'new');
+        try {
+            $this->commit_all($session);
+            $this->fail('Incompatible destination was accepted.');
+        } catch (Site_Export_Staged_Apply_Exception $first) {
+            $this->assertSame('live_tree_changed', $first->get_error_code());
+            try {
+                $this->reopen($session)->commit(1);
+                $this->fail('Reopened terminal session retried live mutation.');
+            } catch (Site_Export_Staged_Apply_Exception $second) {
+                $this->assertSame($first->get_error_code(), $second->get_error_code());
+                $this->assertSame($first->getMessage(), $second->getMessage());
+                $this->assertSame($first->get_context(), $second->get_context());
+            }
+        }
+    }
+
+    public function testUnsupportedLiveAndStagedNodesAreRejectedWithoutMutation(): void {
+        if (!function_exists('posix_mkfifo')) {
+            $this->markTestSkipped('FIFO creation is unavailable.');
+        }
+        posix_mkfifo($this->target . '/live-fifo', 0600);
+        $delete_session = $this->session('16161616161616161616161616161616');
+        $this->stage($delete_session, [[
+            'headers' => ['X-Chunk-Type' => 'delete-list', 'X-Delete-Offset' => '0'],
+            'body' => "live-fifo\0",
+        ]]);
+        try {
+            $this->commit_all($delete_session);
+            $this->fail('Unsupported live node was deleted.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('live_tree_changed', $exception->get_error_code());
+        }
+        $this->assertFileExists($this->target . '/live-fifo');
+        unlink($this->target . '/.maintenance');
+        unlink($this->storage . '/apply-sessions/target.active');
+
+        $install_session = $this->session('17171717171717171717171717171717');
+        posix_mkfifo($install_session->get_session_directory() . '/work/files/staged-fifo', 0600);
+        try {
+            $this->commit_all($install_session);
+            $this->fail('Unsupported staged node was installed.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('invalid_session_state', $exception->get_error_code());
+        }
+        $this->assertFileDoesNotExist($this->target . '/staged-fifo');
+    }
+
+    public function testCrossDeviceSessionCreationIsRejectedAndCleanedUpWhenAvailable(): void {
+        if (!is_dir('/dev/shm') || !is_writable('/dev/shm')) {
+            $this->markTestSkipped('No writable secondary filesystem is available.');
+        }
+        $target_device = stat($this->target)['dev'];
+        $secondary_device = stat('/dev/shm')['dev'];
+        if ($target_device === $secondary_device) {
+            $this->markTestSkipped('/dev/shm is not a distinct filesystem.');
+        }
+        $secondary_target = '/dev/shm/reprint-staged-apply-' . bin2hex(random_bytes(8));
+        mkdir($secondary_target, 0700);
+        $session_id = '18181818181818181818181818181818';
+        try {
+            Site_Export_Staged_Apply_Session::create($this->storage, $secondary_target, [], $session_id);
+            $this->fail('Cross-device session creation was accepted.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('cross_device_filesystem', $exception->get_error_code());
+            $this->assertDirectoryDoesNotExist($this->storage . '/apply-sessions/' . $session_id);
+        } finally {
+            rmdir($secondary_target);
+        }
+    }
+
+    public function testTargetRootReplacementStopsCommitBeforeLiveMutation(): void {
+        $session = $this->session('19191919191919191919191919191919');
+        $this->stage_file($session, 'pending.txt', 'new');
+        $this->complete_delete_upload($session);
+        rmdir($this->target);
+        file_put_contents($this->target, 'not a directory');
+        try {
+            $session->commit(1);
+            $this->fail('Commit used a replaced target root.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('invalid_session_state', $exception->get_error_code());
+        }
+        $this->assertSame('not a directory', file_get_contents($this->target));
+    }
+
+    public function testMissingCoordinatorAndMaintenanceMarkersAreRecreatedOnResume(): void {
+        foreach (['live-marker', 'private-marker', 'active-coordinator', 'target-lock'] as $index => $missing_path) {
+            $session = $this->session(sprintf('%032x', 1600 + $index));
+            $this->stage_file($session, 'value-' . $index . '.txt', 'new');
+            $this->complete_delete_upload($session);
+            $session->commit(1);
+            if ($missing_path === 'live-marker') {
+                unlink($this->target . '/.maintenance');
+            } elseif ($missing_path === 'private-marker') {
+                unlink($session->get_session_directory() . '/work/maintenance.php');
+            } elseif ($missing_path === 'active-coordinator') {
+                unlink($this->storage . '/apply-sessions/target.active');
+            } else {
+                unlink($this->storage . '/apply-sessions/target.lock');
+            }
+
+            $this->commit_all($this->reopen($session));
+            $this->assertSame('new', file_get_contents($this->target . '/value-' . $index . '.txt'));
+            $this->assertFileDoesNotExist($this->target . '/.maintenance');
+            $this->assertFileDoesNotExist($this->storage . '/apply-sessions/target.active');
+        }
+    }
+
+    public function testMissingSessionLockAfterCommitReportsCorruptionWithoutMutation(): void {
+        $session = $this->session('20202020202020202020202020202020');
+        $this->stage_file($session, 'pending.txt', 'new');
+        $this->complete_delete_upload($session);
+        $session->commit(1);
+        unlink($session->get_session_directory() . '/lock');
+
+        try {
+            $this->reopen($session)->commit(1);
+            $this->fail('A session resumed after its lock disappeared.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('invalid_session_state', $exception->get_error_code());
+            $this->assertStringContainsString('lock', strtolower($exception->getMessage()));
+        }
+        $this->assertFileDoesNotExist($this->target . '/pending.txt');
+    }
+
+    public function testForeignCoordinatorReplacementStopsResumeWithoutInstalling(): void {
+        $session = $this->session('21212121212121212121212121212121');
+        $this->stage_file($session, 'pending.txt', 'new');
+        $this->complete_delete_upload($session);
+        $session->commit(1);
+        file_put_contents($this->storage . '/apply-sessions/target.active', "foreign-session\n");
+
+        try {
+            $this->reopen($session)->commit(1);
+            $this->fail('A session ignored replaced target ownership.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('busy', $exception->get_error_code());
+        }
+        $this->assertSame("foreign-session\n", file_get_contents($this->storage . '/apply-sessions/target.active'));
+        $this->assertFileDoesNotExist($this->target . '/pending.txt');
+    }
+
     private function session(string $id): Site_Export_Staged_Apply_Session {
         return Site_Export_Staged_Apply_Session::create(
             $this->storage,
@@ -693,6 +1009,12 @@ final class DirectDeleteThenInstallTest extends TestCase {
         );
         $this->assertIsArray($checkpoint);
         return $checkpoint;
+    }
+
+    /** @return array<string,mixed>|null */
+    private function checkpoint_or_null(Site_Export_Staged_Apply_Session $session): ?array {
+        $path = $session->get_session_directory() . '/commit.json';
+        return is_file($path) ? $this->checkpoint($session) : null;
     }
 
     private function set_current_installation(Site_Export_Staged_Apply_Session $session, string $path, string $type): void {
