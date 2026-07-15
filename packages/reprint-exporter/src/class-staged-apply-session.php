@@ -831,10 +831,10 @@ final class Site_Export_Staged_Apply_Session {
         // completed-file replays returned above and other nonzero offsets failed.
         // Remove the old staged value before rebuilding it in partial storage.
         if ($complete !== null) {
-            $this->remove_private_entry($complete_path);
+            $this->remove_staged_path($complete_path);
         }
         if ($partial !== null && $partial['type'] === 'directory') {
-            $this->remove_private_entry($partial_path);
+            $this->remove_staged_path($partial_path);
             $partial = null;
         }
         $actual_bytes = $partial === null ? 0 : $partial['size'];
@@ -913,10 +913,10 @@ final class Site_Export_Staged_Apply_Session {
             throw new InvalidArgumentException('Explicit empty directory ' . base64_encode($path) . ' conflicts with partial descendants.');
         }
         if ($identity !== null && $identity['type'] !== 'directory') {
-            $this->remove_private_entry($target);
+            $this->remove_staged_path($target);
         }
         if ($partial_identity !== null) {
-            $this->remove_private_entry($partial);
+            $this->remove_staged_path($partial);
         }
         if (!is_dir($target) && !@mkdir($target, 0777)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not stage explicit empty directory ' . base64_encode($path) . '.');
@@ -958,10 +958,10 @@ final class Site_Export_Staged_Apply_Session {
             throw new InvalidArgumentException('Staged symlink ' . base64_encode($path) . ' conflicts with partial descendants.');
         }
         if ($identity !== null) {
-            $this->remove_private_entry($target);
+            $this->remove_staged_path($target);
         }
         if ($partial_identity !== null) {
-            $this->remove_private_entry($partial);
+            $this->remove_staged_path($partial);
         }
         if (!@symlink($target_value, $target)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not stage symlink ' . base64_encode($path) . '.');
@@ -2371,7 +2371,7 @@ final class Site_Export_Staged_Apply_Session {
      *
      * @param string $path Absolute private staging path.
      */
-    private function remove_private_entry(string $path): void {
+    private function remove_staged_path(string $path): void {
         $identity = $this->lstat_path($path);
         if ($identity === null) {
             return;
