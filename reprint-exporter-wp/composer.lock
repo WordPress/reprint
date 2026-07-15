@@ -358,11 +358,11 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-feature/multipart-push-transport",
+            "version": "dev-feature/staged-apply-session",
             "dist": {
                 "type": "path",
                 "url": "../packages/reprint-exporter",
-                "reference": "4b864d3ae9fd88c93db4b5012436600779f25204"
+                "reference": "9842c5d9852a9c3ecd768de88b9652181ef2d1ee"
             },
             "require": {
                 "php": ">=7.2",
@@ -385,6 +385,8 @@
                     "src/class-hmac-server.php",
                     "src/class-http-server.php",
                     "src/class-multipart-processor.php",
+                    "src/class-staged-apply-exception.php",
+                    "src/class-staged-apply-session.php",
                     "src/class-sqlite-driver-pdo.php",
                     "src/class-wpdb-driver-pdo.php"
                 ],
