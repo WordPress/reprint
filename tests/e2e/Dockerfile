@@ -48,4 +48,9 @@ RUN composer install --no-dev --no-interaction --prefer-dist --working-dir=repri
 # Install npm deps for E2E
 RUN cd tests/e2e && npm install --silent
 
+# Keep live and staged state persistent. Docker Desktop may report local-driver
+# volumes on one device; the cross-device test invocation mounts the latter two
+# paths as tmpfs so their st_dev values are observably distinct.
+VOLUME ["/srv/e2e-sites", "/srv/e2e-sites/push-mounted-parent/mounted-parent", "/srv/reprint-e2e-staging"]
+
 ENTRYPOINT ["/app/tests/e2e/docker-entrypoint.sh"]

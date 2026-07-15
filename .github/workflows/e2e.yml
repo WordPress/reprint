@@ -28,11 +28,32 @@ jobs:
           name: importer-phar
           path: reprint.phar
 
-  e2e:
-    name: E2E (exporter PHP ${{ matrix.exporter_php }}, importer PHP ${{ matrix.importer_php }})
+  core:
+    name: Core
+    needs: build-phar
+    uses: ./.github/workflows/e2e-suite.yml
+    with:
+      suite: core
+
+  network-interruption:
+    name: Network and interruption
+    needs: build-phar
+    uses: ./.github/workflows/e2e-suite.yml
+    with:
+      suite: network-interruption
+
+  privileged-filesystem:
+    name: Privileged filesystem
+    needs: build-phar
+    uses: ./.github/workflows/e2e-suite.yml
+    with:
+      suite: privileged-filesystem
+
+  compatibility-smoke:
+    name: Compatibility smoke (exporter PHP ${{ matrix.exporter_php }}, importer PHP ${{ matrix.importer_php }})
     needs: build-phar
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -41,8 +62,12 @@ jobs:
             importer_php: '8.2'
           - exporter_php: '7.4'
             importer_php: '7.4'
+          - exporter_php: '7.4'
+            importer_php: '8.2'
           - exporter_php: '8.0'
             importer_php: '8.0'
+          - exporter_php: '8.0'
+            importer_php: '8.2'
           - exporter_php: '8.1'
             importer_php: '8.1'
           - exporter_php: '8.2'
@@ -75,75 +100,34 @@ jobs:
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
           coverage: none
 
-      # PHP comes from the runner's pre-cached toolcache via this
-      # action; we don't try to apt-install ondrej/php ourselves
-      # because every Launchpad endpoint flakes regularly.
-      - uses: shivammathur/setup-php@v2
+      # PHP comes from the runner's pre-cached toolcache via this action. The
+      # Launchpad endpoints used by apt-based installation are too unreliable
+      # for required test jobs.
+      - name: Setup exporter PHP
+        uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.exporter_php }}
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
           coverage: none
 
       - name: Setup infrastructure
+        if: matrix.importer_php != '7.4' && matrix.importer_php != '8.0'
         run: tests/e2e/ci/setup-infrastructure.sh "${{ matrix.exporter_php }}"
 
       - name: Setup test sites
+        if: matrix.importer_php != '7.4' && matrix.importer_php != '8.0'
         run: tests/e2e/setup.sh
 
       - name: Install dependencies
         working-directory: tests/e2e
         run: npm install
 
-      - name: Provision basic site and smoke-test API
+      - name: Run compatibility cases
         env:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
-          IMPORTER_PHP: php${{ matrix.importer_php }}
+          PHP_BINARY: php${{ matrix.importer_php }}
         working-directory: tests/e2e
-        run: |
-          # Download WP-CLI (normally done by Vitest globalSetup, but we need it here)
-          if [ ! -f /tmp/wp-cli.phar ]; then
-            curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar
-            chmod +x /tmp/wp-cli.phar
-          fi
-
-          # Provision the "basic" site
-          node --input-type=module <<'NODESCRIPT'
-          import { ensureSite } from "./lib/site-setup.js";
-          await ensureSite("basic");
-          console.log("Basic site provisioned");
-          NODESCRIPT
-
-          # Quick smoke test: use the importer CLI to hit the export API.
-          SECRET="test-secret-basic"
-          BASE="http://127.0.0.1:8081/?reprint-api"
-          DIR="/srv/e2e-sites/basic"
-          STATE_DIR="/tmp/e2e-smoke-state"
-          FS_ROOT="/tmp/e2e-smoke-fs"
-
-          echo "=== Importer preflight ==="
-          preflight_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" || {
-            status=$?
-            echo "$preflight_output" | head -50
-            echo "EXIT: $status"
-            exit "$status"
-          }
-          echo "$preflight_output" | head -50
-
-          echo "=== Importer files-pull ==="
-          files_pull_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" || {
-            status=$?
-            echo "$files_pull_output" | head -50
-            echo "EXIT: $status"
-            exit "$status"
-          }
-          echo "$files_pull_output" | head -50
-
-      - name: Run E2E tests
-        if: matrix.exporter_php != '7.2'
-        env:
-          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
-        working-directory: tests/e2e
-        run: npx vitest run
+        run: npx vitest run tests/import-56-compatibility-smoke.test.js --reporter=verbose
 
       - name: Debug logs
         if: always()

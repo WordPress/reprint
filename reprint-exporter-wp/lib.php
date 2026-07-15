@@ -11,7 +11,7 @@ if (!defined('ABSPATH')) {
 }
 
 if (!defined('SITE_EXPORT_VERSION')) {
-    define('SITE_EXPORT_VERSION', '0.9.2-dev');
+    define('SITE_EXPORT_VERSION', '0.8.2-dev');
 }
 if (!defined('SITE_EXPORT_PLUGIN_DIR')) {
     define('SITE_EXPORT_PLUGIN_DIR', plugin_dir_path(__FILE__));
@@ -180,6 +180,47 @@ function _site_export_default_authenticate(): void {
 }
 
 /**
+ * Server-side options for multipart staged-session endpoints.
+ *
+ * The caller must choose durable storage on the same filesystem as ABSPATH.
+ * Commit stores recovery checkpoints and its only pending positive-work queue
+ * there, so a system-temporary fallback could make an interrupted apply
+ * impossible to resume.
+ *
+ * @param array<string,mixed> $options Embedding caller configuration.
+ */
+function _site_export_staged_options(array $options): array {
+    $staging_dir = $options['staging_dir'] ?? null;
+    if (!is_string($staging_dir) || $staging_dir === '') {
+        throw new InvalidArgumentException('Staged push requires a caller-configured staging_dir in durable storage.');
+    }
+
+    $target_root = realpath(ABSPATH);
+    $protected_paths = [];
+    $plugin_dir = realpath(SITE_EXPORT_PLUGIN_DIR);
+    if (is_string($target_root) && is_string($plugin_dir)) {
+        $target_prefix = rtrim($target_root, '/') . '/';
+        if (strpos($plugin_dir . '/', $target_prefix) === 0) {
+            $protected_paths[] = rtrim(substr($plugin_dir, strlen($target_prefix)), '/');
+        }
+        $configured_staging_dir = realpath($staging_dir);
+        if (is_string($configured_staging_dir) && strpos($configured_staging_dir . '/', $target_prefix) === 0) {
+            $protected_paths[] = rtrim(substr($configured_staging_dir, strlen($target_prefix)), '/');
+        }
+    }
+
+    return [
+        'staging_dir' => $staging_dir,
+        'secret' => _site_export_get_shared_secret(),
+        'timestamp_tolerance' => SITE_EXPORT_TIMESTAMP_TOLERANCE,
+        'apply_target_root' => is_string($target_root) ? $target_root : ABSPATH,
+        'apply_protected_paths' => array_values(array_filter($protected_paths, static function ($path): bool {
+            return is_string($path) && $path !== '';
+        })),
+    ];
+}
+
+/**
  * Handle an export API request.
  *
  * WordPress is already loaded at this point — DB credentials, $table_prefix,
@@ -189,6 +230,8 @@ function _site_export_default_authenticate(): void {
  * @param array $options Optional overrides:
  *   - 'authenticate' (callable): Called to authenticate the request.
  *        Defaults to _site_export_default_authenticate().
+ *   - 'staging_dir' (string): Durable same-filesystem storage which enables
+ *        staged push endpoints. With no path, this router remains pull-only.
  */
 function _site_export_handle_api_request(array $options = []): void {
     // Revert WordPress error display settings (wp_debug_mode may
@@ -250,18 +293,17 @@ function _site_export_handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    // staged_upload authenticates inside its handler: the default handler
-    // here buffers the whole request body to hash it, which a chunk upload
-    // cannot afford. The upload route verifies the signed headers first and
-    // hashes the body as it streams. A custom authenticate callable still
-    // runs for every endpoint — its embedder owns that tradeoff.
+    // Multipart session routes authenticate inside their handlers before
+    // php://input is opened. Default body-HMAC authentication would buffer
+    // their request body and defeat streaming. A custom authenticate callable
+    // still runs for every endpoint — its embedder owns that tradeoff.
     // filter_input, not WP sanitizers: lib.php also runs without WordPress
     // bootstrapped (hosts that route the API from their own index.php).
     $endpoint = (string) filter_input(INPUT_GET, 'endpoint');
     $authenticate = $options['authenticate'] ?? null;
     if ($authenticate !== null) {
         $authenticate();
-    } else {
+    } elseif (!Site_Export_HTTP_Server::is_staged_session_endpoint($endpoint)) {
         _site_export_default_authenticate();
     }
 
@@ -277,7 +319,11 @@ function _site_export_handle_api_request(array $options = []): void {
 
     // -- Dispatch --
     try {
-        Site_Export_HTTP_Server::serve(['default_directory' => ABSPATH]);
+        $server_options = ['default_directory' => ABSPATH];
+        if (isset($options['staging_dir'])) {
+            $server_options['staged'] = _site_export_staged_options($options);
+        }
+        Site_Export_HTTP_Server::serve($server_options);
     } catch (Exception $e) {
         if (!headers_sent()) {
             http_response_code(400);

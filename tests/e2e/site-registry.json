@@ -133,6 +133,24 @@
     },
     "symlink-bundle": {
       "port": 8123
+    },
+    "push-direct": {
+      "port": 8124
+    },
+    "push-cross-device": {
+      "port": 8125
+    },
+    "push-mounted-parent": {
+      "port": 8126
+    },
+    "push-live-conflict": {
+      "port": 8127
+    },
+    "push-pull-roundtrip": {
+      "port": 8128
+    },
+    "push-busy": {
+      "port": 8129
     }
   }
 }

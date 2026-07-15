@@ -1,0 +1,162 @@
+name: E2E suite
+
+on:
+  workflow_call:
+    inputs:
+      suite:
+        description: E2E fault domain to run.
+        required: true
+        type: string
+
+jobs:
+  e2e:
+    name: ${{ inputs.suite }} cases
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      DIRECT_PUSH_CORE_PATTERN: 'excludes active|applies basic|seeds independently|applies a |applies an |updates children|replaces and recursively|Import: incompatible live drift'
+      DIRECT_PUSH_NETWORK_PATTERN: 'resumes after externally killing|resumes delete bytes|intentionally replaces compatible drift'
+      DIRECT_PUSH_PRIVILEGED_PATTERN: 'Import: cross-device push refusal'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: importer-phar
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # PHP comes from the runner's pre-cached toolcache via this action. The
+      # Launchpad endpoints used by apt-based installation are too unreliable
+      # for required test jobs.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
+          coverage: none
+
+      - name: Setup infrastructure
+        run: tests/e2e/ci/setup-infrastructure.sh 8.2
+
+      - name: Setup test sites
+        run: tests/e2e/setup.sh
+
+      - name: Mount required separate filesystems
+        if: inputs.suite == 'privileged-filesystem'
+        run: |
+          sudo mkdir -p /srv/reprint-e2e-staging
+          sudo mkdir -p /srv/e2e-sites/push-mounted-parent/mounted-parent
+          sudo mount -t tmpfs -o size=64m tmpfs /srv/reprint-e2e-staging
+          sudo mount -t tmpfs -o size=64m tmpfs /srv/e2e-sites/push-mounted-parent/mounted-parent
+          test "$(stat -c %d /srv/reprint-e2e-staging)" != "$(stat -c %d /srv/e2e-sites)"
+          test "$(stat -c %d /srv/e2e-sites/push-mounted-parent/mounted-parent)" != "$(stat -c %d /srv/e2e-sites/push-mounted-parent)"
+
+      - name: Install dependencies
+        working-directory: tests/e2e
+        run: npm install
+
+      - name: Run core cases
+        if: inputs.suite == 'core'
+        env:
+          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          PHP_BINARY: php8.2
+        working-directory: tests/e2e
+        run: |
+          mapfile -t direct_push_cases < <(
+            npx vitest list tests/import-53-push-direct-apply.test.js \
+              | grep '^tests/import-53-push-direct-apply\.test\.js > '
+          )
+          test "${#direct_push_cases[@]}" -gt 0
+          for case_name in "${direct_push_cases[@]}"; do
+            matching_groups=0
+            if [[ "$case_name" =~ $DIRECT_PUSH_CORE_PATTERN ]]; then
+              matching_groups=$((matching_groups + 1))
+            fi
+            if [[ "$case_name" =~ $DIRECT_PUSH_NETWORK_PATTERN ]]; then
+              matching_groups=$((matching_groups + 1))
+            fi
+            if [[ "$case_name" =~ $DIRECT_PUSH_PRIVILEGED_PATTERN ]]; then
+              matching_groups=$((matching_groups + 1))
+            fi
+            if [ "$matching_groups" -ne 1 ]; then
+              echo "Direct-push case belongs to $matching_groups CI groups: $case_name" >&2
+              exit 1
+            fi
+          done
+          mapfile -t test_files < <(
+            find tests -maxdepth 1 -type f -name 'import-*.test.js' -print \
+              | sort \
+              | grep -Ev 'import-(07-permission-errors|09-resume-sql|10-resume-files|12-gzip-corruption|14-buffered-response|15-volatile-files|17-redirect|19-error-chunks|20-request-cutoff|26-completion-headers|28-concurrent-errors|31-follow-symlinks|36-mysql-mode-crash-recovery|43-sql-stream-crash|47-pull-multi-request|48-pull-crash-resume|50-file-body-resume|53-push-direct-apply|55-push-busy|56-compatibility-smoke)\.test\.js$'
+          )
+          npx vitest run "${test_files[@]}" --reporter=verbose
+          npx vitest run tests/import-53-push-direct-apply.test.js \
+            --testNamePattern="$DIRECT_PUSH_CORE_PATTERN" \
+            --reporter=verbose
+
+      - name: Run network and interruption cases
+        if: inputs.suite == 'network-interruption'
+        env:
+          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          PHP_BINARY: php8.2
+        working-directory: tests/e2e
+        run: |
+          npx vitest run \
+            tests/import-09-resume-sql.test.js \
+            tests/import-10-resume-files.test.js \
+            tests/import-12-gzip-corruption.test.js \
+            tests/import-14-buffered-response.test.js \
+            tests/import-15-volatile-files.test.js \
+            tests/import-17-redirect.test.js \
+            tests/import-20-request-cutoff.test.js \
+            tests/import-26-completion-headers.test.js \
+            tests/import-36-mysql-mode-crash-recovery.test.js \
+            tests/import-43-sql-stream-crash.test.js \
+            tests/import-47-pull-multi-request.test.js \
+            tests/import-48-pull-crash-resume.test.js \
+            tests/import-50-file-body-resume.test.js \
+            tests/import-55-push-busy.test.js \
+            --reporter=verbose
+          npx vitest run tests/import-53-push-direct-apply.test.js \
+            --testNamePattern="$DIRECT_PUSH_NETWORK_PATTERN" \
+            --reporter=verbose
+
+      - name: Run privileged filesystem cases
+        if: inputs.suite == 'privileged-filesystem'
+        env:
+          IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
+          PHP_BINARY: php8.2
+        working-directory: tests/e2e
+        run: |
+          npx vitest run \
+            tests/import-07-permission-errors.test.js \
+            tests/import-19-error-chunks.test.js \
+            tests/import-28-concurrent-errors.test.js \
+            tests/import-31-follow-symlinks.test.js \
+            --reporter=verbose
+          npx vitest run tests/import-53-push-direct-apply.test.js \
+            --testNamePattern="$DIRECT_PUSH_PRIVILEGED_PATTERN" \
+            --reporter=verbose
+
+      - name: Debug logs
+        if: always()
+        run: |
+          echo "--- Listening ports ---"
+          sudo ss -tlnp 2>/dev/null || true
+          echo "--- PHP-FPM error log ---"
+          sudo cat /tmp/php-e2e-errors.log 2>/dev/null || echo "(empty)"
+          echo "--- Nginx error log ---"
+          sudo tail -100 /var/log/nginx/error.log 2>/dev/null || echo "(empty)"
+          echo "--- Nginx config test ---"
+          sudo nginx -t 2>&1 || true
+          echo "--- PHP-FPM journal ---"
+          sudo journalctl -u php8.2-fpm --no-pager -n 30 2>/dev/null || true
+          echo "--- Nginx journal ---"
+          sudo journalctl -u nginx --no-pager -n 30 2>/dev/null || true
+          echo "--- MariaDB journal ---"
+          sudo journalctl -u mariadb --no-pager -n 30 2>/dev/null || true
+          echo "--- PHP processes ---"
+          ps aux | grep php || true

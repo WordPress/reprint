@@ -34,4 +34,19 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--target-engine=ENGINE', $output);
         $this->assertStringContainsString('--new-site-url=URL', $output);
     }
+
+    public function testPushHelpShowsItsNarrowPublicSurface(): void
+    {
+        $output = $this->runHelp('push');
+
+        $this->assertStringContainsString('--source-root=DIR', $output);
+        $this->assertStringContainsString('--state-dir=DIR', $output);
+        $this->assertStringContainsString('--secret=TOKEN', $output);
+        $this->assertStringContainsString('--dry-run', $output);
+        $this->assertStringContainsString('--abort', $output);
+        $this->assertStringContainsString('--allow-http', $output);
+        $this->assertStringContainsString('authorizes applying the delta', $output);
+        $this->assertStringContainsString('a later push rescans the source tree', $output);
+        $this->assertStringNotContainsString('push-commit', $output);
+    }
 }

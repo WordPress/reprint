@@ -4,10 +4,10 @@
  * Specifically guards the contract introduced by the "stream file parts
  * directly to disk" change: now that bytes hit the local file before a
  * multipart part finishes, a request cut mid-body leaves a partially-
- * written file on disk. The importer must resume that exact file —
- * not start over (truncation) and not append duplicates (overlap) —
- * and the server-side cursor must cooperate by skipping the bytes the
- * importer already has.
+ * written file on disk. The importer must resume from its last confirmed
+ * multipart boundary. It may discard an unconfirmed tail, but must never
+ * advance to the header cursor for a body that did not arrive completely or
+ * append duplicated bytes on retry.
  *
  * Setup: a 2 MiB random binary file. With --file-chunk-max=262144, the
  * file is sliced into eight chunks. A test_hook_before_file_chunk hook
@@ -116,13 +116,14 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
 
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
+            autoResume: false,
             extraArgs: [
                 '--file-chunk-start=262144',
                 '--file-chunk-max=262144',
             ],
         });
-        assert.notEqual(result.exitCode, 0,
-            `Expected first run to fail due to mid-file exit\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+        assert.equal(result.exitCode, 2,
+            `Expected first run to remain retryable after the truncated response\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
     });
 
     it('partial file is on disk and smaller than source', () => {
@@ -135,13 +136,20 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
             `Expected a partial file (0 < size < ${fileSize}), got ${partialSize}`);
     });
 
-    it('state records current_file and current_file_bytes for resume', () => {
+    it('state records only multipart-confirmed file bytes for resume', () => {
         const stateFile = join(tempDir, '.import-state.json');
         assert.ok(existsSync(stateFile), 'Expected import state file to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.ok(state.current_file, 'Expected state.current_file to be set after a mid-file crash');
-        assert.ok(typeof state.current_file_bytes === 'number' && state.current_file_bytes > 0,
-            `Expected state.current_file_bytes > 0, got ${state.current_file_bytes}`);
+        assert.equal(state.active_resumable_command.completion_state, 'partial');
+        if (state.current_file === null) {
+            assert.equal(state.current_file_bytes, null,
+                'An unconfirmed file path must not carry a sender-claimed byte offset');
+        } else {
+            const partialSize = statSync(state.current_file).size;
+            assert.ok(typeof state.current_file_bytes === 'number' && state.current_file_bytes > 0);
+            assert.ok(state.current_file_bytes <= partialSize,
+                `Confirmed ${state.current_file_bytes} bytes beyond the ${partialSize}-byte local file`);
+        }
     });
 
     it('resume completes after removing the hook', () => {

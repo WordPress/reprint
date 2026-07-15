@@ -928,7 +928,7 @@ function endpoint_sql_chunk(
                 "Content-Length: " . strlen($sql) . "\r\n" .
                 "X-Chunk-Type: sql\r\n" .
                 "X-Query-Complete: " . ($query_complete ? "1" : "0") . "\r\n" .
-                "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($cursor) . "\r\n" .
                 "\r\n"
             );
             $gz->write($sql);
@@ -1088,7 +1088,7 @@ function endpoint_db_index(
                 "Content-Length: " . strlen($payload) . "\r\n" .
                 "X-Chunk-Type: table_stats\r\n" .
                 "X-Tables: " . count($tables) . "\r\n" .
-                "X-Cursor: " . base64_encode($cursor_json) . "\r\n" .
+                "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($cursor_json) . "\r\n" .
                 "\r\n" .
                 $payload . "\r\n"
             );
@@ -2162,6 +2162,12 @@ function endpoint_preflight(array $config): array
         "wp_content" => $wp_content,
         "database" => $db,
     ];
+    if (isset($config['staged_push']) && is_array($config['staged_push'])) {
+        // HTTP_Server derives this from the target's own staged-session
+        // configuration. It is advisory for push and must not change the
+        // preflight result used by existing pull clients.
+        $response['staged_push'] = $config['staged_push'];
+    }
 
     header("Content-Type: application/json");
     $json = json_encode($response);
@@ -2223,7 +2229,7 @@ function stream_file_producer(
             "Content-Type: application/json\r\n" .
             "Content-Length: " . strlen($initial_progress_json) . "\r\n" .
             "X-Chunk-Type: progress\r\n" .
-            "X-Cursor: " . base64_encode($initial_cursor) . "\r\n" .
+            "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($initial_cursor) . "\r\n" .
             "\r\n" .
             $initial_progress_json . "\r\n"
         );
@@ -2276,7 +2282,7 @@ function stream_file_producer(
                         "Content-Type: application/json\r\n" .
                         "Content-Length: " . strlen($progress_json) . "\r\n" .
                         "X-Chunk-Type: progress\r\n" .
-                        "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                        "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($cursor) . "\r\n" .
                         "\r\n" .
                         $progress_json . "\r\n"
                     );
@@ -2298,7 +2304,7 @@ function stream_file_producer(
                     "Content-Type: application/octet-stream\r\n" .
                     "Content-Length: 0\r\n" .
                     "X-Chunk-Type: directory\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($cursor) . "\r\n" .
                     "X-Directory-Path: " . base64_encode($chunk["path"]) . "\r\n";
                 if (isset($chunk["ctime"])) {
                     $part .= "X-Directory-Ctime: " . $chunk["ctime"] . "\r\n";
@@ -2311,7 +2317,7 @@ function stream_file_producer(
                     "Content-Type: application/octet-stream\r\n" .
                     "Content-Length: 0\r\n" .
                     "X-Chunk-Type: symlink\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($cursor) . "\r\n" .
                     "X-Symlink-Path: " . base64_encode($chunk["path"]) . "\r\n" .
                     "X-Symlink-Target: " . base64_encode($chunk["target"]) . "\r\n" .
                     "X-Symlink-Ctime: " . $chunk["ctime"] . "\r\n" .
@@ -2324,7 +2330,7 @@ function stream_file_producer(
                     "Content-Type: application/octet-stream\r\n" .
                     "Content-Length: 0\r\n" .
                     "X-Chunk-Type: index\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($cursor) . "\r\n" .
                     "X-Index-Path: " . base64_encode($chunk["path"]) . "\r\n" .
                     "X-File-Ctime: " . $chunk["ctime"] . "\r\n" .
                     "X-File-Size: " . $chunk["size"] . "\r\n" .
@@ -2337,7 +2343,7 @@ function stream_file_producer(
                     "Content-Type: application/octet-stream\r\n" .
                     "Content-Length: 0\r\n" .
                     "X-Chunk-Type: missing\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($cursor) . "\r\n" .
                     "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n" .
                     "\r\n\r\n"
                 );
@@ -2360,7 +2366,7 @@ function stream_file_producer(
                     "Content-Type: application/json\r\n" .
                     "Content-Length: " . strlen($json) . "\r\n" .
                     "X-Chunk-Type: error\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($cursor) . "\r\n" .
                     "\r\n" .
                     $json . "\r\n"
                 );
@@ -2387,7 +2393,7 @@ function stream_file_producer(
                     "Content-Type: application/octet-stream\r\n" .
                     "Content-Length: " . strlen($data) . "\r\n" .
                     "X-Chunk-Type: file\r\n" .
-                    "X-Cursor: " . base64_encode($cursor) . "\r\n" .
+                    "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($cursor) . "\r\n" .
                     "X-File-Path: " . base64_encode($chunk["path"]) . "\r\n" .
                     "X-File-Size: " . $chunk["size"] . "\r\n" .
                     "X-File-Ctime: " . $chunk["ctime"] . "\r\n" .
@@ -2433,7 +2439,7 @@ function stream_file_producer(
                 "Content-Type: application/json\r\n" .
                 "Content-Length: " . strlen($json) . "\r\n" .
                 "X-Chunk-Type: error\r\n" .
-                "X-Cursor: " . base64_encode($last_cursor) . "\r\n" .
+                "X-Cursor: " . Site_Export_HTTP_Server::encode_cursor($last_cursor) . "\r\n" .
                 "\r\n" .
                 $json . "\r\n"
             );
@@ -2739,28 +2745,14 @@ function endpoint_file_index(
     // scratch files unless the client explicitly opts in. See
     // path_is_default_skipped() for the full deny-list and rationale.
     $include_caches = !empty($config["include_caches"]);
-    // Reprint's own storage (the push staging area and apply bookkeeping)
-    // must never appear in an index: it can sit inside the document root on
-    // hosts that allow writing nowhere else, and indexing it would sync or
-    // delete reprint's own records mid-transfer. storage_path is the
-    // server's own setting, so it is known here for every request — a
-    // pulling peer's request does not need to mention it.
-    $storage_path = isset($config["storage_path"]) && is_string($config["storage_path"])
-        ? rtrim($config["storage_path"], "/")
-        : "";
-    if ($storage_path !== "") {
-        // The traversal canonicalizes every path with realpath() (see the
-        // wp.com note further down), so the setting must be compared in the
-        // same form. path_is_within_root() compares plain strings, and a
-        // trailing slash on the setting would make it miss — hence the
-        // rtrim above. When the directory does not exist yet there is
-        // nothing to exclude and the trimmed value stays as a harmless
-        // fallback.
-        $storage_real = realpath($storage_path);
-        if ($storage_real !== false) {
-            $storage_path = $storage_real;
-        }
-    }
+    // Reprint's private staging tree can sit inside a listed site root. The
+    // HTTP server injects this server-owned value after discarding request
+    // values, so a pulling peer cannot choose which directory is hidden.
+    $excluded_staging_roots = reprint_build_staging_exclusion_roots(
+        isset($config["excluded_staging_root"]) && is_string($config["excluded_staging_root"])
+            ? $config["excluded_staging_root"]
+            : ""
+    );
 
     // Find the starting point – either by parsing the cursor, or by
     // sourcing it from the filesystem.
@@ -2800,6 +2792,17 @@ function endpoint_file_index(
                     throw new InvalidArgumentException("Index cursor frame has invalid after encoding");
                 }
             }
+            // A cursor may predate a staging configuration change. Drop the
+            // stale frame before it can become response metadata or be read.
+            if (
+                reprint_path_is_within_excluded_staging_roots(
+                    $dir,
+                    $excluded_staging_roots,
+                    $directories
+                )
+            ) {
+                continue;
+            }
             $stack[] = [
                 "dir" => $dir,
                 "after" => $after,
@@ -2837,7 +2840,16 @@ function endpoint_file_index(
             );
         }
 
-        $ordered = [$list_dir_real];
+        $ordered = [];
+        if (
+            !reprint_path_is_within_excluded_staging_roots(
+                $list_dir_real,
+                $excluded_staging_roots,
+                $directories
+            )
+        ) {
+            $ordered[] = $list_dir_real;
+        }
         $extra_roots = [];
         foreach ($directories as $root) {
             if ($root === $list_dir_real) {
@@ -2857,6 +2869,15 @@ function endpoint_file_index(
                 // prevents re-entering child roots (i.e. when traversing
                 // /srv/htdocs we won't descend back into __wp__/).
                 if (in_array($root, $ordered, true)) {
+                    continue;
+                }
+                if (
+                    reprint_path_is_within_excluded_staging_roots(
+                        $root,
+                        $excluded_staging_roots,
+                        $directories
+                    )
+                ) {
                     continue;
                 }
                 $ordered[] = $root;
@@ -2945,6 +2966,17 @@ function endpoint_file_index(
             $current_dir = $frame["dir"];
             $current_after = $frame["after"] ?? null;
 
+            if (
+                reprint_path_is_within_excluded_staging_roots(
+                    $current_dir,
+                    $excluded_staging_roots,
+                    $directories
+                )
+            ) {
+                array_pop($stack);
+                continue;
+            }
+
             clearstatcache(true, $current_dir);
             $current_real = realpath($current_dir);
             if ($current_real === false || !is_dir($current_real)) {
@@ -2959,7 +2991,7 @@ function endpoint_file_index(
                     ["stack" => encode_index_stack($stack)],
                     JSON_UNESCAPED_SLASHES
                 );
-                $cursor_b64 = base64_encode($cursor_json);
+                $cursor_b64 = Site_Export_HTTP_Server::encode_cursor($cursor_json);
                 $gz->write(
                     "--{$boundary}\r\n" .
                     "Content-Type: application/json\r\n" .
@@ -2998,7 +3030,7 @@ function endpoint_file_index(
                     ["stack" => encode_index_stack($stack)],
                     JSON_UNESCAPED_SLASHES
                 );
-                $cursor_b64 = base64_encode($cursor_json);
+                $cursor_b64 = Site_Export_HTTP_Server::encode_cursor($cursor_json);
                 $gz->write(
                     "--{$boundary}\r\n" .
                     "Content-Type: application/json\r\n" .
@@ -3036,7 +3068,7 @@ function endpoint_file_index(
                     ["stack" => encode_index_stack($stack)],
                     JSON_UNESCAPED_SLASHES
                 );
-                $cursor_b64 = base64_encode($cursor_json);
+                $cursor_b64 = Site_Export_HTTP_Server::encode_cursor($cursor_json);
                 $gz->write(
                     "--{$boundary}\r\n" .
                     "Content-Type: application/json\r\n" .
@@ -3090,9 +3122,13 @@ function endpoint_file_index(
                 if (!$include_caches && path_is_default_skipped($path)) {
                     continue;
                 }
-                // The "" guard matters: path_is_within_root() with an empty
-                // root would match every absolute path.
-                if ($storage_path !== "" && path_is_within_root($path, $storage_path)) {
+                if (
+                    reprint_path_is_within_excluded_staging_roots(
+                        $path,
+                        $excluded_staging_roots,
+                        $directories
+                    )
+                ) {
                     continue;
                 }
                 clearstatcache(true, $path);
@@ -3150,7 +3186,7 @@ function endpoint_file_index(
                         ["stack" => encode_index_stack($stack)],
                         JSON_UNESCAPED_SLASHES
                     );
-                    $cursor_b64 = base64_encode($cursor_json);
+                    $cursor_b64 = Site_Export_HTTP_Server::encode_cursor($cursor_json);
                     $json = json_encode_or_throw(
                         encode_index_batch($batch_items),
                         JSON_UNESCAPED_SLASHES
@@ -3226,7 +3262,7 @@ function endpoint_file_index(
             ["stack" => encode_index_stack($stack)],
             JSON_UNESCAPED_SLASHES
         );
-        $cursor_b64 = base64_encode($cursor_json);
+        $cursor_b64 = Site_Export_HTTP_Server::encode_cursor($cursor_json);
         $json = json_encode_or_throw(
             encode_index_batch($batch_items),
             JSON_UNESCAPED_SLASHES
@@ -3256,7 +3292,7 @@ function endpoint_file_index(
                 ["stack" => encode_index_stack($stack)],
                 JSON_UNESCAPED_SLASHES
             );
-            $cursor_b64 = base64_encode($cursor_json);
+            $cursor_b64 = Site_Export_HTTP_Server::encode_cursor($cursor_json);
             $gz->write(
                 "--{$boundary}\r\n" .
                 "Content-Type: application/json\r\n" .
@@ -3274,7 +3310,7 @@ function endpoint_file_index(
             ["stack" => encode_index_stack($stack)],
             JSON_UNESCAPED_SLASHES
         );
-        $cursor_b64 = base64_encode($cursor_json);
+        $cursor_b64 = Site_Export_HTTP_Server::encode_cursor($cursor_json);
 
         $gz->write(
             "--{$boundary}\r\n" .
@@ -3321,6 +3357,11 @@ function endpoint_file_fetch(
     clearstatcache(true);
 
     $directories = resolve_directories($config);
+    $excluded_staging_roots = reprint_build_staging_exclusion_roots(
+        isset($config["excluded_staging_root"]) && is_string($config["excluded_staging_root"])
+            ? $config["excluded_staging_root"]
+            : ""
+    );
 
     $list_path = $config["file_list_path"] ?? null;
     if ($list_path === null && isset($_FILES["file_list"])) {
@@ -3357,6 +3398,28 @@ function endpoint_file_fetch(
         $paths[] = $path;
     }
 
+    $excluded_path = null;
+    foreach ($paths as $path) {
+        if (
+            reprint_path_is_within_excluded_staging_roots(
+                $path,
+                $excluded_staging_roots,
+                $directories
+            ) && $excluded_path === null
+        ) {
+            $excluded_path = $path;
+        }
+    }
+    if ($excluded_path !== null) {
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error text is serialized at the HTTP boundary, not emitted as HTML.
+        throw new InvalidArgumentException(
+            "The file list path with base64 value \"" . base64_encode($excluded_path) .
+                "\" is in Reprint's private staging directory. " .
+                "Run files-pull --abort, then rerun the full pull."
+        );
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+    }
+
     $chunk_size = $config["chunk_size"] ?? FileTreeProducer::DEFAULT_CHUNK_SIZE;
     $chunk_size = require_int_range(
         "chunk_size",
@@ -3380,6 +3443,142 @@ function endpoint_file_fetch(
         $config,
         file_fetch_paths_should_gzip($paths)
     );
+}
+
+/**
+ * Returns true when a transfer path names or resolves into the server-owned
+ * staging tree. Relative file-fetch paths are resolved in the same allowed-root
+ * order as FileTreeProducer.
+ */
+function reprint_path_is_within_excluded_staging_roots(
+    string $path,
+    array $excluded_staging_roots,
+    array $allowed_roots
+): bool {
+    if ($path === "" || $excluded_staging_roots === []) {
+        return false;
+    }
+
+    if ($path[0] === "/") {
+        $candidates = [$path];
+    } else {
+        $candidates = [];
+        $fallback_candidates = [];
+        foreach ($allowed_roots as $allowed_root) {
+            if (!is_string($allowed_root) || $allowed_root === "") {
+                continue;
+            }
+            $candidate = rtrim($allowed_root, "/") . "/" . $path;
+            $fallback_candidates[] = $candidate;
+            clearstatcache(true, $candidate);
+            if (file_exists($candidate) || is_link($candidate)) {
+                // FileTreeProducer uses the first allowed root containing the
+                // relative path, so classification must use the same one.
+                $candidates = [$candidate];
+                break;
+            }
+        }
+        if ($candidates === []) {
+            $candidates = $fallback_candidates;
+        }
+    }
+
+    foreach ($candidates as $candidate) {
+        $candidate_paths = [reprint_normalize_staging_exclusion_path($candidate)];
+        $canonical_candidate = reprint_resolve_from_existing_ancestor(
+            $candidate
+        );
+        if (is_string($canonical_candidate)) {
+            $candidate_paths[] = reprint_normalize_staging_exclusion_path(
+                $canonical_candidate
+            );
+        }
+
+        foreach (array_unique($candidate_paths) as $candidate_path) {
+            foreach ($excluded_staging_roots as $excluded_staging_root) {
+                if (
+                    $excluded_staging_root === "/"
+                        ? isset($candidate_path[0]) && $candidate_path[0] === "/"
+                        : path_is_within_root(
+                            $candidate_path,
+                            $excluded_staging_root
+                        )
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Captures staging-root topology once per endpoint request; candidate aliases
+ * are still resolved separately for every path.
+ *
+ * @return list<string>
+ */
+function reprint_build_staging_exclusion_roots(
+    string $excluded_staging_root
+): array {
+    if ($excluded_staging_root === "") {
+        return [];
+    }
+
+    $excluded_staging_roots = [
+        reprint_normalize_staging_exclusion_path($excluded_staging_root),
+    ];
+    $canonical_excluded_staging_root = reprint_resolve_from_existing_ancestor(
+        $excluded_staging_root
+    );
+    if ($canonical_excluded_staging_root !== null) {
+        $excluded_staging_roots[] = $canonical_excluded_staging_root;
+    }
+
+    return array_values(
+        array_filter(array_unique($excluded_staging_roots))
+    );
+}
+
+function reprint_normalize_staging_exclusion_path(string $path): string
+{
+    $normalized = normalize_dot_segments($path);
+    $normalized = rtrim($normalized, "/");
+    if ($normalized === "" && isset($path[0]) && $path[0] === "/") {
+        return "/";
+    }
+    return $normalized;
+}
+
+/**
+ * realpath() rejects a missing leaf, so resolve its deepest existing ancestor
+ * to retain any symlink transition before appending the stale suffix.
+ */
+function reprint_resolve_from_existing_ancestor(string $path): ?string
+{
+    $current_path = $path;
+    $missing_segments = [];
+    while (true) {
+        clearstatcache(true, $current_path);
+        $canonical_ancestor = @realpath($current_path);
+        if ($canonical_ancestor !== false) {
+            foreach ($missing_segments as $missing_segment) {
+                $canonical_ancestor =
+                    rtrim($canonical_ancestor, "/") . "/" . $missing_segment;
+            }
+            return reprint_normalize_staging_exclusion_path(
+                $canonical_ancestor
+            );
+        }
+
+        $parent_path = dirname($current_path);
+        if ($parent_path === $current_path) {
+            return null;
+        }
+        array_unshift($missing_segments, basename($current_path));
+        $current_path = $parent_path;
+    }
 }
 
 /**

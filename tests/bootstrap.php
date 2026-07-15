@@ -22,21 +22,13 @@ if (!class_exists('Site_Export_HMAC_Server', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-hmac-server.php';
 }
 
-if (!class_exists('Site_Export_HTTP_Server', false)) {
-    require_once __DIR__ . '/../packages/reprint-exporter/src/class-http-server.php';
-}
-
-if (!class_exists('Site_Export_Multipart_Processor', false)) {
-    require_once __DIR__ . '/../packages/reprint-exporter/src/class-multipart-processor.php';
-}
-
-if (!class_exists('Site_Export_Staged_Apply_Exception', false)) {
-    require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-apply-exception.php';
-}
-
-if (!class_exists('Site_Export_Staged_Apply_Session', false)) {
-    require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-apply-session.php';
-}
+// The exporter is installed from a Composer path package in CI and release
+// tests. Require the checkout copies here so tests exercise a changed source
+// file before the package mirror is refreshed.
+require_once __DIR__ . '/../packages/reprint-exporter/src/class-multipart-processor.php';
+require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-apply-session.php';
+require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-endpoints.php';
+require_once __DIR__ . '/../packages/reprint-exporter/src/class-http-server.php';
 
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';

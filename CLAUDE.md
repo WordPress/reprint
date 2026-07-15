@@ -19,7 +19,7 @@ The codebase follows a producer-consumer pattern with two main components:
 
 ### Import Side (Client) — `packages/reprint-importer/src/`
 - **import.php**: CLI script that downloads from export.php using streaming multipart parsing, no buffering of entire response
-- **MultipartStreamParser**: Incremental multipart/mixed parser that processes chunks as they arrive
+- **Site_Export_Multipart_Processor**: Shared caller-driven multipart/mixed processor for pull response fragments and bounded push request reads
 
 ### Supporting Classes
 - **MysqlValueFormatter**: Formats MySQL values by type (NULL, numeric, binary hex, quoted strings)

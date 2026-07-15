@@ -154,6 +154,139 @@ final class FileIndexSkipDefaultsTest extends TestCase
         ];
     }
 
+    /**
+     * @dataProvider excludedStagingPathCases
+     * @param list<string> $allowedRoots
+     */
+    public function testExcludedStagingPathClassifier(
+        string $path,
+        string $excludedStagingRoot,
+        array $allowedRoots,
+        bool $expected
+    ): void {
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+
+        $this->assertSame(
+            $expected,
+            reprint_path_is_within_excluded_staging_roots(
+                $path,
+                reprint_build_staging_exclusion_roots($excludedStagingRoot),
+                $allowedRoots
+            )
+        );
+    }
+
+    /**
+     * @return array<string,array{0:string,1:string,2:list<string>,3:bool}>
+     */
+    public static function excludedStagingPathCases(): array
+    {
+        return [
+            'absolute root' => [
+                '/srv/site/.reprint-staging',
+                '/srv/site/.reprint-staging',
+                ['/srv/site'],
+                true,
+            ],
+            'absolute descendant with trailing root separator' => [
+                '/srv/site/.reprint-staging/session/state.json',
+                '/srv/site/.reprint-staging/',
+                ['/srv/site'],
+                true,
+            ],
+            'relative descendant' => [
+                '.reprint-staging/session/state.json',
+                '/srv/site/.reprint-staging',
+                ['/srv/site'],
+                true,
+            ],
+            'relative path through a parent segment' => [
+                '../private-staging/state.json',
+                '/srv/private-staging',
+                ['/srv/site'],
+                true,
+            ],
+            'absolute neighboring prefix' => [
+                '/srv/site/.reprint-staging-backup/state.json',
+                '/srv/site/.reprint-staging',
+                ['/srv/site'],
+                false,
+            ],
+            'relative neighboring prefix' => [
+                '.reprint-staging-backup/state.json',
+                '/srv/site/.reprint-staging',
+                ['/srv/site'],
+                false,
+            ],
+            'dot segment escapes the lexical prefix' => [
+                '/srv/site/.reprint-staging/../keep.txt',
+                '/srv/site/.reprint-staging',
+                ['/srv/site'],
+                false,
+            ],
+            'filesystem root excludes every absolute path' => [
+                '/srv/site/index.php',
+                '/',
+                ['/srv/site'],
+                true,
+            ],
+            'filesystem root excludes relative paths' => [
+                'index.php',
+                '/',
+                ['/srv/site'],
+                true,
+            ],
+        ];
+    }
+
+    public function testExcludedStagingPathClassifierFollowsSymlinkChanges(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+
+        $siteDir = $this->tempDir . '/site';
+        $staging = $siteDir . '/private-staging';
+        $ordinary = $siteDir . '/ordinary';
+        mkdir($staging, 0755, true);
+        mkdir($ordinary, 0755, true);
+        file_put_contents($staging . '/state.json', '{}');
+        file_put_contents($ordinary . '/state.json', '{}');
+        $excludedStagingRoots = reprint_build_staging_exclusion_roots(
+            $staging
+        );
+        $alias = $siteDir . '/current';
+        if (!@symlink($ordinary, $alias)) {
+            $this->markTestSkipped('The filesystem does not permit symlinks.');
+        }
+
+        $this->assertFalse(
+            reprint_path_is_within_excluded_staging_roots(
+                $alias . '/state.json',
+                $excludedStagingRoots,
+                [$siteDir]
+            )
+        );
+
+        unlink($alias);
+        symlink($staging, $alias);
+
+        $this->assertTrue(
+            reprint_path_is_within_excluded_staging_roots(
+                $alias . '/state.json',
+                $excludedStagingRoots,
+                [$siteDir]
+            ),
+            'the realpath cache from the previous symlink target must not be reused'
+        );
+        $this->assertTrue(
+            reprint_path_is_within_excluded_staging_roots(
+                $alias . '/missing/session.json',
+                $excludedStagingRoots,
+                [$siteDir]
+            ),
+            'a missing leaf must retain the canonical staging ancestor'
+        );
+    }
+
     // ------------------------------------------------------------------
     // Integration tests — endpoint_file_index() over the fixture
     // ------------------------------------------------------------------
@@ -239,6 +372,209 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/reprint-storage/state.json', $withCaches);
     }
 
+    public function testActiveStorageChangesNeverLeakIntoSubsequentIndexes(): void
+    {
+        $siteDir = $this->buildFixtureSite();
+        $storage = $siteDir . '/.reprint-staging';
+        mkdir($storage . '/apply-sessions/first/work/files', 0755, true);
+        file_put_contents($storage . '/apply-sessions/first/work/files/old.txt', 'old');
+
+        $first = $this->relativePaths(
+            $this->runFileIndexEntries($siteDir, false, 5000, $storage),
+            $siteDir
+        );
+        file_put_contents($storage . '/apply-sessions/first/work/files/new.txt', 'new');
+        $second = $this->relativePaths(
+            $this->runFileIndexEntries($siteDir, false, 5000, $storage),
+            $siteDir
+        );
+
+        $isStoragePath = static fn(string $path): bool => strpos($path, '.reprint-staging') === 0;
+        $this->assertSame([], array_values(array_filter($first, $isStoragePath)));
+        $this->assertSame([], array_values(array_filter($second, $isStoragePath)));
+    }
+
+    public function testExternalStorageDoesNotHideAnUnrelatedSiteDirectory(): void
+    {
+        $siteDir = $this->buildFixtureSite();
+        mkdir($siteDir . '/.reprint-staging', 0755, true);
+        file_put_contents($siteDir . '/.reprint-staging/user-file.txt', 'site content');
+        $externalStorage = $this->tempDir . '/external-staging';
+        mkdir($externalStorage, 0755, true);
+
+        $paths = $this->relativePaths(
+            $this->runFileIndexEntries($siteDir, false, 5000, $externalStorage),
+            $siteDir
+        );
+
+        $this->assertContains('.reprint-staging/user-file.txt', $paths);
+    }
+
+    public function testSymlinkedStorageConfigurationExcludesItsCanonicalSiteTarget(): void
+    {
+        $siteDir = $this->buildFixtureSite();
+        $storage = $siteDir . '/private-staging';
+        mkdir($storage, 0755, true);
+        file_put_contents($storage . '/state.json', '{}');
+        file_put_contents($siteDir . '/private-staging-neighbor.txt', 'keep');
+        $storageAlias = $this->tempDir . '/staging-alias';
+        if (!@symlink($storage, $storageAlias)) {
+            $this->markTestSkipped('The filesystem does not permit symlinks.');
+        }
+
+        $paths = $this->relativePaths(
+            $this->runFileIndexEntries($siteDir, false, 5000, $storageAlias),
+            $siteDir
+        );
+
+        $this->assertNotContains('private-staging/state.json', $paths);
+        $this->assertContains('private-staging-neighbor.txt', $paths);
+    }
+
+    public function testFileIndexSkipsAnInTreeSymlinkAliasIntoStaging(): void
+    {
+        $siteDir = $this->buildFixtureSite();
+        $staging = $siteDir . '/private-staging';
+        mkdir($staging, 0755, true);
+        file_put_contents($staging . '/state.json', '{}');
+        $alias = $siteDir . '/public-alias';
+        if (!@symlink($staging, $alias)) {
+            $this->markTestSkipped('The filesystem does not permit symlinks.');
+        }
+
+        $paths = $this->relativePaths(
+            $this->runFileIndexEntries($siteDir, false, 5000, $staging),
+            $siteDir
+        );
+
+        $this->assertNotContains('private-staging/state.json', $paths);
+        $this->assertNotContains('public-alias', $paths);
+        $this->assertContains('index.php', $paths);
+    }
+
+    public function testFileIndexDropsAStaleCursorFrameAfterStagingConfigurationChanges(): void
+    {
+        $siteDir = $this->buildFixtureSite();
+        $staging = $siteDir . '/private-staging';
+        mkdir($staging, 0755, true);
+        file_put_contents($staging . '/state.json', '{}');
+
+        // This frame represents a cursor issued before private-staging became
+        // the server's configured staging root.
+        $cursor = json_encode([
+            'stack' => [
+                [
+                    'dir' => base64_encode(realpath($siteDir) ?: $siteDir),
+                    'after' => null,
+                ],
+                [
+                    'dir' => base64_encode(realpath($staging) ?: $staging),
+                    'after' => null,
+                ],
+            ],
+        ], JSON_THROW_ON_ERROR);
+
+        $paths = $this->relativePaths(
+            $this->runFileIndexEntries(
+                $siteDir,
+                false,
+                5000,
+                $staging,
+                $cursor
+            ),
+            $siteDir
+        );
+
+        $this->assertNotContains('private-staging', $paths);
+        $this->assertNotContains('private-staging/state.json', $paths);
+        $this->assertContains('index.php', $paths);
+    }
+
+    public function testFileIndexCompletesWithAnEmptyIndexWhenTheOnlyRootIsStaging(): void
+    {
+        $staging = $this->tempDir . '/private-staging';
+        mkdir($staging, 0755, true);
+        file_put_contents($staging . '/state.json', '{}');
+
+        $entries = $this->runFileIndexEntries(
+            $staging,
+            false,
+            5000,
+            $staging
+        );
+
+        $this->assertSame([], $entries);
+    }
+
+    public function testFileFetchRejectsAMixedListBeforeStreamingAnyFile(): void
+    {
+        $siteDir = $this->buildFixtureSite();
+        $staging = $siteDir . '/private-staging';
+        mkdir($staging, 0755, true);
+        $allowed = $siteDir . '/allowed.php';
+        $excluded = $staging . '/state.php';
+        file_put_contents($allowed, 'allowed-file-body');
+        file_put_contents($excluded, 'private-staging-body');
+
+        // The invalid cursor would fail in FileTreeProducer's constructor;
+        // staging rejection must happen first, before both it and gzip choice.
+        $result = $this->runFileFetch(
+            $siteDir,
+            [$allowed, $excluded],
+            $staging,
+            'not-json'
+        );
+
+        $this->assertSame(1, $result['exit_code'], $result['stderr']);
+        $this->assertStringContainsString('files-pull --abort', $result['stdout']);
+        $this->assertStringContainsString('rerun the full pull', $result['stdout']);
+        $this->assertStringNotContainsString('--boundary-', $result['stdout']);
+        $this->assertStringNotContainsString('allowed-file-body', $result['stdout']);
+        $this->assertStringNotContainsString('private-staging-body', $result['stdout']);
+    }
+
+    public function testFileFetchRejectsRelativeAndSymlinkedStagingPathsButAllowsNeighbor(): void
+    {
+        $siteDir = $this->buildFixtureSite();
+        $staging = $siteDir . '/private-staging';
+        mkdir($staging, 0755, true);
+        file_put_contents($staging . '/state.php', 'private-staging-body');
+        $neighbor = $siteDir . '/private-staging-neighbor.php';
+        file_put_contents($neighbor, 'neighbor-body');
+        $alias = $siteDir . '/staging-alias';
+        if (!@symlink($staging, $alias)) {
+            $this->markTestSkipped('The filesystem does not permit symlinks.');
+        }
+
+        foreach (
+            [
+                'relative' => 'private-staging/state.php',
+                'absolute alias' => $alias . '/state.php',
+                'absolute alias with missing leaf' => $alias . '/missing/state.php',
+            ] as $label => $path
+        ) {
+            $result = $this->runFileFetch($siteDir, [$path], $staging);
+            $this->assertSame(1, $result['exit_code'], $label . ': ' . $result['stderr']);
+            $this->assertStringContainsString('files-pull --abort', $result['stdout'], $label);
+            $this->assertStringNotContainsString('--boundary-', $result['stdout'], $label);
+        }
+
+        foreach (
+            [
+                'relative neighbor' => 'private-staging-neighbor.php',
+                'absolute neighbor' => $neighbor,
+            ] as $label => $path
+        ) {
+            $result = $this->runFileFetch($siteDir, [$path], $staging);
+            $this->assertSame(0, $result['exit_code'], $label . ': ' . $result['stderr']);
+            $body = @gzdecode($result['stdout']);
+            if ($body === false) {
+                $body = $result['stdout'];
+            }
+            $this->assertStringContainsString('neighbor-body', $body, $label);
+        }
+    }
+
     public function testFileIndexFilterDoesNotBreakResume(): void
     {
         // The skip is applied AFTER the cursor's "after" pointer is updated,
@@ -310,9 +646,21 @@ final class FileIndexSkipDefaultsTest extends TestCase
     /**
      * @return list<array{path: string, type: string}>
      */
-    private function runFileIndexEntries(string $siteDir, bool $includeCaches, int $batchSize = 5000, ?string $storagePath = null): array
+    private function runFileIndexEntries(
+        string $siteDir,
+        bool $includeCaches,
+        int $batchSize = 5000,
+        ?string $excludedStagingRoot = null,
+        ?string $cursor = null
+    ): array
     {
-        $stdout = $this->runFileIndex($siteDir, $includeCaches, $batchSize, $storagePath);
+        $stdout = $this->runFileIndex(
+            $siteDir,
+            $includeCaches,
+            $batchSize,
+            $excludedStagingRoot,
+            $cursor
+        );
 
         // The response is `multipart/mixed; boundary="…"` containing one or
         // more `index_batch` JSON chunks. Parse out each batch and flatten.
@@ -368,7 +716,10 @@ final class FileIndexSkipDefaultsTest extends TestCase
      */
     private function relativePaths(array $entries, string $siteDir): array
     {
-        $prefix = $siteDir . '/';
+        // endpoint_file_index() reports canonical paths. macOS exposes /tmp
+        // and /var through /private symlinks, so compare against the same form.
+        $siteRoot = realpath($siteDir) ?: $siteDir;
+        $prefix = rtrim($siteRoot, '/') . '/';
         $out = [];
         foreach ($entries as $e) {
             $p = $e['path'];
@@ -380,7 +731,13 @@ final class FileIndexSkipDefaultsTest extends TestCase
         return $out;
     }
 
-    private function runFileIndex(string $siteDir, bool $includeCaches, int $batchSize, ?string $storagePath = null): string
+    private function runFileIndex(
+        string $siteDir,
+        bool $includeCaches,
+        int $batchSize,
+        ?string $excludedStagingRoot = null,
+        ?string $cursor = null
+    ): string
     {
         $configPath = $this->tempDir . '/index-config.json';
         $config = [
@@ -389,8 +746,11 @@ final class FileIndexSkipDefaultsTest extends TestCase
             'batch_size' => $batchSize,
             'include_caches' => $includeCaches,
         ];
-        if ($storagePath !== null) {
-            $config['storage_path'] = $storagePath;
+        if ($excludedStagingRoot !== null) {
+            $config['excluded_staging_root'] = $excludedStagingRoot;
+        }
+        if ($cursor !== null) {
+            $config['cursor'] = $cursor;
         }
         file_put_contents($configPath, json_encode($config, JSON_THROW_ON_ERROR));
 
@@ -428,6 +788,77 @@ PHP,
         $this->assertSame(0, $exitCode, "file_index should exit cleanly.\nstderr: {$stderr}");
 
         return $stdout;
+    }
+
+    /**
+     * @param list<string> $paths
+     * @return array{stdout:string,stderr:string,exit_code:int}
+     */
+    private function runFileFetch(
+        string $siteDir,
+        array $paths,
+        string $excludedStagingRoot,
+        ?string $cursor = null
+    ): array {
+        $listPath = $this->tempDir . '/file-fetch-list.json';
+        file_put_contents($listPath, json_encode($paths, JSON_THROW_ON_ERROR));
+
+        $configPath = $this->tempDir . '/file-fetch-config.json';
+        $config = [
+            'directory' => $siteDir,
+            'file_list_path' => $listPath,
+            'excluded_staging_root' => $excludedStagingRoot,
+        ];
+        if ($cursor !== null) {
+            $config['cursor'] = $cursor;
+        }
+        file_put_contents(
+            $configPath,
+            json_encode($config, JSON_THROW_ON_ERROR)
+        );
+
+        $scriptPath = $this->tempDir . '/run-file-fetch.php';
+        file_put_contents(
+            $scriptPath,
+            sprintf(
+                <<<'PHP'
+<?php
+declare(strict_types=1);
+require_once %s;
+$config = json_decode(file_get_contents(%s), true, 512, JSON_THROW_ON_ERROR);
+$budget = new ResourceBudget(microtime(true), 10, 128 * 1024 * 1024, 0.9);
+endpoint_file_fetch($config, $budget);
+PHP,
+                json_encode(
+                    dirname(__DIR__) . '/packages/reprint-exporter/src/export.php',
+                    JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES
+                ),
+                json_encode(
+                    $configPath,
+                    JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES
+                ),
+            ),
+        );
+
+        $command = sprintf('%s %s', escapeshellarg(PHP_BINARY), escapeshellarg($scriptPath));
+        $descriptorSpec = [
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+        $process = proc_open($command, $descriptorSpec, $pipes);
+        $this->assertIsResource($process);
+
+        $stdout = stream_get_contents($pipes[1]);
+        fclose($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[2]);
+        $exitCode = proc_close($process);
+
+        return [
+            'stdout' => $stdout,
+            'stderr' => $stderr,
+            'exit_code' => $exitCode,
+        ];
     }
 
     private function recursiveDelete(string $dir): void

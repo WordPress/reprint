@@ -65,7 +65,9 @@ done
 REGISTRY="/app/tests/e2e/site-registry.json"
 SITE_ROOT=$(jq -r '.siteRoot' "$REGISTRY")
 mkdir -p "$SITE_ROOT"
+mkdir -p /srv/reprint-e2e-staging
 chown nginx:nginx "$SITE_ROOT"
+chown nginx:nginx /srv/reprint-e2e-staging
 
 cat > /etc/nginx/nginx.conf <<'NGINXCONF'
 user nginx;
