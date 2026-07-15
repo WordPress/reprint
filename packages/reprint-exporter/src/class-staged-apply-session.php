@@ -161,11 +161,23 @@ final class Site_Export_Staged_Apply_Session {
             }
             $sessions_dir = self::require_directory($sessions_dir, 'staged apply sessions', false);
         }
-        $creation_lock = @fopen($sessions_dir . '/create.lock', 'c+b');
+        $creation_lock_path = $sessions_dir . '/create.lock';
+        $creation_lock_identity = $session->lstat_path($creation_lock_path);
+        if ($creation_lock_identity !== null && $creation_lock_identity['type'] !== 'file') {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply creation lock is not a regular file.');
+        }
+        $creation_lock = @fopen($creation_lock_path, 'c+b');
         if ($creation_lock === false) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not open the staged apply creation lock.');
         }
         try {
+            $opened_lock_identity = fstat($creation_lock);
+            $published_lock_identity = $session->lstat_path($creation_lock_path);
+            if (!is_array($opened_lock_identity) || $published_lock_identity === null || $published_lock_identity['type'] !== 'file'
+                || (int) $opened_lock_identity['dev'] !== $published_lock_identity['dev']
+                || (int) $opened_lock_identity['ino'] !== $published_lock_identity['ino']) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply creation lock changed while it was opened.');
+            }
             if (!flock($creation_lock, LOCK_EX | LOCK_NB)) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_BUSY, 'Staged apply session creation is busy. Retry the create request.');
             }
@@ -548,6 +560,15 @@ final class Site_Export_Staged_Apply_Session {
         return $this->with_session_lock(function () use ($maximum_entries): array {
             $state = $this->read_json($this->commit_path);
             if ($state === null) {
+                $active_path = $this->storage_dir . '/apply-sessions/target.active';
+                $active_identity = $this->lstat_path($active_path);
+                $active = $active_identity !== null && $active_identity['type'] === 'file'
+                    ? @file_get_contents($active_path)
+                    : false;
+                if ($this->lstat_path($this->maintenance_identity_path) !== null
+                    || ( is_string($active) && trim($active) === $this->session_id )) {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The commit checkpoint disappeared after live mutation began.');
+                }
                 if (!$this->delete_upload_is_complete()) {
                     throw new InvalidArgumentException('Commit requires an explicit completed delete upload declaration.');
                 }
@@ -600,6 +621,10 @@ final class Site_Export_Staged_Apply_Session {
             }
             $this->with_target_lock(function (): void {
                 $active_path = $this->storage_dir . '/apply-sessions/target.active';
+                $active_identity = $this->lstat_path($active_path);
+                if ($active_identity !== null && $active_identity['type'] !== 'file') {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator is not a regular file.');
+                }
                 $active = @file_get_contents($active_path);
                 if (is_string($active) && trim($active) !== '' && trim($active) !== $this->session_id) {
                     throw new Site_Export_Staged_Apply_Exception(self::ERROR_BUSY, 'Another staged apply session is already committing this target: ' . trim($active) . '.');
@@ -1701,6 +1726,10 @@ final class Site_Export_Staged_Apply_Session {
     private function release_target(): void {
         $this->with_target_lock(function (): void {
             $active_path = $this->storage_dir . '/apply-sessions/target.active';
+            $active_identity = $this->lstat_path($active_path);
+            if ($active_identity !== null && $active_identity['type'] !== 'file') {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator is not a regular file.');
+            }
             $active = @file_get_contents($active_path);
             if (!is_string($active) || trim($active) !== $this->session_id) {
                 return;
@@ -1722,11 +1751,23 @@ final class Site_Export_Staged_Apply_Session {
      * @param callable $callback Critical section to execute while locked.
      */
     private function with_target_lock(callable $callback): void {
-        $lock = @fopen($this->storage_dir . '/apply-sessions/target.lock', 'c+b');
+        $lock_path = $this->storage_dir . '/apply-sessions/target.lock';
+        $lock_identity = $this->lstat_path($lock_path);
+        if ($lock_identity !== null && $lock_identity['type'] !== 'file') {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator lock is not a regular file.');
+        }
+        $lock = @fopen($lock_path, 'c+b');
         if ($lock === false) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not open the staged apply target coordinator lock.');
         }
         try {
+            $opened_lock_identity = fstat($lock);
+            $published_lock_identity = $this->lstat_path($lock_path);
+            if (!is_array($opened_lock_identity) || $published_lock_identity === null || $published_lock_identity['type'] !== 'file'
+                || (int) $opened_lock_identity['dev'] !== $published_lock_identity['dev']
+                || (int) $opened_lock_identity['ino'] !== $published_lock_identity['ino']) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator lock changed while it was opened.');
+            }
             if (!flock($lock, LOCK_EX | LOCK_NB)) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_BUSY, 'The staged apply target coordinator is busy. Retry the request.');
             }
@@ -1842,6 +1883,10 @@ final class Site_Export_Staged_Apply_Session {
         }
         if ($target !== $this->target_root || $protected !== $this->protected_paths) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata does not match the current apply configuration.');
+        }
+        $target_identity = $this->lstat_path($this->target_root);
+        if ($target_identity === null || $target_identity['type'] !== 'directory') {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The managed apply target root is no longer a real directory.');
         }
         $this->assert_same_filesystem($this->files_dir, $this->target_root, 'stage', '');
     }
@@ -2059,7 +2104,11 @@ final class Site_Export_Staged_Apply_Session {
         if (!is_string($path)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit ' . $description . ' path is not valid base64.');
         }
-        $this->validate_path($path);
+        try {
+            $this->validate_path($path);
+        } catch (InvalidArgumentException $exception) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit ' . $description . ' path is unsafe: ' . $exception->getMessage());
+        }
         return $path;
     }
 
@@ -2087,7 +2136,11 @@ final class Site_Export_Staged_Apply_Session {
             }
         }
         if ($path !== '') {
-            $this->validate_path($path);
+            try {
+                $this->validate_path($path);
+            } catch (InvalidArgumentException $exception) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit traversal path is unsafe: ' . $exception->getMessage());
+            }
         }
         return $path;
     }
@@ -2364,15 +2417,30 @@ final class Site_Export_Staged_Apply_Session {
      * @return bool True when the tombstone is gone, false when work remains.
      */
     private function discard_tombstone(string $tombstone): bool {
-        if (!is_dir($tombstone)) {
+        $tombstone_identity = $this->lstat_path($tombstone);
+        if ($tombstone_identity === null) {
             return true;
         }
+        if ($tombstone_identity['type'] !== 'directory') {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply discard tombstone is not a real directory.');
+        }
         $lock_path = $tombstone . '/lock';
+        $lock_identity = $this->lstat_path($lock_path);
+        if ($lock_identity === null || $lock_identity['type'] !== 'file') {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply discard tombstone lock is missing or not regular.');
+        }
         $lock = @fopen($lock_path, 'r+b');
         if ($lock === false) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not open the staged apply discard tombstone lock.');
         }
         try {
+            $opened_lock_identity = fstat($lock);
+            $published_lock_identity = $this->lstat_path($lock_path);
+            if (!is_array($opened_lock_identity) || $published_lock_identity === null || $published_lock_identity['type'] !== 'file'
+                || (int) $opened_lock_identity['dev'] !== $published_lock_identity['dev']
+                || (int) $opened_lock_identity['ino'] !== $published_lock_identity['ino']) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply discard tombstone lock changed while it was opened.');
+            }
             if (!flock($lock, LOCK_EX | LOCK_NB)) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_BUSY, 'Staged apply discard cleanup is busy. Retry discard.');
             }
