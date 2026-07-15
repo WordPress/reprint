@@ -26,17 +26,5 @@ if (!class_exists('Site_Export_HTTP_Server', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-http-server.php';
 }
 
-if (!class_exists('Site_Export_Staged_Artifacts', false)) {
-    require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-artifacts.php';
-}
-
-if (!class_exists('Site_Export_Staged_Push_Stream_Protocol', false)) {
-    require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-push-stream-protocol.php';
-}
-
-if (!class_exists('Site_Export_Staged_Endpoints', false)) {
-    require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-endpoints.php';
-}
-
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';

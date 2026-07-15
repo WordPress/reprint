@@ -35,25 +35,15 @@ final class Site_Export_HTTP_Server {
         $this->cursor_header_name = $options['cursor_header_name'] ?? 'HTTP_X_EXPORT_CURSOR';
         $this->default_directory = $options['default_directory'] ?? null;
 
-        if (isset($options['staged']) && is_array($options['staged'])) {
-            $this->register_staged_handlers(new Site_Export_Staged_Endpoints($options['staged']));
-        }
     }
 
     public function handle_request(array $request = []): void {
         $server = $request['server'] ?? $_SERVER;
         $get = $request['get'] ?? $_GET;
         $post = $request['post'] ?? $_POST;
-        if (array_key_exists('body', $request)) {
-            $body = (string) $request['body'];
-        } else {
-            $endpoint = (string) ( $get['endpoint'] ?? $post['endpoint'] ?? '' );
-            // Data-plane staged routes carry raw bytes and must only be read
-            // by their handlers. Other JSON requests still feed config parsing.
-            $body = $endpoint !== 'staged_push' && $this->is_json_content_type($server)
-                ? call_user_func($this->body_reader)
-                : '';
-        }
+        $body = array_key_exists('body', $request)
+            ? (string) $request['body']
+            : ( $this->is_json_content_type($server) ? call_user_func($this->body_reader) : '' );
         $config = $request['config'] ?? $this->parse_http_config(
             $get,
             $post,
@@ -303,54 +293,6 @@ final class Site_Export_HTTP_Server {
             'db_index' => 'endpoint_db_index',
             'preflight' => 'endpoint_preflight',
         ];
-    }
-
-    /**
-     * Wire the staged artifact routes to the shared dispatcher.
-     *
-     * Explicitly-passed handlers win over these, matching how the
-     * handlers option replaces the default map.
-     */
-    private function register_staged_handlers(Site_Export_Staged_Endpoints $endpoints): void {
-        $routes = [
-            'staged_push' => static function (array $config) use ($endpoints): void {
-                $input = @fopen('php://input', 'rb');
-                try {
-                    self::emit_json_response(
-                        $endpoints->push_stream($config, $_SERVER, $input === false ? null : $input)
-                    );
-                } finally {
-                    if (is_resource($input)) {
-                        fclose($input);
-                    }
-                }
-            },
-            'staged_finalize' => static function (array $config) use ($endpoints): void {
-                self::emit_json_response($endpoints->finalize($config, $_SERVER));
-            },
-            'staged_status' => static function (array $config) use ($endpoints): void {
-                self::emit_json_response($endpoints->status($config));
-            },
-            'staged_discard' => static function (array $config) use ($endpoints): void {
-                self::emit_json_response($endpoints->discard($config, $_SERVER));
-            },
-        ];
-
-        foreach ($routes as $endpoint => $handler) {
-            if (!isset($this->handlers[$endpoint])) {
-                $this->handlers[$endpoint] = $handler;
-            }
-            $this->no_budget_endpoints[] = $endpoint;
-        }
-    }
-
-    /**
-     * @param array{http_code:int,body:array} $response
-     */
-    private static function emit_json_response(array $response): void {
-        http_response_code($response['http_code']);
-        header('Content-Type: application/json');
-        echo json_encode($response['body']);
     }
 
     private function is_json_content_type(array $server): bool {
