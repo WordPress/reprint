@@ -827,6 +827,9 @@ final class Site_Export_Staged_Apply_Session {
         if ($partial !== null && !in_array($partial['type'], ['file', 'directory'], true)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The partial path for ' . base64_encode($path) . ' is a ' . $partial['type'] . ', not a regular file.');
         }
+        // Reaching here with a completed entry means an offset-0 restart: exact
+        // completed-file replays returned above and other nonzero offsets failed.
+        // Remove the old staged value before rebuilding it in partial storage.
         if ($complete !== null) {
             $this->remove_private_entry($complete_path);
         }
