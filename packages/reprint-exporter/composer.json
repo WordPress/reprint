@@ -23,6 +23,8 @@
             "src/class-hmac-server.php",
             "src/class-http-server.php",
             "src/class-multipart-processor.php",
+            "src/class-staged-apply-exception.php",
+            "src/class-staged-apply-session.php",
             "src/class-sqlite-driver-pdo.php",
             "src/class-wpdb-driver-pdo.php"
         ],
