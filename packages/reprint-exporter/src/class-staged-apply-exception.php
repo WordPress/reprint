@@ -26,7 +26,16 @@ final class Site_Export_Staged_Apply_Exception extends RuntimeException {
      */
     private $error_code;
 
-    /** @var array<string,mixed> Protocol fields which describe the observed failure. */
+    /**
+     * Protocol fields which describe the observed failure.
+     *
+     * These values are copied into the authenticated JSON response alongside
+     * the stable reason. They are deliberately separate from the message so
+     * callers can inspect structured details such as conflicting paths or
+     * observed filesystem identities without parsing prose.
+     *
+     * @var array<string,mixed>
+     */
     private $context;
 
     /**
@@ -55,7 +64,16 @@ final class Site_Export_Staged_Apply_Exception extends RuntimeException {
         return $this->error_code;
     }
 
-    /** @return array<string,mixed> Structured fields safe to copy into the JSON response. */
+    /**
+     * Returns structured details for the authenticated failure response.
+     *
+     * The array contains only values supplied by staged-apply throw sites. It
+     * may be empty for simple classified failures, but when present it names
+     * the exact observed condition that made the request unrecoverable or
+     * retryable.
+     *
+     * @return array<string,mixed> Structured fields safe to copy into JSON.
+     */
     public function get_context(): array {
         return $this->context;
     }
