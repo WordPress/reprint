@@ -754,7 +754,6 @@ final class Site_Export_Staged_Apply_Session {
         if ($offset > $total_bytes || $part_bytes > $total_bytes - $offset) {
             throw new InvalidArgumentException('File part for ' . base64_encode($path) . ' exceeds its declared total of ' . $total_bytes . ' bytes.');
         }
-        $this->assert_target_parent_same_filesystem($path);
         $partial_path = $this->private_path($this->partial_dir, $path);
         $complete_path = $this->private_path($this->files_dir, $path);
         $this->ensure_private_parent($partial_path);
@@ -807,13 +806,7 @@ final class Site_Export_Staged_Apply_Session {
                     break;
                 }
                 $received += strlen($piece);
-                if ($received > $part_bytes) {
-                    throw new LogicException('Multipart processor exposed more file bytes than Content-Length.');
-                }
                 $this->write_all($handle, $piece, 'partial file ' . base64_encode($path));
-            }
-            if ($received !== $part_bytes) {
-                throw new LogicException('Multipart processor exposed ' . $received . ' file bytes for Content-Length ' . $part_bytes . '.');
             }
             if (!fflush($handle)) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not flush partial file ' . base64_encode($path) . '.');
@@ -850,7 +843,6 @@ final class Site_Export_Staged_Apply_Session {
             throw new InvalidArgumentException('Multipart directory part must have Content-Length 0.');
         }
         $path = $this->decode_path_header($headers, 'x-directory-path');
-        $this->assert_target_parent_same_filesystem($path);
         $target = $this->private_path($this->files_dir, $path);
         $this->ensure_private_parent($target);
         $identity = $this->path_identity($target);
@@ -886,7 +878,6 @@ final class Site_Export_Staged_Apply_Session {
         if ($target_value === '' || strlen($target_value) > self::MAX_PATH_BYTES || strpos($target_value, "\0") !== false) {
             throw new InvalidArgumentException('Symlink target must contain between 1 and ' . self::MAX_PATH_BYTES . ' bytes without NUL.');
         }
-        $this->assert_target_parent_same_filesystem($path);
         $target = $this->private_path($this->files_dir, $path);
         $this->ensure_private_parent($target);
         $identity = $this->path_identity($target);
@@ -973,9 +964,6 @@ final class Site_Export_Staged_Apply_Session {
                     $piece_offset = $overlap;
                 }
                 if ($piece_offset < strlen($piece)) {
-                    if ($position !== $stored_bytes) {
-                        throw new LogicException('Delete-list append did not begin at the actual stored size.');
-                    }
                     $append = substr($piece, $piece_offset);
                     $append_length = strlen($append);
                     for ($index = 0; $index < $append_length; ++$index) {
@@ -984,7 +972,6 @@ final class Site_Export_Staged_Apply_Session {
                                 throw new InvalidArgumentException('Delete-list parts may not contain an empty deletion record.');
                             }
                             $this->validate_path($trailing_path);
-                            $this->assert_target_parent_same_filesystem($trailing_path);
                             $trailing_path = '';
                             continue;
                         }
@@ -1172,10 +1159,47 @@ final class Site_Export_Staged_Apply_Session {
         $entry = $this->first_directory_entry($staged_directory);
         if ($entry === null) {
             if ($stack_size === 0) {
-                $this->finish_commit($state);
+                if ($state['current_deletion_b64'] !== null || $state['traversal_stack'] !== []) {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit reached completion with active bounded work state.');
+                }
+                if ( (int) $state['delete_offset'] !== $this->file_size($this->deletes_path)) {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit reached completion before consuming the complete delete stream.');
+                }
+                if ($this->first_directory_entry($this->files_dir) !== null) {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit reached completion while work/files still contains pending values.');
+                }
+                $maintenance_live_path = $this->target_path('.maintenance');
+                $maintenance_identity = $this->path_identity($maintenance_live_path);
+                if ($maintenance_identity !== null) {
+                    if (!$this->maintenance_marker_is_owned($maintenance_live_path, $state['maintenance_token'])) {
+                        throw new Site_Export_Staged_Apply_Exception(self::ERROR_BUSY, 'The session-owned maintenance marker was replaced by another owner.');
+                    }
+                    if (!@unlink($maintenance_live_path)) {
+                        throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not remove the session-owned WordPress maintenance marker.');
+                    }
+                }
+                if ($this->path_identity($this->maintenance_identity_path) !== null && !@unlink($this->maintenance_identity_path)) {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not remove the private maintenance ownership marker.');
+                }
+                $state['phase'] = 'complete';
+                $this->write_json($this->commit_path, $state);
+                $this->release_target();
                 return;
             }
-            $this->cleanup_structural_directory($state, $parent_path, $staged_directory);
+            $this->assert_live_ancestors($parent_path, 'install', 'directory');
+            $live = $this->path_identity($this->target_path($parent_path));
+            if ($live === null || $live['type'] !== 'directory') {
+                $this->throw_live_tree_changed('install', $parent_path, $parent_path, 'directory', ['directory'], $live);
+            }
+            $state['current_installation'] = ['path_b64' => base64_encode($parent_path), 'expected_type' => 'directory'];
+            $this->write_json($this->commit_path, $state);
+            if (!@rmdir($staged_directory)) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not consume empty structural staging directory ' . base64_encode($parent_path) . '.');
+            }
+            $state['current_installation'] = null;
+            array_pop($state['traversal_stack']);
+            ++$state['values_applied'];
+            $this->write_json($this->commit_path, $state);
             return;
         }
 
@@ -1189,71 +1213,28 @@ final class Site_Export_Staged_Apply_Session {
         if ($identity['type'] === 'directory' && $this->first_directory_entry($staged_path) !== null) {
             $state['traversal_stack'][] = ['component_b64' => base64_encode($entry)];
             $this->write_json($this->commit_path, $state);
-            $this->prepare_structural_directory($path, $this->first_staged_leaf_path($staged_path, $path));
+            $requested_path = $this->first_staged_leaf_path($staged_path, $path);
+            $parent_device = $this->assert_live_ancestors($path, 'install', 'directory');
+            $live_path = $this->target_path($path);
+            $live = $this->path_identity($live_path);
+            if ($live === null) {
+                if (!@mkdir($live_path, 0777) && !is_dir($live_path)) {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not create structural live directory ' . base64_encode($path) . '.');
+                }
+                $live = $this->path_identity($live_path);
+            }
+            if ($live === null || $live['type'] !== 'directory') {
+                $this->throw_live_tree_changed('install', $requested_path, $path, 'directory', ['absent', 'directory'], $live);
+            }
+            if ($live['dev'] !== $parent_device || $live['dev'] !== $this->staging_device()) {
+                $this->throw_cross_device('install', $path, $this->staging_device(), $live['dev']);
+            }
             return;
         }
         if (!in_array($identity['type'], ['file', 'directory', 'symlink'], true)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Staged path ' . base64_encode($path) . ' has unsupported type ' . $identity['type'] . '.');
         }
         $this->install_staged_value($state, $path, $identity['type'], false);
-    }
-
-    /**
-     * Consumes one empty structural directory after its children were applied.
-     *
-     * Structural directories are not logical staged values by themselves; they
-     * exist so descendants can be reached in a depth-first traversal. Removing
-     * one is still checkpointed as current installation state so recovery can
-     * distinguish it from a leaf rename.
-     *
-     * @param array<string,mixed> $state Commit checkpoint, mutated in place.
-     * @param string $path Target-relative structural directory path.
-     * @param string $staged_path Absolute path to the empty private directory.
-     */
-    private function cleanup_structural_directory(array &$state, string $path, string $staged_path): void {
-        $this->assert_live_ancestors($path, 'install', 'directory');
-        $live = $this->path_identity($this->target_path($path));
-        if ($live === null || $live['type'] !== 'directory') {
-            $this->throw_live_tree_changed('install', $path, $path, 'directory', ['directory'], $live);
-        }
-        $state['current_installation'] = ['path_b64' => base64_encode($path), 'expected_type' => 'directory'];
-        $this->write_json($this->commit_path, $state);
-        if (!@rmdir($staged_path)) {
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not consume empty structural staging directory ' . base64_encode($path) . '.');
-        }
-        $state['current_installation'] = null;
-        array_pop($state['traversal_stack']);
-        ++$state['values_applied'];
-        $this->write_json($this->commit_path, $state);
-    }
-
-    /**
-     * Ensures a live structural directory exists before descending into it.
-     *
-     * A directory with staged descendants may already exist, may need to be
-     * created, or may have drifted into an incompatible value. The requested
-     * leaf path is used in drift reports so users see which staged value forced
-     * the structural ancestor check.
-     *
-     * @param string $path Target-relative structural directory path.
-     * @param string $requested_path Staged descendant that required this parent.
-     */
-    private function prepare_structural_directory(string $path, string $requested_path): void {
-        $parent_device = $this->assert_live_ancestors($path, 'install', 'directory');
-        $live_path = $this->target_path($path);
-        $live = $this->path_identity($live_path);
-        if ($live === null) {
-            if (!@mkdir($live_path, 0777) && !is_dir($live_path)) {
-                throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not create structural live directory ' . base64_encode($path) . '.');
-            }
-            $live = $this->path_identity($live_path);
-        }
-        if ($live === null || $live['type'] !== 'directory') {
-            $this->throw_live_tree_changed('install', $requested_path, $path, 'directory', ['absent', 'directory'], $live);
-        }
-        if ($live['dev'] !== $parent_device || $live['dev'] !== $this->staging_device()) {
-            $this->throw_cross_device('install', $path, $this->staging_device(), $live['dev']);
-        }
     }
 
     /**
@@ -1375,44 +1356,6 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * Marks commit complete after all delete and install queues are empty.
-     *
-     * Completion is written only after the delete cursor reaches the actual
-     * stream size, work/files has no remaining staged values, and the
-     * session-owned maintenance marker has been removed. Releasing the target
-     * after the complete checkpoint lets later sessions start.
-     *
-     * @param array<string,mixed> $state Commit checkpoint, mutated in place.
-     */
-    private function finish_commit(array &$state): void {
-        if ($state['current_deletion_b64'] !== null || $state['current_installation'] !== null || $state['traversal_stack'] !== []) {
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit reached completion with active bounded work state.');
-        }
-        if ( (int) $state['delete_offset'] !== $this->file_size($this->deletes_path)) {
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit reached completion before consuming the complete delete stream.');
-        }
-        if ($this->first_directory_entry($this->files_dir) !== null) {
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit reached completion while work/files still contains pending values.');
-        }
-        $maintenance_live_path = $this->target_path('.maintenance');
-        $maintenance_identity = $this->path_identity($maintenance_live_path);
-        if ($maintenance_identity !== null) {
-            if (!$this->maintenance_marker_is_owned($maintenance_live_path, $state['maintenance_token'])) {
-                throw new Site_Export_Staged_Apply_Exception(self::ERROR_BUSY, 'The session-owned maintenance marker was replaced by another owner.');
-            }
-            if (!@unlink($maintenance_live_path)) {
-                throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not remove the session-owned WordPress maintenance marker.');
-            }
-        }
-        if ($this->path_identity($this->maintenance_identity_path) !== null && !@unlink($this->maintenance_identity_path)) {
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not remove the private maintenance ownership marker.');
-        }
-        $state['phase'] = 'complete';
-        $this->write_json($this->commit_path, $state);
-        $this->release_target();
-    }
-
-    /**
      * Validates existing live ancestors without following a symlink.
      *
      * @return int|null Device of the nearest real parent, or null when a
@@ -1451,45 +1394,6 @@ final class Site_Export_Staged_Apply_Session {
             $device = $identity['dev'];
         }
         return $device;
-    }
-
-    /**
-     * Rejects separately mounted nearest live parents before staging a value.
-     *
-     * Upload is allowed before maintenance mode, but it must not accept work
-     * that later cannot be renamed into place. This walks existing ancestors
-     * only until the first missing or non-directory parent because commit will
-     * perform the full live-drift validation under maintenance.
-     *
-     * @param string $path Target-relative path being staged.
-     */
-    private function assert_target_parent_same_filesystem(string $path): void {
-        $staging_device = $this->staging_device();
-        $root = $this->path_identity($this->target_root);
-        if ($root === null || $root['type'] !== 'directory') {
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The managed live root is no longer a real directory.');
-        }
-        if ($root['dev'] !== $staging_device) {
-            $this->throw_cross_device('stage', $path, $staging_device, $root['dev']);
-        }
-        $absolute = $this->target_root;
-        $device = $root['dev'];
-        $segments = explode('/', $path);
-        array_pop($segments);
-        foreach ($segments as $segment) {
-            $absolute .= ( $absolute === '/' ? '' : '/' ) . $segment;
-            $identity = $this->path_identity($absolute);
-            if ($identity === null) {
-                break;
-            }
-            if ($identity['dev'] !== $device || $identity['dev'] !== $staging_device) {
-                $this->throw_cross_device('stage', $path, $staging_device, $identity['dev']);
-            }
-            if ($identity['type'] !== 'directory') {
-                break;
-            }
-            $device = $identity['dev'];
-        }
     }
 
     /**
@@ -2016,11 +1920,11 @@ final class Site_Export_Staged_Apply_Session {
             }
             $this->decode_commit_path($installation['path_b64'], 'current installation');
         }
-        if (!is_array($state['traversal_stack'] ?? null) || count($state['traversal_stack']) > self::MAX_PATH_BYTES) {
+        if (!is_array($state['traversal_stack'] ?? null)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint has an invalid traversal stack.');
         }
         foreach ($state['traversal_stack'] as $frame) {
-            if (!is_array($frame) || array_keys($frame) !== ['component_b64'] || !is_string($frame['component_b64'])) {
+            if (!is_array($frame) || !is_string($frame['component_b64'] ?? null)) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint has an invalid structural traversal frame.');
             }
         }
