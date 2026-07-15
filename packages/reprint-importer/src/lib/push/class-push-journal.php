@@ -2,7 +2,7 @@
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal errors are CLI values, never HTML output.
 /**
- * Per-remote-site memory of the last completed push: the local baseline.
+ * Per-remote-site source snapshot used to plan a push: the local baseline.
  *
  * ctime is machine-local, so push never compares a local timestamp against
  * a remote one. Each machine is compared against its own past instead
@@ -10,22 +10,21 @@
  * on the local machine, one directory per remote site:
  *
  *     <state-dir>/push/<site>/last-sync-local-files.jsonl
+ *     <state-dir>/push/<site>/last-sync-local-files.identity.json
  *
  * The baseline is a copy of a file index in the same format as
  * .import-index.jsonl: one JSON object per line with a base64-encoded path
  * plus ctime, size, type, and any symlink target, sorted by
  * decoded path. Non-empty directories use a private `tree-directory` marker:
  * it is never uploaded, but lets a later diff remove a vanished directory
- * after its last child goes. The push driver captures it at the end of a
- * successful push. A capture writes a temporary file and renames it into
- * place, so a killed process never leaves a truncated baseline for the next
- * push to trust — until the rename lands, the previous baseline stays in
- * effect.
+ * after its last child goes. The adjacent identity binds that snapshot to
+ * the managed remote directory and canonical local root which produced it.
+ * A completed push or eligible full-root pull captures both.
  *
- * diff_local_files() answers "what changed on this machine since the last
- * push to this site". It streams the current index and the local baseline
- * together — both are sorted by path, so one pass suffices — and writes
- * two outputs into the site directory:
+ * diff_local_files() answers "what changed on this machine since this
+ * compatible baseline was captured". It streams the current index and the
+ * local baseline together — both are sorted by path, so one pass suffices —
+ * and writes two outputs into the site directory:
  *
  *     local-paths-to-push.jsonl  paths new since the baseline, or whose
  *                                ctime, size, or type differs
@@ -44,7 +43,8 @@
  * positive changes immediately before upload; their fields are the normalized
  * logical change, not source truth after the plan was written.
  *
- * With no baseline yet — the first push to a site — every uploadable current
+ * With no compatible baseline — because none has been captured yet, or the
+ * push uses another managed directory or local root — every uploadable current
  * entry counts as changed and no deletion can be detected.
  *
  * Producing the current index is the caller's job; this class only
@@ -61,7 +61,7 @@
  *
  * Example:
  *
- *     $journal = new PushJournal('/srv/reprint-state', $target_url);
+ *     $journal = new PushJournal('/srv/reprint-state', $target_url, '/srv/local-site');
  *     $summary = $journal->diff_local_files($current_snapshot);
  *     // Stream the positive plan and raw delete stream, then wait for commit.
  *     // After target commit succeeds:
@@ -87,6 +87,20 @@ class PushJournal
     public string $local_files_baseline_path;
 
     /**
+     * Identity which makes the adjacent baseline eligible for this source.
+     *
+     * @var string
+     */
+    public string $local_files_identity_path;
+
+    /**
+     * Managed remote directory and local root expected by this journal.
+     *
+     * @var array{managed_directory_b64:string|null,local_root_b64:string}
+     */
+    private array $local_files_identity;
+
+    /**
      * JSONL current-snapshot entries which the active push must materialize.
      *
      * @var string
@@ -108,11 +122,22 @@ class PushJournal
      *
      * @param string $state_dir Local root shared by push state for all targets.
      * @param string $site_url Remote site URL used to isolate this baseline.
+     * @param string $local_root Canonical local root represented by the baseline.
      */
-    public function __construct(string $state_dir, string $site_url)
+    public function __construct(string $state_dir, string $site_url, string $local_root)
     {
+        if ($local_root === '' || $local_root[0] !== '/') {
+            throw new InvalidArgumentException("Push journal local_root must be an absolute path: {$local_root}");
+        }
+        $local_root = $local_root === '/' ? '/' : rtrim($local_root, '/');
+        $managed_directory = self::managed_directory_from_url($site_url);
         $this->site_dir = rtrim($state_dir, "/") . "/push/" . self::site_key($site_url);
         $this->local_files_baseline_path = $this->site_dir . "/last-sync-local-files.jsonl";
+        $this->local_files_identity_path = $this->site_dir . "/last-sync-local-files.identity.json";
+        $this->local_files_identity = [
+            'managed_directory_b64' => $managed_directory === null ? null : base64_encode($managed_directory),
+            'local_root_b64' => base64_encode($local_root),
+        ];
         $this->local_paths_to_push = $this->site_dir . "/local-paths-to-push.jsonl";
         $this->local_delete_stream_path = $this->site_dir . "/local-delete-stream.bin";
     }
@@ -159,19 +184,129 @@ class PushJournal
     }
 
     /**
+     * Returns the one explicit absolute directory selected by a target URL.
+     *
+     * Pull baseline publication needs an exact managed-directory identity.
+     * A missing parameter, a repeated/array parameter, or a relative value is
+     * ambiguous and therefore cannot seed a full-root push baseline.
+     *
+     * @param string $site_url Exporter URL supplied to both pull and push.
+     * @return string|null Normalized absolute directory, or null when ambiguous.
+     */
+    public static function managed_directory_from_url(string $site_url): ?string
+    {
+        $query = parse_url($site_url, PHP_URL_QUERY);
+        if (!is_string($query) || $query === '') {
+            return null;
+        }
+        $directories = [];
+        foreach (explode('&', $query) as $parameter) {
+            [$encoded_name, $encoded_value] = array_pad(explode('=', $parameter, 2), 2, '');
+            $name = urldecode($encoded_name);
+            if (
+                strpos($name, 'directory[') === 0 ||
+                strpos($name, 'directory]') === 0
+            ) {
+                return null;
+            }
+            if ($name === 'directory') {
+                $directories[] = urldecode($encoded_value);
+            }
+        }
+        if (count($directories) !== 1) {
+            return null;
+        }
+        $directory = $directories[0];
+        if ($directory === '' || $directory[0] !== '/' || strpos($directory, "\0") !== false) {
+            return null;
+        }
+        foreach (explode('/', $directory) as $segment) {
+            if ($segment === '.' || $segment === '..') {
+                return null;
+            }
+        }
+        $directory = rtrim($directory, '/');
+        return $directory === '' ? '/' : $directory;
+    }
+
+    /**
      * Stores a copy of the local file index as the new local baseline.
      *
      * The push driver calls this at the end of a successful push; from then
-     * on "changed locally" means "different from this index". The copy is
-     * atomic (temp file + rename) and the source file is left untouched.
+     * on "changed locally" means "different from this index". Both files are
+     * prepared before the old identity is invalidated. The baseline and then
+     * its identity are renamed into place, so any interrupted publication is
+     * unavailable rather than trusted with the wrong identity. The source file
+     * is left untouched.
      *
-     * @param string $index_file Sorted JSONL snapshot whose target commit completed.
+     * @param string $index_file Sorted JSONL snapshot whose push or pull filesystem phase completed.
      *
      * @throws RuntimeException If the snapshot is missing or cannot be published.
      */
     public function capture_local_files_baseline(string $index_file): void
     {
-        $this->replace_file($this->local_files_baseline_path, $index_file);
+        if (!is_file($index_file)) {
+            throw new RuntimeException("Cannot capture a baseline, the index file is missing: {$index_file}");
+        }
+        $this->ensure_site_dir();
+        $baseline_tmp = $this->local_files_baseline_path . ".tmp";
+        $identity_tmp = $this->local_files_identity_path . ".tmp";
+        if (!copy($index_file, $baseline_tmp)) {
+            throw new RuntimeException("Failed to copy the index into a baseline temp file: {$baseline_tmp}");
+        }
+        $identity = json_encode($this->local_files_identity, JSON_UNESCAPED_SLASHES);
+        if ($identity === false || file_put_contents($identity_tmp, $identity . "\n") !== strlen($identity) + 1) {
+            @unlink($baseline_tmp);
+            @unlink($identity_tmp);
+            throw new RuntimeException("Failed to write the local baseline identity: {$identity_tmp}");
+        }
+        if (is_file($this->local_files_identity_path) && !unlink($this->local_files_identity_path)) {
+            @unlink($baseline_tmp);
+            @unlink($identity_tmp);
+            throw new RuntimeException("Failed to invalidate the prior local baseline identity: {$this->local_files_identity_path}");
+        }
+        if (!rename($baseline_tmp, $this->local_files_baseline_path)) {
+            @unlink($baseline_tmp);
+            @unlink($identity_tmp);
+            throw new RuntimeException("Failed to move the baseline into place: {$this->local_files_baseline_path}");
+        }
+        if (!rename($identity_tmp, $this->local_files_identity_path)) {
+            @unlink($identity_tmp);
+            throw new RuntimeException("Failed to move the local baseline identity into place: {$this->local_files_identity_path}");
+        }
+    }
+
+    /** Returns whether the existing baseline belongs to this exact source. */
+    public function has_compatible_local_files_baseline(): bool
+    {
+        if (!is_file($this->local_files_baseline_path) || !is_file($this->local_files_identity_path)) {
+            return false;
+        }
+        // phpcs:ignore WordPress.WhiteSpace.CastStructureSpacing.NoSpaceBeforeOpenParenthesis -- Match this class's established cast style.
+        $identity = json_decode((string) file_get_contents($this->local_files_identity_path), true);
+        return is_array($identity) && $identity === $this->local_files_identity;
+    }
+
+    /**
+     * Makes the current baseline unavailable before a pull can mutate files.
+     *
+     * The baseline goes first. If removing the identity subsequently fails,
+     * no snapshot remains for that identity to make trustworthy.
+     *
+     * @param string $state_dir Local root shared by push state for all targets.
+     * @param string $site_url Remote site URL whose one baseline is invalidated.
+     */
+    public static function invalidate_local_files_baseline(string $state_dir, string $site_url): void
+    {
+        $site_dir = rtrim($state_dir, "/") . "/push/" . self::site_key($site_url);
+        $baseline_path = $site_dir . "/last-sync-local-files.jsonl";
+        $identity_path = $site_dir . "/last-sync-local-files.identity.json";
+        if (is_file($baseline_path) && !unlink($baseline_path)) {
+            throw new RuntimeException("Failed to invalidate the local baseline: {$baseline_path}");
+        }
+        if (is_file($identity_path) && !unlink($identity_path)) {
+            throw new RuntimeException("Failed to remove the invalid local baseline identity: {$identity_path}");
+        }
     }
 
     /**
@@ -208,7 +343,7 @@ class PushJournal
             throw new RuntimeException("Failed to open the current index: {$current_index_file}");
         }
         $baseline_handle = null;
-        if (is_file($this->local_files_baseline_path)) {
+        if ($this->has_compatible_local_files_baseline()) {
             $baseline_handle = fopen($this->local_files_baseline_path, "r");
             if (!$baseline_handle) {
                 fclose($current_handle);
@@ -432,30 +567,6 @@ class PushJournal
         }
         $entry = $decoded_entry;
         $path = $decoded_path;
-    }
-
-    /**
-     * Copies an index file over a baseline through an adjacent temporary file.
-     *
-     * The final rename means readers see either the prior completed baseline or
-     * the new complete snapshot, never a partially copied index.
-     *
-     * @param string $target Final baseline path.
-     * @param string $source_index_file Completed snapshot to copy.
-     */
-    private function replace_file(string $target, string $source_index_file): void
-    {
-        if (!is_file($source_index_file)) {
-            throw new RuntimeException("Cannot capture a baseline, the index file is missing: {$source_index_file}");
-        }
-        $this->ensure_site_dir();
-        $tmp = $target . ".tmp";
-        if (!copy($source_index_file, $tmp)) {
-            throw new RuntimeException("Failed to copy the index into a baseline temp file: {$tmp}");
-        }
-        if (!rename($tmp, $target)) {
-            throw new RuntimeException("Failed to move the baseline into place: {$target}");
-        }
     }
 
     /**

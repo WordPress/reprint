@@ -44,6 +44,8 @@ final class MultipartPushTest extends TestCase {
     private ?string $reject_upload_marker = null;
     private ?string $drop_discard_response_marker = null;
     private bool $make_checkpoint_unremovable_after_discard = false;
+    /** @var string[] */
+    private array $apply_protected_paths = [];
 
     public static function setUpBeforeClass(): void {
         if (!function_exists('curl_init')) {
@@ -115,6 +117,54 @@ final class MultipartPushTest extends TestCase {
         }
     }
 
+    public function testSharedSnapshotWriterKeepsStructuralMarkersOutOfTheUploadPlan(): void {
+        $this->write_source('wp-content/plugins/demo/plugin.php', '<?php');
+        mkdir($this->source . '/empty', 0700, true);
+        $snapshot = $this->state . '/pulled-local-files.jsonl';
+        mkdir($this->state, 0700, true);
+
+        \MultipartPush::write_local_snapshot($this->source, $snapshot, $this->state);
+
+        $entries = array_map(static function (string $line): array {
+            $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+            $entry['path'] = base64_decode($entry['path'], true);
+            return $entry;
+        }, file($snapshot, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []);
+        $types = [];
+        foreach ($entries as $entry) {
+            $types[$entry['path']] = $entry['type'];
+        }
+        $this->assertSame('tree-directory', $types['wp-content'] ?? null);
+        $this->assertSame('tree-directory', $types['wp-content/plugins'] ?? null);
+        $this->assertSame('file', $types['wp-content/plugins/demo/plugin.php'] ?? null);
+        $this->assertSame('directory', $types['empty'] ?? null);
+
+        $journal = new \PushJournal($this->state, self::$base_url, $this->source);
+        $journal->diff_local_files($snapshot);
+        $plannedTypes = array_map(static function (string $line): ?string {
+            $entry = json_decode($line, true);
+            return is_array($entry) ? ( $entry['type'] ?? null ) : null;
+        }, file($journal->local_paths_to_push, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []);
+        $this->assertNotContains('tree-directory', $plannedTypes);
+    }
+
+    public function testNakedFullRootPushExplainsHowToSeedTheBaselineAfterProtectedRejection(): void {
+        $this->apply_protected_paths = ['wp-content/plugins/site-export'];
+        $this->configure_server();
+        $this->write_source('wp-content/plugins/site-export/index.php', 'sender copy');
+        mkdir($this->target . '/wp-content/plugins/site-export', 0700, true);
+        file_put_contents($this->target . '/wp-content/plugins/site-export/index.php', 'live exporter');
+
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertNotSame(0, $result['exit_code']);
+        $this->assertStringContainsString('no compatible full-root baseline', $result['stderr']);
+        $this->assertStringContainsString('unfiltered files-pull', $result['stderr']);
+        $this->assertStringContainsString('same --state-dir', $result['stderr']);
+        $this->assertSame('live exporter', file_get_contents($this->target . '/wp-content/plugins/site-export/index.php'));
+        $this->assertFileDoesNotExist($this->target . '/.maintenance');
+    }
+
     public function testCliPushDeliversInitialAndDeltaTreesThroughTheRealRouter(): void {
         $this->write_source('large.bin', str_repeat('payload-', 80));
         $this->write_source('delete-on-delta.txt', 'delete me');
@@ -171,6 +221,23 @@ final class MultipartPushTest extends TestCase {
         $status = $this->run_cli('push-status');
         $this->assertSame(0, $status['exit_code'], $status['stderr']);
         $this->assertSame('no_active_push', $status['json']['status'] ?? null);
+    }
+
+    public function testZeroDeltaPushCompletesWithoutContactingTarget(): void {
+        $this->write_source('unchanged.txt', 'same bytes');
+        $first = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $first['exit_code'], $first['stderr']);
+        $requests_before = file_get_contents($this->request_log);
+        $this->assertIsString($requests_before);
+
+        $second = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $second['exit_code'], $second['stderr']);
+        $this->assertSame('complete', $second['json']['status'] ?? null);
+        $this->assertSame(0, $second['json']['changed'] ?? null);
+        $this->assertSame(0, $second['json']['deleted'] ?? null);
+        $this->assertSame($requests_before, file_get_contents($this->request_log));
+        $this->assertFileDoesNotExist($this->target . '/.maintenance');
     }
 
     public function testPushMakesTheTargetTreeExactlyMatchAStandaloneSourceSnapshot(): void {
@@ -709,6 +776,28 @@ final class MultipartPushTest extends TestCase {
         $this->assertSame([], glob($this->state . '/push/*/last-sync-local-files.jsonl') ?: []);
     }
 
+    public function testPushAfterDryRunRescansAndAppliesTheCurrentDelta(): void {
+        $this->write_source('rescanned.txt', 'baseline');
+        $initial = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $initial['exit_code'], $initial['stderr']);
+
+        $this->write_source('rescanned.txt', 'dry-run contents');
+        $dry_run = $this->run_cli('push', ['--source-root=' . $this->source, '--dry-run']);
+        $this->assertSame(0, $dry_run['exit_code'], $dry_run['stderr']);
+        $this->assertSame('dry_run', $dry_run['json']['status'] ?? null);
+        $this->assertSame('baseline', file_get_contents($this->target . '/rescanned.txt'));
+
+        $this->write_source('rescanned.txt', 'confirmed contents');
+        $this->write_source('added-after-dry-run.txt', 'newly confirmed');
+        $pushed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $pushed['exit_code'], $pushed['stderr']);
+        $this->assertSame('complete', $pushed['json']['status'] ?? null);
+        $this->assertSame(2, $pushed['json']['changed'] ?? null);
+        $this->assertSame('confirmed contents', file_get_contents($this->target . '/rescanned.txt'));
+        $this->assertSame('newly confirmed', file_get_contents($this->target . '/added-after-dry-run.txt'));
+    }
+
     public function testDryRunRejectsAnActivePushWithoutAdvancingIt(): void {
         $this->reject_upload_marker = $this->case_root . '/rejected-upload';
         $this->configure_server();
@@ -1070,6 +1159,7 @@ final class MultipartPushTest extends TestCase {
             'reject_upload_marker' => $this->reject_upload_marker,
             'drop_discard_response_marker' => $this->drop_discard_response_marker,
             'make_checkpoint_unremovable_after_discard' => $this->make_checkpoint_unremovable_after_discard,
+            'apply_protected_paths' => $this->apply_protected_paths,
             'local_state_dir' => $this->state,
         ]));
     }

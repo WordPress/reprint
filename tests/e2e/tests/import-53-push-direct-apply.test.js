@@ -10,7 +10,7 @@ import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync,
-    rmSync, symlinkSync, writeFileSync,
+    realpathSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { join, relative } from 'node:path';
@@ -434,6 +434,10 @@ describe.sequential('Import: cross-device push refusal', { timeout: 180000 }, ()
             indexRecord('mounted-parent', 'tree-directory', 0),
             indexRecord('mounted-parent/sentinel', 'file', 4),
         ].join('\n') + '\n');
+        writeFileSync(join(pushStateRoot, 'last-sync-local-files.identity.json'), JSON.stringify({
+            managed_directory_b64: null,
+            local_root_b64: Buffer.from(realpathSync(source)).toString('base64'),
+        }) + '\n');
         result = runPush(mountedSite, source, state);
         assert.notEqual(result.exitCode, 0);
         rejection = targetErrorFromPusher(result.stderr);

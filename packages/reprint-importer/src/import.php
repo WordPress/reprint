@@ -1353,7 +1353,7 @@ class ImportClient
                 'base_url' => $this->remote_url,
                 // push-status never scans this directory. Give the shared
                 // state reader a real harmless root so status also works
-                // before --state-dir has been created by a first push.
+                // before any push has created --state-dir.
                 'source_root' => $command === 'push' ? $options['source_root'] : getcwd(),
                 'state_dir' => $this->state_dir,
                 'secret' => $secret,
@@ -2627,6 +2627,12 @@ class ImportClient
                 );
             }
 
+            // Once a new pull may change the local tree, the previous
+            // full-root snapshot can no longer prove which edits belong to
+            // the user. A partial, filtered, or ambiguously rooted pull leaves
+            // the target's one baseline invalid.
+            PushJournal::invalidate_local_files_baseline($this->state_dir, $this->remote_url);
+
             $this->import_state()->active_resumable_command->command_name = "files-pull";
             $this->import_state()->active_resumable_command->completion_state = "in_progress";
             $this->import_state()->active_resumable_command->current_stage = "index";
@@ -2685,6 +2691,8 @@ class ImportClient
             return;
         }
 
+        $this->publish_pull_push_baseline();
+
         $this->import_state()->active_resumable_command->completion_state = "complete";
         $this->save_state($this->state);
 
@@ -2710,6 +2718,74 @@ class ImportClient
         ], true);
 
         $this->report_volatile_files();
+    }
+
+    /**
+     * Publishes an actual-local-tree snapshot after an eligible full pull.
+     *
+     * Remote index ctimes belong to another machine and cannot seed push
+     * change detection. The shared push scanner records local ctimes after all
+     * writes finish, then PushJournal publishes the existing baseline format
+     * before files-pull is marked complete.
+     */
+    private function publish_pull_push_baseline(): void
+    {
+        if (
+            $this->filter !== "none" ||
+            $this->pull_only_files_with_path_prefixes !== [] ||
+            $this->remap_rules !== [] ||
+            $this->fs_root_nonempty_behavior === 'preserve-local'
+        ) {
+            return;
+        }
+        $push_baseline = $this->pull_push_baseline_identity();
+        if ($push_baseline === null) {
+            return;
+        }
+
+        $snapshot = $this->state_dir . '/.pull-push-baseline-' . bin2hex(random_bytes(8)) . '.jsonl';
+        try {
+            MultipartPush::write_local_snapshot(
+                $push_baseline['local_root'],
+                $snapshot,
+                $this->state_dir
+            );
+            $push_baseline['journal']->capture_local_files_baseline($snapshot);
+        } finally {
+            @unlink($snapshot);
+            @unlink($snapshot . '.tmp');
+        }
+    }
+
+    /**
+     * Resolves the exact local root represented by the URL's managed directory.
+     *
+     * A pull can seed a push only when its URL carries one scalar absolute
+     * `directory` value. That same URL and state directory then select the
+     * journal used by push; no remote index or machine-local ctime crosses the
+     * boundary.
+     *
+     * @return array{journal:PushJournal,local_root:string}|null
+     */
+    private function pull_push_baseline_identity(): ?array
+    {
+        $managed_directory = PushJournal::managed_directory_from_url($this->remote_url);
+        if ($managed_directory === null) {
+            return null;
+        }
+        $filesystem_root = $this->get_filesystem_root_path();
+        $local_root = $managed_directory === '/'
+            ? $filesystem_root
+            : $filesystem_root . $managed_directory;
+        $canonical_local_root = realpath($local_root);
+        if (is_string($canonical_local_root)) {
+            $local_root = $canonical_local_root;
+        }
+        $local_root = $local_root === '/' ? '/' : rtrim($local_root, '/');
+        return [
+            'journal' => new PushJournal($this->state_dir, $this->remote_url, $local_root),
+            'local_root' => $local_root,
+        ];
     }
 
     /**
@@ -12530,7 +12606,9 @@ if (
                 "push baseline, then streams changed files, symlinks, empty directories,\n" .
                 "and deletes to one private target session. After upload completes, the target\n" .
                 "deletes planned roots and installs staged values directly. Re-run after an\n" .
-                "interruption; it resumes from target-confirmed staging state.\n",
+                "interruption; it resumes from target-confirmed staging state. Running push\n" .
+                "authorizes applying the delta computed by that invocation. --dry-run reports\n" .
+                "the current plan without contacting the target; a later push rescans the source tree.\n",
             "extra" =>
                 "Examples:\n" .
                 "  reprint push https://example.com --source-root=./wordpress \\\n" .

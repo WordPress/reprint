@@ -25,6 +25,7 @@ baseline:
   local-delete-stream.bin
   session.json
   last-sync-local-files.jsonl
+  last-sync-local-files.identity.json
 ~~~
 
 The source scan reads directory entries one at a time into an unsorted JSONL
@@ -60,6 +61,42 @@ next push rather than being silently called deployed.
 The token is deliberately small rather than a content hash. A same-size edit
 within the filesystem ctime resolution can escape both it and the snapshot
 diff, which uses the same size and ctime signals.
+
+### Baseline initialization from pull
+
+Without pull seeding, only a successful push can establish or replace the
+sender baseline. Reprint additionally supports the full-root pull → edit → push
+workflow: a completed, unfiltered filesystem pull may publish the resulting
+local filesystem snapshot as that same sender baseline for the same target,
+managed directory, local root, and state directory. The snapshot is generated
+from the finished local tree, so remote ctimes are never reused as local change
+evidence. The small adjacent identity file binds the JSONL snapshot to the
+managed directory and canonical local root; it is not another baseline. There
+is still one baseline format and one target-specific source of truth.
+
+The shared pull/push URL must contain exactly one scalar absolute `directory`
+query parameter. This gives the sender the managed-directory identity without
+another preflight or a target index. Publication also requires `--filter=none`,
+no `--only` or `--remap`, and normal overwrite behavior rather than
+`--on-fs-root-nonempty=preserve-local`. Repeated, bracketed, relative, or
+dot-segment directory forms do not publish a baseline. They are not rejected as
+pull inputs: a multi-root `directory[]` pull still traverses every root, but the
+current single-root push model cannot represent it as one baseline identity.
+
+Before a new pull first mutates the applicable local tree, it invalidates the
+old baseline. It publishes a replacement through adjacent temporary files and
+atomic renames only after the complete unfiltered filesystem phase and local
+snapshot both succeed. The identity is removed before either final rename, so
+an interrupted publication is unavailable rather than paired with stale
+identity. An interrupted pull, a filtered pull, or a failed snapshot
+publication therefore leaves the full-root baseline unavailable; a later push
+cannot interpret partially pulled files as user edits.
+
+A push without a compatible baseline keeps create-only semantics. It neither
+downloads a remote index nor compares ctimes from different machines. Against
+an existing full target it fails safely and directs the operator to complete an
+unfiltered pull with the same explicit managed-directory URL and state
+directory; there is no public initialization flag or second baseline.
 
 ## Endpoint vocabulary and authentication
 
@@ -357,11 +394,13 @@ reprint push-status <target-url> \
   --state-dir=DIR --secret=TOKEN [--allow-http] [--verbose]
 ~~~
 
-push resumes an existing compatible local session by default. --dry-run builds
-and reports the local plan without creating a target session or publishing a
-baseline, and rejects when an active push already exists. --abort removes local
-state only after target discard confirms; once direct live mutation began it
-refuses and tells the operator to rerun normal push.
+Invoking push without --dry-run authorizes applying the delta computed by that
+invocation. --dry-run builds and reports the current local plan without creating
+a target session or publishing a baseline; a later push rescans rather than
+reusing that plan. An empty delta completes locally without opening a target
+session. Push resumes an existing compatible local session by default. --abort
+removes local state only after target discard confirms; once direct live mutation
+began it refuses and tells the operator to rerun normal push.
 push-status does not require a source root, does not scan a tree, and never
 creates a session.
 

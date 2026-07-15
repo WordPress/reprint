@@ -5,12 +5,13 @@
 /**
  * Drives a local source tree through the resumable staged-push protocol.
  *
- * This is the sender's high-level lifecycle. A first run scans the source
- * without following symlinks, externally sorts a JSONL snapshot, and compares
- * it with the last completed baseline. Changed and deleted paths remain as
- * disk-backed streaming plans. The driver then creates one target workspace,
- * uploads many bounded parts per HTTP request, and repeats bounded commit calls
- * until the target has deleted and directly installed every planned value.
+ * This is the sender's high-level lifecycle. A new push with no active session
+ * scans the source without following symlinks, externally sorts a JSONL
+ * snapshot, and compares it with the compatible local baseline. Changed and
+ * deleted paths remain as disk-backed streaming plans. The driver then creates
+ * one target workspace, uploads many bounded parts per HTTP request, and
+ * repeats bounded commit calls until the target has deleted and directly
+ * installed every planned value.
  *
  * Example:
  *
@@ -192,7 +193,7 @@ class MultipartPush
         $this->allow_http = $allow_http;
         $this->verbose = (bool) ($options['verbose'] ?? false);
         $this->status_only = $status_only;
-        $this->journal = new PushJournal($this->state_dir, $this->base_url);
+        $this->journal = new PushJournal($this->state_dir, $this->base_url, $this->source_root);
         $this->site_dir = dirname($this->journal->local_files_baseline_path);
         $this->session_path = $this->site_dir . '/session.json';
         $this->snapshot_path = $this->site_dir . '/current-local-files.jsonl';
@@ -203,10 +204,13 @@ class MultipartPush
      *
      * Dry runs build the same disk-backed snapshot and plans without creating
      * a target session, which makes their changed/deleted counts representative
-     * without mutating the target. A normal first run persists its create token
-     * before contacting the target, then checkpoints every target-confirmed
-     * cursor and learned request-size decision. Re-running after an exception
-     * continues the active phase rather than rescanning underneath it.
+     * without mutating the target. A later non-dry-run invocation rescans; that
+     * invocation authorizes applying the delta it computes. An empty delta
+     * refreshes the local baseline without contacting the target. A normal run
+     * with work persists its create token before contacting the target, then
+     * checkpoints every target-confirmed cursor and learned request-size
+     * decision. Re-running after an exception continues the active phase rather
+     * than rescanning underneath it.
      *
      * After target commit completes, the starting snapshot atomically becomes
      * the next local baseline. The sender then discards the successful target
@@ -237,6 +241,13 @@ class MultipartPush
             $summary = $this->prepare_new_push();
             if ($dry_run) {
                 return array_merge(['status' => 'dry_run'], $summary);
+            }
+            if ($summary['changed'] === 0 && $summary['deleted'] === 0) {
+                // An empty delta has nothing to stage or commit. Refresh the
+                // snapshot-backed baseline locally instead of opening a target
+                // session whose empty commit would briefly enter maintenance.
+                $this->journal->capture_local_files_baseline($this->snapshot_path);
+                return array_merge(['status' => 'complete'], $summary);
             }
             $state = [
                 'version' => 1,
@@ -422,28 +433,61 @@ class MultipartPush
         if (!is_dir($this->site_dir) && !@mkdir($this->site_dir, 0700, true) && !is_dir($this->site_dir)) {
             throw new RuntimeException('Could not create push state directory ' . $this->site_dir . '.');
         }
-        $temporary = $this->snapshot_path . '.tmp';
+        self::write_local_snapshot($this->source_root, $this->snapshot_path, $this->site_dir);
+        return $this->journal->diff_local_files($this->snapshot_path);
+    }
+
+    /**
+     * Writes the same sorted local snapshot used to plan a push.
+     *
+     * A completed full-root pull uses this after all local writes finish, so
+     * its baseline records local ctimes and the private structural markers a
+     * later push diff needs. The temporary scan remains bounded by the external
+     * sort's memory limit and is removed on success or failure.
+     *
+     * @param string $source_root Canonical local directory to scan.
+     * @param string $snapshot_path Final sorted JSONL snapshot path.
+     * @param string $working_dir Existing directory for external-sort chunks.
+     */
+    public static function write_local_snapshot(string $source_root, string $snapshot_path, string $working_dir): void
+    {
+        $requested_source_root = $source_root;
+        $source_root = realpath($requested_source_root);
+        if ($source_root === false || !is_dir($source_root) || is_link($requested_source_root)) {
+            throw new RuntimeException(
+                'Could not snapshot local root ' . $requested_source_root
+                . ': it must resolve to a real directory and cannot be a symlink.'
+            );
+        }
+        if (!is_dir($working_dir)) {
+            throw new RuntimeException('Could not write a local snapshot without an existing working directory: ' . $working_dir . '.');
+        }
+        $source_root = $source_root === '/' ? '/' : rtrim($source_root, '/');
+        $temporary = $snapshot_path . '.tmp';
         $handle = @fopen($temporary, 'wb');
         if ($handle === false) {
             throw new RuntimeException('Could not write local push snapshot ' . $temporary . '.');
         }
         try {
-            $this->scan_directory($this->source_root, '', $handle, null);
-        } finally {
-            fclose($handle);
-        }
-        (new ExternalMergeSort(function (string $line): ?string {
-            $entry = json_decode($line, true);
-            if (!is_array($entry) || !isset($entry['path']) || !is_string($entry['path'])) {
-                return null;
+            self::scan_directory($source_root, '', $handle, null);
+            if (!fclose($handle)) {
+                throw new RuntimeException('Could not finish local push snapshot ' . $temporary . '.');
             }
-            $path = base64_decode($entry['path'], true);
-            return $path === false ? null : $path;
-        }, self::SNAPSHOT_SORT_MEMORY_BYTES, true, $this->site_dir))->sort($temporary, $this->snapshot_path);
-        if (is_file($temporary)) {
+            $handle = null;
+            ( new ExternalMergeSort(function (string $line): ?string {
+                $entry = json_decode($line, true);
+                if (!is_array($entry) || !isset($entry['path']) || !is_string($entry['path'])) {
+                    return null;
+                }
+                $path = base64_decode($entry['path'], true);
+                return $path === false ? null : $path;
+            }, self::SNAPSHOT_SORT_MEMORY_BYTES, true, $working_dir) )->sort($temporary, $snapshot_path);
+        } finally {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
             @unlink($temporary);
         }
-        return $this->journal->diff_local_files($this->snapshot_path);
     }
 
     /**
@@ -455,7 +499,7 @@ class MultipartPush
      * @param resource $handle Writable unsorted snapshot stream.
      * @param int|null $directory_ctime Parent-supplied lstat ctime for this directory.
      */
-    private function scan_directory(string $directory, string $relative_path, $handle, ?int $directory_ctime): void
+    private static function scan_directory(string $directory, string $relative_path, $handle, ?int $directory_ctime): void
     {
         $directory_handle = @opendir($directory);
         if ($directory_handle === false) {
@@ -478,38 +522,38 @@ class MultipartPush
                         // children create them. Keep an existence-only baseline marker so
                         // deleting a whole non-empty directory also removes the now-empty
                         // directory on the target.
-                        $this->write_snapshot_entry($handle, $relative_path, 'tree-directory', 0, $directory_ctime ?? 0);
+                        self::write_snapshot_entry($handle, $relative_path, 'tree-directory', 0, $directory_ctime ?? 0);
                     }
                 }
                 $path = $relative_path === '' ? $entry : $relative_path . '/' . $entry;
-                $this->validate_relative_path($path);
+                self::validate_relative_path($path);
                 $absolute_path = $directory . '/' . $entry;
                 clearstatcache(true, $absolute_path);
                 $stat = @lstat($absolute_path);
                 if (!is_array($stat) || !isset($stat['mode'], $stat['ctime'], $stat['size'])) {
-                    throw new RuntimeException('Could not stat source path ' . $this->display_path($path) . '.');
+                    throw new RuntimeException('Could not stat source path ' . self::display_path($path) . '.');
                 }
                 $mode = (int) $stat['mode'];
                 $type_bits = $mode & 0170000;
                 if ($type_bits === 0040000) {
-                    $this->scan_directory($absolute_path, $path, $handle, (int) $stat['ctime']);
+                    self::scan_directory($absolute_path, $path, $handle, (int) $stat['ctime']);
                 } elseif ($type_bits === 0100000) {
-                    $this->write_snapshot_entry($handle, $path, 'file', (int) $stat['size'], (int) $stat['ctime']);
+                    self::write_snapshot_entry($handle, $path, 'file', (int) $stat['size'], (int) $stat['ctime']);
                 } elseif ($type_bits === 0120000) {
                     $target = @readlink($absolute_path);
                     if (!is_string($target)) {
-                        throw new RuntimeException('Could not read source symlink ' . $this->display_path($path) . '.');
+                        throw new RuntimeException('Could not read source symlink ' . self::display_path($path) . '.');
                     }
-                    $this->write_snapshot_entry($handle, $path, 'symlink', (int) $stat['size'], (int) $stat['ctime'], $target);
+                    self::write_snapshot_entry($handle, $path, 'symlink', (int) $stat['size'], (int) $stat['ctime'], $target);
                 } else {
-                    throw new RuntimeException('Source path ' . $this->display_path($path) . ' has an unsupported filesystem type.');
+                    throw new RuntimeException('Source path ' . self::display_path($path) . ' has an unsupported filesystem type.');
                 }
             }
         } finally {
             closedir($directory_handle);
         }
         if ($relative_path !== '' && !$has_children) {
-            $this->write_snapshot_entry($handle, $relative_path, 'directory', 0, $directory_ctime ?? 0);
+            self::write_snapshot_entry($handle, $relative_path, 'directory', 0, $directory_ctime ?? 0);
         }
     }
 
@@ -528,7 +572,7 @@ class MultipartPush
      * @param int $ctime lstat change timestamp in seconds.
      * @param string|null $target Literal symlink target, when applicable.
      */
-    private function write_snapshot_entry($handle, string $path, string $type, int $size, int $ctime, ?string $target = null): void
+    private static function write_snapshot_entry($handle, string $path, string $type, int $size, int $ctime, ?string $target = null): void
     {
         $entry = [
             'path' => base64_encode($path),
@@ -541,7 +585,7 @@ class MultipartPush
         }
         $line = json_encode($entry, JSON_UNESCAPED_SLASHES);
         if ($line === false || fwrite($handle, $line . "\n") !== strlen($line) + 1) {
-            throw new RuntimeException('Could not write local push snapshot entry for ' . $this->display_path($path) . '.');
+            throw new RuntimeException('Could not write local push snapshot entry for ' . self::display_path($path) . '.');
         }
     }
 
@@ -1101,7 +1145,7 @@ class MultipartPush
                 continue;
             }
             if (($confirmation['path_b64'] ?? null) !== base64_encode($descriptor['path']) || ($confirmation['state'] ?? null) !== 'complete') {
-                throw new RuntimeException('Target did not confirm completed ' . $descriptor['type'] . ' ' . $this->display_path($descriptor['path']) . '.');
+                throw new RuntimeException('Target did not confirm completed ' . $descriptor['type'] . ' ' . self::display_path($descriptor['path']) . '.');
             }
             $state['plan_offset'] = $descriptor['next_plan_offset'];
         }
@@ -1125,9 +1169,21 @@ class MultipartPush
             $target_response = is_array($result['response'] ?? null)
                 ? json_encode($result['response'], JSON_UNESCAPED_SLASHES)
                 : false;
+            $detail = is_string($result['detail'] ?? null) ? $result['detail'] : '';
+            $baseline_guidance = '';
+            if (
+                ( $result['reason'] ?? null ) === 'invalid_session_request' &&
+                strpos($detail, 'Protected target-relative path cannot be changed:') === 0 &&
+                !$this->journal->has_compatible_local_files_baseline()
+            ) {
+                $baseline_guidance = ' This push has no compatible full-root baseline. Abort this private push, '
+                    . 'complete an unfiltered files-pull from the same target using one explicit absolute directory '
+                    . 'query parameter and the same --state-dir, then push the pulled local site root with that URL.';
+            }
             throw new RuntimeException(
-                'Multipart upload failed: ' . ( $result['reason'] ?? 'unknown' ) . '. ' . ( $result['detail'] ?? '' )
+                'Multipart upload failed: ' . ( $result['reason'] ?? 'unknown' ) . '. ' . $detail
                 . ( $target_response === false ? '' : ' Target response: ' . $target_response )
+                . $baseline_guidance
             );
         }
         // A retry has no sender-confirmed outcome. Ask the target for only
@@ -1328,7 +1384,7 @@ class MultipartPush
             }
             $type = $entry['type'] ?? null;
             if (!is_string($type) || !in_array($type, ['file', 'directory', 'symlink'], true)) {
-                throw new RuntimeException('Local changed-path list contains no supported logical type for ' . $this->display_path($path) . '.');
+                throw new RuntimeException('Local changed-path list contains no supported logical type for ' . self::display_path($path) . '.');
             }
             return [
                 'path' => $path,
@@ -1520,7 +1576,7 @@ class MultipartPush
      */
     private function source_path(string $relative_path): string
     {
-        $this->validate_relative_path($relative_path);
+        self::validate_relative_path($relative_path);
         return ($this->source_root === '/' ? '' : $this->source_root) . '/' . $relative_path;
     }
 
@@ -1532,14 +1588,14 @@ class MultipartPush
      *
      * @param string $path Target-relative source path.
      */
-    private function validate_relative_path(string $path): void
+    private static function validate_relative_path(string $path): void
     {
         if ($path === '' || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
-            throw new RuntimeException('Source path cannot be sent safely: ' . $this->display_path($path) . '.');
+            throw new RuntimeException('Source path cannot be sent safely: ' . self::display_path($path) . '.');
         }
         foreach (explode('/', $path) as $segment) {
             if ($segment === '' || $segment === '.' || $segment === '..') {
-                throw new RuntimeException('Source path cannot be sent safely: ' . $this->display_path($path) . '.');
+                throw new RuntimeException('Source path cannot be sent safely: ' . self::display_path($path) . '.');
             }
         }
         if ($path === '.maintenance' || strpos($path, '.maintenance/') === 0) {
@@ -1553,7 +1609,7 @@ class MultipartPush
      * @param string $path Raw filesystem path bytes.
      * @return string Base64 representation.
      */
-    private function display_path(string $path): string
+    private static function display_path(string $path): string
     {
         return base64_encode($path);
     }

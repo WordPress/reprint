@@ -95,11 +95,178 @@ final class PushJournalTest extends TestCase
         $this->makeJournal()->capture_local_files_baseline($this->tempDir . '/no-such-index.jsonl');
     }
 
+    public function testCapturedBaselineIsUsableOnlyForItsManagedDirectoryAndLocalRoot(): void
+    {
+        $stateDir = $this->tempDir . '/state';
+        $localRoot = $this->tempDir . '/local-site';
+        $target = 'https://example.com/export?directory=%2Fsrv%2Fsite';
+        $index = $this->writeIndex(['index.php' => [100, 5, 'file']]);
+        $journal = new PushJournal($stateDir, $target, $localRoot);
+
+        $journal->capture_local_files_baseline($index);
+
+        $this->assertTrue($journal->has_compatible_local_files_baseline());
+        $this->assertSame(
+            ['changed' => 0, 'deleted' => 0],
+            $journal->diff_local_files($index)
+        );
+        $otherManagedDirectory = new PushJournal(
+            $stateDir,
+            'https://example.com/export?directory=%2Fsrv%2Fother',
+            $localRoot
+        );
+        $otherLocalRoot = new PushJournal(
+            $stateDir,
+            $target,
+            $this->tempDir . '/other-local-site'
+        );
+        $this->assertFalse($otherManagedDirectory->has_compatible_local_files_baseline());
+        $this->assertFalse($otherLocalRoot->has_compatible_local_files_baseline());
+    }
+
+    public function testTargetAndStateDirectoryKeepBaselinesIndependent(): void
+    {
+        $index = $this->writeIndex(['index.php' => [100, 5, 'file']]);
+        $localRoot = $this->tempDir . '/local-site';
+        $target = 'https://example.com/export?directory=%2Fsrv%2Fsite';
+        $journal = new PushJournal($this->tempDir . '/state-a', $target, $localRoot);
+        $journal->capture_local_files_baseline($index);
+
+        $otherTarget = new PushJournal(
+            $this->tempDir . '/state-a',
+            'https://other.example/export?directory=%2Fsrv%2Fsite',
+            $localRoot
+        );
+        $otherStateDirectory = new PushJournal($this->tempDir . '/state-b', $target, $localRoot);
+        $this->assertFalse($otherTarget->has_compatible_local_files_baseline());
+        $this->assertFalse($otherStateDirectory->has_compatible_local_files_baseline());
+    }
+
+    public function testIncompatibleIdentityUsesCreateOnlyDiff(): void
+    {
+        $stateDir = $this->tempDir . '/state';
+        $localRoot = $this->tempDir . '/local-site';
+        $index = $this->writeIndex(['index.php' => [100, 5, 'file']]);
+        $baselineJournal = new PushJournal(
+            $stateDir,
+            'https://example.com/export?directory=%2Fsrv%2Fsite',
+            $localRoot
+        );
+        $baselineJournal->capture_local_files_baseline($index);
+
+        $journal = new PushJournal(
+            $stateDir,
+            'https://example.com/export?directory=%2Fsrv%2Fother',
+            $localRoot
+        );
+
+        $this->assertSame(['changed' => 1, 'deleted' => 0], $journal->diff_local_files($index));
+        $this->assertSame(['index.php'], $this->listPaths($journal->local_paths_to_push));
+    }
+
+    public function testBaselineWithoutItsIdentityIsNeverTrusted(): void
+    {
+        $journal = $this->makeJournal();
+        $index = $this->writeIndex(['index.php' => [100, 5, 'file']]);
+        mkdir(dirname($journal->local_files_baseline_path), 0755, true);
+        copy($index, $journal->local_files_baseline_path);
+
+        $this->assertFalse($journal->has_compatible_local_files_baseline());
+        $this->assertSame(['changed' => 1, 'deleted' => 0], $journal->diff_local_files($index));
+        $this->assertSame(['index.php'], $this->listPaths($journal->local_paths_to_push));
+    }
+
+    public function testInvalidationRemovesBothBaselineAndIdentity(): void
+    {
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'index.php' => [100, 5, 'file'],
+        ]));
+        $this->assertTrue($journal->has_compatible_local_files_baseline());
+
+        PushJournal::invalidate_local_files_baseline(
+            $this->tempDir . '/state',
+            'https://example.com/'
+        );
+
+        $this->assertFalse($journal->has_compatible_local_files_baseline());
+        $this->assertFileDoesNotExist($journal->local_files_baseline_path);
+        $this->assertFileDoesNotExist($journal->local_files_identity_path);
+    }
+
+    public function testFailedCaptureAfterInvalidationCannotRestoreStaleTrust(): void
+    {
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'index.php' => [100, 5, 'file'],
+        ]));
+        PushJournal::invalidate_local_files_baseline(
+            $this->tempDir . '/state',
+            'https://example.com/?directory=%2Fsrv%2Fsite'
+        );
+
+        try {
+            $journal->capture_local_files_baseline($this->tempDir . '/missing-snapshot.jsonl');
+            $this->fail('Expected the missing snapshot capture to fail.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('index file is missing', $exception->getMessage());
+        }
+
+        $this->assertFalse($journal->has_compatible_local_files_baseline());
+    }
+
+    public function testManagedDirectoryRequiresOneAbsoluteScalarUrlParameter(): void
+    {
+        $this->assertSame(
+            '/srv/site',
+            PushJournal::managed_directory_from_url(
+                'https://example.com/export?reprint-api=1&directory=%2Fsrv%2Fsite%2F'
+            )
+        );
+        $this->assertSame(
+            '/',
+            PushJournal::managed_directory_from_url('https://example.com/export?directory=%2F')
+        );
+        $this->assertSame(
+            '/srv//site',
+            PushJournal::managed_directory_from_url('https://example.com/export?directory=%2Fsrv%2F%2Fsite%2F%2F')
+        );
+    }
+
+    public function testManagedDirectoryRejectsEveryUnrepresentableQueryShape(): void
+    {
+        $ineligible_urls = [
+            'missing' => 'https://example.com/export',
+            'empty' => 'https://example.com/export?directory=',
+            'relative' => 'https://example.com/export?directory=relative',
+            'NUL' => 'https://example.com/export?directory=%2Fsrv%00site',
+            'dot segment' => 'https://example.com/export?directory=%2Fsrv%2F.%2Fsite',
+            'dot-dot segment' => 'https://example.com/export?directory=%2Fsrv%2F..%2Fsite',
+            'repeated scalar' => 'https://example.com/export?directory=%2Fsrv%2Fsite&directory=%2Fsrv%2Fother',
+            'literal array' => 'https://example.com/export?directory[]=%2Fsrv%2Fsite',
+            'encoded array' => 'https://example.com/export?directory%5B%5D=%2Fsrv%2Fsite',
+            'indexed array' => 'https://example.com/export?directory%5B0%5D=%2Fsrv%2Fsite',
+            'keyed array' => 'https://example.com/export?directory%5Bsite%5D=%2Fsrv%2Fsite',
+            'nested array' => 'https://example.com/export?directory%5Bsite%5D%5Broot%5D=%2Fsrv%2Fsite',
+            'unclosed bracket' => 'https://example.com/export?directory%5Bsite=%2Fsrv%2Fsite',
+            'unopened bracket' => 'https://example.com/export?directory%5D=%2Fsrv%2Fsite',
+            'mixed scalar and array' => 'https://example.com/export?directory=%2Fsrv%2Fsite&directory%5B%5D=%2Fsrv%2Fother',
+            'encoded name and array' => 'https://example.com/export?%64irectory%5B%5D=%2Fsrv%2Fsite',
+        ];
+
+        foreach ($ineligible_urls as $description => $url) {
+            $this->assertNull(
+                PushJournal::managed_directory_from_url($url),
+                $description
+            );
+        }
+    }
+
     // ------------------------------------------------------------------
     //  Local diff
     // ------------------------------------------------------------------
 
-    public function testFirstPushTreatsEveryEntryAsChanged(): void
+    public function testNoCompatibleBaselineTreatsEveryEntryAsChanged(): void
     {
         $journal = $this->makeJournal();
         $counts = $journal->diff_local_files($this->writeIndex([
@@ -221,7 +388,7 @@ final class PushJournalTest extends TestCase
         foreach ($types as $previousType) {
             foreach ($types as $currentType) {
                 $caseRoot = $this->tempDir . '/' . $previousType . '-to-' . $currentType;
-                $journal = new PushJournal($caseRoot, 'https://example.com/');
+                $journal = new PushJournal($caseRoot, 'https://example.com/', $caseRoot . '/local-site');
                 $baseline = $this->writeLogicalIndex($caseRoot . '-baseline.jsonl', $previousType, 1);
                 $current = $this->writeLogicalIndex($caseRoot . '-current.jsonl', $currentType, 2);
                 $journal->capture_local_files_baseline($baseline);
@@ -294,7 +461,7 @@ final class PushJournalTest extends TestCase
         $journal = $this->makeJournal();
         $index = $this->writeIndex(['a.txt' => [100, 5, 'file']]);
 
-        // First run, no baseline: a.txt lands in local_paths_to_push.
+        // With no compatible baseline, a.txt lands in local_paths_to_push.
         $journal->diff_local_files($index);
         $this->assertSame(['a.txt'], $this->listPaths($journal->local_paths_to_push));
 
@@ -440,7 +607,7 @@ file_put_contents($baseline, json_encode([
     'size' => 0,
     'type' => 'tree-directory',
 ]) . "\n");
-$journal = new PushJournal($root . '/state', 'https://example.com/');
+$journal = new PushJournal($root . '/state', 'https://example.com/', $root . '/local-site');
 $journal->capture_local_files_baseline($baseline);
 $summary = $journal->diff_local_files($current);
 if ($summary !== ['changed' => 500000, 'deleted' => 1]) {
@@ -469,7 +636,11 @@ PHP;
 
     private function makeJournal(): PushJournal
     {
-        return new PushJournal($this->tempDir . '/state', 'https://example.com/');
+        return new PushJournal(
+            $this->tempDir . '/state',
+            'https://example.com/?directory=%2Fsrv%2Fsite',
+            $this->tempDir . '/local-site'
+        );
     }
 
     /**

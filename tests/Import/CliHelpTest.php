@@ -45,6 +45,8 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--dry-run', $output);
         $this->assertStringContainsString('--abort', $output);
         $this->assertStringContainsString('--allow-http', $output);
+        $this->assertStringContainsString('authorizes applying the delta', $output);
+        $this->assertStringContainsString('a later push rescans the source tree', $output);
         $this->assertStringNotContainsString('push-commit', $output);
     }
 }

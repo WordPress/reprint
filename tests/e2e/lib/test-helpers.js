@@ -338,7 +338,7 @@ export function runPush(siteName, sourceDir, stateDir, options = {}) {
     const args = [
         IMPORTER_PATH,
         'push',
-        getSiteUrl(siteName),
+        options.url || getSiteUrl(siteName),
         `--state-dir=${stateDir}`,
         `--source-root=${sourceDir}`,
         `--secret=${getSiteSecret(siteName)}`,

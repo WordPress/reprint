@@ -115,7 +115,47 @@ final class StagingExclusionPullTest extends TestCase {
         $this->assertFileDoesNotExist($local_private_path);
         $this->assertNotContains(self::$internal_staging_root, $this->indexedPaths());
         $this->assertNotContains(self::$internal_staging_root . '/private.txt', $this->indexedPaths());
+        $journal_dir = self::$state_dir . '/push/' . \PushJournal::site_key(
+            self::$base_url . '/?directory=' . rawurlencode(self::$remote_site)
+        );
+        $baseline_path = $journal_dir . '/last-sync-local-files.jsonl';
+        $this->assertFileExists($baseline_path);
+        $this->assertFileExists($journal_dir . '/last-sync-local-files.identity.json');
+        $baseline_paths = $this->encodedPathsFromJsonLines($baseline_path);
+        $this->assertNotContains('.reprint-staging', $baseline_paths);
+        $this->assertNotContains('.reprint-staging/private.txt', $baseline_paths);
         $this->assertImporterRequestsContainNoPrivateConfiguration();
+    }
+
+    public function testMultiRootPullTraversesEveryRootWithoutPublishingPushBaseline(): void {
+        $first_root = self::$case_root . '/multi-root-first';
+        $second_root = self::$case_root . '/multi-root-second';
+        mkdir($first_root, 0700, true);
+        mkdir($second_root, 0700, true);
+        file_put_contents($first_root . '/first.txt', 'first root');
+        file_put_contents($second_root . '/second.txt', 'second root');
+        $first_root = (string) realpath($first_root);
+        $second_root = (string) realpath($second_root);
+        $state_dir = self::$case_root . '/multi-root-state';
+        $filesystem_root = self::$case_root . '/multi-root-files';
+        $url = self::$base_url . '/?directory%5B%5D=' . rawurlencode($first_root) .
+            '&directory%5B%5D=' . rawurlencode($second_root);
+        $client = new \ImportClient($url, $state_dir, $filesystem_root);
+        $this->writePreflightState($client, $state_dir, [$first_root, $second_root]);
+
+        $client->run([
+            'command' => 'files-pull',
+            'follow_symlinks' => false,
+        ]);
+
+        $this->assertSame('first root', file_get_contents($filesystem_root . $first_root . '/first.txt'));
+        $this->assertSame('second root', file_get_contents($filesystem_root . $second_root . '/second.txt'));
+        $indexed_paths = $this->encodedPathsFromJsonLines($state_dir . '/.import-index.jsonl');
+        $this->assertContains($first_root . '/first.txt', $indexed_paths);
+        $this->assertContains($second_root . '/second.txt', $indexed_paths);
+        $journal_dir = $state_dir . '/push/' . \PushJournal::site_key($url);
+        $this->assertFileDoesNotExist($journal_dir . '/last-sync-local-files.jsonl');
+        $this->assertFileDoesNotExist($journal_dir . '/last-sync-local-files.identity.json');
     }
 
     private function client(): \ImportClient {
@@ -128,16 +168,22 @@ final class StagingExclusionPullTest extends TestCase {
 
     private function seedPreflightState(): void {
         $client = $this->client();
+        $this->writePreflightState($client, self::$state_dir, [self::$remote_site]);
+    }
+
+    /** @param list<string> $roots */
+    private function writePreflightState(\ImportClient $client, string $state_dir, array $roots): void {
         $state = $client->default_state();
         $state['preflight'] = [
             'http_code' => 200,
             'data' => [
                 'ok' => true,
-                'wp_detect' => [
-                    'roots' => [['path' => self::$remote_site]],
-                ],
+                'wp_detect' => ['roots' => array_map(
+                    static fn(string $path): array => ['path' => $path],
+                    $roots
+                )],
                 'runtime' => [
-                    'document_root' => self::$remote_site,
+                    'document_root' => $roots[0],
                     'ini_get_all' => [],
                 ],
                 'database' => [
@@ -150,7 +196,7 @@ final class StagingExclusionPullTest extends TestCase {
         $state['remote_protocol_min_version'] = 1;
         $state['follow_symlinks'] = false;
         file_put_contents(
-            self::$state_dir . '/.import-state.json',
+            $state_dir . '/.import-state.json',
             json_encode($state, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT)
         );
     }
