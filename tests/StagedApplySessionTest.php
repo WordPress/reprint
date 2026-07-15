@@ -40,7 +40,7 @@ final class StagedApplySessionTest extends TestCase {
             ],
             'body' => 'old',
         ]]);
-        $this->assertSame(3, $session->get_status(['upload.bin'])['paths'][0]['accepted_bytes']);
+        $this->assertSame(3, $session->get_status('upload.bin')['path']['accepted_bytes']);
 
         $this->stage($session, [[
             'headers' => [
@@ -51,9 +51,9 @@ final class StagedApplySessionTest extends TestCase {
             ],
             'body' => 'new',
         ]]);
-        $status = $session->get_status(['upload.bin']);
-        $this->assertSame('complete', $status['paths'][0]['state']);
-        $this->assertSame(3, $status['paths'][0]['accepted_bytes']);
+        $status = $session->get_status('upload.bin');
+        $this->assertSame('complete', $status['path']['state']);
+        $this->assertSame(3, $status['path']['accepted_bytes']);
 
         $this->commit_all($session);
         $this->assertSame('new', file_get_contents($this->target . '/upload.bin'));

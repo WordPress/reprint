@@ -438,12 +438,13 @@ final class Site_Export_Staged_Apply_Session {
      *
      * Senders use this snapshot after a lost response or process restart. It
      * derives every cursor from the target workspace rather than echoing a
-     * sender's claimed offset. Calling it with no paths returns only session
+     * sender's claimed offset. Calling it without a path returns only session
      * progress; it never enumerates the complete positive-work tree.
      *
-     * Requested paths are returned in the same order, encoded as path_b64 so
-     * arbitrary filesystem bytes remain representable. Each path is reported
-     * as one of:
+     * The optional path is the one in-flight file whose upload response was
+     * lost. Delete-list resume does not need a path; use delete_bytes from the
+     * session-level result. The path status is encoded as path_b64 so arbitrary
+     * filesystem bytes remain representable. It is reported as one of:
      *
      *  - missing, with an accepted_bytes cursor of zero;
      *  - partial, with the regular file's actual stored byte size; or
@@ -452,20 +453,21 @@ final class Site_Export_Staged_Apply_Session {
      *
      * The session-level result contains the session id, the current uploading,
      * deleting, applying, or complete phase, the actual delete-stream byte
-     * size, and whether its completion was explicitly declared. The complete
-     * snapshot is read while holding the session lock.
+     * size, whether its completion was explicitly declared, and a path status
+     * when a path was requested. The complete snapshot is read while holding
+     * the session lock.
      *
-     * @param string[] $paths Raw target-relative path byte strings to inspect.
+     * @param string|null $path Raw target-relative path byte string to inspect.
      * @return array<string,mixed> Target-confirmed session and path progress.
      *
-     * @throws InvalidArgumentException If a requested path is unsafe.
+     * @throws InvalidArgumentException If the requested path is unsafe.
      * @throws Site_Export_Staged_Apply_Exception If the session is busy,
      *     unavailable, corrupt, or no longer matches the target configuration.
      */
-    public function get_status(array $paths = []): array {
-        return $this->with_session_lock(function () use ($paths): array {
-            $reported_paths = [];
-            foreach ($paths as $path) {
+    public function get_status(?string $path = null): array {
+        return $this->with_session_lock(function () use ($path): array {
+            $reported_path = null;
+            if ($path !== null) {
                 $this->validate_path($path);
                 $partial = $this->private_path($this->partial_dir, $path);
                 $complete = $this->private_path($this->files_dir, $path);
@@ -473,28 +475,28 @@ final class Site_Export_Staged_Apply_Session {
                 $this->ensure_private_parent($complete, false);
                 $complete_identity = $this->path_identity($complete);
                 if ($complete_identity !== null) {
-                    $reported_paths[] = [
+                    $reported_path = [
                         'path_b64' => base64_encode($path),
                         'state' => 'complete',
                         'type' => $complete_identity['type'],
                         'accepted_bytes' => $complete_identity['type'] === 'file' ? $complete_identity['size'] : 0,
                     ];
-                    continue;
-                }
-                $partial_identity = $this->path_identity($partial);
-                if ($partial_identity !== null) {
-                    if ($partial_identity['type'] !== 'file') {
-                        throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Partial staging path ' . base64_encode($path) . ' is not a regular file.');
+                } else {
+                    $partial_identity = $this->path_identity($partial);
+                    if ($partial_identity !== null) {
+                        if ($partial_identity['type'] !== 'file') {
+                            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Partial staging path ' . base64_encode($path) . ' is not a regular file.');
+                        }
+                        $reported_path = [
+                            'path_b64' => base64_encode($path),
+                            'state' => 'partial',
+                            'type' => 'file',
+                            'accepted_bytes' => $partial_identity['size'],
+                        ];
+                    } else {
+                        $reported_path = ['path_b64' => base64_encode($path), 'state' => 'missing', 'accepted_bytes' => 0];
                     }
-                    $reported_paths[] = [
-                        'path_b64' => base64_encode($path),
-                        'state' => 'partial',
-                        'type' => 'file',
-                        'accepted_bytes' => $partial_identity['size'],
-                    ];
-                    continue;
                 }
-                $reported_paths[] = ['path_b64' => base64_encode($path), 'state' => 'missing', 'accepted_bytes' => 0];
             }
             $commit = $this->read_json($this->commit_path);
             if (is_array($commit)) {
@@ -505,7 +507,7 @@ final class Site_Export_Staged_Apply_Session {
                 'phase' => is_array($commit) ? $commit['phase'] : 'uploading',
                 'delete_bytes' => $this->file_size($this->deletes_path),
                 'delete_upload_complete' => $this->delete_upload_is_complete(),
-                'paths' => $reported_paths,
+                'path' => $reported_path,
             ];
         });
     }
