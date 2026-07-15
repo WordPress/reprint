@@ -1132,14 +1132,41 @@ final class StagedApplySessionTest extends TestCase {
         }
     }
 
+    public function testCreateAndDeleteCompletionPreserveExactVersionThreeMetadata(): void {
+        $session = $this->session('04140414041404140414041404140414');
+        $created = $this->session_metadata($session);
+
+        $this->assertSame([
+            'version',
+            'session_id',
+            'target_root_b64',
+            'protected_paths_b64',
+            'delete_upload_complete',
+            'commit_started',
+        ], array_keys($created));
+        $this->assertSame(3, $created['version']);
+        $this->assertFalse($created['delete_upload_complete']);
+        $this->assertFalse($created['commit_started']);
+
+        $this->complete_delete_upload($session);
+        $completed = $this->session_metadata($session);
+        $this->assertSame(array_keys($created), array_keys($completed));
+        $this->assertTrue($completed['delete_upload_complete']);
+        $this->assertFalse($completed['commit_started']);
+    }
+
     public function testEverySessionMetadataShapeIsValidatedBeforeStateIsUsed(): void {
         $invalid_values = [
-            ['version' => 1],
+            ['version' => 2],
             ['session_id' => 'wrong'],
             ['delete_upload_complete' => 1],
+            ['commit_started' => null],
+            ['commit_started' => 0],
+            ['commit_started' => 'false'],
             ['target_root_b64' => 1],
             ['target_root_b64' => '***'],
             ['protected_paths_b64' => 'not-a-list'],
+            ['protected_paths_b64' => ['path' => base64_encode('safe')]],
             ['protected_paths_b64' => [1]],
             ['protected_paths_b64' => ['***']],
         ];
@@ -1157,6 +1184,19 @@ final class StagedApplySessionTest extends TestCase {
             } catch (Site_Export_Staged_Apply_Exception $exception) {
                 $this->assertSame('invalid_session_state', $exception->get_error_code());
             }
+        }
+
+        $missing_commit_started = $this->session('05150515051505150515051505150515');
+        $missing_path = $missing_commit_started->get_session_directory() . '/session.json';
+        $missing_metadata = $this->session_metadata($missing_commit_started);
+        unset($missing_metadata['commit_started']);
+        file_put_contents($missing_path, json_encode($missing_metadata, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        try {
+            $missing_commit_started->get_status();
+            $this->fail('Session metadata without commit_started was accepted.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('invalid_session_state', $exception->get_error_code());
+            $this->assertStringContainsString('commit_started', $exception->getMessage());
         }
 
         $oversized = $this->session('05050505050505050505050505050505');
@@ -1261,6 +1301,7 @@ final class StagedApplySessionTest extends TestCase {
             }
             if ($type === 'directory') {
                 mkdir($active_path);
+                file_put_contents($active_path . '/sentinel', 'safe');
             } else {
                 file_put_contents($this->target . '/active-sentinel', 'safe');
                 symlink($this->target . '/active-sentinel', $active_path);
@@ -1272,12 +1313,142 @@ final class StagedApplySessionTest extends TestCase {
                 $this->assertSame('invalid_session_state', $exception->get_error_code());
             }
             if ($type === 'directory') {
+                $this->assertSame('safe', file_get_contents($active_path . '/sentinel'));
+                unlink($active_path . '/sentinel');
                 rmdir($active_path);
             } else {
                 $this->assertSame('safe', file_get_contents($this->target . '/active-sentinel'));
                 unlink($active_path);
             }
         }
+    }
+
+    public function testCoordinatorRecordAcceptsOnlyMissingOwnedOrValidForeignState(): void {
+        $owner = $this->session('31313131424242425353535364646464');
+        $this->stage_file($owner, 'owner-pending', 'new');
+        $this->complete_delete_upload($owner);
+        $active_path = $this->storage . '/apply-sessions/target.active';
+
+        $owner->commit(1);
+        $this->assertSame($owner->get_session_id() . "\n", file_get_contents($active_path));
+        $owner->commit(1);
+        $this->assertSame($owner->get_session_id() . "\n", file_get_contents($active_path));
+
+        $other = $this->session('32323232434343435454545465656565');
+        $this->stage_file($other, 'other-pending', 'new');
+        $this->complete_delete_upload($other);
+        try {
+            $other->commit(1);
+            $this->fail('A valid foreign coordinator owner was overwritten.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('busy', $exception->get_error_code());
+        }
+        $this->assertSame($owner->get_session_id() . "\n", file_get_contents($active_path));
+        $this->assertFileDoesNotExist($this->target . '/other-pending');
+    }
+
+    public function testCoordinatorRecordRejectsEveryMalformedRegularFileWithoutReplacingIt(): void {
+        $invalid_records = [
+            'empty' => '',
+            'too short' => str_repeat('a', 31) . "\n",
+            'too long' => str_repeat('a', 33) . "\n",
+            'uppercase' => str_repeat('A', 32) . "\n",
+            'non-hex' => str_repeat('g', 32) . "\n",
+            'missing newline' => str_repeat('a', 32),
+            'extra newline' => str_repeat('a', 32) . "\n\n",
+            'extra data' => str_repeat('a', 32) . "\nextra",
+        ];
+        $case_index = 0;
+        foreach ($invalid_records as $description => $record) {
+            $session = $this->session(sprintf('%032x', 2500 + $case_index));
+            $sentinel = 'malformed-coordinator-' . $case_index;
+            file_put_contents($this->target . '/' . $sentinel, 'safe');
+            $this->stage_file($session, 'pending-' . $case_index, 'new');
+            $this->complete_delete_upload($session);
+            $active_path = $this->storage . '/apply-sessions/target.active';
+            file_put_contents($active_path, $record);
+
+            $observed_exception = null;
+            try {
+                $session->commit(1);
+            } catch (Throwable $exception) {
+                $observed_exception = $exception;
+            }
+            $this->assertInstanceOf(
+                Site_Export_Staged_Apply_Exception::class,
+                $observed_exception,
+                'Malformed coordinator ' . $description . ' case was accepted.'
+            );
+            $this->assertSame('invalid_session_state', $observed_exception->get_error_code());
+            $this->assertSame($record, file_get_contents($active_path));
+            $this->assertSame('safe', file_get_contents($this->target . '/' . $sentinel));
+            $this->assertFileDoesNotExist($this->target . '/pending-' . $case_index);
+            $this->assertFileDoesNotExist($this->target . '/.maintenance');
+            $this->assertFileDoesNotExist($session->get_session_directory() . '/work/maintenance.php');
+            $checkpoint = json_decode(
+                (string) file_get_contents($session->get_session_directory() . '/commit.json'),
+                true,
+                512,
+                JSON_THROW_ON_ERROR
+            );
+            $this->assertSame('deleting', $checkpoint['phase']);
+            $this->assertSame(0, $checkpoint['delete_offset']);
+            $this->assertSame(0, $checkpoint['deletions_applied']);
+            $this->assertSame(0, $checkpoint['values_applied']);
+            unlink($active_path);
+            ++$case_index;
+        }
+    }
+
+    public function testTruncatedCoordinatorIsRejectedWithoutWritingTheCompetingSessionId(): void {
+        $owner = $this->session('33333333444444445555555566666666');
+        $this->stage_file($owner, 'owner-pending', 'new');
+        $this->complete_delete_upload($owner);
+        $owner->commit(1);
+        $active_path = $this->storage . '/apply-sessions/target.active';
+        file_put_contents($active_path, '');
+
+        $competitor = $this->session('34343434454545455656565667676767');
+        $this->stage_file($competitor, 'competitor-pending', 'new');
+        $this->complete_delete_upload($competitor);
+        try {
+            $competitor->commit(1);
+            $this->fail('A truncated coordinator was treated as unclaimed.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('invalid_session_state', $exception->get_error_code());
+        }
+
+        $this->assertSame('', file_get_contents($active_path));
+        $this->assertFileDoesNotExist($this->target . '/competitor-pending');
+        $this->assertFileDoesNotExist($competitor->get_session_directory() . '/work/maintenance.php');
+    }
+
+    public function testUnreadableCoordinatorIsRetryableAndIsNeverTreatedAsAbsent(): void {
+        $session = $this->session('35353535464646465757575768686868');
+        $this->stage_file($session, 'unreadable-pending', 'new');
+        $this->complete_delete_upload($session);
+        $active_path = $this->storage . '/apply-sessions/target.active';
+        $foreign_owner = str_repeat('d', 32) . "\n";
+        file_put_contents($active_path, $foreign_owner);
+        chmod($active_path, 0000);
+        $probe = @fopen($active_path, 'rb');
+        if (is_resource($probe)) {
+            fclose($probe);
+            chmod($active_path, 0600);
+            $this->markTestSkipped('This platform does not enforce unreadable coordinator permissions for the test process.');
+        }
+
+        try {
+            $session->commit(1);
+            $this->fail('An unreadable coordinator was treated as absent.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('retryable_io_error', $exception->get_error_code());
+        } finally {
+            chmod($active_path, 0600);
+        }
+        $this->assertSame($foreign_owner, file_get_contents($active_path));
+        $this->assertFileDoesNotExist($this->target . '/unreadable-pending');
+        $this->assertFileDoesNotExist($this->target . '/.maintenance');
     }
 
     public function testDiscardHandlesMissingTombstonedAndContendedSessionsWithoutFollowingLinks(): void {
@@ -1359,6 +1530,27 @@ final class StagedApplySessionTest extends TestCase {
             ],
             'body' => $contents,
         ]]);
+    }
+
+    /**
+     * @return array{
+     *     version:3,
+     *     session_id:string,
+     *     target_root_b64:string,
+     *     protected_paths_b64:list<string>,
+     *     delete_upload_complete:bool,
+     *     commit_started:bool
+     * }
+     */
+    private function session_metadata(Site_Export_Staged_Apply_Session $session): array {
+        $metadata = json_decode(
+            (string) file_get_contents($session->get_session_directory() . '/session.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertIsArray($metadata);
+        return $metadata;
     }
 
     /** @param array<int,array{headers:array<string,string>,body:string}> $parts */

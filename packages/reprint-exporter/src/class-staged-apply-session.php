@@ -199,11 +199,12 @@ final class Site_Export_Staged_Apply_Session {
                 throw $exception;
             }
             $session->write_json($session->session_metadata_path, [
-                'version' => 2,
+                'version' => 3,
                 'session_id' => $session_id,
                 'target_root_b64' => base64_encode($target_root),
                 'protected_paths_b64' => array_map('base64_encode', $session->protected_paths),
                 'delete_upload_complete' => false,
+                'commit_started' => false,
             ]);
             return $session;
         } finally {
@@ -317,8 +318,8 @@ final class Site_Export_Staged_Apply_Session {
         }
         $lock = $this->acquire_session_lock();
         try {
-            $this->assert_session_configuration();
-            if (is_file($this->commit_path)) {
+            $metadata = $this->assert_session_configuration();
+            if ($this->read_commit_state($metadata['commit_started']) !== null) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_COMMIT_REQUIRED, 'Uploads are closed because this staged apply session is committing.');
             }
             $this->upload_lock = $lock;
@@ -486,7 +487,7 @@ final class Site_Export_Staged_Apply_Session {
      *     unavailable, corrupt, or no longer matches the target configuration.
      */
     public function get_status(?string $path = null): array {
-        return $this->with_session_lock(function () use ($path): array {
+        return $this->with_session_lock(function (array $metadata) use ($path): array {
             $reported_path = null;
             if ($path !== null) {
                 $this->validate_path($path);
@@ -519,15 +520,12 @@ final class Site_Export_Staged_Apply_Session {
                     }
                 }
             }
-            $commit = $this->read_json($this->commit_path);
-            if (is_array($commit)) {
-                $this->require_valid_commit_state($commit);
-            }
+            $commit = $this->read_commit_state($metadata['commit_started']);
             return [
                 'session_id' => $this->session_id,
                 'phase' => is_array($commit) ? $commit['phase'] : 'uploading',
                 'delete_bytes' => $this->file_size($this->deletes_path),
-                'delete_upload_complete' => $this->delete_upload_is_complete(),
+                'delete_upload_complete' => $metadata['delete_upload_complete'],
                 'path' => $reported_path,
             ];
         });
@@ -557,19 +555,10 @@ final class Site_Export_Staged_Apply_Session {
         if ($maximum_entries <= 0) {
             throw new InvalidArgumentException('The staged apply commit entry limit must be greater than zero.');
         }
-        return $this->with_session_lock(function () use ($maximum_entries): array {
-            $state = $this->read_json($this->commit_path);
+        return $this->with_session_lock(function (array $metadata) use ($maximum_entries): array {
+            $state = $this->read_commit_state($metadata['commit_started']);
             if ($state === null) {
-                $active_path = $this->storage_dir . '/apply-sessions/target.active';
-                $active_identity = $this->lstat_path($active_path);
-                $active = $active_identity !== null && $active_identity['type'] === 'file'
-                    ? @file_get_contents($active_path)
-                    : false;
-                if ($this->lstat_path($this->maintenance_identity_path) !== null
-                    || ( is_string($active) && trim($active) === $this->session_id )) {
-                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The commit checkpoint disappeared after live mutation began.');
-                }
-                if (!$this->delete_upload_is_complete()) {
+                if (!$metadata['delete_upload_complete']) {
                     throw new InvalidArgumentException('Commit requires an explicit completed delete upload declaration.');
                 }
                 $delete_bytes = $this->file_size($this->deletes_path);
@@ -602,8 +591,10 @@ final class Site_Export_Staged_Apply_Session {
                     'values_applied' => 0,
                 ];
                 $this->write_json($this->commit_path, $state);
-            } else {
-                $this->require_valid_commit_state($state);
+            }
+            if (!$metadata['commit_started']) {
+                $metadata['commit_started'] = true;
+                $this->write_json($this->session_metadata_path, $metadata);
             }
             if (isset($state['terminal_error'])) {
                 throw new Site_Export_Staged_Apply_Exception(
@@ -613,6 +604,7 @@ final class Site_Export_Staged_Apply_Session {
                 );
             }
             if ($state['phase'] === 'complete') {
+                $this->release_target();
                 return [
                     'phase' => $state['phase'],
                     'send_next_request' => false,
@@ -621,15 +613,13 @@ final class Site_Export_Staged_Apply_Session {
             }
             $this->with_target_lock(function (): void {
                 $active_path = $this->storage_dir . '/apply-sessions/target.active';
-                $active_identity = $this->lstat_path($active_path);
-                if ($active_identity !== null && $active_identity['type'] !== 'file') {
-                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator is not a regular file.');
+                $active_owner = $this->read_target_owner();
+                if ($active_owner !== null && $active_owner !== $this->session_id) {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_BUSY, 'Another staged apply session is already committing this target: ' . $active_owner . '.');
                 }
-                $active = @file_get_contents($active_path);
-                if (is_string($active) && trim($active) !== '' && trim($active) !== $this->session_id) {
-                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_BUSY, 'Another staged apply session is already committing this target: ' . trim($active) . '.');
+                if ($active_owner === null) {
+                    $this->write_atomic_file($active_path, $this->session_id . "\n", 0600);
                 }
-                $this->write_atomic_file($active_path, $this->session_id . "\n", 0600);
             });
             $maintenance_token = $state['maintenance_token'];
             $maintenance_live_path = $this->target_path('.maintenance');
@@ -693,9 +683,9 @@ final class Site_Export_Staged_Apply_Session {
         }
         $lock = $this->acquire_session_lock();
         try {
-            $state = $this->read_json($this->commit_path);
-            if (is_array($state)) {
-                $this->require_valid_commit_state($state);
+            $metadata = $this->read_session_metadata();
+            $state = $this->read_commit_state($metadata['commit_started']);
+            if ($state !== null) {
                 if ($state['phase'] !== 'complete') {
                     throw new Site_Export_Staged_Apply_Exception(self::ERROR_COMMIT_REQUIRED, 'Live mutation has begun. Resume commit instead of discarding this session.');
                 }
@@ -710,7 +700,6 @@ final class Site_Export_Staged_Apply_Session {
             flock($lock, LOCK_UN);
             fclose($lock);
         }
-        $this->release_target();
         return $this->discard_tombstone($discarding_session_dir);
     }
 
@@ -985,10 +974,11 @@ final class Site_Export_Staged_Apply_Session {
         $this->require_only_headers($headers, ['content-length', 'content-type', 'x-chunk-type', 'x-delete-offset', 'x-delete-complete'], 'delete-list');
         $offset = $this->require_non_negative_header($headers, 'x-delete-offset');
         $complete = ( $headers['x-delete-complete'] ?? null ) === '1';
+        $delete_upload_complete = $this->delete_upload_is_complete();
         if (isset($headers['x-delete-complete']) && !$complete) {
             throw new InvalidArgumentException('Multipart X-Delete-Complete must be 1 when present.');
         }
-        if ($this->delete_upload_is_complete() && ( !$complete || $offset !== $this->file_size($this->deletes_path) || $part_bytes !== 0 )) {
+        if ($delete_upload_complete && ( !$complete || $offset !== $this->file_size($this->deletes_path) || $part_bytes !== 0 )) {
             throw new InvalidArgumentException('Delete upload is already complete; only its empty completion declaration may be replayed.');
         }
         $handle = @fopen($this->deletes_path, 'r+b');
@@ -1075,10 +1065,7 @@ final class Site_Export_Staged_Apply_Session {
             fclose($handle);
         }
         if ($complete) {
-            $metadata = $this->read_json($this->session_metadata_path);
-            if (!is_array($metadata)) {
-                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata is missing while completing the delete upload.');
-            }
+            $metadata = $this->read_session_metadata();
             $metadata['delete_upload_complete'] = true;
             $this->write_json($this->session_metadata_path, $metadata);
         }
@@ -1094,10 +1081,11 @@ final class Site_Export_Staged_Apply_Session {
      * cursor only after the live path is confirmed absent.
      *
      * @param array{
-     *     phase:string,
+     *     version:2,
+     *     phase:'deleting'|'applying'|'complete',
      *     delete_offset:int,
      *     current_deletion_b64:?string,
-     *     current_installation:?array{path_b64:string,expected_type:string},
+     *     current_installation:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
      *     traversal_stack:list<array{component_b64:string}>,
      *     maintenance_token:string,
      *     deletions_applied:int,
@@ -1108,49 +1096,15 @@ final class Site_Export_Staged_Apply_Session {
     private function advance_deletion(array &$state): void {
         if ($state['current_deletion_b64'] === null) {
             $delete_offset = (int) $state['delete_offset'];
-            $delete_size = $this->file_size($this->deletes_path);
-            if ($delete_offset === $delete_size) {
+            $path = $this->read_delete_record_at_offset($delete_offset);
+            if ($path === null) {
                 $state['phase'] = 'applying';
                 $this->write_json($this->commit_path, $state);
                 return;
             }
-            if ($delete_offset < 0 || $delete_offset > $delete_size) {
-                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Delete-consumption offset ' . $delete_offset . ' is outside the ' . $delete_size . '-byte stream.');
-            }
-            $handle = @fopen($this->deletes_path, 'rb');
-            if ($handle === false || fseek($handle, $delete_offset) !== 0) {
-                if (is_resource($handle)) {
-                    fclose($handle);
-                }
-                throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not seek to the confirmed delete-consumption offset.');
-            }
-            $path = '';
-            $path_bytes = 0;
-            try {
-                while ($path_bytes <= self::MAX_PATH_BYTES) {
-                    $byte = fread($handle, 1);
-                    if ($byte === false) {
-                        throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not read the staged delete stream.');
-                    }
-                    if ($byte === '') {
-                        throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged delete stream ended before its NUL record terminator.');
-                    }
-                    if ($byte === "\0") {
-                        if ($path === '') {
-                            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged delete stream contains an empty record at offset ' . $delete_offset . '.');
-                        }
-                        $this->validate_path($path);
-                        $state['current_deletion_b64'] = base64_encode($path);
-                        $this->write_json($this->commit_path, $state);
-                        return;
-                    }
-                    $path .= $byte;
-                    ++$path_bytes;
-                }
-            } finally {
-                fclose($handle);
-            }
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'A staged delete path exceeds ' . self::MAX_PATH_BYTES . ' bytes.');
+            $state['current_deletion_b64'] = base64_encode($path);
+            $this->write_json($this->commit_path, $state);
+            return;
         }
 
         $path = $this->decode_commit_path($state['current_deletion_b64'], 'current deletion');
@@ -1228,10 +1182,11 @@ final class Site_Export_Staged_Apply_Session {
      * directories after their descendants have been applied.
      *
      * @param array{
-     *     phase:string,
+     *     version:2,
+     *     phase:'deleting'|'applying'|'complete',
      *     delete_offset:int,
      *     current_deletion_b64:?string,
-     *     current_installation:?array{path_b64:string,expected_type:string},
+     *     current_installation:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
      *     traversal_stack:list<array{component_b64:string}>,
      *     maintenance_token:string,
      *     deletions_applied:int,
@@ -1395,9 +1350,16 @@ final class Site_Export_Staged_Apply_Session {
      * renames are allowed; copy fallback would break the direct-install model.
      *
      * @param array{
-     *     current_installation:?array{path_b64:string,expected_type:string},
+     *     version:2,
+     *     phase:'deleting'|'applying'|'complete',
+     *     delete_offset:int,
+     *     current_deletion_b64:?string,
+     *     current_installation:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
      *     traversal_stack:list<array{component_b64:string}>,
-     *     values_applied:int
+     *     maintenance_token:string,
+     *     deletions_applied:int,
+     *     values_applied:int,
+     *     terminal_error?:array{reason:string,detail:string,context:array<string,mixed>}
      * } $state Commit checkpoint, mutated in place.
      * @param string $path Target-relative value path.
      * @param string $expected_type Staged type expected at $path.
@@ -1729,18 +1691,72 @@ final class Site_Export_Staged_Apply_Session {
     private function release_target(): void {
         $this->with_target_lock(function (): void {
             $active_path = $this->storage_dir . '/apply-sessions/target.active';
-            $active_identity = $this->lstat_path($active_path);
-            if ($active_identity !== null && $active_identity['type'] !== 'file') {
-                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator is not a regular file.');
-            }
-            $active = @file_get_contents($active_path);
-            if (!is_string($active) || trim($active) !== $this->session_id) {
+            if ($this->read_target_owner() !== $this->session_id) {
                 return;
             }
             if (!@unlink($active_path)) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not release the staged apply target coordinator.');
             }
         });
+    }
+
+    /**
+     * Reads the exact target-wide ownership record without guessing corruption.
+     *
+     * Absence means no session currently owns the target. A present record must
+     * remain the same bounded regular file throughout the read and contain one
+     * 32-character lowercase hexadecimal session id followed by one newline.
+     * Malformed durable contents are invalid state; an unreadable file is a
+     * retryable I/O failure and is never treated as unclaimed.
+     *
+     * @return string|null Valid owner session id, or null when unclaimed.
+     */
+    private function read_target_owner(): ?string {
+        $active_path = $this->storage_dir . '/apply-sessions/target.active';
+        $identity = $this->lstat_path($active_path);
+        if ($identity === null) {
+            return null;
+        }
+        if ($identity['type'] !== 'file') {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator must be a regular file when present; observed ' . $identity['type'] . '.');
+        }
+        if ($identity['size'] !== 33) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator must contain exactly 33 bytes; observed ' . $identity['size'] . '.');
+        }
+        $handle = @fopen($active_path, 'rb');
+        if ($handle === false) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not read the staged apply target coordinator.');
+        }
+        try {
+            $opened_identity = fstat($handle);
+            $published_identity = $this->lstat_path($active_path);
+            if (!is_array($opened_identity) || $published_identity === null || $published_identity['type'] !== 'file'
+                || (int) $opened_identity['dev'] !== $published_identity['dev']
+                || (int) $opened_identity['ino'] !== $published_identity['ino']) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator changed while it was opened.');
+            }
+            $contents = fread($handle, 34);
+            if (!is_string($contents)) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not read the staged apply target coordinator.');
+            }
+            $final_opened_identity = fstat($handle);
+            $final_published_identity = $this->lstat_path($active_path);
+            if (!is_array($final_opened_identity) || $final_published_identity === null || $final_published_identity['type'] !== 'file'
+                || (int) $final_opened_identity['dev'] !== $final_published_identity['dev']
+                || (int) $final_opened_identity['ino'] !== $final_published_identity['ino']) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator changed while it was read.');
+            }
+        } finally {
+            fclose($handle);
+        }
+        $observed_bytes = strlen($contents);
+        if ($observed_bytes !== 33 || (int) $final_opened_identity['size'] !== 33 || $final_published_identity['size'] !== 33) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator must remain exactly 33 bytes while read; observed ' . $observed_bytes . ' bytes containing ' . base64_encode($contents) . '.');
+        }
+        if (preg_match('/^[a-f0-9]{32}\n$/D', $contents) !== 1) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged apply target coordinator must contain 32 lowercase hexadecimal characters followed by one newline; observed ' . base64_encode($contents) . '.');
+        }
+        return substr($contents, 0, 32);
     }
 
     /**
@@ -1788,13 +1804,21 @@ final class Site_Export_Staged_Apply_Session {
      * session identity and the same-filesystem requirement are then checked
      * before the callback can read or mutate session state.
      *
+     * @param callable(array{
+     *     version:3,
+     *     session_id:string,
+     *     target_root_b64:string,
+     *     protected_paths_b64:list<string>,
+     *     delete_upload_complete:bool,
+     *     commit_started:bool
+     * }):mixed $callback Critical section receiving validated session metadata.
      * @return mixed Callback result.
      */
     private function with_session_lock(callable $callback) {
         $lock = $this->acquire_session_lock();
         try {
-            $this->assert_session_configuration();
-            return $callback();
+            $metadata = $this->assert_session_configuration();
+            return $callback($metadata);
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -1865,23 +1889,22 @@ final class Site_Export_Staged_Apply_Session {
      * after the target or protected-path configuration has changed. Upload,
      * status, and commit must agree with the immutable session metadata and
      * retain the same-filesystem guarantee under which the session was made.
+     *
+     * @return array{
+     *     version:3,
+     *     session_id:string,
+     *     target_root_b64:string,
+     *     protected_paths_b64:list<string>,
+     *     delete_upload_complete:bool,
+     *     commit_started:bool
+     * } Validated session metadata matching the current configuration.
      */
-    private function assert_session_configuration(): void {
-        $metadata = $this->read_json($this->session_metadata_path);
-        if (!is_array($metadata) || ( $metadata['version'] ?? null ) !== 2 || ( $metadata['session_id'] ?? null ) !== $this->session_id
-            || !is_bool($metadata['delete_upload_complete'] ?? null)) {
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata has an unsupported version or session identity.');
-        }
-        if (!is_string($metadata['target_root_b64'] ?? null) || !is_array($metadata['protected_paths_b64'] ?? null)) {
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata does not contain the configured target and protected paths.');
-        }
+    private function assert_session_configuration(): array {
+        $metadata = $this->read_session_metadata();
         $target = base64_decode($metadata['target_root_b64'], true);
         $protected = [];
         foreach ($metadata['protected_paths_b64'] as $encoded) {
-            $decoded = is_string($encoded) ? base64_decode($encoded, true) : false;
-            if (!is_string($decoded)) {
-                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata contains an invalid protected path.');
-            }
+            $decoded = base64_decode($encoded, true);
             $protected[] = $decoded;
         }
         if ($target !== $this->target_root || $protected !== $this->protected_paths) {
@@ -1892,6 +1915,91 @@ final class Site_Export_Staged_Apply_Session {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The managed apply target root is no longer a real directory.');
         }
         $this->assert_same_filesystem($this->files_dir, $this->target_root, 'stage', '');
+        return $metadata;
+    }
+
+    /**
+     * Reads and validates the complete durable version-three session record.
+     *
+     * This checks the session's own identity and schema without comparing the
+     * target or protected paths with current configuration. Discard uses that
+     * narrower trust boundary so abandoned private work remains removable after
+     * configuration changes.
+     *
+     * @return array{
+     *     version:3,
+     *     session_id:string,
+     *     target_root_b64:string,
+     *     protected_paths_b64:list<string>,
+     *     delete_upload_complete:bool,
+     *     commit_started:bool
+     * } Validated durable session metadata.
+     */
+    private function read_session_metadata(): array {
+        $metadata = $this->read_json($this->session_metadata_path);
+        if ($metadata === null) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata is missing for staged apply session ' . $this->session_id . '.');
+        }
+        if (( $metadata['version'] ?? null ) !== 3) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata version must be 3; observed ' . json_encode($metadata['version'] ?? null) . '. Version-2 sessions are not migrated.');
+        }
+        if (( $metadata['session_id'] ?? null ) !== $this->session_id) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata identity must equal ' . $this->session_id . '; observed ' . json_encode($metadata['session_id'] ?? null) . '.');
+        }
+        if (!is_bool($metadata['delete_upload_complete'] ?? null)) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata field delete_upload_complete must be boolean; observed ' . json_encode($metadata['delete_upload_complete'] ?? null) . '.');
+        }
+        if (!is_bool($metadata['commit_started'] ?? null)) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata field commit_started must be boolean; observed ' . json_encode($metadata['commit_started'] ?? null) . '.');
+        }
+        if (!is_string($metadata['target_root_b64'] ?? null) || !is_string(base64_decode($metadata['target_root_b64'], true))) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata target_root_b64 must be valid base64 text; observed ' . json_encode($metadata['target_root_b64'] ?? null) . '.');
+        }
+        if (!is_array($metadata['protected_paths_b64'] ?? null) || array_values($metadata['protected_paths_b64']) !== $metadata['protected_paths_b64']) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata protected paths field protected_paths_b64 must be a list; observed ' . gettype($metadata['protected_paths_b64'] ?? null) . '.');
+        }
+        foreach ($metadata['protected_paths_b64'] as $encoded) {
+            $decoded = is_string($encoded) ? base64_decode($encoded, true) : false;
+            if (!is_string($decoded)) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata protected_paths_b64 contains an invalid base64 value: ' . json_encode($encoded) . '.');
+            }
+        }
+        /** @var array{version:3,session_id:string,target_root_b64:string,protected_paths_b64:list<string>,delete_upload_complete:bool,commit_started:bool} $metadata */
+        return $metadata;
+    }
+
+    /**
+     * Reads the optional commit checkpoint under the monotonic lifecycle fact.
+     *
+     * A missing checkpoint is valid only before commit_started becomes true.
+     * Once commit has started, absence is durable corruption even if the last
+     * known checkpoint had already reached completion.
+     *
+     * @param bool $commit_started Validated monotonic session lifecycle fact.
+     * @return array{
+     *     version:2,
+     *     phase:'deleting'|'applying'|'complete',
+     *     delete_offset:int,
+     *     current_deletion_b64:?string,
+     *     current_installation:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
+     *     traversal_stack:list<array{component_b64:string}>,
+     *     maintenance_token:string,
+     *     deletions_applied:int,
+     *     values_applied:int,
+     *     terminal_error?:array{reason:string,detail:string,context:array<string,mixed>}
+     * }|null Validated checkpoint, or null before commit starts.
+     */
+    private function read_commit_state(bool $commit_started): ?array {
+        $state = $this->read_json($this->commit_path);
+        if ($state === null) {
+            if ($commit_started) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata records commit_started=true, but commit.json is missing for session ' . $this->session_id . '.');
+            }
+            return null;
+        }
+        $this->require_valid_commit_state($state);
+        /** @var array{version:2,phase:'deleting'|'applying'|'complete',delete_offset:int,current_deletion_b64:?string,current_installation:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},traversal_stack:list<array{component_b64:string}>,maintenance_token:string,deletions_applied:int,values_applied:int,terminal_error?:array{reason:string,detail:string,context:array<string,mixed>}} $state */
+        return $state;
     }
 
     /**
@@ -1933,19 +2041,22 @@ final class Site_Export_Staged_Apply_Session {
      *
      * @param string $path Absolute metadata file path.
      * @param array{
-     *     version?:int,
-     *     session_id?:string,
-     *     target_root_b64?:string,
-     *     protected_paths_b64?:list<string>,
-     *     delete_upload_complete?:bool,
-     *     phase?:string,
-     *     delete_offset?:int,
-     *     current_deletion_b64?:?string,
-     *     current_installation?:?array{path_b64:string,expected_type:string},
-     *     traversal_stack?:list<array{component_b64:string}>,
-     *     maintenance_token?:string,
-     *     deletions_applied?:int,
-     *     values_applied?:int,
+     *     version:3,
+     *     session_id:string,
+     *     target_root_b64:string,
+     *     protected_paths_b64:list<string>,
+     *     delete_upload_complete:bool,
+     *     commit_started:bool
+     * }|array{
+     *     version:2,
+     *     phase:'deleting'|'applying'|'complete',
+     *     delete_offset:int,
+     *     current_deletion_b64:?string,
+     *     current_installation:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
+     *     traversal_stack:list<array{component_b64:string}>,
+     *     maintenance_token:string,
+     *     deletions_applied:int,
+     *     values_applied:int,
      *     terminal_error?:array{reason:string,detail:string,context:array<string,mixed>}
      * } $value Session metadata or commit checkpoint object to persist.
      */
@@ -2056,8 +2167,9 @@ final class Site_Export_Staged_Apply_Session {
         if (!array_key_exists('current_deletion_b64', $state)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint is missing current_deletion_b64.');
         }
+        $current_deletion = null;
         if ($state['current_deletion_b64'] !== null) {
-            $this->decode_commit_path($state['current_deletion_b64'], 'current deletion');
+            $current_deletion = $this->decode_commit_path($state['current_deletion_b64'], 'current deletion');
         }
         if (!array_key_exists('current_installation', $state)) {
             throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint is missing current_installation.');
@@ -2070,8 +2182,8 @@ final class Site_Export_Staged_Apply_Session {
             }
             $this->decode_commit_path($installation['path_b64'], 'current installation');
         }
-        if (!is_array($state['traversal_stack'] ?? null)) {
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint has an invalid traversal stack.');
+        if (!is_array($state['traversal_stack'] ?? null) || array_values($state['traversal_stack']) !== $state['traversal_stack']) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint traversal_stack must be a list of structural frames.');
         }
         foreach ($state['traversal_stack'] as $frame) {
             if (!is_array($frame) || !is_string($frame['component_b64'] ?? null)) {
@@ -2086,6 +2198,117 @@ final class Site_Export_Staged_Apply_Session {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Commit checkpoint has an invalid terminal error.');
             }
         }
+        $delete_record = $this->read_delete_record_at_offset($state['delete_offset']);
+        if ($state['phase'] === 'deleting') {
+            if ($installation !== null) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'A deleting checkpoint must have current_installation=null; observed a pending installation for ' . $installation['path_b64'] . '.');
+            }
+            if ($state['traversal_stack'] !== []) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'A deleting checkpoint must have an empty traversal_stack; observed ' . count($state['traversal_stack']) . ' frames.');
+            }
+            if ($current_deletion !== null && $delete_record !== $current_deletion) {
+                throw new Site_Export_Staged_Apply_Exception(
+                    self::ERROR_INVALID_STATE,
+                    'Commit current_deletion_b64 ' . base64_encode($current_deletion) . ' does not match the durable delete record at offset ' . $state['delete_offset'] . '; observed ' . ( $delete_record === null ? 'EOF' : base64_encode($delete_record) ) . '.'
+                );
+            }
+            return;
+        }
+        if ($delete_record !== null) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'An ' . $state['phase'] . ' checkpoint must consume the complete delete stream; offset ' . $state['delete_offset'] . ' still selects record ' . base64_encode($delete_record) . '.');
+        }
+        if ($current_deletion !== null) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'An ' . $state['phase'] . ' checkpoint must have current_deletion_b64=null; observed ' . base64_encode($current_deletion) . '.');
+        }
+        if ($state['phase'] === 'complete') {
+            if ($installation !== null) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'A complete checkpoint must have current_installation=null; observed a pending installation for ' . $installation['path_b64'] . '.');
+            }
+            if ($state['traversal_stack'] !== []) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'A complete checkpoint must have an empty traversal_stack; observed ' . count($state['traversal_stack']) . ' frames.');
+            }
+        }
+    }
+
+    /**
+     * Reads at most one bounded path from a durable NUL-delimited delete stream.
+     *
+     * The offset must be byte zero, exact EOF, or immediately after a NUL
+     * terminator. A record is returned only after its own terminator and normal
+     * target-path safety have been verified. Exact EOF returns null.
+     *
+     * @param int $offset Durable delete-consumption cursor.
+     * @return string|null Raw path bytes at the cursor, or null at exact EOF.
+     */
+    private function read_delete_record_at_offset(int $offset): ?string {
+        $identity = $this->lstat_path($this->deletes_path);
+        if ($identity === null || $identity['type'] !== 'file') {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The durable staged delete stream must be a regular file; observed ' . ( $identity === null ? 'missing' : $identity['type'] ) . '.');
+        }
+        $delete_size = $identity['size'];
+        if ($offset < 0 || $offset > $delete_size) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Delete-consumption offset ' . $offset . ' is outside the ' . $delete_size . '-byte stream.');
+        }
+        $handle = @fopen($this->deletes_path, 'rb');
+        if ($handle === false) {
+            throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not open the durable staged delete stream.');
+        }
+        try {
+            $opened_identity = fstat($handle);
+            $published_identity = $this->lstat_path($this->deletes_path);
+            if (!is_array($opened_identity) || $published_identity === null || $published_identity['type'] !== 'file'
+                || (int) $opened_identity['dev'] !== $published_identity['dev']
+                || (int) $opened_identity['ino'] !== $published_identity['ino']
+                || (int) $opened_identity['size'] !== $delete_size
+                || $published_identity['size'] !== $delete_size) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The durable staged delete stream changed while it was opened.');
+            }
+            if ($offset === $delete_size) {
+                return null;
+            }
+            if ($offset > 0) {
+                if (fseek($handle, $offset - 1) !== 0) {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not inspect the delete-record boundary before offset ' . $offset . '.');
+                }
+                $previous_byte = fread($handle, 1);
+                if ($previous_byte === false) {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not read the delete-record boundary before offset ' . $offset . '.');
+                }
+                if ($previous_byte !== "\0") {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Delete-consumption offset ' . $offset . ' is not a record boundary; the preceding byte is ' . base64_encode($previous_byte) . '.');
+                }
+            }
+            if (fseek($handle, $offset) !== 0) {
+                throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not seek to delete-consumption offset ' . $offset . '.');
+            }
+            $path = '';
+            $path_bytes = 0;
+            while ($path_bytes <= self::MAX_PATH_BYTES) {
+                $byte = fread($handle, 1);
+                if ($byte === false) {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_RETRYABLE_IO, 'Could not read the staged delete record at offset ' . $offset . '.');
+                }
+                if ($byte === '') {
+                    throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged delete record at offset ' . $offset . ' ended without a NUL terminator after path ' . base64_encode($path) . '.');
+                }
+                if ($byte === "\0") {
+                    if ($path === '') {
+                        throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged delete stream contains an empty record at offset ' . $offset . '.');
+                    }
+                    try {
+                        $this->validate_path($path);
+                    } catch (InvalidArgumentException $exception) {
+                        throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged delete record at offset ' . $offset . ' contains unsafe path ' . base64_encode($path) . ': ' . $exception->getMessage());
+                    }
+                    return $path;
+                }
+                $path .= $byte;
+                ++$path_bytes;
+            }
+        } finally {
+            fclose($handle);
+        }
+        throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'The staged delete record at offset ' . $offset . ' exceeds ' . self::MAX_PATH_BYTES . ' bytes.');
     }
 
     /**
@@ -2158,10 +2381,7 @@ final class Site_Export_Staged_Apply_Session {
      * @return bool True once a delete-list part declared completion.
      */
     private function delete_upload_is_complete(): bool {
-        $metadata = $this->read_json($this->session_metadata_path);
-        if (!is_array($metadata) || !is_bool($metadata['delete_upload_complete'] ?? null)) {
-            throw new Site_Export_Staged_Apply_Exception(self::ERROR_INVALID_STATE, 'Session metadata has no valid delete-upload completion state.');
-        }
+        $metadata = $this->read_session_metadata();
         return $metadata['delete_upload_complete'];
     }
 
@@ -2413,8 +2633,9 @@ final class Site_Export_Staged_Apply_Session {
      *
      * Discard first renames a session so it is no longer addressable by its
      * public id. This method then removes at most DISCARD_ENTRY_LIMIT entries
-     * while holding the tombstone's own lock, preserving that lock until the
-     * final empty-directory removal.
+     * while holding the tombstone's own lock. It releases any surviving target
+     * claim before removing the first entry and preserves the tombstone lock
+     * until the final empty-directory removal.
      *
      * @param string $tombstone Absolute tombstone directory path.
      * @return bool True when the tombstone is gone, false when work remains.
@@ -2447,6 +2668,7 @@ final class Site_Export_Staged_Apply_Session {
             if (!flock($lock, LOCK_EX | LOCK_NB)) {
                 throw new Site_Export_Staged_Apply_Exception(self::ERROR_BUSY, 'Staged apply discard cleanup is busy. Retry discard.');
             }
+            $this->release_target();
             $remaining_entries = self::DISCARD_ENTRY_LIMIT;
             $empty = self::discard_directory_entries($tombstone, $remaining_entries, true);
             if (!$empty) {
