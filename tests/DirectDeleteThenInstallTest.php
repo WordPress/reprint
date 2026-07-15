@@ -62,6 +62,23 @@ final class DirectDeleteThenInstallTest extends TestCase {
         $this->assertFileDoesNotExist($session->get_session_directory() . '/work/staged.jsonl');
     }
 
+    public function testCommitProcessesMultipleEntriesInOneCall(): void {
+        $session = $this->session('12121212121212121212121212121212');
+        $this->stage_file($session, 'first.txt', 'one');
+        $this->stage_file($session, 'second.txt', 'two');
+        $this->stage_file($session, 'third.txt', 'three');
+        $this->complete_delete_upload($session);
+
+        $result = $session->commit(16);
+
+        $this->assertSame('complete', $result['phase']);
+        $this->assertFalse($result['send_next_request']);
+        $this->assertGreaterThan(1, $result['entries_processed']);
+        $this->assertSame('one', file_get_contents($this->target . '/first.txt'));
+        $this->assertSame('two', file_get_contents($this->target . '/second.txt'));
+        $this->assertSame('three', file_get_contents($this->target . '/third.txt'));
+    }
+
     public function testDeleteUploadAcceptsReplayAndContinuesFromItsActualRawSize(): void {
         $session = $this->session('22222222222222222222222222222222');
         $first = "first\0partial";

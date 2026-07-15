@@ -83,8 +83,8 @@ final class Site_Export_Staged_Apply_Session {
      * unique, and storage below the managed root protects itself from push.
      * No filesystem state is read or changed here.
      *
-     * @param string[] $protected_paths Target-relative paths which push must
-     *                                  never stage, delete, or replace.
+     * @param list<string> $protected_paths Target-relative paths which push
+     *                                      must never stage, delete, or replace.
      */
     private function __construct(string $storage_dir, string $target_root, string $session_id, array $protected_paths) {
         $this->storage_dir = rtrim($storage_dir, '/');
@@ -142,7 +142,7 @@ final class Site_Export_Staged_Apply_Session {
      *
      * @param string $storage_dir Durable private storage on the target filesystem.
      * @param string $target_root Managed live directory receiving committed values.
-     * @param string[] $protected_paths Target-relative paths which push must preserve.
+     * @param list<string> $protected_paths Target-relative paths which push must preserve.
      * @param string $session_id Stable lowercase hexadecimal session identity.
      * @return self New or existing session handle.
      */
@@ -208,7 +208,7 @@ final class Site_Export_Staged_Apply_Session {
      * @param string $storage_dir Durable private session storage.
      * @param string $target_root Managed live directory.
      * @param string $session_id Lowercase hexadecimal session identity.
-     * @param string[] $protected_paths Target-relative paths which push must preserve.
+     * @param list<string> $protected_paths Target-relative paths which push must preserve.
      * @return self Session handle; the session may prove missing or invalid
      *              when its first operation acquires the lock.
      */
@@ -230,7 +230,7 @@ final class Site_Export_Staged_Apply_Session {
      * @param string $storage_dir Durable private session storage.
      * @param string $target_root Currently configured managed live directory.
      * @param string $session_id Lowercase hexadecimal session identity.
-     * @param string[] $protected_paths Currently configured protected paths.
+     * @param list<string> $protected_paths Currently configured protected paths.
      * @return bool True when the workspace and any discard tombstone are gone.
      */
     public static function discard(string $storage_dir, string $target_root, string $session_id, array $protected_paths): bool {
@@ -425,9 +425,9 @@ final class Site_Export_Staged_Apply_Session {
      * next_change() again clears the previous value before processing, and
      * finish_upload() clears it when the request closes.
      *
-     * @return array<string,mixed>|null Accepted type, state, byte cursor, and
-     *                                  path when applicable, or null when no
-     *                                  result is current.
+     * @return array{state:string,type:string,accepted_bytes:int,path_b64?:string}|null
+     *     Accepted type, state, byte cursor, and path when applicable, or null
+     *     when no result is current.
      */
     public function get_current_change(): ?array {
         return $this->current_change;
@@ -458,7 +458,13 @@ final class Site_Export_Staged_Apply_Session {
      * the session lock.
      *
      * @param string|null $path Raw target-relative path byte string to inspect.
-     * @return array<string,mixed> Target-confirmed session and path progress.
+     * @return array{
+     *     session_id:string,
+     *     phase:string,
+     *     delete_bytes:int,
+     *     delete_upload_complete:bool,
+     *     path:array{path_b64:string,state:string,accepted_bytes:int,type?:string}|null
+     * } Target-confirmed session and optional path progress.
      *
      * @throws InvalidArgumentException If the requested path is unsafe.
      * @throws Site_Export_Staged_Apply_Exception If the session is busy,
@@ -519,7 +525,7 @@ final class Site_Export_Staged_Apply_Session {
      * every staged file is complete. The first call creates a durable checkpoint
      * and claims the target so no other session can mutate the same live tree.
      * Subsequent calls resume from that checkpoint, refresh the WordPress
-     * maintenance marker, and perform at most $maximum_steps units of delete or
+     * maintenance marker, and perform at most $maximum_entries units of delete or
      * install work before returning.
      *
      * Live-tree drift and cross-device destinations are terminal for the
@@ -527,14 +533,16 @@ final class Site_Export_Staged_Apply_Session {
      * later calls. Retryable I/O failures are not terminal, so a later call can
      * retry the same bounded step from the durable state.
      *
-     * @param int $maximum_steps Maximum delete/install steps to attempt.
-     * @return array<string,mixed> Current phase and whether another request is needed.
+     * @param int $maximum_entries Maximum bounded commit entries to process in this call.
+     * @return array{phase:string,send_next_request:bool,entries_processed:int}
+     *     Current phase, whether another request is needed, and entries
+     *     processed by this call.
      */
-    public function commit(int $maximum_steps = 1): array {
-        if ($maximum_steps <= 0) {
-            throw new InvalidArgumentException('The staged apply commit step limit must be greater than zero.');
+    public function commit(int $maximum_entries = 1): array {
+        if ($maximum_entries <= 0) {
+            throw new InvalidArgumentException('The staged apply commit entry limit must be greater than zero.');
         }
-        return $this->with_session_lock(function () use ($maximum_steps): array {
+        return $this->with_session_lock(function () use ($maximum_entries): array {
             $state = $this->read_json($this->commit_path);
             if ($state === null) {
                 if (!$this->delete_upload_is_complete()) {
@@ -584,6 +592,7 @@ final class Site_Export_Staged_Apply_Session {
                 return [
                     'phase' => $state['phase'],
                     'send_next_request' => false,
+                    'entries_processed' => 0,
                 ];
             }
             $this->with_target_lock(function (): void {
@@ -612,7 +621,7 @@ final class Site_Export_Staged_Apply_Session {
             $this->write_atomic_file($this->maintenance_identity_path, $maintenance_contents, 0600);
             $this->write_atomic_file($maintenance_live_path, $maintenance_contents, 0644);
             try {
-                for ($step = 0; $step < $maximum_steps && $state['phase'] !== 'complete'; ++$step) {
+                for ($entries_processed = 0; $entries_processed < $maximum_entries && $state['phase'] !== 'complete'; ++$entries_processed) {
                     if ($state['phase'] === 'deleting') {
                         $this->advance_deletion($state);
                     } else {
@@ -633,6 +642,7 @@ final class Site_Export_Staged_Apply_Session {
             return [
                 'phase' => $state['phase'],
                 'send_next_request' => $state['phase'] !== 'complete',
+                'entries_processed' => $entries_processed,
             ];
         });
     }
@@ -745,7 +755,8 @@ final class Site_Export_Staged_Apply_Session {
      * and promotes the file atomically inside private storage only when the
      * declared total size has been reached.
      *
-     * @param array<string,string> $headers Normalized headers for the part.
+     * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-file-path:string,x-file-size:string,x-chunk-offset:string} $headers
+     *     Normalized file part headers.
      * @param int $part_bytes Declared Content-Length for this file chunk.
      */
     private function stage_file_part(array $headers, int $part_bytes): void {
@@ -836,7 +847,8 @@ final class Site_Export_Staged_Apply_Session {
      * descendants because a single staged path cannot be both a leaf value and a
      * structural parent.
      *
-     * @param array<string,string> $headers Normalized headers for the part.
+     * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-directory-path:string} $headers
+     *     Normalized directory part headers.
      * @param int $part_bytes Declared Content-Length, which must be zero.
      */
     private function stage_directory_part(array $headers, int $part_bytes): void {
@@ -867,7 +879,8 @@ final class Site_Export_Staged_Apply_Session {
      * body. The staged value replaces any previous leaf at the same private path
      * and rejects directory conflicts that would orphan already staged children.
      *
-     * @param array<string,string> $headers Normalized headers for the part.
+     * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-symlink-path:string,x-symlink-target:string} $headers
+     *     Normalized symlink part headers.
      * @param int $part_bytes Declared Content-Length, which must be zero.
      */
     private function stage_symlink_part(array $headers, int $part_bytes): void {
@@ -903,7 +916,8 @@ final class Site_Export_Staged_Apply_Session {
      * exactly; new bytes are validated record-by-record before they are flushed.
      * A completion declaration records that no more delete bytes may be added.
      *
-     * @param array<string,string> $headers Normalized headers for the part.
+     * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-delete-offset:string,x-delete-complete?:string} $headers
+     *     Normalized delete-list part headers.
      * @param int $part_bytes Declared Content-Length for this delete segment.
      */
     private function stage_delete_list_part(array $headers, int $part_bytes): void {
@@ -1018,7 +1032,17 @@ final class Site_Export_Staged_Apply_Session {
      * most one leaf or empty directory beneath that root and advances the byte
      * cursor only after the live path is confirmed absent.
      *
-     * @param array<string,mixed> $state Commit checkpoint, mutated in place.
+     * @param array{
+     *     phase:string,
+     *     delete_offset:int,
+     *     current_deletion_b64:?string,
+     *     current_installation:?array{path_b64:string,expected_type:string},
+     *     traversal_stack:list<array{component_b64:string}>,
+     *     maintenance_token:string,
+     *     deletions_applied:int,
+     *     values_applied:int,
+     *     terminal_error?:array{reason:string,detail:string,context:array<string,mixed>}
+     * } $state Commit checkpoint, mutated in place.
      */
     private function advance_deletion(array &$state): void {
         if ($state['current_deletion_b64'] === null) {
@@ -1142,7 +1166,17 @@ final class Site_Export_Staged_Apply_Session {
      * installing one leaf value per step, and consuming empty structural staging
      * directories after their descendants have been applied.
      *
-     * @param array<string,mixed> $state Commit checkpoint, mutated in place.
+     * @param array{
+     *     phase:string,
+     *     delete_offset:int,
+     *     current_deletion_b64:?string,
+     *     current_installation:?array{path_b64:string,expected_type:string},
+     *     traversal_stack:list<array{component_b64:string}>,
+     *     maintenance_token:string,
+     *     deletions_applied:int,
+     *     values_applied:int,
+     *     terminal_error?:array{reason:string,detail:string,context:array<string,mixed>}
+     * } $state Commit checkpoint, mutated in place.
      */
     private function advance_installation(array &$state): void {
         if ($state['current_installation'] !== null) {
@@ -1247,7 +1281,11 @@ final class Site_Export_Staged_Apply_Session {
      * the live tree already contains the committed value. Only same-filesystem
      * renames are allowed; copy fallback would break the direct-install model.
      *
-     * @param array<string,mixed> $state Commit checkpoint, mutated in place.
+     * @param array{
+     *     current_installation:?array{path_b64:string,expected_type:string},
+     *     traversal_stack:list<array{component_b64:string}>,
+     *     values_applied:int
+     * } $state Commit checkpoint, mutated in place.
      * @param string $path Target-relative value path.
      * @param string $expected_type Staged type expected at $path.
      * @param bool $recovering Whether current_installation is already durable.
@@ -1303,7 +1341,11 @@ final class Site_Export_Staged_Apply_Session {
      * the live tree needs to be verified. The method clears the checkpoint only
      * after the expected live result is confirmed.
      *
-     * @param array<string,mixed> $state Commit checkpoint, mutated in place.
+     * @param array{
+     *     current_installation:?array{path_b64:string,expected_type:string},
+     *     traversal_stack:list<array{component_b64:string}>,
+     *     values_applied:int
+     * } $state Commit checkpoint, mutated in place.
      */
     private function resolve_current_installation(array &$state): void {
         $installation = $state['current_installation'];
@@ -1399,8 +1441,10 @@ final class Site_Export_Staged_Apply_Session {
     }
 
     /**
-     * @param string[] $expected_live_types
-     * @param array<string,mixed>|null $observed_identity
+     * @param list<string> $expected_live_types Live identity types accepted at
+     *                                          the conflicting path.
+     * @param array{type:string,dev:int,ino:int,size:int,ctime:int}|null $observed_identity
+     *     Observed live filesystem identity, or null when absent.
      */
     private function throw_live_tree_changed(
         string $operation,
@@ -1787,7 +1831,8 @@ final class Site_Export_Staged_Apply_Session {
      * size ceiling, and decode to a JSON object.
      *
      * @param string $path Absolute metadata file path.
-     * @return array<string,mixed>|null Decoded object, or null if absent.
+     * @return array<string,mixed>|null Decoded caller-specific object, or null
+     *                                  if absent.
      */
     private function read_json(string $path): ?array {
         $identity = $this->path_identity($path);
@@ -1816,7 +1861,22 @@ final class Site_Export_Staged_Apply_Session {
      * object must fit the same ceiling enforced by read_json().
      *
      * @param string $path Absolute metadata file path.
-     * @param array<string,mixed> $value JSON object to persist.
+     * @param array{
+     *     version?:int,
+     *     session_id?:string,
+     *     target_root_b64?:string,
+     *     protected_paths_b64?:list<string>,
+     *     delete_upload_complete?:bool,
+     *     phase?:string,
+     *     delete_offset?:int,
+     *     current_deletion_b64?:?string,
+     *     current_installation?:?array{path_b64:string,expected_type:string},
+     *     traversal_stack?:list<array{component_b64:string}>,
+     *     maintenance_token?:string,
+     *     deletions_applied?:int,
+     *     values_applied?:int,
+     *     terminal_error?:array{reason:string,detail:string,context:array<string,mixed>}
+     * } $value Session metadata or commit checkpoint object to persist.
      */
     private function write_json(string $path, array $value): void {
         $contents = json_encode($value, JSON_UNESCAPED_SLASHES);
@@ -1894,7 +1954,18 @@ final class Site_Export_Staged_Apply_Session {
      * ownership, or pending installation is checked before use. This keeps a
      * corrupt checkpoint from being interpreted as live-tree authority.
      *
-     * @param array<string,mixed> $state Decoded commit checkpoint.
+     * @param array{
+     *     version?:mixed,
+     *     phase?:mixed,
+     *     delete_offset?:mixed,
+     *     deletions_applied?:mixed,
+     *     values_applied?:mixed,
+     *     maintenance_token?:mixed,
+     *     current_deletion_b64?:mixed,
+     *     current_installation?:mixed,
+     *     traversal_stack?:mixed,
+     *     terminal_error?:mixed
+     * } $state Decoded commit checkpoint.
      */
     private function require_valid_commit_state(array $state): void {
         if (( $state['version'] ?? null ) !== 2) {
@@ -1970,7 +2041,7 @@ final class Site_Export_Staged_Apply_Session {
      * each component independently, rebuilds the slash-separated path, and then
      * applies the normal target-relative path rules to the result.
      *
-     * @param array<int,array<string,mixed>> $stack Traversal frames.
+     * @param list<array{component_b64:string}> $stack Traversal frames.
      * @return string Target-relative path for the current traversal directory.
      */
     private function traversal_path(array $stack): string {
@@ -2046,7 +2117,7 @@ final class Site_Export_Staged_Apply_Session {
      * strings, so callers can disable target-path validation and apply their
      * own symlink-target rules instead.
      *
-     * @param array<string,string> $headers Normalized part headers.
+     * @param array<string,string> $headers Normalized part headers keyed by lowercase header name.
      * @param string $header Header name to read.
      * @param bool $is_target_path Whether to apply target path validation.
      * @return string Decoded header bytes.
@@ -2073,8 +2144,9 @@ final class Site_Export_Staged_Apply_Session {
      * ignored because a misspelled required header or a future unsupported
      * option should fail at the boundary instead of silently changing meaning.
      *
-     * @param array<string,string> $headers Normalized headers to inspect.
-     * @param string[] $allowed Lowercase header names allowed for this part.
+     * @param array<string,string> $headers Normalized headers to inspect, keyed
+     *                                      by lowercase header name.
+     * @param list<string> $allowed Lowercase header names allowed for this part.
      * @param string $type Human-readable part type for errors.
      */
     private function require_only_headers(array $headers, array $allowed, string $type): void {
@@ -2092,7 +2164,8 @@ final class Site_Export_Staged_Apply_Session {
      * rejects values that overflow PHP's integer range rather than silently
      * wrapping offsets, sizes, or Content-Length values.
      *
-     * @param array<string,string> $headers Normalized headers to inspect.
+     * @param array<string,string> $headers Normalized headers to inspect, keyed
+     *                                      by lowercase header name.
      * @param string $header Header name to read.
      * @return int Parsed non-negative integer.
      */
@@ -2191,7 +2264,8 @@ final class Site_Export_Staged_Apply_Session {
      * copied into drift reports and status responses.
      *
      * @param string $path Absolute path to inspect.
-     * @return array<string,mixed>|null Type, device, inode, size, and ctime, or null if absent.
+     * @return array{type:string,dev:int,ino:int,size:int,ctime:int}|null Type,
+     *     device, inode, size, and ctime, or null if absent.
      */
     private function path_identity(string $path): ?array {
         clearstatcache(true, $path);

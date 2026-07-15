@@ -47,7 +47,10 @@ final class Site_Export_Staged_Apply_Exception extends RuntimeException {
      *
      * @param string $error_code Stable machine-readable staged-apply reason.
      * @param string $message Human-readable statement of the violated condition.
-     * @param array<string,mixed> $context Additional authenticated response fields.
+     * @param array<string,mixed> $context Additional authenticated response
+     *     fields. Common keys are operation, path_b64, conflict_path_b64,
+     *     expected_live_types, observed_live_identity, staging_device,
+     *     live_device, staged_type, and detail.
      */
     public function __construct(string $error_code, string $message, array $context = []) {
         parent::__construct($message);
@@ -73,6 +76,9 @@ final class Site_Export_Staged_Apply_Exception extends RuntimeException {
      * retryable.
      *
      * @return array<string,mixed> Structured fields safe to copy into JSON.
+     *     Common keys are operation, path_b64, conflict_path_b64,
+     *     expected_live_types, observed_live_identity, staging_device,
+     *     live_device, staged_type, and detail.
      */
     public function get_context(): array {
         return $this->context;
