@@ -26,5 +26,9 @@ if (!class_exists('Site_Export_HTTP_Server', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-http-server.php';
 }
 
+if (!class_exists('Site_Export_Multipart_Processor', false)) {
+    require_once __DIR__ . '/../packages/reprint-exporter/src/class-multipart-processor.php';
+}
+
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';

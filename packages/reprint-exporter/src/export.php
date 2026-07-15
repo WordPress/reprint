@@ -146,8 +146,8 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
      *
      *    https://github.com/curl/curl/blob/462244447e8ba3a53b1ba9f0ba7baa52d8777daa/lib/mime.c#L1179-L1236
      *
-     * Also, most chunks declare their Content-Length, so the client may skip the
-     * boundary matching entirely and just consume that many bytes.
+     * Also, every chunk declares its Content-Length, so the client never needs
+     * to search arbitrary body bytes for the boundary.
      */
     $boundary = "boundary-" . bin2hex(random_bytes(16));
     $can_send_headers = !headers_sent();

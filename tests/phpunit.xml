@@ -29,6 +29,7 @@
             <file>FileIndexDedupTest.php</file>
             <file>FileIndexSkipDefaultsTest.php</file>
             <file>HmacServerTest.php</file>
+            <file>MultipartProcessorTest.php</file>
             <file>SiteExportSecretTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">
