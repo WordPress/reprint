@@ -67,6 +67,15 @@ jobs:
       - name: Setup test sites
         run: tests/e2e/setup.sh
 
+      - name: Mount required separate filesystems
+        run: |
+          sudo mkdir -p /srv/reprint-e2e-staging
+          sudo mkdir -p /srv/e2e-sites/push-mounted-parent/mounted-parent
+          sudo mount -t tmpfs -o size=64m tmpfs /srv/reprint-e2e-staging
+          sudo mount -t tmpfs -o size=64m tmpfs /srv/e2e-sites/push-mounted-parent/mounted-parent
+          test "$(stat -c %d /srv/reprint-e2e-staging)" != "$(stat -c %d /srv/e2e-sites)"
+          test "$(stat -c %d /srv/e2e-sites/push-mounted-parent/mounted-parent)" != "$(stat -c %d /srv/e2e-sites/push-mounted-parent)"
+
       - name: Install E2E dependencies
         working-directory: tests/e2e
         run: npm install

@@ -80,6 +80,12 @@ class MultipartPush
      */
     private const MAX_PLAN_LINE_BYTES = 16384;
 
+    /** Maximum consecutive recoverable responses for one operation. */
+    private const MAX_RECOVERABLE_RESPONSE_ATTEMPTS = 5;
+
+    /** Initial delay for exponential recoverable-response backoff. */
+    private const RECOVERABLE_RESPONSE_DELAY_MICROSECONDS = 100000;
+
     /** @var string Exporter API URL, including any required API selector query. */
     private string $base_url;
 
@@ -331,7 +337,13 @@ class MultipartPush
             is_array($state['sizer'] ?? null) ? $state['sizer'] : [],
             is_numeric($state['max_frame_bytes'] ?? null) ? (int) $state['max_frame_bytes'] : null
         );
-        $response = $client->control_request('GET', 'staged_session_status', ['session_id' => $session_id]);
+        $response = $this->control_response(
+            $client,
+            'GET',
+            'staged_session_status',
+            ['session_id' => $session_id],
+            ['ok']
+        );
         $response['local_phase'] = $state['phase'] ?? 'unknown';
         $current = $state['current'] ?? null;
         if (is_array($current) && is_string($current['path_b64'] ?? null)) {
@@ -400,8 +412,13 @@ class MultipartPush
         if (!is_string($create_token) || preg_match('/^[a-f0-9]{32}$/D', $create_token) !== 1) {
             throw new RuntimeException('Push session checkpoint has no valid create token.');
         }
-        $response = $client->control_request('POST', 'staged_session_create', ['create_token' => $create_token]);
-        $this->require_control_status($response, 'created');
+        $response = $this->control_response(
+            $client,
+            'POST',
+            'staged_session_create',
+            ['create_token' => $create_token],
+            ['created']
+        );
         $session_id = $response['session_id'] ?? null;
         if (!is_string($session_id) || preg_match('/^[a-f0-9]{32}$/D', $session_id) !== 1) {
             throw new RuntimeException('Target create response has no valid session_id.');
@@ -609,6 +626,7 @@ class MultipartPush
         if ( (int) $state['delete_offset'] === $local_stream_size) {
             return;
         }
+        $recoverable_attempts = 0;
         $handle = @fopen($this->journal->local_delete_stream_path, 'rb');
         if ($handle === false) {
             throw new RuntimeException('Could not open the local delete stream: ' . $this->journal->local_delete_stream_path . '.');
@@ -670,12 +688,21 @@ class MultipartPush
                     if ( (int) $state['delete_offset'] !== $target_start) {
                         $state['sizer'] = $client->get_request_sizer_state();
                         $this->write_state($state);
+                        if ( (int) $state['delete_offset'] > $target_start) {
+                            $recoverable_attempts = 0;
+                            continue;
+                        }
+                        if ($result['status'] !== 'complete') {
+                            $this->handle_unknown_upload_result($state, $client, $result, null);
+                            $this->wait_for_recoverable_response($result, $recoverable_attempts, 'Delete-list upload');
+                        }
                         continue;
                     }
                     if ($result['status'] === 'complete') {
                         throw new RuntimeException('Multipart request could not fit one delete-list part inside its request-body budget.');
                     }
                     $this->handle_unknown_upload_result($state, $client, $result, null);
+                    $this->wait_for_recoverable_response($result, $recoverable_attempts, 'Delete-list upload');
                     continue;
                 }
                 if ($result['status'] !== 'complete') {
@@ -683,6 +710,11 @@ class MultipartPush
                         $this->reconcile_delete_upload_status($state, $client, $local_stream_size);
                     }
                     $this->handle_unknown_upload_result($state, $client, $result, null);
+                    if ( (int) $state['delete_offset'] > $target_start) {
+                        $recoverable_attempts = 0;
+                        continue;
+                    }
+                    $this->wait_for_recoverable_response($result, $recoverable_attempts, 'Delete-list upload');
                     continue;
                 }
                 $accepted = $result['response']['accepted'] ?? null;
@@ -714,11 +746,13 @@ class MultipartPush
                     $this->reconcile_delete_upload_status($state, $client, $local_stream_size);
                     $state['sizer'] = $client->get_request_sizer_state();
                     $this->write_state($state);
+                    $recoverable_attempts = 0;
                     continue;
                 }
                 $state['delete_offset'] = $sent[$sent_count - 1];
                 $state['sizer'] = $client->get_request_sizer_state();
                 $this->write_state($state);
+                $recoverable_attempts = 0;
             }
         } finally {
             fclose($handle);
@@ -735,6 +769,7 @@ class MultipartPush
                 . ', before the ' . $local_stream_size . '-byte local delete stream reached EOF.'
             );
         }
+        $recoverable_attempts = 0;
         while (true) {
             $target_offset = (int) ( $state['delete_offset'] ?? 0 );
             if (!$client->start_upload_request($this->session_id_from_state($state))) {
@@ -748,7 +783,15 @@ class MultipartPush
             ]);
             $result = $client->finish_request();
             if (!$sent || $result['status'] !== 'complete') {
+                if ($result['status'] !== 'failed') {
+                    $this->reconcile_delete_upload_status($state, $client, $local_stream_size);
+                }
                 $this->handle_unknown_upload_result($state, $client, $result, null);
+                $this->wait_for_recoverable_response($result, $recoverable_attempts, 'Delete-list completion upload');
+                if ( (int) $state['delete_offset'] < $local_stream_size) {
+                    $this->upload_deletes($state, $client);
+                    $recoverable_attempts = 0;
+                }
                 continue;
             }
             $accepted = $result['response']['accepted'] ?? null;
@@ -802,10 +845,13 @@ class MultipartPush
     /** Replaces the local delete cursor with signed target status. */
     private function reconcile_delete_upload_status(array &$state, MultipartPushStreamClient $client, int $local_stream_size): void
     {
-        $response = $client->control_request('GET', 'staged_session_status', [
-            'session_id' => $this->session_id_from_state($state),
-        ]);
-        $this->require_control_status($response, 'ok');
+        $response = $this->control_response(
+            $client,
+            'GET',
+            'staged_session_status',
+            ['session_id' => $this->session_id_from_state($state)],
+            ['ok']
+        );
         $target_offset = $this->require_non_negative_delete_offset(
             $response['delete_bytes'] ?? null,
             'Target status delete_bytes'
@@ -841,6 +887,7 @@ class MultipartPush
      */
     private function upload_changes(array &$state, MultipartPushStreamClient $client): void
     {
+        $recoverable_attempts = 0;
         while ($this->read_plan_entry((int) ($state['plan_offset'] ?? 0)) !== null) {
             $session_id = $this->session_id_from_state($state);
             if (!$client->start_upload_request($session_id)) {
@@ -952,15 +999,32 @@ class MultipartPush
                     throw new RuntimeException('Multipart request could not fit one upload part inside its request-body budget.');
                 }
                 $this->handle_unknown_upload_result($state, $client, $result, null);
+                $this->wait_for_recoverable_response($result, $recoverable_attempts, 'Multipart upload');
                 continue;
             }
             if ($result['status'] !== 'complete') {
+                $plan_offset_before = (int) ( $state['plan_offset'] ?? 0 );
+                $current_before = $state['current'] ?? null;
+                $accepted_bytes_before = is_array($current_before)
+                    ? (int) ( $current_before['accepted_bytes'] ?? 0 )
+                    : 0;
                 $this->handle_unknown_upload_result($state, $client, $result, $sent[0]);
+                $current_after = $state['current'] ?? null;
+                $confirmed_progress = (int) ( $state['plan_offset'] ?? 0 ) > $plan_offset_before || (
+                    is_array($current_after) &&
+                    (int) ( $current_after['accepted_bytes'] ?? 0 ) > $accepted_bytes_before
+                );
+                if ($confirmed_progress) {
+                    $recoverable_attempts = 0;
+                    continue;
+                }
+                $this->wait_for_recoverable_response($result, $recoverable_attempts, 'Multipart upload');
                 continue;
             }
             $this->apply_upload_response($state, $sent, $result['response']);
             $state['sizer'] = $client->get_request_sizer_state();
             $this->write_state($state);
+            $recoverable_attempts = 0;
         }
     }
 
@@ -1209,11 +1273,16 @@ class MultipartPush
     private function recover_first_sent_status(array &$state, MultipartPushStreamClient $client, array $sent): void
     {
         $session_id = $this->session_id_from_state($state);
-        $response = $client->control_request('GET', 'staged_session_status', [
-            'session_id' => $session_id,
-            'path' => base64_encode($sent['path']),
-        ]);
-        $this->require_control_status($response, 'ok');
+        $response = $this->control_response(
+            $client,
+            'GET',
+            'staged_session_status',
+            [
+                'session_id' => $session_id,
+                'path' => base64_encode($sent['path']),
+            ],
+            ['ok']
+        );
         $paths = $response['paths'] ?? null;
         $target = is_array($paths) && isset($paths[0]) && is_array($paths[0]) ? $paths[0] : null;
         if ($target === null || ($target['path_b64'] ?? null) !== base64_encode($sent['path'])) {
@@ -1254,6 +1323,11 @@ class MultipartPush
                     throw new RuntimeException('Target status has no valid partial byte count.');
                 }
                 $state['current']['accepted_bytes'] = (int) $accepted_bytes;
+            } elseif ( ( $target['state'] ?? null ) === 'missing' ) {
+                if ( (int) ( $target['accepted_bytes'] ?? -1 ) !== 0 ) {
+                    throw new RuntimeException('Target status reported a missing file with a nonzero accepted byte count.');
+                }
+                $state['current']['accepted_bytes'] = 0;
             }
             return;
         }
@@ -1309,8 +1383,13 @@ class MultipartPush
     {
         $session_id = $this->session_id_from_state($state);
         do {
-            $response = $client->control_request('POST', 'staged_session_commit', ['session_id' => $session_id]);
-            $this->require_control_status($response, 'ok');
+            $response = $this->control_response(
+                $client,
+                'POST',
+                'staged_session_commit',
+                ['session_id' => $session_id],
+                ['ok']
+            );
             $this->log('Commit phase ' . ($response['phase'] ?? 'unknown') . '.');
         } while (!empty($response['send_next_request']));
     }
@@ -1329,18 +1408,14 @@ class MultipartPush
     private function discard_target_session(array $state, MultipartPushStreamClient $client): void
     {
         do {
-            $response = $client->control_request('POST', 'staged_session_discard', [
-                'session_id' => $this->session_id_from_state($state),
-            ]);
-            if (( $response['reason'] ?? null ) === 'commit_required') {
-                throw new RuntimeException(
-                    'Push commit has begun on the target. Re-run push to finish it; a live mutation cannot be discarded.'
-                );
-            }
+            $response = $this->control_response(
+                $client,
+                'POST',
+                'staged_session_discard',
+                ['session_id' => $this->session_id_from_state($state)],
+                ['discarding', 'discarded']
+            );
             $status = $response['status'] ?? null;
-            if ($status !== 'discarding' && $status !== 'discarded') {
-                $this->require_control_status($response, 'discarded');
-            }
             $send_next_request = $response['send_next_request'] ?? null;
             if (!is_bool($send_next_request) || ( $status === 'discarding' ) !== $send_next_request) {
                 throw new RuntimeException('Target discard response has inconsistent status and send_next_request fields.');
@@ -1551,21 +1626,77 @@ class MultipartPush
     }
 
     /**
-     * Requires the target's machine-readable control status to match expectation.
+     * Sends a control request until it succeeds or its retry budget is spent.
      *
-     * @param array<string,mixed> $response Decoded control response.
-     * @param string $expected_status Success status required by this lifecycle step.
+     * Every target response is classified by MultipartPushStreamClient before
+     * this method sees it. Only `busy` and `offset_gap` consume this bounded
+     * backoff; authentication and protocol failures stop immediately.
+     *
+     * @param MultipartPushStreamClient $client Signed target client.
+     * @param string $method GET or POST.
+     * @param string $endpoint Protocol endpoint query value.
+     * @param array<string,mixed> $parameters Additional signed query parameters.
+     * @param string[] $expected_statuses Successful statuses for this request.
+     * @return array<string,mixed> Decoded successful target response.
      */
-    private function require_control_status(array $response, string $expected_status): void
-    {
-        if (($response['status'] ?? null) !== $expected_status) {
-            $encoded_response = json_encode($response, JSON_UNESCAPED_SLASHES);
-            throw new RuntimeException(
-                'Push control request expected status ' . $expected_status . ', received '
-                . json_encode($response['status'] ?? null) . ': '
-                . ( is_string($encoded_response) ? $encoded_response : (string) ( $response['detail'] ?? $response['reason'] ?? '' ) )
+    private function control_response(
+        MultipartPushStreamClient $client,
+        string $method,
+        string $endpoint,
+        array $parameters,
+        array $expected_statuses
+    ): array {
+        $recoverable_attempts = 0;
+        while (true) {
+            $result = $client->control_request($method, $endpoint, $parameters, $expected_statuses);
+            if ( ( $result['status'] ?? null ) === 'complete' && is_array($result['response'] ?? null) ) {
+                return $result['response'];
+            }
+            if ( ( $result['status'] ?? null ) === 'failed' ) {
+                if ($endpoint === 'staged_session_discard' && ( $result['reason'] ?? null ) === 'commit_required') {
+                    throw new RuntimeException(
+                        'Push commit has begun on the target. Re-run push to finish it; a live mutation cannot be discarded.'
+                    );
+                }
+                $encoded_response = is_array($result['response'] ?? null)
+                    ? json_encode($result['response'], JSON_UNESCAPED_SLASHES)
+                    : false;
+                $reason = is_string($result['reason'] ?? null) ? $result['reason'] : 'unknown';
+                $detail = is_string($result['detail'] ?? null) ? $result['detail'] : '';
+                throw new RuntimeException(
+                    'Push control request ' . $endpoint . ' failed: ' . $reason . '. ' . $detail
+                    . ( $encoded_response === false ? '' : ' Target response: ' . $encoded_response )
+                );
+            }
+            $this->wait_for_recoverable_response(
+                $result,
+                $recoverable_attempts,
+                'Push control request ' . $endpoint
             );
         }
+    }
+
+    /**
+     * Applies one shared bounded exponential backoff to recoverable responses.
+     *
+     * @param array<string,mixed> $result Classified request result.
+     * @param int $attempts Consecutive recoverable responses for this operation.
+     * @param string $operation Human-readable operation name for exhaustion.
+     */
+    private function wait_for_recoverable_response(array $result, int &$attempts, string $operation): void
+    {
+        $reason = $result['reason'] ?? null;
+        if (( $result['status'] ?? null ) !== 'retry' || !in_array($reason, ['busy', 'offset_gap'], true)) {
+            return;
+        }
+        ++$attempts;
+        if ($attempts >= self::MAX_RECOVERABLE_RESPONSE_ATTEMPTS) {
+            throw new RuntimeException(
+                $operation . ' remained ' . $reason . ' after ' . $attempts . ' attempts. '
+                . ( is_string($result['detail'] ?? null) ? $result['detail'] : '' )
+            );
+        }
+        usleep(self::RECOVERABLE_RESPONSE_DELAY_MICROSECONDS * ( 1 << ( $attempts - 1 ) ));
     }
 
     /**

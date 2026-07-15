@@ -104,7 +104,7 @@ describe.sequential('Import: direct push apply', { timeout: 300000 }, () => {
         }
     });
 
-    it('covers the real file, symlink, empty-directory, and structural transitions', () => {
+    it('seeds independently reported file, symlink, empty, and structural transitions', () => {
         rmSync(join(sourceRoot, 'push-fixture'), { recursive: true, force: true });
         const fixture = join(sourceRoot, 'push-fixture');
         writeSource(sourceRoot, 'push-fixture/file-to-file', 'old');
@@ -122,30 +122,123 @@ describe.sequential('Import: direct push apply', { timeout: 300000 }, () => {
         writeSource(sourceRoot, 'push-fixture/structural-stays/old', 'old');
         assertPush(runPush(site, sourceRoot, stateDir));
 
-        writeFileSync(join(fixture, 'file-to-file'), 'new-value');
-        rmSync(join(fixture, 'file-to-symlink'));
-        symlinkSync('target-b', join(fixture, 'file-to-symlink'));
-        rmSync(join(fixture, 'symlink-to-file'));
-        writeFileSync(join(fixture, 'symlink-to-file'), 'new');
-        rmSync(join(fixture, 'symlink-to-symlink'));
-        symlinkSync('target-b', join(fixture, 'symlink-to-symlink'));
-        replaceWithFile(join(fixture, 'directory-to-file'), 'new');
-        replaceWithSymlink(join(fixture, 'directory-to-symlink'), 'target-b');
-        replaceWithEmptyDirectory(join(fixture, 'directory-to-empty'));
-        replaceWithEmptyDirectory(join(fixture, 'file-to-empty'));
-        replaceWithEmptyDirectory(join(fixture, 'symlink-to-empty'));
-        replaceWithStructuralDirectory(join(fixture, 'file-to-structural'));
-        replaceWithStructuralDirectory(join(fixture, 'symlink-to-structural'));
-        writeFileSync(join(fixture, 'empty-to-structural/child'), 'new');
-        rmSync(join(fixture, 'structural-stays/old'));
-        writeFileSync(join(fixture, 'structural-stays/new'), 'new');
+        assert.deepEqual(logicalTree(fixture), logicalTree(targetFixture));
+    });
+
+    it('applies a file-to-file transition', () => {
+        writeFileSync(join(sourceRoot, 'push-fixture/file-to-file'), 'new-value');
         assertPush(runPush(site, sourceRoot, stateDir));
 
-        assert.deepEqual(logicalTree(fixture), logicalTree(targetFixture));
+        assert.ok(lstatSync(join(targetFixture, 'file-to-file')).isFile());
         assert.equal(readFileSync(join(targetFixture, 'file-to-file'), 'utf8'), 'new-value');
+    });
+
+    it('applies a file-to-symlink transition', () => {
+        const path = join(sourceRoot, 'push-fixture/file-to-symlink');
+        rmSync(path);
+        symlinkSync('target-b', path);
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'file-to-symlink')).isSymbolicLink());
         assert.equal(readlinkSync(join(targetFixture, 'file-to-symlink')), 'target-b');
+    });
+
+    it('applies a symlink-to-file transition', () => {
+        const path = join(sourceRoot, 'push-fixture/symlink-to-file');
+        rmSync(path);
+        writeFileSync(path, 'new');
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'symlink-to-file')).isFile());
         assert.equal(readFileSync(join(targetFixture, 'symlink-to-file'), 'utf8'), 'new');
+    });
+
+    it('applies a symlink-to-symlink transition', () => {
+        const path = join(sourceRoot, 'push-fixture/symlink-to-symlink');
+        rmSync(path);
+        symlinkSync('target-b', path);
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'symlink-to-symlink')).isSymbolicLink());
         assert.equal(readlinkSync(join(targetFixture, 'symlink-to-symlink')), 'target-b');
+    });
+
+    it('applies a directory-to-file transition', () => {
+        replaceWithFile(join(sourceRoot, 'push-fixture/directory-to-file'), 'new');
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'directory-to-file')).isFile());
+        assert.equal(readFileSync(join(targetFixture, 'directory-to-file'), 'utf8'), 'new');
+    });
+
+    it('applies a directory-to-symlink transition', () => {
+        replaceWithSymlink(join(sourceRoot, 'push-fixture/directory-to-symlink'), 'target-b');
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'directory-to-symlink')).isSymbolicLink());
+        assert.equal(readlinkSync(join(targetFixture, 'directory-to-symlink')), 'target-b');
+    });
+
+    it('applies a directory-to-empty-directory transition', () => {
+        replaceWithEmptyDirectory(join(sourceRoot, 'push-fixture/directory-to-empty'));
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'directory-to-empty')).isDirectory());
+        assert.deepEqual(readdirSync(join(targetFixture, 'directory-to-empty')), []);
+    });
+
+    it('applies a file-to-empty-directory transition', () => {
+        replaceWithEmptyDirectory(join(sourceRoot, 'push-fixture/file-to-empty'));
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'file-to-empty')).isDirectory());
+        assert.deepEqual(readdirSync(join(targetFixture, 'file-to-empty')), []);
+    });
+
+    it('applies a symlink-to-empty-directory transition', () => {
+        replaceWithEmptyDirectory(join(sourceRoot, 'push-fixture/symlink-to-empty'));
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'symlink-to-empty')).isDirectory());
+        assert.deepEqual(readdirSync(join(targetFixture, 'symlink-to-empty')), []);
+    });
+
+    it('applies a file-to-structural-directory transition', () => {
+        replaceWithStructuralDirectory(join(sourceRoot, 'push-fixture/file-to-structural'));
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'file-to-structural')).isDirectory());
+        assert.equal(readFileSync(join(targetFixture, 'file-to-structural/child'), 'utf8'), 'new');
+    });
+
+    it('applies a symlink-to-structural-directory transition', () => {
+        replaceWithStructuralDirectory(join(sourceRoot, 'push-fixture/symlink-to-structural'));
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'symlink-to-structural')).isDirectory());
+        assert.equal(readFileSync(join(targetFixture, 'symlink-to-structural/child'), 'utf8'), 'new');
+    });
+
+    it('applies an empty-to-structural-directory transition', () => {
+        writeFileSync(join(sourceRoot, 'push-fixture/empty-to-structural/child'), 'new');
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'empty-to-structural')).isDirectory());
+        assert.equal(readFileSync(join(targetFixture, 'empty-to-structural/child'), 'utf8'), 'new');
+    });
+
+    it('updates children below a structural directory', () => {
+        rmSync(join(sourceRoot, 'push-fixture/structural-stays/old'));
+        writeFileSync(join(sourceRoot, 'push-fixture/structural-stays/new'), 'new');
+        assertPush(runPush(site, sourceRoot, stateDir));
+
+        assert.ok(lstatSync(join(targetFixture, 'structural-stays')).isDirectory());
+        assert.ok(!existsSync(join(targetFixture, 'structural-stays/old')));
+        assert.equal(readFileSync(join(targetFixture, 'structural-stays/new'), 'utf8'), 'new');
+        assert.deepEqual(
+            logicalTree(join(sourceRoot, 'push-fixture')),
+            logicalTree(targetFixture),
+        );
     });
 
     it('replaces and recursively deletes symlinks without touching their referent', () => {
@@ -207,10 +300,15 @@ describe.sequential('Import: direct push apply', { timeout: 300000 }, () => {
         assert.notEqual(interrupted.exitCode, 0, `process interruption did not stop the active push: ${interrupted.stderr}`);
         assert.ok(existsSync(join(targetRoot, '.maintenance')), 'owned maintenance marker did not survive process death');
         assert.ok(!existsSync(oldDirectory), 'deletion had not completed before positive installation began');
-        const activeSessions = readdirSync(join(stagingDir, 'apply-sessions')).filter((name) => /^[a-f0-9]{32}$/.test(name));
+        const sessionsDir = join(stagingDir, 'apply-sessions');
+        const activeSessions = activeSessionDirectories(sessionsDir);
         assert.equal(activeSessions.length, 1);
+        // The killed sender can leave one bounded target request finishing, so
+        // start at the stable sessions root while it consumes the work queue.
         assert.ok(
-            recursiveNames(join(stagingDir, 'apply-sessions', activeSessions[0], 'work', 'files')).length > 0,
+            execFileSync('sudo', [
+                'find', sessionsDir, '-path', `${activeSessions[0]}/work/files/*`, '-print0', '-quit',
+            ]).length > 0,
             'process interruption left no pending staged values to resume',
         );
 
@@ -238,7 +336,8 @@ describe.sequential('Import: direct push apply', { timeout: 300000 }, () => {
         const different = await uploadDelete(site, sessionId, 0, Buffer.from('other\0'));
         assert.equal(different.response.status, 400);
         const gap = await uploadDelete(site, sessionId, 999, Buffer.from('later\0'));
-        assert.equal(gap.response.status, 400);
+        assert.equal(gap.response.status, 409);
+        assert.equal(gap.body.reason, 'offset_gap');
         const status = await stagedRequest(site, 'GET', 'staged_session_status', { session_id: sessionId });
         assert.equal(status.body.delete_bytes, Buffer.byteLength('first\0partial\0'));
 
@@ -256,7 +355,7 @@ describe.sequential('Import: direct push apply', { timeout: 300000 }, () => {
         rmSync(join(sourceRoot, 'push-fixture'), { recursive: true, force: true });
         writeSource(sourceRoot, 'push-fixture/live-drift/file.bin', 'x'.repeat(10 * 1024 * 1024));
         let running = startPush(site, sourceRoot, stateDir);
-        await waitFor(() => sessionWorkExists(stagingDir, 'partial', 'push-fixture/live-drift/file.bin'), 60000, 'partial staged file was not observable');
+        await waitFor(() => sessionWorkExists(stagingDir, 'files', 'push-fixture/live-drift/file.bin'), 60000, 'staged file was not observable before commit');
         process.kill(running.child.pid, 'SIGSTOP');
         execFileSync('sudo', ['mkdir', '-p', join(targetFixture, 'live-drift')]);
         execFileSync('sudo', ['sh', '-c', `printf drift > ${shellQuote(join(targetFixture, 'live-drift/file.bin'))}`]);
@@ -271,7 +370,7 @@ describe.sequential('Import: direct push apply', { timeout: 300000 }, () => {
         execFileSync('sudo', ['mkdir', '-p', join(targetRoot, 'outside-conflict')]);
         execFileSync('sudo', ['sh', '-c', `printf safe > ${shellQuote(join(targetRoot, 'outside-conflict/sentinel'))}`]);
         running = startPush(site, sourceRoot, stateDir);
-        await waitFor(() => sessionWorkExists(stagingDir, 'partial', 'push-fixture/conflict-parent/file.bin'), 60000, 'conflicting path was not staged');
+        await waitFor(() => sessionWorkExists(stagingDir, 'files', 'push-fixture/conflict-parent/file.bin'), 60000, 'conflicting path was not staged before commit');
         process.kill(running.child.pid, 'SIGSTOP');
         execFileSync('sudo', ['ln', '-s', '../outside-conflict', join(targetFixture, 'conflict-parent')]);
         process.kill(running.child.pid, 'SIGCONT');
@@ -371,12 +470,12 @@ describe.sequential('Import: cross-device push refusal', { timeout: 180000 }, ()
         assert.notEqual(
             lstatSync('/srv/reprint-e2e-staging').dev,
             lstatSync(getSiteDir('push-cross-device')).dev,
-            'cross-device Docker test requires --tmpfs /srv/reprint-e2e-staging',
+            'cross-device test requires a separate filesystem at /srv/reprint-e2e-staging',
         );
         assert.notEqual(
             lstatSync(join(getSiteDir('push-mounted-parent'), 'mounted-parent')).dev,
             lstatSync(getSiteDir('push-mounted-parent')).dev,
-            'mount-boundary Docker test requires --tmpfs /srv/e2e-sites/push-mounted-parent/mounted-parent',
+            'mount-boundary test requires a separate filesystem at /srv/e2e-sites/push-mounted-parent/mounted-parent',
         );
         caseRoot = createTempDir('e2e-push-cross-device');
     });
@@ -397,7 +496,7 @@ describe.sequential('Import: cross-device push refusal', { timeout: 180000 }, ()
         assert.ok(!existsSync(join(getSiteDir('push-cross-device'), 'must-not-arrive')));
         const sessions = '/srv/reprint-e2e-staging/push-cross-device/apply-sessions';
         if (existsSync(sessions)) {
-            assert.equal(readdirSync(sessions).filter((name) => /^[a-f0-9]{32}$/.test(name)).length, 0);
+            assert.equal(activeSessionDirectories(sessions).length, 0);
         }
     });
 
@@ -523,15 +622,7 @@ function recursiveNames(root) {
     const names = [];
     for (const name of entries) {
         const path = join(root, name);
-        let stat;
-        try {
-            stat = lstatSync(path);
-        } catch (error) {
-            // The killed sender can leave one bounded target request finishing
-            // while this observes the pending queue it is consuming.
-            if (error.code === 'ENOENT') continue;
-            throw error;
-        }
+        const stat = lstatSync(path);
         names.push(name);
         if (stat.isDirectory()) names.push(...recursiveNames(path));
     }
@@ -578,12 +669,15 @@ async function waitFor(predicate, timeout, message) {
 function sessionWorkExists(stagingDir, workType, path) {
     const sessionsDir = join(stagingDir, 'apply-sessions');
     if (!existsSync(sessionsDir)) return false;
-    for (const session of readdirSync(sessionsDir)) {
-        if (/^[a-f0-9]{32}$/.test(session) && existsSync(join(sessionsDir, session, 'work', workType, path))) {
-            return true;
-        }
-    }
-    return false;
+    return execFileSync('sudo', [
+        'find', sessionsDir, '-path', `*/work/${workType}/${path}`, '-print0', '-quit',
+    ]).length > 0;
+}
+
+function activeSessionDirectories(sessionsDir) {
+    return execFileSync('sudo', [
+        'find', sessionsDir, '-mindepth', '1', '-maxdepth', '1', '-type', 'd', '-print0',
+    ]).toString().split('\0').filter((path) => /\/[a-f0-9]{32}$/.test(path));
 }
 
 async function stagedRequest(site, method, endpoint, parameters, body = null, contentType = null) {

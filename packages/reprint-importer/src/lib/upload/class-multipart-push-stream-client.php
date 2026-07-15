@@ -47,9 +47,9 @@
  * A curl_multi handle outlives individual requests so libcurl may reuse its
  * connection. The active easy handle exists only from start_upload_request()
  * through finish_request(). Timeouts are per phase rather than total-transfer
- * deadlines: connection establishment, lack of upload progress, and waiting
- * for a response after the closing boundary. A slow upload which continues
- * moving bytes is allowed to continue.
+ * deadlines: connection establishment, lack of upload progress, and lack of
+ * finish/response progress after the closing boundary is queued. A slow
+ * connection which continues moving bytes is allowed to continue.
  *
  * Pausing from a PHP cURL read callback is reliable only on PHP 8.1 and newer;
  * older bindings interpret CURL_READFUNC_PAUSE as end-of-body and silently
@@ -79,7 +79,7 @@ class MultipartPushStreamClient
     /** @var int Seconds allowed with no multipart bytes consumed by libcurl. */
     private int $stall_timeout;
 
-    /** @var int Seconds allowed for the finish/response phase after the close is queued. */
+    /** @var int Seconds allowed without finish/response progress after the close is queued. */
     private int $response_timeout;
 
     /**
@@ -482,8 +482,8 @@ class MultipartPushStreamClient
      *
      * When the transfer is still active, this queues the closing boundary and
      * signals EOF only after cURL consumes it. The finish phase has its own
-     * deadline beginning when that closing boundary is queued, not at request
-     * start. Redirects,
+     * no-progress timer beginning when that closing boundary is queued, not a
+     * total deadline measured from request start. Redirects,
      * structured target rejections, HTTP 413, invalid JSON, and cURL failures are
      * converted into stable `complete`, `retry`, or `failed` results.
      *
@@ -509,13 +509,22 @@ class MultipartPushStreamClient
             $this->outbound_suffix = '';
             $this->body_complete = true;
             curl_pause($this->curl_handle, CURLPAUSE_CONT);
-            $deadline = microtime(true) + $this->response_timeout;
+            $seen_outbound_bytes = $this->outbound_consumed_bytes;
+            $seen_inbound_bytes = (float) curl_getinfo($this->curl_handle, CURLINFO_SIZE_DOWNLOAD)
+                + (int) curl_getinfo($this->curl_handle, CURLINFO_HEADER_SIZE);
+            $last_progress_at = microtime(true);
             while (!$this->transfer_finished) {
-                if (microtime(true) > $deadline) {
-                    $this->transfer_error = 'No response arrived within ' . $this->response_timeout . 's of finishing the multipart upload body.';
+                $this->pump_transfer();
+                $inbound_bytes = (float) curl_getinfo($this->curl_handle, CURLINFO_SIZE_DOWNLOAD)
+                    + (int) curl_getinfo($this->curl_handle, CURLINFO_HEADER_SIZE);
+                if ($seen_outbound_bytes !== $this->outbound_consumed_bytes || $seen_inbound_bytes !== $inbound_bytes) {
+                    $seen_outbound_bytes = $this->outbound_consumed_bytes;
+                    $seen_inbound_bytes = $inbound_bytes;
+                    $last_progress_at = microtime(true);
+                } elseif (microtime(true) - $last_progress_at > $this->response_timeout) {
+                    $this->transfer_error = 'The multipart request finish phase stalled: no upload or response bytes moved for ' . $this->response_timeout . 's.';
                     break;
                 }
-                $this->pump_transfer();
             }
         }
 
@@ -527,8 +536,8 @@ class MultipartPushStreamClient
 
         if (in_array($http_code, [301, 302, 303, 307, 308], true)) {
             return $this->result('failed', 'redirected', $redirect_url === ''
-                ? 'The target redirected the upload. Use its final URL as the push target.'
-                : 'The target redirected to ' . $redirect_url . '. Use that address as the push target.');
+                ? 'The target redirected the upload. Use its final URL as the push base_url.'
+                : 'The target redirected to ' . $redirect_url . '. Use that address as the push base_url.');
         }
         $decoded = json_decode($body, true);
         if ($http_code === 413) {
@@ -542,6 +551,13 @@ class MultipartPushStreamClient
             );
         }
         if (!is_array($decoded)) {
+            if ($body !== '') {
+                return $this->result(
+                    'failed',
+                    'malformed_response',
+                    'Invalid JSON response (HTTP ' . $http_code . '): ' . substr($body, 0, 160)
+                );
+            }
             $decision = $this->request_sizer->record_request_failure();
             return $this->result(
                 $decision['action'] === 'give_up' ? 'failed' : 'retry',
@@ -549,19 +565,15 @@ class MultipartPushStreamClient
                 $this->transfer_error ?? 'Invalid JSON response (HTTP ' . $http_code . '): ' . substr($body, 0, 160)
             );
         }
-        if (($decoded['status'] ?? null) !== 'accepted') {
-            $reason = is_string($decoded['reason'] ?? null) ? $decoded['reason'] : 'unexpected_response';
-            return $this->result(
-                in_array($reason, ['busy'], true) ? 'retry' : 'failed',
-                $reason,
-                is_string($decoded['detail'] ?? null) ? $decoded['detail'] : 'HTTP ' . $http_code,
-                $decoded
-            );
+        $decoded['http_code'] = $http_code;
+        $result = $this->classify_response($decoded, ['accepted']);
+        if ($result['status'] !== 'complete') {
+            return $result;
         }
         if ($this->parts_sent > 0) {
             $this->request_sizer->record_success();
         }
-        return $this->result('complete', null, null, $decoded);
+        return $result;
     }
 
     /**
@@ -573,16 +585,20 @@ class MultipartPushStreamClient
      * @param string $method GET or POST.
      * @param string $endpoint Protocol endpoint query value.
      * @param array<string,mixed> $parameters Additional signed query parameters.
-     * @return array<string,mixed> Decoded target body plus its HTTP status code.
+     * @param string[] $expected_statuses Successful protocol statuses for this endpoint.
+     * @return array<string,mixed> Complete, retryable, or terminal response classification.
      *
      * @throws InvalidArgumentException If the method is unsupported.
      * @throws RuntimeException If transport, redirect, or JSON decoding fails.
      */
-    public function control_request(string $method, string $endpoint, array $parameters = []): array
+    public function control_request(string $method, string $endpoint, array $parameters, array $expected_statuses): array
     {
         $method = strtoupper($method);
         if (!in_array($method, ['GET', 'POST'], true)) {
             throw new InvalidArgumentException('Multipart push control method must be GET or POST.');
+        }
+        if ($expected_statuses === [] || count(array_filter($expected_statuses, 'is_string')) !== count($expected_statuses)) {
+            throw new InvalidArgumentException('Multipart push control requests require one or more string success statuses.');
         }
         $url = $this->endpoint_url($endpoint, $parameters);
         $headers = $this->hmac_client->get_envelope_auth_headers($method, $url);
@@ -618,7 +634,7 @@ class MultipartPushStreamClient
         $redirect_url = (string) curl_getinfo($handle, CURLINFO_REDIRECT_URL);
         curl_close($handle);
         if (in_array($http_code, [301, 302, 303, 307, 308], true)) {
-            throw new RuntimeException('The target redirected to ' . ($redirect_url === '' ? 'another address' : $redirect_url) . '. Use that address as the push target.');
+            throw new RuntimeException('The target redirected to ' . ($redirect_url === '' ? 'another address' : $redirect_url) . '. Use that address as the push base_url.');
         }
         if (!is_string($body)) {
             throw new RuntimeException('Push control request failed: ' . ($error === '' ? 'no response' : $error) . '.');
@@ -628,7 +644,7 @@ class MultipartPushStreamClient
             throw new RuntimeException('Push control request returned invalid JSON (HTTP ' . $http_code . '): ' . substr($body, 0, 160));
         }
         $decoded['http_code'] = $http_code;
-        return $decoded;
+        return $this->classify_response($decoded, $expected_statuses);
     }
 
     /**
@@ -861,7 +877,34 @@ class MultipartPushStreamClient
     }
 
     /**
-     * Builds the stable upload result shape consumed by MultipartPush.
+     * Classifies every decoded upload and control response by protocol reason.
+     *
+     * `busy` and `offset_gap` are recoverable because a later request can use
+     * the target-confirmed cursor. Every other rejection is terminal; HTTP
+     * status alone never promotes an unknown reason into a retry.
+     *
+     * @param array<string,mixed> $response Decoded target response with http_code.
+     * @param string[] $expected_statuses Successful statuses for this request.
+     * @return array<string,mixed> Stable complete, retry, or failed result.
+     */
+    private function classify_response(array $response, array $expected_statuses): array
+    {
+        if (in_array($response['status'] ?? null, $expected_statuses, true)) {
+            return $this->result('complete', null, null, $response);
+        }
+        $reason = is_string($response['reason'] ?? null) ? $response['reason'] : 'unexpected_response';
+        return $this->result(
+            in_array($reason, ['busy', 'offset_gap'], true) ? 'retry' : 'failed',
+            $reason,
+            is_string($response['detail'] ?? null)
+                ? $response['detail']
+                : 'HTTP ' . (int) ($response['http_code'] ?? 0),
+            $response
+        );
+    }
+
+    /**
+     * Builds the stable response result shape consumed by MultipartPush.
      *
      * @param string $status `complete`, `retry`, or `failed`.
      * @param string|null $reason Machine-readable target/transport classification.

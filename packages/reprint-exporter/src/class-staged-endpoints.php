@@ -761,6 +761,9 @@ final class Site_Export_Staged_Endpoints {
                 case Site_Export_Staged_Apply_Session::ERROR_COMMIT_REQUIRED:
                     $http_code = 409;
                     break;
+                case Site_Export_Staged_Apply_Session::ERROR_OFFSET_GAP:
+                    $http_code = 409;
+                    break;
                 case Site_Export_Staged_Apply_Session::ERROR_LIVE_TREE_CHANGED:
                     $http_code = 409;
                     break;

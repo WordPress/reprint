@@ -253,8 +253,9 @@ describeSupportedPush('Import: pull-seeded full-root push', { timeout: 300000 },
         running.child.kill('SIGKILL');
         const interrupted = await running.completed;
         assert.notEqual(interrupted.exitCode, 0);
+        // Invalidation removes the baseline first. SIGKILL may land before the
+        // identity unlink, but an identity cannot authorize a missing snapshot.
         assert.ok(!existsSync(join(journal, 'last-sync-local-files.jsonl')));
-        assert.ok(!existsSync(join(journal, 'last-sync-local-files.identity.json')));
     });
 
     it('pull restart republishes only after eventual completion', () => {

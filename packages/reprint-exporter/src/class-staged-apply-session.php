@@ -22,6 +22,7 @@ if (!class_exists('Site_Export_Staged_Apply_Exception', false)) {
 final class Site_Export_Staged_Apply_Session {
 
     public const ERROR_BUSY = 'busy';
+    public const ERROR_OFFSET_GAP = 'offset_gap';
     public const ERROR_SESSION_NOT_FOUND = 'session_not_found';
     public const ERROR_RETRYABLE_IO = 'retryable_io_error';
     public const ERROR_COMMIT_REQUIRED = 'commit_required';
@@ -503,7 +504,10 @@ final class Site_Export_Staged_Apply_Session {
                 $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'file', 'accepted_bytes' => $total_bytes];
                 return;
             } else {
-                throw new InvalidArgumentException('Completed staged file ' . base64_encode($path) . ' can only be restarted at offset 0.');
+                throw new Site_Export_Staged_Apply_Exception(
+                    self::ERROR_OFFSET_GAP,
+                    'Completed staged file ' . base64_encode($path) . ' can only be restarted at offset 0.'
+                );
             }
         }
 
@@ -518,7 +522,10 @@ final class Site_Export_Staged_Apply_Session {
             }
             $actual_bytes = 0;
         } elseif ($offset !== $actual_bytes) {
-            throw new InvalidArgumentException('File part for ' . base64_encode($path) . ' starts at offset ' . $offset . ', but work/partial contains ' . $actual_bytes . ' bytes. Start at offset 0 or resume at the actual size.');
+            throw new Site_Export_Staged_Apply_Exception(
+                self::ERROR_OFFSET_GAP,
+                'File part for ' . base64_encode($path) . ' starts at offset ' . $offset . ', but work/partial contains ' . $actual_bytes . ' bytes. Start at offset 0 or resume at the actual size.'
+            );
         }
 
         $handle = @fopen($partial_path, $actual_bytes === 0 ? 'wb' : 'ab');
@@ -625,7 +632,10 @@ final class Site_Export_Staged_Apply_Session {
         try {
             $stored_bytes = $this->file_size_from_handle($handle, 'staged delete stream');
             if ($offset > $stored_bytes) {
-                throw new InvalidArgumentException('Delete-list part starts at offset ' . $offset . ', but the target has stored ' . $stored_bytes . ' bytes.');
+                throw new Site_Export_Staged_Apply_Exception(
+                    self::ERROR_OFFSET_GAP,
+                    'Delete-list part starts at offset ' . $offset . ', but the target has stored ' . $stored_bytes . ' bytes.'
+                );
             }
             $position = $offset;
             $trailing_path = $this->read_delete_trailing_path($handle, $stored_bytes);

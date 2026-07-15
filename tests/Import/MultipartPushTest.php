@@ -44,6 +44,11 @@ final class MultipartPushTest extends TestCase {
     private ?string $reject_upload_marker = null;
     private ?string $drop_discard_response_marker = null;
     private bool $make_checkpoint_unremovable_after_discard = false;
+    /** @var array<string,int> */
+    private array $busy_response_limits = [];
+    private string $server_secret = self::SECRET;
+    private ?string $control_fault = null;
+    private int $too_large_upload_responses = 0;
     /** @var string[] */
     private array $apply_protected_paths = [];
 
@@ -163,6 +168,214 @@ final class MultipartPushTest extends TestCase {
         $this->assertStringContainsString('same --state-dir', $result['stderr']);
         $this->assertSame('live exporter', file_get_contents($this->target . '/wp-content/plugins/site-export/index.php'));
         $this->assertFileDoesNotExist($this->target . '/.maintenance');
+    }
+
+    public function testBusySessionCreationRetriesUntilTheTargetBecomesAvailable(): void {
+        $this->busy_response_limits = ['staged_session_create' => 2];
+        $this->configure_server();
+        $this->write_source('created-after-contention.txt', 'created');
+
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        $this->assertSame('created', file_get_contents($this->target . '/created-after-contention.txt'));
+        $this->assertSame(3, $this->endpoint_count('staged_session_create'));
+    }
+
+    public function testBusyUploadRetriesUntilTheTargetBecomesAvailable(): void {
+        $this->busy_response_limits = ['staged_session_upload' => 2];
+        $this->configure_server();
+        $this->write_source('uploaded-after-contention.txt', 'uploaded');
+
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        $this->assertSame('uploaded', file_get_contents($this->target . '/uploaded-after-contention.txt'));
+        $this->assertGreaterThanOrEqual(4, $this->endpoint_count('staged_session_upload'));
+    }
+
+    public function testBusyCommitRetriesUntilTheTargetBecomesAvailable(): void {
+        $this->busy_response_limits = ['staged_session_commit' => 2];
+        $this->configure_server();
+        $this->write_source('committed-after-contention.txt', 'committed');
+
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        $this->assertSame('committed', file_get_contents($this->target . '/committed-after-contention.txt'));
+        $this->assertGreaterThanOrEqual(3, $this->endpoint_count('staged_session_commit'));
+    }
+
+    public function testBusyDiscardRetriesUntilTheTargetBecomesAvailable(): void {
+        $this->busy_response_limits = ['staged_session_discard' => 2];
+        $this->configure_server();
+        $this->write_source('cleaned-after-contention.txt', 'cleaned');
+
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        $this->assertSame('cleaned', file_get_contents($this->target . '/cleaned-after-contention.txt'));
+        $this->assertSame(3, $this->endpoint_count('staged_session_discard'));
+        $this->assertSame([], glob($this->state . '/push/*/session.json') ?: []);
+    }
+
+    public function testPersistentBusyUploadFailsBoundedlyAndTheNextProcessResumes(): void {
+        $this->busy_response_limits = ['staged_session_upload' => 6];
+        $this->configure_server();
+        $this->write_source('resumed-after-contention.txt', 'resumed');
+
+        $failed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertNotSame(0, $failed['exit_code']);
+        $this->assertStringContainsString('remained busy after 5 attempts', $failed['stderr']);
+        $this->assertCount(1, glob($this->state . '/push/*/session.json') ?: []);
+        $this->assertFileDoesNotExist($this->target . '/resumed-after-contention.txt');
+
+        $this->busy_response_limits = [];
+        $this->configure_server();
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertSame('resumed', file_get_contents($this->target . '/resumed-after-contention.txt'));
+        $this->assertSame([], glob($this->state . '/push/*/session.json') ?: []);
+    }
+
+    public function testAuthenticationFailureIsTerminalWithoutRetrying(): void {
+        $this->server_secret = 'different-target-secret';
+        $this->configure_server();
+        $this->write_source('must-not-authenticate.txt', 'no');
+
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertNotSame(0, $result['exit_code']);
+        $this->assertStringContainsString('authentication', strtolower($result['stderr']));
+        $this->assertSame(1, $this->endpoint_count('staged_session_create'));
+        $this->assertFileDoesNotExist($this->target . '/must-not-authenticate.txt');
+    }
+
+    public function testControlRedirectIsTerminalWithTargetGuidance(): void {
+        $this->control_fault = 'redirect';
+        $this->configure_server();
+        $this->write_source('must-not-redirect.txt', 'no');
+
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertNotSame(0, $result['exit_code']);
+        $this->assertStringContainsString('redirected to', $result['stderr']);
+        $this->assertStringContainsString('Use that address as the push base_url', $result['stderr']);
+        $this->assertSame(1, $this->endpoint_count('staged_session_create'));
+        $this->assertFileDoesNotExist($this->target . '/must-not-redirect.txt');
+    }
+
+    public function testMalformedControlResponseIsTerminalWithoutRetrying(): void {
+        $this->control_fault = 'malformed';
+        $this->configure_server();
+        $this->write_source('must-not-accept-malformed.txt', 'no');
+
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertNotSame(0, $result['exit_code']);
+        $this->assertStringContainsString('invalid JSON', $result['stderr']);
+        $this->assertSame(1, $this->endpoint_count('staged_session_create'));
+        $this->assertFileDoesNotExist($this->target . '/must-not-accept-malformed.txt');
+    }
+
+    public function testHttp413ShrinksTheRequestAndResumesFromTargetStatus(): void {
+        $this->too_large_upload_responses = 1;
+        $this->configure_server();
+        $this->write_source('accepted-after-413.txt', 'right-sized retry');
+
+        $result = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        $this->assertSame('right-sized retry', file_get_contents($this->target . '/accepted-after-413.txt'));
+        $this->assertGreaterThanOrEqual(3, $this->endpoint_count('staged_session_upload'));
+        $this->assertGreaterThanOrEqual(1, $this->endpoint_count('staged_session_status'));
+    }
+
+    public function testOffsetGapResumesFromTheTargetConfirmedFileCursor(): void {
+        $this->reject_upload_marker = $this->case_root . '/rejected-before-offset-gap';
+        $this->configure_server();
+        $this->write_source('offset-gap.bin', 'target starts with no bytes');
+
+        $interrupted = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertNotSame(0, $interrupted['exit_code']);
+        $checkpoints = glob($this->state . '/push/*/session.json') ?: [];
+        $this->assertCount(1, $checkpoints);
+        $checkpoint = json_decode( (string) file_get_contents($checkpoints[0]), true);
+        $this->assertIsArray($checkpoint);
+        $this->assertSame(base64_encode('offset-gap.bin'), $checkpoint['current']['path_b64'] ?? null);
+
+        // Simulate a sender checkpoint ahead of the target. The rejection must
+        // reconcile from status rather than trusting this attempted cursor.
+        $checkpoint['current']['accepted_bytes'] = 1;
+        file_put_contents($checkpoints[0], json_encode($checkpoint));
+        $status_requests_before_resume = $this->endpoint_count('staged_session_status');
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertSame('target starts with no bytes', file_get_contents($this->target . '/offset-gap.bin'));
+        $this->assertGreaterThan($status_requests_before_resume, $this->endpoint_count('staged_session_status'));
+    }
+
+    public function testOffsetGapResumesFromTheTargetConfirmedDeleteCursor(): void {
+        $this->write_source('delete-offset-gap.txt', 'delete this');
+        $initial = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $initial['exit_code'], $initial['stderr']);
+
+        unlink($this->source . '/delete-offset-gap.txt');
+        $this->reject_upload_marker = $this->case_root . '/rejected-before-delete-offset-gap';
+        $this->configure_server();
+        $interrupted = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertNotSame(0, $interrupted['exit_code']);
+        $checkpoints = glob($this->state . '/push/*/session.json') ?: [];
+        $this->assertCount(1, $checkpoints);
+        $checkpoint = json_decode( (string) file_get_contents($checkpoints[0]), true);
+        $this->assertIsArray($checkpoint);
+
+        // Simulate a sender checkpoint one byte ahead of an empty target
+        // delete stream. Status must rewind the one local/wire cursor.
+        $checkpoint['delete_offset'] = 1;
+        file_put_contents($checkpoints[0], json_encode($checkpoint));
+        $status_requests_before_resume = $this->endpoint_count('staged_session_status');
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertFileDoesNotExist($this->target . '/delete-offset-gap.txt');
+        $this->assertGreaterThan($status_requests_before_resume, $this->endpoint_count('staged_session_status'));
+    }
+
+    public function testCheckpointAtDeleteEofReconcilesBeforeCompletion(): void {
+        $path = 'delete-completion-offset-gap.txt';
+        $this->write_source($path, 'delete this too');
+        $initial = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $initial['exit_code'], $initial['stderr']);
+
+        unlink($this->source . '/' . $path);
+        $this->reject_upload_marker = $this->case_root . '/rejected-before-delete-completion-offset-gap';
+        $this->configure_server();
+        $interrupted = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertNotSame(0, $interrupted['exit_code']);
+        $checkpoints = glob($this->state . '/push/*/session.json') ?: [];
+        $delete_streams = glob($this->state . '/push/*/local-delete-stream.bin') ?: [];
+        $this->assertCount(1, $checkpoints);
+        $this->assertCount(1, $delete_streams);
+        $checkpoint = json_decode( (string) file_get_contents($checkpoints[0]), true);
+        $this->assertIsArray($checkpoint);
+
+        // Simulate a checkpoint which falsely says the complete delete stream
+        // reached the target. Signed status must rewind to zero and upload the
+        // pending raw bytes before completion can be declared.
+        $checkpoint['delete_offset'] = filesize($delete_streams[0]);
+        file_put_contents($checkpoints[0], json_encode($checkpoint));
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertFileDoesNotExist($this->target . '/' . $path);
+        $this->assertGreaterThanOrEqual(1, $this->endpoint_count('staged_session_status'));
     }
 
     public function testCliPushDeliversInitialAndDeltaTreesThroughTheRealRouter(): void {
@@ -969,58 +1182,81 @@ final class MultipartPushTest extends TestCase {
     }
 
     public function testSameSizeSourceEditDuringLostResponseRestartsAtZeroInsteadOfBuildingAHybridFile(): void {
-        $this->pause_after_upload_marker = $this->case_root . '/upload-accepted';
-        $this->resume_upload_response_marker = $this->case_root . '/resume-upload-response';
-        $this->configure_server();
         $source_path = $this->source . '/changed-during-response.bin';
         $old_contents = str_repeat('old-', 200);
         $new_contents = str_repeat('new-', 200);
         file_put_contents($source_path, $old_contents);
         $old_ctime = (int) lstat($source_path)['ctime'];
 
-        $entry = realpath(__DIR__ . '/../../importer/import.php');
-        $this->assertNotFalse($entry);
-        $process = proc_open([
-            PHP_BINARY,
-            $entry,
-            'push',
-            self::$base_url,
-            '--state-dir=' . $this->state,
-            '--secret=' . self::SECRET,
-            '--allow-http',
-            '--source-root=' . $this->source,
-        ], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $this->case_root);
-        $this->assertIsResource($process);
+        $result = $this->run_push_while_first_upload_response_is_paused(function () use ($source_path, $new_contents, $old_ctime): void {
+            $new_ctime = $old_ctime;
+            for ($attempt = 0; $attempt < 4 && $new_ctime === $old_ctime; ++$attempt) {
+                sleep(1);
+                file_put_contents($source_path, $new_contents);
+                clearstatcache(true, $source_path);
+                $new_ctime = (int) lstat($source_path)['ctime'];
+            }
+            $this->assertNotSame($old_ctime, $new_ctime, 'The filesystem did not expose a ctime change for the same-size edit.');
+        });
 
-        for ($attempt = 0; $attempt < 100 && !is_file($this->pause_after_upload_marker); ++$attempt) {
-            usleep(100000);
-        }
-        $this->assertFileExists($this->pause_after_upload_marker, 'The target never accepted the old source version.');
-        $new_ctime = $old_ctime;
-        for ($attempt = 0; $attempt < 4 && $new_ctime === $old_ctime; ++$attempt) {
-            sleep(1);
-            file_put_contents($source_path, $new_contents);
-            clearstatcache(true, $source_path);
-            $new_ctime = (int) lstat($source_path)['ctime'];
-        }
-        $this->assertNotSame($old_ctime, $new_ctime, 'The filesystem did not expose a ctime change for the same-size edit.');
-        file_put_contents($this->resume_upload_response_marker, "resume\n");
-
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $exit_code = proc_close($process);
-        $lines = array_values(array_filter(preg_split('/\R/', trim((string) $stdout)) ?: [], static function (string $line): bool {
-            return $line !== '';
-        }));
-        $result = $lines === [] ? null : json_decode((string) end($lines), true);
-
-        $this->assertSame(0, $exit_code, (string) $stderr);
-        $this->assertSame('complete', is_array($result) ? ($result['status'] ?? null) : null);
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        $this->assertSame('complete', $result['json']['status'] ?? null);
         $this->assertSame($new_contents, file_get_contents($this->target . '/changed-during-response.bin'));
         $this->assertNotSame($old_contents, file_get_contents($this->target . '/changed-during-response.bin'));
         $this->assertGreaterThanOrEqual(1, $this->endpoint_count('staged_session_status'));
+    }
+
+    public function testSourceGrowthDuringLostResponseRestartsAtZeroInsteadOfAppendingVersions(): void {
+        $source_path = $this->source . '/grown-during-response.bin';
+        $old_contents = str_repeat('old-', 200);
+        $new_contents = str_repeat('new-version-', 120);
+        file_put_contents($source_path, $old_contents);
+
+        $result = $this->run_push_while_first_upload_response_is_paused(static function () use ($source_path, $new_contents): void {
+            file_put_contents($source_path, $new_contents);
+        });
+
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        $this->assertSame('complete', $result['json']['status'] ?? null);
+        $this->assertSame($new_contents, file_get_contents($this->target . '/grown-during-response.bin'));
+        $this->assertNotSame($old_contents, file_get_contents($this->target . '/grown-during-response.bin'));
+        $this->assertGreaterThanOrEqual(1, $this->endpoint_count('staged_session_status'));
+    }
+
+    public function testSourceShrinkDuringLostResponseRestartsAtZeroInsteadOfKeepingAnOldSuffix(): void {
+        $source_path = $this->source . '/shrunk-during-response.bin';
+        $old_contents = str_repeat('old-version-', 120);
+        $new_contents = str_repeat('new-', 100);
+        file_put_contents($source_path, $old_contents);
+
+        $result = $this->run_push_while_first_upload_response_is_paused(static function () use ($source_path, $new_contents): void {
+            file_put_contents($source_path, $new_contents);
+        });
+
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        $this->assertSame('complete', $result['json']['status'] ?? null);
+        $this->assertSame($new_contents, file_get_contents($this->target . '/shrunk-during-response.bin'));
+        $this->assertNotSame($old_contents, file_get_contents($this->target . '/shrunk-during-response.bin'));
+        $this->assertGreaterThanOrEqual(1, $this->endpoint_count('staged_session_status'));
+    }
+
+    public function testSourceDeletionDuringLostResponseDiscardsTheStalePrivateSession(): void {
+        $source_path = $this->source . '/deleted-during-response.bin';
+        file_put_contents($source_path, str_repeat('delete-me-', 100));
+
+        $result = $this->run_push_while_first_upload_response_is_paused(static function () use ($source_path): void {
+            unlink($source_path);
+        });
+
+        $this->assertNotSame(0, $result['exit_code']);
+        $this->assertStringContainsString('Source changed structurally during push', $result['stderr']);
+        $this->assertFileDoesNotExist($this->target . '/deleted-during-response.bin');
+        $this->assertSame([], glob($this->state . '/push/*/session.json') ?: []);
+
+        $resumed = $this->run_cli('push', ['--source-root=' . $this->source]);
+        $this->assertSame(0, $resumed['exit_code'], $resumed['stderr']);
+        $this->assertSame('complete', $resumed['json']['status'] ?? null);
+        $this->assertFileDoesNotExist($this->target . '/deleted-during-response.bin');
     }
 
     public function testAbortKeepsLocalStateUntilTheTargetConfirmsDiscard(): void {
@@ -1059,6 +1295,57 @@ final class MultipartPushTest extends TestCase {
         $this->assertStringContainsString('same-filesystem rename', $result['stderr']);
         $this->assertFileDoesNotExist($this->target . '/must-not-arrive.txt');
         $this->assertSame(1, $this->endpoint_count('staged_session_create'));
+    }
+
+    /** @return array{exit_code:int,stdout:string,stderr:string,json:array<string,mixed>} */
+    private function run_push_while_first_upload_response_is_paused(callable $mutate_source): array {
+        $this->pause_after_upload_marker = $this->case_root . '/upload-accepted';
+        $this->resume_upload_response_marker = $this->case_root . '/resume-upload-response';
+        $this->configure_server();
+        $entry = realpath(__DIR__ . '/../../importer/import.php');
+        $this->assertNotFalse($entry);
+        $process = proc_open([
+            PHP_BINARY,
+            $entry,
+            'push',
+            self::$base_url,
+            '--state-dir=' . $this->state,
+            '--secret=' . self::SECRET,
+            '--allow-http',
+            '--source-root=' . $this->source,
+        ], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $this->case_root);
+        $this->assertIsResource($process);
+
+        for ($attempt = 0; $attempt < 100 && !is_file($this->pause_after_upload_marker); ++$attempt) {
+            usleep(100000);
+        }
+        $this->assertFileExists($this->pause_after_upload_marker, 'The target never accepted the old source version.');
+        $mutation_error = null;
+        try {
+            $mutate_source();
+        } catch (\Throwable $error) {
+            $mutation_error = $error;
+        }
+        file_put_contents($this->resume_upload_response_marker, "resume\n");
+
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exit_code = proc_close($process);
+        if ($mutation_error !== null) {
+            throw $mutation_error;
+        }
+        $lines = array_values(array_filter(preg_split('/\R/', trim( (string) $stdout)) ?: [], static function (string $line): bool {
+            return $line !== '';
+        }));
+        $decoded = $lines === [] ? null : json_decode( (string) end($lines), true);
+        return [
+            'exit_code' => $exit_code,
+            'stdout' => (string) $stdout,
+            'stderr' => (string) $stderr,
+            'json' => is_array($decoded) ? $decoded : [],
+        ];
     }
 
     /** @param string[] $extra_options @return array{exit_code:int,stdout:string,stderr:string,json:array<string,mixed>} */
@@ -1141,7 +1428,7 @@ final class MultipartPushTest extends TestCase {
     private function configure_server(): void {
         file_put_contents(self::$config_path, json_encode([
             'staging_dir' => $this->storage,
-            'secret' => self::SECRET,
+            'secret' => $this->server_secret,
             'apply_target_root' => $this->target,
             // Make the real CLI split the large file into several MIME parts.
             'max_frame_bytes' => $this->max_frame_bytes,
@@ -1159,6 +1446,11 @@ final class MultipartPushTest extends TestCase {
             'reject_upload_marker' => $this->reject_upload_marker,
             'drop_discard_response_marker' => $this->drop_discard_response_marker,
             'make_checkpoint_unremovable_after_discard' => $this->make_checkpoint_unremovable_after_discard,
+            'busy_response_limits' => $this->busy_response_limits,
+            'busy_response_counter_dir' => $this->case_root,
+            'control_fault' => $this->control_fault,
+            'redirect_url' => self::$base_url,
+            'too_large_upload_responses' => $this->too_large_upload_responses,
             'apply_protected_paths' => $this->apply_protected_paths,
             'local_state_dir' => $this->state,
         ]));
@@ -1293,6 +1585,49 @@ if ((\$_GET['endpoint'] ?? null) === 'staged_session_status'
     file_put_contents(\$config['negative_delete_status_marker'], "returned negative delete_bytes\\n");
     echo \$response_body;
     return true;
+}
+\$endpoint = \$_GET['endpoint'] ?? null;
+\$busy_response_limits = \$config['busy_response_limits'] ?? [];
+if (is_string(\$endpoint) && is_array(\$busy_response_limits) && isset(\$busy_response_limits[\$endpoint])) {
+    \$counter_path = (string) \$config['busy_response_counter_dir'] . '/busy-' . \$endpoint . '.count';
+    \$attempt = (int) @file_get_contents(\$counter_path) + 1;
+    file_put_contents(\$counter_path, (string) \$attempt);
+    if (\$attempt <= (int) \$busy_response_limits[\$endpoint]) {
+        http_response_code(423);
+        header('Content-Type: application/json');
+        echo json_encode([
+            'status' => 'error',
+            'reason' => 'busy',
+            'detail' => 'The test endpoint is busy.',
+            'send_next_request' => false,
+        ]);
+        return true;
+    }
+}
+if (\$endpoint === 'staged_session_create' && (\$config['control_fault'] ?? null) === 'redirect') {
+    http_response_code(307);
+    header('Location: ' . (string) \$config['redirect_url']);
+    return true;
+}
+if (\$endpoint === 'staged_session_create' && (\$config['control_fault'] ?? null) === 'malformed') {
+    header('Content-Type: text/plain');
+    echo 'not a JSON response';
+    return true;
+}
+if (\$endpoint === 'staged_session_upload' && (int) (\$config['too_large_upload_responses'] ?? 0) > 0) {
+    \$counter_path = (string) \$config['busy_response_counter_dir'] . '/forced-413.count';
+    \$attempt = (int) @file_get_contents(\$counter_path) + 1;
+    file_put_contents(\$counter_path, (string) \$attempt);
+    if (\$attempt <= (int) \$config['too_large_upload_responses']) {
+        http_response_code(413);
+        header('Content-Type: application/json');
+        echo json_encode([
+            'status' => 'error',
+            'reason' => 'request_too_large',
+            'post_max_bytes' => 4 * 1024 * 1024,
+        ]);
+        return true;
+    }
 }
 if ((\$_GET['endpoint'] ?? null) === 'staged_session_upload'
     && is_string(\$config['reject_upload_marker'] ?? null)

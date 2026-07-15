@@ -78,13 +78,32 @@ final class StagedApplySessionTest extends TestCase {
         try {
             $session->next_change();
             $this->fail('An offset gap was accepted.');
-        } catch (InvalidArgumentException $exception) {
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('offset_gap', $exception->get_error_code());
             $this->assertStringContainsString('Start at offset 0', $exception->getMessage());
         } finally {
             $session->finish_upload();
             fclose($input);
         }
         $this->assertFileDoesNotExist($session->get_session_directory() . '/work/files/must-not-be-read.bin');
+    }
+
+    public function testDeleteOffsetGapHasTheSameRecoverableProtocolReason(): void {
+        $session = $this->session('23232323232323232323232323232323');
+
+        try {
+            $this->stage($session, [[
+                'headers' => [
+                    'X-Chunk-Type' => 'delete-list',
+                    'X-Delete-Offset' => '1',
+                ],
+                'body' => "gone\0",
+            ]]);
+            $this->fail('A delete offset gap was accepted.');
+        } catch (Site_Export_Staged_Apply_Exception $exception) {
+            $this->assertSame('offset_gap', $exception->get_error_code());
+            $this->assertStringContainsString('target has stored 0 bytes', $exception->getMessage());
+        }
     }
 
     public function testProtectedAndInvalidPathsNeverReachStaging(): void {

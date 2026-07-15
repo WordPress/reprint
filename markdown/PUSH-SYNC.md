@@ -58,6 +58,15 @@ reports complete, by atomically publishing the snapshot used to make the plan.
 A source change after a snapshot was made therefore remains a delta for the
 next push rather than being silently called deployed.
 
+Upload and control responses pass through the same reason classifier. `busy`
+and `offset_gap` are the only recoverable protocol rejections: the sender waits
+with bounded exponential backoff, reconciles upload cursors from status, and
+tries a continuously rejected operation at most five times. Persistent
+contention exits as a failure while preserving the last confirmed phase for a
+later `push` process.
+Authentication failures, redirects, malformed responses, live-tree conflicts,
+and cross-device rejections remain terminal. There is no retry option.
+
 The token is deliberately small rather than a content hash. A same-size edit
 within the filesystem ctime resolution can escape both it and the snapshot
 diff, which uses the same size and ctime signals.
@@ -126,7 +135,7 @@ workspace.
 Classified target failures use the same descriptive string inside the server
 and in the authenticated JSON `reason`; PHP's integer exception code is not a
 second vocabulary. `apply_not_configured` maps to 503, `busy` to 423,
-`session_not_found` to 404, `commit_required`, `live_tree_changed`,
+`session_not_found` to 404, `commit_required`, `offset_gap`, `live_tree_changed`,
 `cross_device_filesystem`, and `invalid_session_state` to 409, and
 `retryable_io_error` to 500. A runtime failure without one of those deliberate
 classifications remains the generic 409 `session_rejected` response instead
@@ -185,7 +194,8 @@ The target validates paths one at a time and stores the raw NUL-delimited byte
 stream in `work/deletes`. Every part carries the sender's confirmed byte
 offset. An offset before the stored end is an exact replay: matching bytes are
 accepted and a matching suffix may continue the stream, while different bytes
-are rejected. An offset beyond the actual file size is a gap and is rejected.
+are rejected. An offset beyond the actual file size is rejected as
+`offset_gap`; the sender resumes from the `delete_bytes` returned by status.
 Status reports that actual size as `delete_bytes`; it never trusts a claimed
 cursor. A path may span parts when the target's part ceiling is smaller than
 its record, and the sender packs successive bounded parts into each request.
@@ -288,7 +298,8 @@ truth:
 - a missing file accepts offset zero;
 - an offset matching its actual regular-file size appends;
 - offset zero discards a partial or completed staged version and restarts;
-- every other offset is rejected.
+- every other offset is rejected as `offset_gap`, so the sender asks status and
+  resumes from the target's actual staged size.
 
 If a crash leaves a full-sized file in `work/partial` before its promotion
 rename, status reports that actual size and the sender supplies an empty final
@@ -419,4 +430,6 @@ request-size learning, and the local baseline. Raw TCP tests prove that a part
 reaches the network before send_part() returns. Docker end-to-end tests use a
 real WordPress target and HMAC requests, kill the push PHP process during commit,
 exercise symlinks and empty directories, and mount separate filesystems to
-verify cross-device refusal before an unsafe mutation.
+verify cross-device refusal before an unsafe mutation. Separate-process flock
+and discard-tombstone tests hold creation, upload, commit, and cleanup busy long
+enough to prove both automatic recovery and bounded failure plus restart.
