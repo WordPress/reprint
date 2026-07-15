@@ -25,14 +25,14 @@
         </testsuite>
         <testsuite name="Export Utility Tests">
             <file>BuildPdoDsnTest.php</file>
-            <file>DirectDeleteThenInstallTest.php</file>
+            <file>PushCommitTest.php</file>
             <file>ExportHttpServerTest.php</file>
             <file>FileIndexDedupTest.php</file>
             <file>FileIndexSkipDefaultsTest.php</file>
             <file>HmacServerTest.php</file>
             <file>MultipartProcessorTest.php</file>
             <file>SiteExportSecretTest.php</file>
-            <file>StagedApplySessionTest.php</file>
+            <file>PushSessionTest.php</file>
         </testsuite>
         <testsuite name="Query Stream Tests">
             <file>NaiveQueryStreamTest.php</file>

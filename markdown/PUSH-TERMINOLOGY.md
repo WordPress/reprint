@@ -1,0 +1,88 @@
+# Push terminology
+
+This is the vocabulary contract for every push surface. Read it before
+changing push code, tests, documentation, plans, review replies, commit
+messages, or pull-request descriptions.
+
+## Core nouns
+
+- A **push session** receives one resumable set of work for one document root.
+- The **reprint directory** is the private directory supplied to the push session.
+- The **document root** is the directory changed by commit.
+- **Excluded paths** are document-root-relative paths that a push must not
+  change.
+- **Work files**, **work partials**, and **work deletes** are the only durable
+  queues owned by a push session.
+- **Commit** consumes work deletes and work files. It never names another
+  lifecycle operation.
+- **Remove** deletes a push directory in bounded calls.
+
+## PHP names
+
+Use these names verbatim:
+
+| Surface | Name |
+| --- | --- |
+| Exception class and file | `Site_Export_Push_Exception`, `class-push-exception.php` |
+| Session class and file | `Site_Export_Push_Session`, `class-push-session.php` |
+| reprint directory | `$reprint_directory` |
+| Document root | `$docroot` |
+| Excluded paths | `$excluded_paths` |
+| Push session identity | `$push_session_id` |
+| Push directory | `$push_directory` |
+| Push metadata | `$push_metadata` |
+| Commit checkpoint | `$commit_state` |
+| Work-delete offset | `$work_deletes_byte_offset` |
+| Current delete path | `$current_delete_path` |
+| Current work-files descendant | `$current_work_files_descendant` |
+| Commit cursor | `$commit_cursor` |
+
+The public operations are `create()`, `open()`, `remove()`, and `commit()`.
+Use `get_push_session_id()` and `get_push_directory()` for their accessors.
+
+## Durable layout and JSON
+
+Every push directory is located at:
+
+```text
+<reprint-directory>/.reprint/push/<push-session-id>/
+```
+
+It contains `push.json`, `push.lock`, `commit.json`, and `work/`. The work
+directory contains `files/`, `partial/`, `deletes`, and the private
+maintenance copy. The shared `.reprint/push/` directory contains
+`push-create.lock`, `commit-state`, `commit-state.lock`, and bounded removal
+tombstones named `.removing-<push-session-id>/`.
+
+`push.json` is version 4. Its identity and policy keys are
+`push_session_id`, `docroot_b64`, `excluded_paths_b64`,
+`work_deletes_complete`, and `commit_started`.
+
+`commit.json` is version 3. Its phases are `deleting_files`,
+`installing_files`, and `complete`. Its cursor keys are
+`work_deletes_byte_offset`, `current_delete_path`,
+`current_work_files_descendant`, and `commit_cursor`. Path values remain
+base64 text even where a key does not include a suffix. Its non-recoverable
+failure key is `non_recoverable_commit_failure`.
+
+Prior versions are rejected. There are no compatibility aliases or migration
+paths.
+
+## Protocol names
+
+The work-upload endpoint is `push_upload` and its push-session parameter is
+`push_session_id`. Endpoint names and endpoint prefixes begin with `push_`.
+JSON responses use `push_session_id`, `receiving_work`, and
+`work_deletes_bytes`. The stable classified failures are
+`lock_acquisition_failure`, `offset_gap`, `push_not_found`, `filesystem_error`,
+`commit_required`, `unexpected_docroot_mutation`, `corrupted_push_state`, and
+`same_device`.
+
+The document-root `.maintenance` file identifies its owner with the push
+session ID. `commit.json` stores no separate maintenance value.
+
+## Enforcement
+
+Run `composer lint:push-terminology` before staging a push change. The checker
+reads its rejected-spelling list from an audit fixture; that fixture is the
+only approved location for those spellings.

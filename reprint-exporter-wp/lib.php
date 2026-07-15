@@ -250,7 +250,7 @@ function _site_export_handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    // staged_upload authenticates inside its handler: the default handler
+    // push_upload authenticates inside its handler: the default handler
     // here buffers the whole request body to hash it, which a chunk upload
     // cannot afford. The upload route verifies the signed headers first and
     // hashes the body as it streams. A custom authenticate callable still

@@ -2739,7 +2739,7 @@ function endpoint_file_index(
     // scratch files unless the client explicitly opts in. See
     // path_is_default_skipped() for the full deny-list and rationale.
     $include_caches = !empty($config["include_caches"]);
-    // Reprint's own storage (the push staging area and apply bookkeeping)
+    // Reprint's own storage (the push work area and commit bookkeeping)
     // must never appear in an index: it can sit inside the document root on
     // hosts that allow writing nowhere else, and indexing it would sync or
     // delete reprint's own records mid-transfer. storage_path is the

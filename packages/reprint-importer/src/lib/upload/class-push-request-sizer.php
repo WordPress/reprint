@@ -1,6 +1,6 @@
 <?php
 /**
- * Adaptive sizing for staged push request bodies.
+ * Adaptive sizing for push request bodies.
  *
  * Push moves bytes from an outbound-only local site to a remote WordPress
  * site through PHP request bodies. The push stream keeps many files inside
@@ -178,7 +178,7 @@ class PushRequestSizer
      * structured request_too_large response.
      *
      * The failed size caps the session ceiling so growth cannot retry it.
-     * When the server reported its actual limit — the staged_push endpoint's
+     * When the server reported its actual limit — the push_upload endpoint's
      * 413 carries max_frame_bytes, which it derives from its request-size
      * limits — the ceiling drops below that limit directly instead of
      * probing downward.
