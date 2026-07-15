@@ -22,6 +22,7 @@
             "src/class-hmac-client.php",
             "src/class-hmac-server.php",
             "src/class-http-server.php",
+            "src/class-multipart-processor.php",
             "src/class-sqlite-driver-pdo.php",
             "src/class-wpdb-driver-pdo.php"
         ],
