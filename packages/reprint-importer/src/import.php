@@ -56,24 +56,8 @@ require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 // Typed state objects for the persisted import state.
 require_once __DIR__ . '/lib/state/class-import-state.php';
 
-// Shared staged push stream framing used by the sender and the target endpoint.
-if (!class_exists('Site_Export_Staged_Push_Stream_Protocol')) {
-    foreach ([
-        __DIR__ . '/../../reprint-exporter/src/class-staged-push-stream-protocol.php',
-        __DIR__ . '/../../../vendor/wp-php-toolkit/reprint-exporter/src/class-staged-push-stream-protocol.php',
-    ] as $staged_push_stream_protocol_path) {
-        if (file_exists($staged_push_stream_protocol_path)) {
-            require_once $staged_push_stream_protocol_path;
-            break;
-        }
-    }
-}
-
 // Adaptive sizing for staged push request bodies
 require_once __DIR__ . '/lib/upload/class-push-request-sizer.php';
-
-// One-request push streams into the target's staged artifact store
-require_once __DIR__ . '/lib/upload/class-staged-push-stream-client.php';
 
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
