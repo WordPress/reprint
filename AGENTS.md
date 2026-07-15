@@ -120,6 +120,34 @@ is about how to work.
   stalls every request by the full timeout; libcurl reuses connections
   across requests only when the curl_multi handle outlives them.
 
+## Failure provenance — do not invent bugs
+
+- Before adding defensive production code, recovery logic, or a PR
+  justification, prove that the failure is reachable from a valid production
+  state. Write the causal sequence. Every transition must name its actor and
+  evidence: the production code path which performs it, a documented concurrent
+  or external actor, or the exact syscall/API failure allowed by the system
+  contract.
+- A test helper, operator, or hypothetical process which unlinks, rewrites,
+  chmods, replaces, or symlinks private state is not a production actor. Unless
+  the threat model explicitly includes that actor, classify the test as
+  deliberate state corruption. Do not call it an interruption, race, or
+  reproduction.
+- Fault injection must match the claimed failure at the same abstraction layer.
+  If the claim is that `unlink()` fails, make `unlink()` fail and exercise that
+  error path. Replacing the file with a directory tests type corruption, not an
+  `unlink()` failure.
+- A test failing against the pre-change implementation proves only regression
+  coverage. It does not prove production reachability. Require both a
+  production-reachable causal sequence and a pre-change test failure at the
+  assertion representing the claimed defect.
+- If no production actor exists for any transition, stop. Do not add production
+  logic or invent a hypothetical restore, cleanup, attacker, or helper process.
+  Ask whether arbitrary corruption or tampering is an explicit requirement.
+- Tests which alter private state out of band must say `corrupt` or `tamper` in
+  their names. They may verify fail-closed validation, but they do not justify
+  new persistent flags, schema versions, or recovery machinery.
+
 ## Abstractions
 
 - Inline single-use helpers; no wrapper classes that only rename a concept.
