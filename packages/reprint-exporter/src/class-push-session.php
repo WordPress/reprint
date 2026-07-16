@@ -748,16 +748,16 @@ final class Site_Export_Push_Session {
     /**
      * Reads and validates the durable description of the unfinished work value.
      *
-     * A push session has no path-shaped partial tree. Instead, one JSON object
-     * identifies the work value which is being received or published, while the
-     * fixed data file holds unfinished file bytes. This method reads those two
-     * records together so callers never treat bytes without metadata, or metadata
-     * with an incompatible data file, as resumable work.
+     * A push receives or publishes one work value at a time. Its identity and
+     * phase are stored in `work/inflight.json`; unfinished file bytes are stored
+     * in `work/inflight.data`. This method reads both records before upload,
+     * status, or commit decides what work is safe to perform.
      *
-     * The returned object is deliberately still an array at this boundary: JSON
-     * is untrusted until every key, discriminant, path, phase, and size relation
-     * has been checked. A missing metadata file means there is no unfinished
-     * value only when the fixed data file is absent as well.
+     * The JSON record is untrusted durable state. This method validates its
+     * exact keys, path, type, phase, and file-size relation before returning it.
+     * Missing metadata means that no work is in flight only when the data file
+     * is absent as well. A data file without metadata is corrupt state, not a
+     * resume cursor.
      *
      * @return array<string,mixed>|null The validated unfinished value, or null
      *                                  when the session has no unfinished work.
