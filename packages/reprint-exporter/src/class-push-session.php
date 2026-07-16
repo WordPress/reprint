@@ -335,8 +335,8 @@ final class Site_Export_Push_Session {
      *
      * Returning true means the complete part has been accepted into the work
      * directory and get_current_change() describes the resulting work state.
-     * A file part may leave that file partial, so true does not mean the logical
-     * file or the complete multipart request is finished.
+     * A file part may leave its value in the fixed in-flight slot, so true does
+     * not mean the logical file or the complete multipart request is finished.
      *
      * Returning false means the closing multipart boundary was consumed. EOF
      * in a header, body, or boundary throws instead, so truncation is never
@@ -746,9 +746,21 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Reads the durable description of the one unfinished work value.
+     * Reads and validates the durable description of the unfinished work value.
      *
-     * @return array<string,mixed>|null
+     * A push session has no path-shaped partial tree. Instead, one JSON object
+     * identifies the work value which is being received or published, while the
+     * fixed data file holds unfinished file bytes. This method reads those two
+     * records together so callers never treat bytes without metadata, or metadata
+     * with an incompatible data file, as resumable work.
+     *
+     * The returned object is deliberately still an array at this boundary: JSON
+     * is untrusted until every key, discriminant, path, phase, and size relation
+     * has been checked. A missing metadata file means there is no unfinished
+     * value only when the fixed data file is absent as well.
+     *
+     * @return array<string,mixed>|null The validated unfinished value, or null
+     *                                  when the session has no unfinished work.
      */
     private function read_inflight(): ?array {
         $inflight = $this->read_json($this->work_inflight_path);
@@ -788,7 +800,17 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Finishes a completed publication before another operation observes it.
+     * Finishes a publication which crossed its durable publication boundary.
+     *
+     * Publishing metadata is written before the completed work value changes.
+     * That ordering lets a later upload, status request, or commit distinguish a
+     * crash before publication from a crash after the data-file rename. When the
+     * fixed data file remains it is authoritative and is renamed into work/files.
+     * When it has already been consumed, the completed value is checked as the
+     * durable evidence of publication. Only then is the in-flight metadata
+     * removed.
+     *
+     * @return void
      */
     private function finish_published_inflight(): void {
         $inflight = $this->read_inflight();
