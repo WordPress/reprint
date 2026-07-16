@@ -145,4 +145,47 @@ final class ExportHttpServerTest extends TestCase
 
         $this->assertSame([['endpoint' => 'preflight']], $calls);
     }
+
+    public function testPushUploadNeverReadsAJsonRequestBody(): void
+    {
+        $body_reads = 0;
+        $calls = [];
+        $server = new Site_Export_HTTP_Server([
+            'body_reader' => static function () use (&$body_reads): string {
+                ++$body_reads;
+                return '{"body_parameter":"must-not-be-read"}';
+            },
+            'handlers' => [
+                'push_upload' => static function (array $config) use (&$calls): void {
+                    $calls[] = $config;
+                },
+            ],
+        ]);
+
+        $server->handle_request([
+            'get' => [
+                'endpoint' => 'push_upload',
+                'push_session_id' => str_repeat('a', 32),
+            ],
+            'post' => [],
+            'server' => [
+                'REQUEST_METHOD' => 'POST',
+                'CONTENT_TYPE' => 'application/json',
+            ],
+        ]);
+
+        $this->assertSame(0, $body_reads);
+        $this->assertSame([[
+            'endpoint' => 'push_upload',
+            'push_session_id' => str_repeat('a', 32),
+        ]], $calls);
+    }
+
+    public function testInvalidPushOptionsUseTheConfigurationException(): void
+    {
+        $this->expectException(Site_Export_Push_Configuration_Exception::class);
+        $this->expectExceptionMessage('The push HTTP server option must be an array.');
+
+        new Site_Export_HTTP_Server(['push' => null]);
+    }
 }

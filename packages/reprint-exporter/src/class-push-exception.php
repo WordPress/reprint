@@ -10,8 +10,8 @@
  * native code from being presented as a recoverable protocol condition.
  *
  * Only failures which have a deliberate push or commit classification use this
- * exception. An ordinary RuntimeException remains unclassified and is exposed
- * by the endpoint as `session_rejected` rather than leaking an accidental code.
+ * exception. An ordinary RuntimeException remains unclassified and follows the
+ * endpoint's `invalid_request` handling rather than leaking an accidental code.
  */
 final class Site_Export_Push_Exception extends RuntimeException {
 

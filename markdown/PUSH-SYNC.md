@@ -109,21 +109,55 @@ still being prepared or received, so it traverses completed work files only.
 more cleanup remains and must be retried. A push with a commit in progress is
 not removable; its next commit request resumes the durable cursor instead.
 
+## Push HTTP operations
+
+The production exporter router exposes five authenticated operations. Control
+and upload requests use the envelope signature described above, so
+`push_upload` passes `php://input` directly to the multipart processor instead
+of reading the complete request for authentication.
+
+- `POST push_create` creates or reopens the caller's 32-character lowercase
+  hexadecimal `push_session_id`. It returns
+  `{status:"created",push_session_id:string,max_part_bytes:int,post_max_bytes:int|null}`.
+  The two limits describe different dimensions: one part and the complete
+  decoded request body. The endpoint enforces the request-body limit while
+  reading bounded fragments, including chunked requests without
+  `Content-Length`.
+- `POST push_upload` accepts `multipart/mixed`. It returns
+  `{status:"accepted",push_session_id:string,changes_accepted:int,last_change:change|null}`,
+  where `change` is exactly the `get_current_change()` file, directory,
+  symlink, or delete-list union. Only the latest change is retained for the
+  response; request memory does not grow with the number of parts.
+- `GET push_status` accepts an optional base64 `path_b64`. It returns
+  `status:"accepted"` together with the exact `get_status()` object: push
+  session phase, `work_deletes_bytes`, `work_deletes_complete`, and the
+  requested path's missing, partial, or complete receiver-confirmed state.
+- `POST push_commit` performs a server-bounded call to `commit()`. It returns
+  `{status:"accepted",push_session_id:string,phase:"deleting_files"|"installing_files"|"complete",send_next_request:bool,entries_processed:int}`.
+  The sender repeats it while `send_next_request` is true.
+- `POST push_remove` performs one bounded remove step. It returns
+  `{status:"accepted",push_session_id:string,removed:bool}`. The sender repeats
+  it while `removed` is false.
+
+The WordPress plugin stores push work in a document-root-specific private
+directory beside the resolved `ABSPATH` document root unless its embedder
+supplies `reprint_directory`.
+Configured reprint directories must remain outside the document root; the HTTP
+endpoints reject an inside path because they do not yet apply the indexing and
+web-access protections described below. The plugin always excludes its own
+directory from push. An embedding router must likewise choose its reprint
+directory and excluded paths as server configuration; request parameters cannot
+select either one.
+
 ## Where reprint stores its own data on the remote
 
 The remote is configured with one storage path for everything reprint keeps:
-the private push directory and any commit bookkeeping. Preferably outside the document
-root. When the host only allows writing inside the document root:
-
-- the file indexer never lists anything under it. `storage_path` is the
-  server's own setting, so every index request knows it — including a
-   pulling peer's, which never scans this site's push work,
-- the deletion step refuses to touch anything under it,
-- an `.htaccess` (deny-all) and an empty `index.php` are written into
-  it. That is all that can be done from inside the directory: Apache
-  honors the deny rules, nginx ignores both files and loses nothing by
-  their presence. Do not keep this directory inside the document root
-  unless the host offers nowhere else to write.
+the private push directory and any commit bookkeeping. The current push HTTP
+endpoints require this path to be outside the document root. They do not yet
+exclude an inside path from every file index or write web-server access guards,
+so endpoint construction rejects that configuration instead of exposing private
+push work. A host which cannot write outside the document root is not supported
+until those protections exist.
 
 ## Commit
 

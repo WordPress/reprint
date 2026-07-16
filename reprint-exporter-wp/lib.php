@@ -38,6 +38,40 @@ function _site_export_error(int $code, string $message): void {
 }
 
 /**
+ * Sends one classified push-protocol failure and terminates the request.
+ *
+ * Failures raised before an endpoint method can format its own response use
+ * the push response discriminator here instead of the legacy export error
+ * object.
+ *
+ * Emits `{status:"rejected",reason:string,detail:string}`.
+ *
+ * @param int $http_code HTTP status code.
+ * @param string $reason Machine-readable push failure reason.
+ * @param string $detail Human-readable violated condition.
+ */
+function _site_export_push_error(int $http_code, string $reason, string $detail): void {
+    http_response_code($http_code);
+    header('Content-Type: application/json');
+    echo json_encode([
+        'status' => 'rejected',
+        'reason' => $reason,
+        'detail' => $detail,
+    ]);
+    exit;
+}
+
+/**
+ * Returns whether an endpoint uses the push authentication and error contract.
+ *
+ * @param string $endpoint Exact endpoint query value.
+ * @return bool Whether this is a registered push endpoint.
+ */
+function _site_export_is_push_endpoint(string $endpoint): bool {
+    return in_array($endpoint, ['push_create', 'push_upload', 'push_status', 'push_commit', 'push_remove'], true);
+}
+
+/**
  * Resolve and load the exporter package runtime.
  *
  * Supports both plugin release bundles (with reprint-exporter-wp/vendor/) and
@@ -186,9 +220,31 @@ function _site_export_default_authenticate(): void {
  * and the database layer (including the SQLite db.php drop-in when present)
  * are all available.
  *
- * @param array $options Optional overrides:
- *   - 'authenticate' (callable): Called to authenticate the request.
- *        Defaults to _site_export_default_authenticate().
+ * @param array $options {
+ *     Optional endpoint configuration overrides.
+ *
+ *     @type callable $authenticate Optional. Authenticates the request.
+ *                                  Defaults to _site_export_default_authenticate().
+ *     @type string $reprint_directory Optional. Private push storage path
+ *                                     outside the resolved ABSPATH document
+ *                                     root. Defaults to a document-root-specific sibling.
+ *     @type string[] $excluded_paths Optional. Document-root-relative paths
+ *                                    push must preserve. The exporter plugin
+ *                                    directory is always included when it is
+ *                                    below ABSPATH.
+ *     @type int $maximum_part_bytes Optional. Maximum Content-Length for one
+ *                                   push upload part. Defaults to 4 MiB.
+ *     @type int $maximum_commit_entries Optional. Maximum bounded entries one
+ *                                       push_commit request processes. Defaults
+ *                                       to 256.
+ * }
+ * @phpstan-param array{
+ *     authenticate?:callable,
+ *     reprint_directory?:string,
+ *     excluded_paths?:string[],
+ *     maximum_part_bytes?:int,
+ *     maximum_commit_entries?:int
+ * } $options
  */
 function _site_export_handle_api_request(array $options = []): void {
     // Revert WordPress error display settings (wp_debug_mode may
@@ -250,17 +306,46 @@ function _site_export_handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    // push_upload authenticates inside its handler: the default handler
-    // here buffers the whole request body to hash it, which a chunk upload
-    // cannot afford. The upload route verifies the signed headers first and
-    // hashes the body as it streams. A custom authenticate callable still
-    // runs for every endpoint — its embedder owns that tradeoff.
+    // Push requests use envelope authentication: the signature covers the
+    // method and exact request target while TLS protects the streamed body.
+    // The legacy verifier hashes php://input and remains only for the existing
+    // pull endpoints with bounded command bodies. A custom authenticate
+    // callable still runs for every endpoint; its embedder owns that policy.
     // filter_input, not WP sanitizers: lib.php also runs without WordPress
     // bootstrapped (hosts that route the API from their own index.php).
     $endpoint = (string) filter_input(INPUT_GET, 'endpoint');
     $authenticate = $options['authenticate'] ?? null;
     if ($authenticate !== null) {
         $authenticate();
+    } elseif (_site_export_is_push_endpoint($endpoint)) {
+        if (_site_export_has_secret_file()) {
+            $secret = _site_export_get_file_secret();
+            if (empty($secret)) {
+                _site_export_push_error(503, 'not_configured', 'Invalid secret.php configuration. Remove it or replace it with a valid shared secret.');
+            }
+        } else {
+            $secret = _site_export_get_option_secret();
+        }
+        if (empty($secret) || !is_string($secret)) {
+            _site_export_push_error(503, 'not_configured', 'Configure the shared secret in WordPress admin under Tools > Reprint Exporter.');
+        }
+        if (!class_exists('Site_Export_HMAC_Server')) {
+            _site_export_load_exporter_runtime();
+        }
+        if (!class_exists('Site_Export_HMAC_Server')) {
+            _site_export_push_error(500, 'filesystem_error', 'Reprint Exporter runtime is incomplete. Run composer install in reprint-exporter-wp or rebuild the release package.');
+        }
+        // These exact request-line values are covered by the HMAC; WordPress
+        // slashing or sanitization would verify a different target.
+        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+        $request_method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
+        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+        $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
+        $hmac_server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
+        $auth_error = $hmac_server->verify_envelope($_SERVER, $request_method, $request_target);
+        if ($auth_error !== null) {
+            _site_export_push_error(403, 'auth_failed', $auth_error);
+        }
     } else {
         _site_export_default_authenticate();
     }
@@ -277,8 +362,56 @@ function _site_export_handle_api_request(array $options = []): void {
 
     // -- Dispatch --
     try {
-        Site_Export_HTTP_Server::serve(['default_directory' => ABSPATH]);
+        $server_options = ['default_directory' => ABSPATH];
+        if (_site_export_is_push_endpoint($endpoint)) {
+            // Resolve ABSPATH before deriving its sibling so a symlinked
+            // document root cannot place private push storage inside itself.
+            $canonical_docroot = realpath(ABSPATH);
+            $docroot = rtrim($canonical_docroot === false ? ABSPATH : $canonical_docroot, '/\\');
+            $reprint_directory = $options['reprint_directory'] ?? (
+                dirname($docroot) . '/.reprint-' . substr(hash('sha256', $docroot), 0, 12)
+            );
+            $excluded_paths = $options['excluded_paths'] ?? [];
+            if (!is_array($excluded_paths)) {
+                throw new Site_Export_Push_Configuration_Exception('excluded_paths must be an array.');
+            }
+            $canonical_plugin_directory = realpath(SITE_EXPORT_PLUGIN_DIR);
+            $plugin_directory = rtrim($canonical_plugin_directory === false ? SITE_EXPORT_PLUGIN_DIR : $canonical_plugin_directory, '/\\');
+            $docroot_prefix = $docroot . DIRECTORY_SEPARATOR;
+            if (strpos($plugin_directory . DIRECTORY_SEPARATOR, $docroot_prefix) === 0) {
+                $relative_plugin_directory = str_replace('\\', '/', substr($plugin_directory, strlen($docroot_prefix)));
+                if ($relative_plugin_directory !== '') {
+                    $excluded_paths[] = $relative_plugin_directory;
+                }
+            }
+            $push_options = [
+                'reprint_directory' => $reprint_directory,
+                'docroot' => $docroot,
+                'excluded_paths' => $excluded_paths,
+            ];
+            if (array_key_exists('maximum_part_bytes', $options)) {
+                $push_options['maximum_part_bytes'] = $options['maximum_part_bytes'];
+            }
+            if (array_key_exists('maximum_commit_entries', $options)) {
+                $push_options['maximum_commit_entries'] = $options['maximum_commit_entries'];
+            }
+            $server_options['push'] = $push_options;
+        }
+        Site_Export_HTTP_Server::serve($server_options);
     } catch (Exception $e) {
+        if (_site_export_is_push_endpoint($endpoint)) {
+            if ($e instanceof Site_Export_Push_Configuration_Exception) {
+                _site_export_push_error(503, 'not_configured', $e->getMessage());
+            }
+            if ($e instanceof InvalidArgumentException) {
+                _site_export_push_error(400, 'invalid_request', $e->getMessage());
+            }
+            _site_export_push_error(
+                500,
+                'filesystem_error',
+                'The push endpoint failed while processing the request.'
+            );
+        }
         if (!headers_sent()) {
             http_response_code(400);
             header('Content-Type: application/json');

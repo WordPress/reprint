@@ -184,6 +184,32 @@ function normalize_path(string $path): string
 }
 
 /**
+ * Validates, sorts, and deduplicates document-root-relative excluded paths.
+ *
+ * @param string[] $excluded_paths Paths which a push must not change.
+ * @phpstan-param array<mixed> $excluded_paths
+ * @return list<string> Safe excluded paths in bytewise order.
+ */
+function normalize_excluded_paths(array $excluded_paths): array
+{
+    $normalized_excluded_paths = [];
+    foreach ($excluded_paths as $path) {
+        if (!is_string($path) || $path === '' || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
+            throw new InvalidArgumentException('Each excluded path must be a non-empty safe relative path.');
+        }
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Base64 keeps arbitrary path bytes safe in exception text; nothing is rendered here.
+                throw new InvalidArgumentException('Excluded path is unsafe: ' . base64_encode($path) . '.');
+            }
+        }
+        $normalized_excluded_paths[] = $path;
+    }
+    sort($normalized_excluded_paths, SORT_STRING);
+    return array_values(array_unique($normalized_excluded_paths));
+}
+
+/**
  * Returns true when $path is equal to $root or strictly under it.
  */
 function path_is_within_root(string $path, string $root): bool

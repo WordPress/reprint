@@ -2,6 +2,8 @@
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Push errors become authenticated API JSON, never HTML output.
 
+use function WordPress\Reprint\Exporter\normalize_excluded_paths;
+
 if (!class_exists('Site_Export_Multipart_Processor', false)) {
     require_once __DIR__ . '/class-multipart-processor.php';
 }
@@ -57,6 +59,7 @@ final class Site_Export_Push_Session {
     public const ERROR_UNEXPECTED_DOCROOT_MUTATION = 'unexpected_docroot_mutation';
     public const ERROR_CORRUPTED_PUSH_STATE = 'corrupted_push_state';
     public const ERROR_SAME_DEVICE = 'same_device';
+    public const ERROR_REQUEST_TOO_LARGE = 'request_too_large';
 
     private const MAX_PATH_BYTES = 4096;
     private const MAX_METADATA_BYTES = 1048576;
@@ -103,6 +106,10 @@ final class Site_Export_Push_Session {
     private $current_change = null;
     /** @var int */
     private $maximum_upload_part_bytes = PHP_INT_MAX;
+    /** @var int */
+    private $maximum_upload_request_body_bytes = PHP_INT_MAX;
+    /** @var int */
+    private $upload_request_body_bytes_read = 0;
 
     /**
      * Normalizes one push session's policy and derives its private paths.
@@ -130,20 +137,7 @@ final class Site_Export_Push_Session {
                 $excluded_paths[] = $relative_reprint_directory;
             }
         }
-        $normalized_excluded_paths = [];
-        foreach ($excluded_paths as $path) {
-            if (!is_string($path) || $path === '' || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
-                throw new InvalidArgumentException('Each excluded path must be a non-empty safe relative path.');
-            }
-            foreach (explode('/', $path) as $segment) {
-                if ($segment === '' || $segment === '.' || $segment === '..') {
-                    throw new InvalidArgumentException('Excluded path is unsafe: ' . base64_encode($path) . '.');
-                }
-            }
-            $normalized_excluded_paths[] = $path;
-        }
-        sort($normalized_excluded_paths, SORT_STRING);
-        $this->excluded_paths = array_values(array_unique($normalized_excluded_paths));
+        $this->excluded_paths = normalize_excluded_paths($excluded_paths);
         $this->push_directory = $this->reprint_directory . '/.reprint/push/' . $push_session_id;
         $this->push_json_path = $this->push_directory . '/push.json';
         $this->commit_json_path = $this->push_directory . '/commit.json';
@@ -304,8 +298,9 @@ final class Site_Export_Push_Session {
      * The push lock remains held until finish_upload() is called, so no
      * status, commit, remove, or second upload can observe a partly processed
      * MIME part. The supplied processor owns the request boundary and parser
-     * state. The byte limit applies to each part's declared Content-Length,
-     * not to the complete HTTP request.
+     * state. The two byte limits remain independent: one applies to each part's
+     * declared Content-Length, and one applies to all decoded request-body bytes
+     * read from the supplied stream.
      *
      * A push session which has started commit is closed to further uploads. This
      * method validates that condition before any bytes are read from $input.
@@ -314,13 +309,21 @@ final class Site_Export_Push_Session {
      * @param Site_Export_Multipart_Processor $processor Parser configured with
      *                                                   the request boundary.
      * @param int $maximum_part_bytes Largest Content-Length accepted for one part.
+     * @param int $maximum_request_body_bytes Largest decoded request body accepted.
+     *                                        Defaults to unlimited for direct callers.
      *
      * @throws LogicException If another upload is already open on this object.
-     * @throws InvalidArgumentException If the stream or part limit is invalid.
+     * @throws InvalidArgumentException If the stream or either byte limit is invalid.
      * @throws Site_Export_Push_Exception If the push session is busy,
-     *     malformed, unavailable, or already committing.
+     *     malformed, unavailable, already committing, or the decoded request
+     *     body exceeds its byte limit.
      */
-    public function accept_upload($input, Site_Export_Multipart_Processor $processor, int $maximum_part_bytes = PHP_INT_MAX): void {
+    public function accept_upload(
+        $input,
+        Site_Export_Multipart_Processor $processor,
+        int $maximum_part_bytes = PHP_INT_MAX,
+        int $maximum_request_body_bytes = PHP_INT_MAX
+    ): void {
         if ($this->upload_lock !== null) {
             throw new LogicException('A push upload is already open; call finish_upload() first.');
         }
@@ -329,6 +332,12 @@ final class Site_Export_Push_Session {
         }
         if ($maximum_part_bytes <= 0) {
             throw new InvalidArgumentException('Multipart part byte limit must be greater than zero.');
+        }
+        if ($maximum_request_body_bytes <= 0) {
+            throw new InvalidArgumentException(
+                'Multipart request-body byte limit must be greater than zero; received '
+                . $maximum_request_body_bytes . '.'
+            );
         }
         $lock = $this->acquire_push_lock();
         try {
@@ -342,6 +351,8 @@ final class Site_Export_Push_Session {
             $this->current_upload_part_ended = false;
             $this->current_change = null;
             $this->maximum_upload_part_bytes = $maximum_part_bytes;
+            $this->maximum_upload_request_body_bytes = $maximum_request_body_bytes;
+            $this->upload_request_body_bytes_read = 0;
         } catch (Throwable $exception) {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -444,6 +455,8 @@ final class Site_Export_Push_Session {
         $this->current_upload_part_ended = false;
         $this->current_change = null;
         $this->maximum_upload_part_bytes = PHP_INT_MAX;
+        $this->maximum_upload_request_body_bytes = PHP_INT_MAX;
+        $this->upload_request_body_bytes_read = 0;
         flock($lock, LOCK_UN);
         fclose($lock);
     }
@@ -781,7 +794,13 @@ final class Site_Export_Push_Session {
             if (!$this->upload_processor->paused_at_incomplete_input()) {
                 throw new LogicException('Multipart processor stopped without completing or requesting input.');
             }
-            $bytes = fread($this->upload_input, Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES);
+            $maximum_fragment_bytes = Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES;
+            $remaining_request_body_bytes = PHP_INT_MAX;
+            if ($this->maximum_upload_request_body_bytes !== PHP_INT_MAX) {
+                $remaining_request_body_bytes = $this->maximum_upload_request_body_bytes - $this->upload_request_body_bytes_read;
+                $maximum_fragment_bytes = min($maximum_fragment_bytes, $remaining_request_body_bytes + 1);
+            }
+            $bytes = fread($this->upload_input, $maximum_fragment_bytes);
             if ($bytes === false) {
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read the multipart upload request body.');
             }
@@ -789,6 +808,17 @@ final class Site_Export_Push_Session {
                 $this->upload_processor->finish_input();
                 return false;
             }
+            $fragment_bytes = strlen($bytes);
+            if ($fragment_bytes > $remaining_request_body_bytes) {
+                $observed_request_body_bytes = $this->upload_request_body_bytes_read + $fragment_bytes;
+                throw new Site_Export_Push_Exception(
+                    self::ERROR_REQUEST_TOO_LARGE,
+                    'The decoded request body reached ' . $observed_request_body_bytes
+                    . ' bytes, exceeding the target post_max_size of '
+                    . $this->maximum_upload_request_body_bytes . ' bytes.'
+                );
+            }
+            $this->upload_request_body_bytes_read += $fragment_bytes;
             $this->upload_processor->append_bytes($bytes);
         }
         return true;

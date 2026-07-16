@@ -185,6 +185,51 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertLessThan(32 * 1024 * 1024, $client->get_request_sizer_state()['request_body_bytes']);
     }
 
+    public function testStructured413AppliesPostMaxBytesAndPreservesDetail(): void {
+        if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
+            $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        $this->assertNotFalse($listener, (string) $error);
+        $address = stream_socket_get_name($listener, false);
+        $client = new MultipartPushStreamClient([
+            'base_url' => 'http://' . $address . '/?reprint-api=1',
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'connect_timeout' => 2,
+            'stall_timeout' => 2,
+            'response_timeout' => 2,
+        ]);
+
+        $this->assertTrue($client->start_upload_request(str_repeat('4', 32)));
+        $connection = stream_socket_accept($listener, 3);
+        $this->assertNotFalse($connection);
+        $this->read_available($connection);
+        $this->assertTrue($client->send_part([
+            'type' => 'file',
+            'path' => 'structured-too-large.bin',
+            'total_bytes' => 1,
+            'offset' => 0,
+            'payload' => 'x',
+        ]));
+        $response = (string) json_encode([
+            'status' => 'rejected',
+            'reason' => 'request_too_large',
+            'detail' => 'The decoded request body reached 16777217 bytes, exceeding the target post_max_size of 16777216 bytes.',
+            'post_max_bytes' => 16 * 1024 * 1024,
+        ]);
+        fwrite($connection, "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: " . strlen($response) . "\r\nConnection: close\r\n\r\n" . $response);
+        fclose($connection);
+        fclose($listener);
+
+        $result = $client->finish_request();
+        $this->assertSame('retry', $result['status']);
+        $this->assertSame('request_too_large', $result['reason']);
+        $this->assertSame('The decoded request body reached 16777217 bytes, exceeding the target post_max_size of 16777216 bytes.', $result['detail']);
+        $this->assertSame(16 * 1024 * 1024, $result['response']['post_max_bytes']);
+        $this->assertLessThan(16 * 1024 * 1024, $client->get_request_sizer_state()['request_body_bytes']);
+    }
+
     public function testMalformedNonemptyUploadResponseIsTerminal(): void {
         if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
             $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');

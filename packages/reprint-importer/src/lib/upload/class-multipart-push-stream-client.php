@@ -567,7 +567,7 @@ class MultipartPushStreamClient
      *     @type int         $body_bytes_sent MIME entity-body bytes sent.
      * }
      * @phpstan-return array{
-     *     status:string,
+     *     status:'complete'|'retry'|'failed',
      *     reason:?string,
      *     detail:?string,
      *     response:?array<string,mixed>,
@@ -633,7 +633,9 @@ class MultipartPushStreamClient
             return [
                 'status' => $decision['action'] === 'give_up' ? 'failed' : 'retry',
                 'reason' => 'request_too_large',
-                'detail' => is_array($decoded) ? null : 'HTTP 413 Request Entity Too Large.',
+                'detail' => is_array($decoded) && is_string($decoded['detail'] ?? null)
+                    ? $decoded['detail']
+                    : 'HTTP 413 Request Entity Too Large.',
                 'response' => is_array($decoded) ? $decoded : null,
                 'parts_sent' => $this->parts_sent,
                 'body_bytes_sent' => $this->body_bytes_sent,
@@ -696,7 +698,7 @@ class MultipartPushStreamClient
      *     @type int         $body_bytes_sent MIME entity-body bytes sent.
      * }
      * @phpstan-return array{
-     *     status:string,
+     *     status:'complete'|'retry'|'failed',
      *     reason:?string,
      *     detail:?string,
      *     response:array<string,mixed>,
@@ -1039,15 +1041,16 @@ class MultipartPushStreamClient
     /**
      * Classifies every decoded upload and control response by protocol reason.
      *
-     * `busy` and `offset_gap` are recoverable because a later request can use
-     * the receiver-confirmed cursor. Every other rejection fails the request; HTTP
-     * status alone never promotes an unknown reason into a retry.
+     * `lock_acquisition_failure` and `offset_gap` are recoverable because a
+     * later request can retry the locked operation or use the receiver-
+     * confirmed cursor. Every other rejection fails the request; HTTP status
+     * alone never promotes an unknown reason into a retry.
      *
      * Classification reads these response keys:
      *
      * - `status`: target protocol status compared with `$expected_statuses`.
-     * - `reason`: optional machine-readable rejection reason. Only `busy` and
-     *   `offset_gap` are recoverable.
+     * - `reason`: optional machine-readable rejection reason. Only
+     *   `lock_acquisition_failure` and `offset_gap` are recoverable.
      * - `detail`: optional human-readable rejection detail.
      * - `http_code`: observed HTTP status used when no detail was supplied.
      *
@@ -1069,7 +1072,7 @@ class MultipartPushStreamClient
      *     @type int         $body_bytes_sent MIME entity-body bytes sent.
      * }
      * @phpstan-return array{
-     *     status:string,
+     *     status:'complete'|'retry'|'failed',
      *     reason:?string,
      *     detail:?string,
      *     response:array<string,mixed>,
@@ -1091,7 +1094,7 @@ class MultipartPushStreamClient
         }
         $reason = is_string($response['reason'] ?? null) ? $response['reason'] : 'unexpected_response';
         return [
-            'status' => in_array($reason, ['busy', 'offset_gap'], true) ? 'retry' : 'failed',
+            'status' => in_array($reason, ['lock_acquisition_failure', 'offset_gap'], true) ? 'retry' : 'failed',
             'reason' => $reason,
             'detail' => is_string($response['detail'] ?? null)
                 ? $response['detail']
