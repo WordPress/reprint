@@ -46,13 +46,21 @@ final class PushCommitTest extends TestCase {
         $this->complete_work_deletes($push_session);
 
         $saw_deleted_before_install = false;
+        $reported_phases = [];
         do {
             $result = $push_session->commit(1);
+            $this->assertSame(['phase', 'send_next_request', 'entries_processed'], array_keys($result));
+            $this->assertContains($result['phase'], ['deleting_files', 'installing_files', 'complete']);
+            $this->assertIsBool($result['send_next_request']);
+            $this->assertIsInt($result['entries_processed']);
+            $this->assertSame($result['phase'], $push_session->get_status()['phase']);
+            $reported_phases[$result['phase']] = true;
             if (!file_exists($this->docroot . '/tree/old.txt') && !file_exists($this->docroot . '/tree/new.txt')) {
                 $saw_deleted_before_install = true;
             }
         } while ($result['send_next_request']);
 
+        $this->assertSame(['deleting_files', 'installing_files', 'complete'], array_keys($reported_phases));
         $this->assertTrue($saw_deleted_before_install);
         $this->assertSame('new', file_get_contents($this->docroot . '/tree/new.txt'));
         $this->assertSame([], $this->directory_entries($push_session->get_push_directory() . '/work/files'));
