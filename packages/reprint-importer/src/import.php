@@ -4009,7 +4009,14 @@ class ImportClient
      * `hasCompletedOnce` is derived from Reprint-owned pull state so
      * callers do not need to persist a parallel flag that could drift.
      *
-     * @return array{hasCompletedOnce: bool, pullStage: mixed}
+     * @return array {
+     *     Import metadata for host integrations.
+     *
+     *     @type bool  $hasCompletedOnce Whether the pull pipeline has completed
+     *                                   at least once.
+     *     @type mixed $pullStage        Last completed pull stage.
+     * }
+     * @phpstan-return array{hasCompletedOnce: bool, pullStage: mixed}
      */
     private function build_import_metadata(): array
     {
@@ -6755,9 +6762,15 @@ class ImportClient
      *
      * @param string $list_file Path to the JSONL download list.
      * @param int    $offset    Byte offset into the download list file.
-     * @return array{file: string, offset: int, next_offset: int, entries: int}|null
-     *         The temp file path, byte offsets, and entry count, or null if
-     *         no paths remain.
+     * @return array|null {
+     *     Prepared fetch batch, or null if no paths remain.
+     *
+     *     @type string $file        Temporary batch file path.
+     *     @type int    $offset      Byte offset where the batch began.
+     *     @type int    $next_offset Byte offset for the next batch.
+     *     @type int    $entries     Number of entries in the batch.
+     * }
+     * @phpstan-return array{file: string, offset: int, next_offset: int, entries: int}|null
      */
     private function prepare_fetch_batch(string $list_file, int $offset): ?array
     {
@@ -12204,7 +12217,14 @@ if (
     /**
      * Parse CLI options using the declarative option definitions.
      *
-     * @return array{0: ?string, 1: ?string, 2: array} [$state_dir, $fs_root, $options]
+     * @return array {
+     *     Parsed CLI option tuple.
+     *
+     *     @type string|null $0 State directory path.
+     *     @type string|null $1 Filesystem root path.
+     *     @type array       $2 Parsed options.
+     * }
+     * @phpstan-return array{0: ?string, 1: ?string, 2: array}
      */
     function _cli_parse_options(array $argv, int $argc, int $start, array $option_defs): array
     {

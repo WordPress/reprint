@@ -21,7 +21,14 @@ class SQLitePreparedInsertBuilderTest extends TestCase
     }
 
     /**
-     * @param array{sql: string, params: list<mixed>, param_types: list<int>} $prepared
+     * @param array $prepared {
+     *     SQLite prepared statement.
+     *
+     *     @type string $sql         SQL with placeholders.
+     *     @type array  $params      Decoded parameter values.
+     *     @type array  $param_types SQLite parameter types.
+     * }
+     * @phpstan-param array{sql: string, params: list<mixed>, param_types: list<int>} $prepared
      */
     private function executePrepared(PDO $pdo, array $prepared): void
     {

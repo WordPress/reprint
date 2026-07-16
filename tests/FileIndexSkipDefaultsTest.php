@@ -59,7 +59,13 @@ final class FileIndexSkipDefaultsTest extends TestCase
     }
 
     /**
-     * @return list<array{0:string,1:bool}>
+     * @return array[] {
+     *     Default skip classifier cases.
+     *
+     *     @type string $0 Path to classify.
+     *     @type bool   $1 Expected skip result.
+     * }
+     * @phpstan-return list<array{0:string,1:bool}>
      */
     public static function skipCases(): array
     {
@@ -308,7 +314,13 @@ final class FileIndexSkipDefaultsTest extends TestCase
     }
 
     /**
-     * @return list<array{path: string, type: string}>
+     * @return array[] {
+     *     File-index entries.
+     *
+     *     @type string $path Indexed path.
+     *     @type string $type Indexed path type.
+     * }
+     * @phpstan-return list<array{path: string, type: string}>
      */
     private function runFileIndexEntries(string $siteDir, bool $includeCaches, int $batchSize = 5000, ?string $storagePath = null): array
     {

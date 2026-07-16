@@ -35,7 +35,12 @@ final class ExportLibraryLoadTest extends TestCase
     }
 
     /**
-     * @return array{output:string}
+     * @return array {
+     *     Export runner result.
+     *
+     *     @type string $output Captured output.
+     * }
+     * @phpstan-return array{output:string}
      */
     private function runExportWith(string $setup_script): array
     {

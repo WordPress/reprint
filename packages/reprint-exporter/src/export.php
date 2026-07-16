@@ -120,7 +120,13 @@ $streaming_context = null;
  * @param bool $require_headers If true, throws when headers were already sent
  *                              (use for endpoints that can't degrade gracefully).
  * @param bool $gzip If true, emit Content-Encoding: gzip and compress the body.
- * @return array{gz: GzipOutputStream, boundary: string}
+ * @return array {
+ *     Multipart stream context.
+ *
+ *     @type GzipOutputStream $gz       Output stream used by the response.
+ *     @type string           $boundary MIME boundary for response parts.
+ * }
+ * @phpstan-return array{gz: GzipOutputStream, boundary: string}
  */
 function begin_multipart_stream(bool $require_headers = false, bool $gzip = true): array
 {
@@ -174,8 +180,24 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
  * Never reads from $config / HTTP parameters — credentials must come from
  * the server environment (PHP constants or environment variables).
  *
- * @return array{db_host: string, db_name: string, db_user: string, db_password: string,
- *               wp_config_path: ?string, table_prefix: ?string}
+ * @return array {
+ *     Database connection details resolved from the server environment.
+ *
+ *     @type string      $db_host        Database host.
+ *     @type string      $db_name        Database name.
+ *     @type string      $db_user        Database user.
+ *     @type string      $db_password    Database password.
+ *     @type string|null $wp_config_path WordPress config path, if known.
+ *     @type string|null $table_prefix   WordPress table prefix, if known.
+ * }
+ * @phpstan-return array{
+ *     db_host: string,
+ *     db_name: string,
+ *     db_user: string,
+ *     db_password: string,
+ *     wp_config_path: ?string,
+ *     table_prefix: ?string
+ * }
  * @throws InvalidArgumentException When required credentials are missing.
  */
 function resolve_db_credentials(): array
@@ -2644,9 +2666,15 @@ function find_parents_symlinks(string $absolute_path): array
  * find_parents_symlinks() catches those.
  *
  * @param string $path  Absolute path to the symlink.
- * @return array{target: string|null, intermediates: array} The resolved
- *               canonical target (null for file symlinks or unresolvable
- *               paths), and any intermediate symlink entries found.
+ * @return array {
+ *     Resolved symlink target details.
+ *
+ *     @type string|null $target        Resolved canonical target, or null for
+ *                                     file symlinks or unresolvable paths.
+ *     @type array       $intermediates Intermediate symlink entries found while
+ *                                     walking the raw target path.
+ * }
+ * @phpstan-return array{target: string|null, intermediates: array}
  */
 function resolve_symlink_target(string $path): array
 {
@@ -3683,7 +3711,14 @@ function path_is_default_skipped(string $path): bool
  * explicit `table` instead. Values are base64-encoded so raw bytes never travel
  * as SQL text.
  *
- * @return list<array{table: string, column: string, value: string}>
+ * @return array[] {
+ *     SQL row exclusion rules.
+ *
+ *     @type string $table  Table name.
+ *     @type string $column Column name.
+ *     @type string $value  Column value to exclude.
+ * }
+ * @phpstan-return list<array{table: string, column: string, value: string}>
  */
 function sql_exclude_rows_from_config(array $config, ?string $table_prefix): array
 {

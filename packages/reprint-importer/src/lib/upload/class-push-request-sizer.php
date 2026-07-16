@@ -127,7 +127,13 @@ class PushRequestSizer
      * safety margin, becomes the ceiling.
      *
      * @param array $limit_bytes_list List of int|null limit candidates.
-     * @return array{action:string,request_body_bytes:int} Decision summary.
+     * @return array {
+     *     Decision summary.
+     *
+     *     @type string $action             Sizing action.
+     *     @type int    $request_body_bytes Current decoded entity-body budget.
+     * }
+     * @phpstan-return array{action:string,request_body_bytes:int}
      */
     public function apply_reported_limits(array $limit_bytes_list): array
     {
@@ -155,7 +161,13 @@ class PushRequestSizer
      * Record an accepted request; grows toward the ceiling unless a recent
      * failure is still being held off.
      *
-     * @return array{action:string,request_body_bytes:int} Decision summary.
+     * @return array {
+     *     Decision summary.
+     *
+     *     @type string $action             Sizing action.
+     *     @type int    $request_body_bytes Current decoded entity-body budget.
+     * }
+     * @phpstan-return array{action:string,request_body_bytes:int}
      */
     public function record_success(): array
     {
@@ -184,7 +196,13 @@ class PushRequestSizer
      * probing downward.
      *
      * @param int|null $reported_max_bytes Server-reported request limit, if any.
-     * @return array{action:string,request_body_bytes:int} Decision summary.
+     * @return array {
+     *     Decision summary.
+     *
+     *     @type string $action             Sizing action.
+     *     @type int    $request_body_bytes Current decoded entity-body budget.
+     * }
+     * @phpstan-return array{action:string,request_body_bytes:int}
      */
     public function record_too_large(?int $reported_max_bytes = null): array
     {
@@ -215,7 +233,13 @@ class PushRequestSizer
      * after the holdoff the size may grow back, so one transient failure does
      * not permanently clamp the session.
      *
-     * @return array{action:string,request_body_bytes:int} Decision summary.
+     * @return array {
+     *     Decision summary.
+     *
+     *     @type string $action             Sizing action.
+     *     @type int    $request_body_bytes Current decoded entity-body budget.
+     * }
+     * @phpstan-return array{action:string,request_body_bytes:int}
      */
     public function record_request_failure(): array
     {
@@ -230,7 +254,17 @@ class PushRequestSizer
     }
 
     /**
-     * @return array{request_body_bytes:int,ceiling_bytes:?int,growth_holdoff_remaining:int}
+     * @return array {
+     *     Serializable request-sizing state.
+     *
+     *     @type int      $request_body_bytes       Current decoded entity-body
+     *                                             budget.
+     *     @type int|null $ceiling_bytes            Learned session ceiling, or
+     *                                             null while unknown.
+     *     @type int      $growth_holdoff_remaining Accepted requests still
+     *                                             required before growth.
+     * }
+     * @phpstan-return array{request_body_bytes:int,ceiling_bytes:?int,growth_holdoff_remaining:int}
      */
     public function get_state(): array
     {
@@ -245,7 +279,13 @@ class PushRequestSizer
      * Lowers the learned per-session ceiling and shrinks the current size
      * when it no longer fits.
      *
-     * @return array{action:string,request_body_bytes:int}
+     * @return array {
+     *     Decision summary.
+     *
+     *     @type string $action             Sizing action.
+     *     @type int    $request_body_bytes Current decoded entity-body budget.
+     * }
+     * @phpstan-return array{action:string,request_body_bytes:int}
      */
     private function lower_ceiling(int $ceiling): array
     {

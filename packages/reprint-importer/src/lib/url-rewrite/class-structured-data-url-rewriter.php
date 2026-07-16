@@ -391,7 +391,13 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * @param false|array{raw_url: string, parsed_url: mixed} $value
+     * @param array|false $value {
+     *     Cached rewrite result, or false for an uncacheable value.
+     *
+     *     @type string $raw_url    Raw URL value.
+     *     @type mixed  $parsed_url Parsed URL value.
+     * }
+     * @phpstan-param false|array{raw_url: string, parsed_url: mixed} $value
      */
     private function set_cached_rewrite_result(string $cache_key, $value): void
     {

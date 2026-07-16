@@ -553,14 +553,27 @@ class MultipartPushStreamClient
      * - `parts_sent`: complete MIME parts supplied in this request.
      * - `body_bytes_sent`: MIME entity-body bytes accounted for this request.
      *
-     * @return array{
+     * @return array {
+     *     Classified request result and transmission counters.
+     *
+     *     @type string      $status          Request status.
+     *     @type string|null $reason          Machine-readable failure reason, or
+     *                                       null on success.
+     *     @type string|null $detail          Human-readable failure detail, or
+     *                                       null when none was supplied.
+     *     @type array|null  $response        Decoded target JSON, or null when
+     *                                       no usable JSON arrived.
+     *     @type int         $parts_sent      Complete MIME parts sent.
+     *     @type int         $body_bytes_sent MIME entity-body bytes sent.
+     * }
+     * @phpstan-return array{
      *     status:string,
      *     reason:?string,
      *     detail:?string,
      *     response:?array<string,mixed>,
      *     parts_sent:int,
      *     body_bytes_sent:int
-     * } Classified request result and transmission counters.
+     * }
      *
      * @throws RuntimeException If no upload request is open.
      */
@@ -669,14 +682,27 @@ class MultipartPushStreamClient
      * @param array<string,mixed> $parameters Endpoint-specific query parameters.
      *     Their keys are encoded and signed but are not interpreted here.
      * @param string[] $expected_statuses Successful protocol statuses for this endpoint.
-     * @return array{
+     * @return array {
+     *     Response classification. Keys have the meanings documented by
+     *     finish_request().
+     *
+     *     @type string      $status          Request status.
+     *     @type string|null $reason          Machine-readable failure reason, or
+     *                                       null on success.
+     *     @type string|null $detail          Human-readable failure detail, or
+     *                                       null when none was supplied.
+     *     @type array       $response        Decoded target JSON.
+     *     @type int         $parts_sent      Complete MIME parts sent.
+     *     @type int         $body_bytes_sent MIME entity-body bytes sent.
+     * }
+     * @phpstan-return array{
      *     status:string,
      *     reason:?string,
      *     detail:?string,
      *     response:array<string,mixed>,
      *     parts_sent:int,
      *     body_bytes_sent:int
-     * } Response classification. Keys have the meanings documented by finish_request().
+     * }
      *
      * @throws InvalidArgumentException If the method is unsupported.
      * @throws RuntimeException If transport, redirect, or JSON decoding fails.
@@ -746,11 +772,21 @@ class MultipartPushStreamClient
      * - `ceiling_bytes`: learned session ceiling, or null while unknown.
      * - `growth_holdoff_remaining`: accepted requests still required before growth.
      *
-     * @return array{
+     * @return array {
+     *     Serializable PushRequestSizer state.
+     *
+     *     @type int      $request_body_bytes       Current decoded entity-body
+     *                                             budget.
+     *     @type int|null $ceiling_bytes            Learned session ceiling, or
+     *                                             null while unknown.
+     *     @type int      $growth_holdoff_remaining Accepted requests still
+     *                                             required before growth.
+     * }
+     * @phpstan-return array{
      *     request_body_bytes:int,
      *     ceiling_bytes:?int,
      *     growth_holdoff_remaining:int
-     * } Serializable PushRequestSizer state.
+     * }
      */
     public function get_request_sizer_state(): array
     {
@@ -1020,14 +1056,26 @@ class MultipartPushStreamClient
      * @param array<string,mixed> $response Decoded target response containing
      *     the classification keys above.
      * @param string[] $expected_statuses Successful statuses for this request.
-     * @return array{
+     * @return array {
+     *     Stable result whose keys are documented by finish_request().
+     *
+     *     @type string      $status          Request status.
+     *     @type string|null $reason          Machine-readable failure reason, or
+     *                                       null on success.
+     *     @type string|null $detail          Human-readable failure detail, or
+     *                                       null when none was supplied.
+     *     @type array       $response        Decoded target JSON.
+     *     @type int         $parts_sent      Complete MIME parts sent.
+     *     @type int         $body_bytes_sent MIME entity-body bytes sent.
+     * }
+     * @phpstan-return array{
      *     status:string,
      *     reason:?string,
      *     detail:?string,
      *     response:array<string,mixed>,
      *     parts_sent:int,
      *     body_bytes_sent:int
-     * } Stable result whose keys are documented by finish_request().
+     * }
      */
     private function classify_response(array $response, array $expected_statuses): array
     {
