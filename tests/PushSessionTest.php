@@ -29,6 +29,16 @@ final class PushSessionTest extends TestCase {
         $this->assertSame(['operation' => 'receive'], $exception->get_context());
     }
 
+    public function testNewPushSessionHasOneCompletedTreeAndNoPartialTree(): void {
+        $push_session = $this->push_session('10101010101010101010101010101010');
+        $work_directory = $push_session->get_push_directory() . '/work';
+
+        $this->assertDirectoryExists($work_directory . '/files');
+        $this->assertFileDoesNotExist($work_directory . '/partial');
+        $this->assertFileDoesNotExist($work_directory . '/inflight.json');
+        $this->assertFileDoesNotExist($work_directory . '/inflight.data');
+    }
+
     public function testPartialFileProgressComesFromTheFileAndOffsetZeroRestartsIt(): void {
         $push_session = $this->push_session('11111111111111111111111111111111');
         $this->push_parts($push_session, [[
