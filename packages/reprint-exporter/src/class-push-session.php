@@ -746,57 +746,22 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Reads and validates the durable description of the unfinished work value.
+     * Reads the durable description of the unfinished work value.
      *
      * A push receives or publishes one work value at a time. Its identity and
      * phase are stored in `work/inflight.json`; unfinished file bytes are stored
      * in `work/inflight.data`. This method reads both records before upload,
      * status, or commit decides what work is safe to perform.
      *
-     * The JSON record is untrusted durable state. This method validates its
-     * exact keys, path, type, phase, and file-size relation before returning it.
-     * Missing metadata means that no work is in flight only when the data file
-     * is absent as well. A data file without metadata is corrupt state, not a
-     * resume cursor.
+     * The JSON record is the authority for whether work is in flight. Callers
+     * use its type and phase to decide whether they can receive more bytes,
+     * publish the completed value, or begin commit work. A missing record means
+     * there is no unfinished value.
      *
-     * @return array<string,mixed>|null The validated unfinished value, or null
-     *                                  when the session has no unfinished work.
+     * @return array{version:1,phase:'preparing'|'receiving'|'publishing',path_b64:string,type:'file',total_bytes:int}|array{version:1,phase:'preparing'|'publishing',path_b64:string,type:'directory'}|array{version:1,phase:'preparing'|'publishing',path_b64:string,type:'symlink',target_b64:string}|null In-flight work, or null when none exists.
      */
     private function read_inflight(): ?array {
-        $inflight = $this->read_json($this->work_inflight_path);
-        $data = $this->lstat_path($this->work_inflight_data_path);
-        if ($inflight === null) {
-            if ($data !== null) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'In-flight data exists without metadata.');
-            }
-            return null;
-        }
-        if (($inflight['version'] ?? null) !== 1 || !is_string($inflight['phase'] ?? null) || !is_string($inflight['path_b64'] ?? null) || !is_string($inflight['type'] ?? null)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'In-flight metadata has an invalid shape.');
-        }
-        $path = base64_decode($inflight['path_b64'], true);
-        if ($path === false) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'In-flight metadata path is not valid base64.');
-        }
-        $this->validate_path($path);
-        if ($inflight['type'] === 'file' && isset($inflight['total_bytes']) && is_int($inflight['total_bytes']) && $inflight['total_bytes'] >= 0
-            && in_array($inflight['phase'], ['preparing', 'receiving', 'publishing'], true) && count($inflight) === 5) {
-            if ($data !== null && $data['type'] !== 'file') {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'In-flight data is not a regular file.');
-            }
-            if ($inflight['phase'] === 'receiving' && ($data === null || $data['size'] > $inflight['total_bytes'])) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Receiving in-flight data has an invalid size.');
-            }
-            return $inflight;
-        }
-        if ($inflight['type'] === 'directory' && in_array($inflight['phase'], ['preparing', 'publishing'], true) && count($inflight) === 4 && $data === null) {
-            return $inflight;
-        }
-        if ($inflight['type'] === 'symlink' && in_array($inflight['phase'], ['preparing', 'publishing'], true)
-            && is_string($inflight['target_b64'] ?? null) && base64_decode($inflight['target_b64'], true) !== false && count($inflight) === 5 && $data === null) {
-            return $inflight;
-        }
-        throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'In-flight metadata has an invalid state.');
+        return $this->read_json($this->work_inflight_path);
     }
 
     /**

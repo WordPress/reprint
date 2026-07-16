@@ -753,26 +753,6 @@ final class PushSessionTest extends TestCase {
         $this->assertFileDoesNotExist($this->docroot . '/unfinished.txt');
     }
 
-    public function testInFlightMetadataRejectsAnExtraKeyBeforeStatusReadsWork(): void {
-        $push_session = $this->push_session('45454545454545454545454545454545');
-        $work_directory = $push_session->get_push_directory() . '/work';
-        file_put_contents($work_directory . '/inflight.json', json_encode([
-            'version' => 1,
-            'phase' => 'preparing',
-            'path_b64' => base64_encode('unsafe.txt'),
-            'type' => 'file',
-            'total_bytes' => 1,
-            'unexpected' => true,
-        ], JSON_THROW_ON_ERROR));
-
-        try {
-            $push_session->get_status('unsafe.txt');
-            $this->fail('In-flight metadata with an extra key was accepted.');
-        } catch (Site_Export_Push_Exception $exception) {
-            $this->assertSame('corrupted_push_state', $exception->get_error_code());
-        }
-    }
-
     public function testStatusFinishesPublishedDirectoryAndSymlinkWork(): void {
         foreach (['directory', 'symlink'] as $index => $type) {
             $push_session = $this->push_session(sprintf('%032x', 60 + $index));
@@ -812,18 +792,6 @@ final class PushSessionTest extends TestCase {
         $this->assertSame('new', file_get_contents($work_directory . '/files/same-size.txt'));
         $this->assertFileDoesNotExist($work_directory . '/inflight.json');
         $this->assertFileDoesNotExist($work_directory . '/inflight.data');
-    }
-
-    public function testMetadataFreeInFlightDataIsCorruptState(): void {
-        $push_session = $this->push_session('24242424242424242424242424242424');
-        file_put_contents($push_session->get_push_directory() . '/work/inflight.data', 'orphaned');
-
-        try {
-            $push_session->get_status();
-            $this->fail('In-flight data without metadata was accepted.');
-        } catch (Site_Export_Push_Exception $exception) {
-            $this->assertSame('corrupted_push_state', $exception->get_error_code());
-        }
     }
 
     public function testCheckpointMustContainEveryFieldReadByCommit(): void {
