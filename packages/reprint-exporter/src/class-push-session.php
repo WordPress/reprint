@@ -749,9 +749,10 @@ final class Site_Export_Push_Session {
      * Reads the durable description of the unfinished work value.
      *
      * A push receives or publishes one work value at a time. Its identity and
-     * phase are stored in `work/inflight.json`; unfinished file bytes are stored
-     * in `work/inflight.data`. This method reads both records before upload,
-     * status, or commit decides what work is safe to perform.
+     * phase are stored in `work/inflight.json`; unfinished file bytes, when
+     * applicable, are stored separately in `work/inflight.data`. This method
+     * reads the record before upload, status, or commit decides what work is
+     * safe to perform.
      *
      * The JSON record is the authority for whether work is in flight. Callers
      * use its type and phase to decide whether they can receive more bytes,
@@ -828,7 +829,8 @@ final class Site_Export_Push_Session {
      *
      * The caller has already validated Content-Length against the document-root
      * part ceiling. This method validates the file-specific headers, enforces the
-     * work-confirmed resume offset, streams the body into the partial file,
+     * work-confirmed resume offset, streams the body into the in-flight data
+     * file,
      * and promotes the file atomically inside the private reprint directory only when the
      * declared total size has been reached.
      *
@@ -859,7 +861,7 @@ final class Site_Export_Push_Session {
             throw new Site_Export_Push_Exception(self::ERROR_OFFSET_GAP, 'File part for ' . base64_encode($path) . ' starts at offset ' . $offset . ', but no matching in-flight file exists. Start at offset 0.');
         }
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
-            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished staged value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
+            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished work value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
         }
         if ($inflight === null || $offset === 0) {
             if ($inflight !== null && $this->lstat_path($this->work_inflight_data_path) !== null && !@unlink($this->work_inflight_data_path)) {
@@ -943,7 +945,7 @@ final class Site_Export_Push_Session {
         $this->finish_published_inflight();
         $inflight = $this->read_inflight();
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
-            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished staged value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
+            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished work value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
         }
         $identity = $this->lstat_path($target);
         if ($identity !== null && $identity['type'] === 'directory' && $this->first_directory_entry($target) !== null) {
@@ -998,7 +1000,7 @@ final class Site_Export_Push_Session {
         $this->finish_published_inflight();
         $inflight = $this->read_inflight();
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
-            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished staged value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
+            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished work value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
         }
         $identity = $this->lstat_path($target);
         if ($identity !== null && $identity['type'] === 'directory' && $this->first_directory_entry($target) !== null) {
@@ -1943,8 +1945,12 @@ final class Site_Export_Push_Session {
      *     commit_cursor?:list<array{component_b64:string}>,
      *     deleted_files?:int,
      *     installed_files?:int,
-     *     non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>}
-     * } $value Push metadata or commit checkpoint object to persist.
+     *     non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>},
+     *     path_b64?:string,
+     *     type?:string,
+     *     total_bytes?:int,
+     *     target_b64?:string
+     * } $value Push metadata, commit checkpoint, or in-flight work record to persist.
      */
     private function write_json(string $path, array $value): void {
         $contents = json_encode($value, JSON_UNESCAPED_SLASHES);
