@@ -788,7 +788,11 @@ final class Site_Export_Push_Session {
             $data = $this->lstat_path($this->work_inflight_data_path);
             if ($data !== null) {
                 if ($data['type'] !== 'file' || $data['size'] !== $inflight['total_bytes']) {
-                    throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Publishing in-flight data has an invalid size.');
+                    throw new Site_Export_Push_Exception(
+                        self::ERROR_CORRUPTED_PUSH_STATE,
+                        'Publishing in-flight file ' . $inflight['path_b64'] . ' requires data type file and size ' . $inflight['total_bytes']
+                        . '; observed type ' . $data['type'] . ' and size ' . $data['size'] . '.'
+                    );
                 }
                 $this->ensure_private_parent($work_path);
                 if ($work_identity !== null) {
@@ -798,24 +802,42 @@ final class Site_Export_Push_Session {
                     throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish in-flight file data.');
                 }
             } elseif ($work_identity === null || $work_identity['type'] !== 'file' || $work_identity['size'] !== $inflight['total_bytes']) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Published in-flight data has no completed file.');
+                $observed_type = $work_identity === null ? 'absent' : $work_identity['type'];
+                $observed_size = $work_identity === null ? 'absent' : (string) $work_identity['size'];
+                throw new Site_Export_Push_Exception(
+                    self::ERROR_CORRUPTED_PUSH_STATE,
+                    'Published in-flight file ' . $inflight['path_b64'] . ' requires completed type file and size ' . $inflight['total_bytes']
+                    . '; observed type ' . $observed_type . ' and size ' . $observed_size . '.'
+                );
             }
         } elseif ($inflight['type'] === 'directory') {
             if ($work_identity === null) {
                 $this->ensure_private_parent($work_path);
-                if (!@mkdir($work_path, 0700)) {
+                if (!@mkdir($work_path, 0777)) {
                     throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the in-flight directory.');
                 }
             } elseif ($work_identity['type'] !== 'directory') {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Published in-flight directory has an incompatible completed value.');
+                throw new Site_Export_Push_Exception(
+                    self::ERROR_CORRUPTED_PUSH_STATE,
+                    'Published in-flight directory ' . $inflight['path_b64'] . ' requires completed type directory; observed type ' . $work_identity['type'] . '.'
+                );
             }
         } elseif ($work_identity === null) {
             $this->ensure_private_parent($work_path);
             if (!@symlink(base64_decode($inflight['target_b64'], true), $work_path)) {
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the in-flight symlink.');
             }
-        } elseif ($work_identity['type'] !== 'symlink' || @readlink($work_path) !== base64_decode($inflight['target_b64'], true)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Published in-flight symlink has an incompatible completed value.');
+        } else {
+            $expected_target = base64_decode($inflight['target_b64'], true);
+            $observed_target = $work_identity['type'] === 'symlink' ? @readlink($work_path) : false;
+            if ($work_identity['type'] !== 'symlink' || $observed_target !== $expected_target) {
+                throw new Site_Export_Push_Exception(
+                    self::ERROR_CORRUPTED_PUSH_STATE,
+                    'Published in-flight symlink ' . $inflight['path_b64'] . ' requires target ' . $inflight['target_b64']
+                    . '; observed type ' . $work_identity['type'] . ' and target '
+                    . ( is_string($observed_target) ? base64_encode($observed_target) : 'unavailable' ) . '.'
+                );
+            }
         }
         if (!@unlink($this->work_inflight_path)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear published in-flight metadata.');
@@ -902,10 +924,14 @@ final class Site_Export_Push_Session {
         }
         $accepted_bytes = $actual_bytes + $received;
         if ($accepted_bytes === $total_bytes) {
+            $existing = $this->lstat_path($complete_path);
+            if ($existing !== null && $existing['type'] === 'directory' && $this->first_directory_entry($complete_path) !== null) {
+                throw new InvalidArgumentException('Work file ' . base64_encode($path) . ' conflicts with completed work descendants.');
+            }
             $inflight['phase'] = 'publishing';
             $this->write_json($this->work_inflight_path, $inflight);
             $this->ensure_private_parent($complete_path);
-            if (($existing = $this->lstat_path($complete_path)) !== null) {
+            if ($existing !== null) {
                 $this->remove_work_path($complete_path);
             }
             if (!@rename($this->work_inflight_data_path, $complete_path)) {

@@ -1141,6 +1141,139 @@ final class PushSessionTest extends TestCase {
         $this->assertSame('new', file_get_contents($this->docroot . '/commit.txt'));
     }
 
+    /**
+     * Rejects a file which would replace completed work descendants.
+     *
+     * The complete file bytes remain in the receiving phase. Publication must
+     * not become durable until replacing the completed value is possible;
+     * otherwise every later operation would retry the same impossible cleanup.
+     */
+    public function testFilePublicationConflictRemainsReceiving(): void {
+        $push_session = $this->push_session('56565656565656565656565656565656');
+        $work_directory = $push_session->get_push_directory() . '/work';
+        $this->push_file($push_session, 'parent/child.txt', 'child');
+
+        try {
+            $this->push_file($push_session, 'parent', 'new');
+            $this->fail('A file replaced a completed work directory with descendants.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString(base64_encode('parent'), $exception->getMessage());
+            $this->assertStringContainsString('completed work descendants', $exception->getMessage());
+        }
+
+        $inflight = json_decode( (string) file_get_contents($work_directory . '/inflight.json'), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('receiving', $inflight['phase']);
+        $this->assertSame('new', file_get_contents($work_directory . '/inflight.data'));
+        $this->assertSame('child', file_get_contents($work_directory . '/files/parent/child.txt'));
+        $this->assertSame(
+            [
+                'path_b64' => base64_encode('parent'),
+                'state' => 'partial',
+                'type' => 'file',
+                'accepted_bytes' => 3,
+            ],
+            $push_session->get_status('parent')['path']
+        );
+    }
+
+    /**
+     * Gives recovered publication failures enough evidence to diagnose them.
+     *
+     * File data reports its expected and observed identity, directories report
+     * the incompatible completed type, and symlinks report both encoded targets.
+     */
+    public function testCorruptPublicationStateErrorsNameTheViolatedCondition(): void {
+        $file_session = $this->push_session('57575757575757575757575757575757');
+        $file_work_directory = $file_session->get_push_directory() . '/work';
+        file_put_contents($file_work_directory . '/inflight.json', json_encode([
+            'phase' => 'publishing',
+            'path_b64' => base64_encode('broken-file'),
+            'type' => 'file',
+            'total_bytes' => 2,
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        file_put_contents($file_work_directory . '/inflight.data', 'x');
+        try {
+            $file_session->get_status();
+            $this->fail('Publication accepted in-flight file data with the wrong size.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertStringContainsString(base64_encode('broken-file'), $exception->getMessage());
+            $this->assertStringContainsString('size 2', $exception->getMessage());
+            $this->assertStringContainsString('type file and size 1', $exception->getMessage());
+        }
+
+        $directory_session = $this->push_session('58585858585858585858585858585858');
+        $directory_work_directory = $directory_session->get_push_directory() . '/work';
+        file_put_contents($directory_work_directory . '/inflight.json', json_encode([
+            'phase' => 'publishing',
+            'path_b64' => base64_encode('broken-directory'),
+            'type' => 'directory',
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        file_put_contents($directory_work_directory . '/files/broken-directory', 'file');
+        try {
+            $directory_session->get_status();
+            $this->fail('Directory recovery accepted an incompatible completed file.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertStringContainsString(base64_encode('broken-directory'), $exception->getMessage());
+            $this->assertStringContainsString('observed type file', $exception->getMessage());
+        }
+
+        $symlink_session = $this->push_session('59595959595959595959595959595959');
+        $symlink_work_directory = $symlink_session->get_push_directory() . '/work';
+        file_put_contents($symlink_work_directory . '/inflight.json', json_encode([
+            'phase' => 'publishing',
+            'path_b64' => base64_encode('broken-symlink'),
+            'type' => 'symlink',
+            'target_b64' => base64_encode('../expected'),
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        symlink('../observed', $symlink_work_directory . '/files/broken-symlink');
+        try {
+            $symlink_session->get_status();
+            $this->fail('Symlink recovery accepted a different completed target.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertStringContainsString(base64_encode('broken-symlink'), $exception->getMessage());
+            $this->assertStringContainsString(base64_encode('../expected'), $exception->getMessage());
+            $this->assertStringContainsString(base64_encode('../observed'), $exception->getMessage());
+        }
+    }
+
+    /**
+     * Applies the normal directory mode when publication resumes after a crash.
+     *
+     * Both paths call mkdir() under the same process umask. Recovery must not
+     * replace the requested mode with a private-directory mode that can make the
+     * committed directory inaccessible to the web server.
+     */
+    public function testRecoveredDirectoryUsesNormalPublicationMode(): void {
+        $previous_umask = umask(0022);
+        try {
+            $normal_session = $this->push_session('60606060606060606060606060606060');
+            $this->push_parts($normal_session, [[
+                'headers' => [
+                    'X-Chunk-Type' => 'directory',
+                    'X-Directory-Path' => base64_encode('normal-directory'),
+                ],
+                'body' => '',
+            ]]);
+            $normal_mode = fileperms($normal_session->get_push_directory() . '/work/files/normal-directory') & 0777;
+
+            $recovered_session = $this->push_session('61616161616161616161616161616161');
+            $this->run_upload_with_filesystem_fault($recovered_session, [[
+                'headers' => [
+                    'X-Chunk-Type' => 'directory',
+                    'X-Directory-Path' => base64_encode('recovered-directory'),
+                ],
+                'body' => '',
+            ]], 'mkdir', '/work/files/recovered-directory');
+            $recovered_session->get_status('recovered-directory');
+            $recovered_mode = fileperms($recovered_session->get_push_directory() . '/work/files/recovered-directory') & 0777;
+
+            $this->assertSame(0755, $normal_mode);
+            $this->assertSame($normal_mode, $recovered_mode);
+        } finally {
+            umask($previous_umask);
+        }
+    }
+
     public function testDirectoryAndSymlinkPublicationRecoverBeforeAndAfterLeafCreation(): void {
         foreach (['directory', 'symlink'] as $type_index => $type) {
             foreach (['create', 'clear'] as $boundary_index => $boundary) {
