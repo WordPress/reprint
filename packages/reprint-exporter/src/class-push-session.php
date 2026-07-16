@@ -13,9 +13,8 @@ if (!class_exists('Site_Export_Push_Exception', false)) {
  * Receives push work privately, then commits its deletes and files directly.
  *
  * `work/files/` is both the completed work tree and the work-file queue.
- * Incomplete file bytes live under `work/partial/`, but both trees represent
- * one logical path namespace: a value in either tree cannot hide or contain a
- * value in the other.
+ * One unfinished value is recorded in `work/inflight.json`; unfinished file
+ * bytes live in `work/inflight.data` rather than in a second path-shaped tree.
  * Successful file installation consumes each entry. Deletes remain raw NUL-delimited
  * bytes in `work/deletes`; their confirmed cursor is the file's actual size.
  * Commit persists only one delete, one work-files descendant, and a path-depth-bounded
@@ -52,7 +51,9 @@ final class Site_Export_Push_Session {
     /** @var string */
     private $work_files_directory;
     /** @var string */
-    private $work_partial_directory;
+    private $work_inflight_path;
+    /** @var string */
+    private $work_inflight_data_path;
     /** @var string */
     private $work_deletes_path;
     /** @var string */
@@ -123,7 +124,8 @@ final class Site_Export_Push_Session {
         $this->push_lock_path = $this->push_directory . '/push.lock';
         $this->work_dir = $this->push_directory . '/work';
         $this->work_files_directory = $this->work_dir . '/files';
-        $this->work_partial_directory = $this->work_dir . '/partial';
+        $this->work_inflight_path = $this->work_dir . '/inflight.json';
+        $this->work_inflight_data_path = $this->work_dir . '/inflight.data';
         $this->work_deletes_path = $this->work_dir . '/deletes';
         $this->maintenance_copy_path = $this->work_dir . '/maintenance.php';
     }
@@ -172,7 +174,7 @@ final class Site_Export_Push_Session {
             if (file_exists($push_session->push_directory) || is_link($push_session->push_directory)) {
                 return $push_session;
             }
-            if (!@mkdir($push_session->work_files_directory, 0700, true) || !@mkdir($push_session->work_partial_directory, 0700, true)) {
+            if (!@mkdir($push_session->work_files_directory, 0700, true)) {
                 self::remove_tree($push_session->push_directory);
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create the push work directories.');
             }
@@ -333,8 +335,8 @@ final class Site_Export_Push_Session {
      *
      * Returning true means the complete part has been accepted into the work
      * directory and get_current_change() describes the resulting work state.
-     * A file part may leave that file partial, so true does not mean the logical
-     * file or the complete multipart request is finished.
+     * A file part may leave its value in the fixed in-flight slot, so true does
+     * not mean the logical file or the complete multipart request is finished.
      *
      * Returning false means the closing multipart boundary was consumed. EOF
      * in a header, body, or boundary throws instead, so truncation is never
@@ -475,15 +477,21 @@ final class Site_Export_Push_Session {
      */
     public function get_status(?string $path = null): array {
         return $this->with_push_lock(function () use ($path): array {
+            $this->finish_published_inflight();
             $reported_path = null;
             if ($path !== null) {
                 $this->validate_path($path);
-                $partial = $this->work_partial_directory . '/' . $path;
                 $complete = $this->work_files_directory . '/' . $path;
-                $this->ensure_private_parent($partial, false);
                 $this->ensure_private_parent($complete, false);
-                $complete_identity = $this->lstat_path($complete);
-                if ($complete_identity !== null) {
+                $inflight = $this->read_inflight();
+                if ($inflight !== null && base64_decode($inflight['path_b64'], true) === $path) {
+                    $reported_path = [
+                        'path_b64' => base64_encode($path),
+                        'state' => 'partial',
+                        'type' => $inflight['type'],
+                        'accepted_bytes' => $inflight['type'] === 'file' && $inflight['phase'] === 'receiving' ? $this->file_size($this->work_inflight_data_path) : 0,
+                    ];
+                } elseif (($complete_identity = $this->lstat_path($complete)) !== null) {
                     $reported_path = [
                         'path_b64' => base64_encode($path),
                         'state' => 'complete',
@@ -491,20 +499,7 @@ final class Site_Export_Push_Session {
                         'accepted_bytes' => $complete_identity['type'] === 'file' ? $complete_identity['size'] : 0,
                     ];
                 } else {
-                    $partial_identity = $this->lstat_path($partial);
-                    if ($partial_identity !== null) {
-                        if ($partial_identity['type'] !== 'file') {
-                            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Partial work path ' . base64_encode($path) . ' is not a regular file.');
-                        }
-                        $reported_path = [
-                            'path_b64' => base64_encode($path),
-                            'state' => 'partial',
-                            'type' => 'file',
-                            'accepted_bytes' => $partial_identity['size'],
-                        ];
-                    } else {
-                        $reported_path = ['path_b64' => base64_encode($path), 'state' => 'missing', 'accepted_bytes' => 0];
-                    }
+                    $reported_path = ['path_b64' => base64_encode($path), 'state' => 'missing', 'accepted_bytes' => 0];
                 }
             }
             $commit_state = $this->read_json($this->commit_json_path);
@@ -566,8 +561,9 @@ final class Site_Export_Push_Session {
                         throw new InvalidArgumentException('A nonempty delete stream must end in NUL before commit; the final record is unterminated.');
                     }
                 }
-                if ($this->first_tree_entry($this->work_partial_directory) !== null) {
-                    throw new InvalidArgumentException('Commit cannot begin while work/partial still contains an incomplete file.');
+                $this->finish_published_inflight();
+                if ($this->read_inflight() !== null) {
+                    throw new InvalidArgumentException('Commit cannot begin while an unfinished work value remains.');
                 }
                 $commit_state = [
                     'version' => 3,
@@ -750,11 +746,91 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Accepts one file MIME part into work/partial or work/files.
+     * Reads the durable description of the unfinished work value.
+     *
+     * A push receives or publishes one work value at a time. Its identity and
+     * phase are stored in `work/inflight.json`; unfinished file bytes, when
+     * applicable, are stored separately in `work/inflight.data`. This method
+     * reads the record before upload, status, or commit decides what work is
+     * safe to perform.
+     *
+     * The JSON record is the authority for whether work is in flight. Callers
+     * use its type and phase to decide whether they can receive more bytes,
+     * publish the completed value, or begin commit work. A missing record means
+     * there is no unfinished value.
+     *
+     * @return array{version:1,phase:'preparing'|'receiving'|'publishing',path_b64:string,type:'file',total_bytes:int}|array{version:1,phase:'preparing'|'publishing',path_b64:string,type:'directory'}|array{version:1,phase:'preparing'|'publishing',path_b64:string,type:'symlink',target_b64:string}|null In-flight work, or null when none exists.
+     */
+    private function read_inflight(): ?array {
+        return $this->read_json($this->work_inflight_path);
+    }
+
+    /**
+     * Finishes a publication which crossed its durable publication boundary.
+     *
+     * Publishing metadata is written before the completed work value changes.
+     * That ordering lets a later upload, status request, or commit distinguish a
+     * crash before publication from a crash after the data-file rename. When the
+     * fixed data file remains it is authoritative and is renamed into work/files.
+     * When it has already been consumed, the completed value is checked as the
+     * durable evidence of publication. Only then is the in-flight metadata
+     * removed.
+     *
+     * @return void
+     */
+    private function finish_published_inflight(): void {
+        $inflight = $this->read_inflight();
+        if ($inflight === null || $inflight['phase'] !== 'publishing') {
+            return;
+        }
+        $path = base64_decode($inflight['path_b64'], true);
+        $work_path = $this->work_files_directory . '/' . $path;
+        $work_identity = $this->lstat_path($work_path);
+        if ($inflight['type'] === 'file') {
+            $data = $this->lstat_path($this->work_inflight_data_path);
+            if ($data !== null) {
+                if ($data['type'] !== 'file' || $data['size'] !== $inflight['total_bytes']) {
+                    throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Publishing in-flight data has an invalid size.');
+                }
+                $this->ensure_private_parent($work_path);
+                if ($work_identity !== null) {
+                    $this->remove_work_path($work_path);
+                }
+                if (!@rename($this->work_inflight_data_path, $work_path)) {
+                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish in-flight file data.');
+                }
+            } elseif ($work_identity === null || $work_identity['type'] !== 'file' || $work_identity['size'] !== $inflight['total_bytes']) {
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Published in-flight data has no completed file.');
+            }
+        } elseif ($inflight['type'] === 'directory') {
+            if ($work_identity === null) {
+                $this->ensure_private_parent($work_path);
+                if (!@mkdir($work_path, 0700)) {
+                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the in-flight directory.');
+                }
+            } elseif ($work_identity['type'] !== 'directory') {
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Published in-flight directory has an incompatible completed value.');
+            }
+        } elseif ($work_identity === null) {
+            $this->ensure_private_parent($work_path);
+            if (!@symlink(base64_decode($inflight['target_b64'], true), $work_path)) {
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the in-flight symlink.');
+            }
+        } elseif ($work_identity['type'] !== 'symlink' || @readlink($work_path) !== base64_decode($inflight['target_b64'], true)) {
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Published in-flight symlink has an incompatible completed value.');
+        }
+        if (!@unlink($this->work_inflight_path)) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear published in-flight metadata.');
+        }
+    }
+
+    /**
+     * Accepts one file MIME part through the durable in-flight slot.
      *
      * The caller has already validated Content-Length against the document-root
      * part ceiling. This method validates the file-specific headers, enforces the
-     * work-confirmed resume offset, streams the body into the partial file,
+     * work-confirmed resume offset, streams the body into the in-flight data
+     * file,
      * and promotes the file atomically inside the private reprint directory only when the
      * declared total size has been reached.
      *
@@ -770,96 +846,89 @@ final class Site_Export_Push_Session {
         if ($offset > $total_bytes || $part_bytes > $total_bytes - $offset) {
             throw new InvalidArgumentException('File part for ' . base64_encode($path) . ' exceeds its declared total of ' . $total_bytes . ' bytes.');
         }
-        $partial_path = $this->work_partial_directory . '/' . $path;
+        $this->finish_published_inflight();
+        $inflight = $this->read_inflight();
         $complete_path = $this->work_files_directory . '/' . $path;
-        $this->ensure_private_parent($partial_path);
-        $this->ensure_private_parent($complete_path);
-
         $complete = $this->lstat_path($complete_path);
-        if ($complete !== null) {
-            if ($offset !== 0 && $complete['type'] === 'file' && $complete['size'] === $total_bytes && $offset === $total_bytes && $part_bytes === 0) {
-                if ($this->read_current_upload_body_piece() !== null) {
-                    throw new LogicException('Multipart processor exposed file bytes for an empty completed-file replay.');
-                }
-                $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'file', 'accepted_bytes' => $total_bytes];
-                return;
+        if ($inflight === null && $complete !== null && $complete['type'] === 'file' && $complete['size'] === $total_bytes && $offset === $total_bytes && $part_bytes === 0) {
+            if ($this->read_current_upload_body_piece() !== null) {
+                throw new LogicException('Multipart processor exposed file bytes for an empty completed-file replay.');
             }
-            if ($offset !== 0) {
-                throw new Site_Export_Push_Exception(
-                    self::ERROR_OFFSET_GAP,
-                    'Completed work file ' . base64_encode($path) . ' can only be restarted at offset 0.'
-                );
+            $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'file', 'accepted_bytes' => $total_bytes];
+            return;
+        }
+        if ($inflight === null && $offset !== 0) {
+            throw new Site_Export_Push_Exception(self::ERROR_OFFSET_GAP, 'File part for ' . base64_encode($path) . ' starts at offset ' . $offset . ', but no matching in-flight file exists. Start at offset 0.');
+        }
+        if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
+            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished work value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
+        }
+        if ($inflight === null || $offset === 0) {
+            if ($inflight !== null && $this->lstat_path($this->work_inflight_data_path) !== null && !@unlink($this->work_inflight_data_path)) {
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not discard in-flight file data for restart.');
             }
-            if ($complete['type'] === 'directory' && $this->first_directory_entry($complete_path) !== null) {
-                throw new InvalidArgumentException('Work file ' . base64_encode($path) . ' conflicts with work descendants.');
+            $inflight = ['version' => 1, 'phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'file', 'total_bytes' => $total_bytes];
+            $this->write_json($this->work_inflight_path, $inflight);
+            $handle = @fopen($this->work_inflight_data_path, 'wb');
+            if ($handle === false) {
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create in-flight file data for ' . base64_encode($path) . '.');
             }
-        }
-
-        $partial = $this->lstat_path($partial_path);
-        if ($partial !== null && $partial['type'] === 'directory' && $this->first_directory_entry($partial_path) !== null) {
-            throw new InvalidArgumentException('Work file ' . base64_encode($path) . ' conflicts with partial descendants.');
-        }
-        if ($partial !== null && !in_array($partial['type'], ['file', 'directory'], true)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The partial path for ' . base64_encode($path) . ' is a ' . $partial['type'] . ', not a regular file.');
-        }
-        if ($complete !== null) {
-            $this->remove_work_path($complete_path);
-        }
-        if ($partial !== null && $partial['type'] === 'directory') {
-            $this->remove_work_path($partial_path);
-            $partial = null;
-        }
-        $actual_bytes = $partial === null ? 0 : $partial['size'];
-        if ($offset === 0 && $actual_bytes !== 0) {
-            if (!@unlink($partial_path)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not restart partial file ' . base64_encode($path) . ' at offset 0.');
-            }
+            fclose($handle);
+            $inflight['phase'] = 'receiving';
+            $this->write_json($this->work_inflight_path, $inflight);
             $actual_bytes = 0;
-        } elseif ($offset !== $actual_bytes) {
-            throw new Site_Export_Push_Exception(
-                self::ERROR_OFFSET_GAP,
-                'File part for ' . base64_encode($path) . ' starts at offset ' . $offset . ', but work/partial contains ' . $actual_bytes . ' bytes. Start at offset 0 or resume at the actual size.'
-            );
+        } else {
+            if ($inflight['type'] !== 'file' || $inflight['phase'] !== 'receiving' || $inflight['total_bytes'] !== $total_bytes) {
+                throw new Site_Export_Push_Exception(self::ERROR_OFFSET_GAP, 'In-flight file ' . base64_encode($path) . ' must be restarted at offset 0.');
+            }
+            $actual_bytes = $this->file_size($this->work_inflight_data_path);
+            if ($offset !== $actual_bytes) {
+                throw new Site_Export_Push_Exception(self::ERROR_OFFSET_GAP, 'File part for ' . base64_encode($path) . ' starts at offset ' . $offset . ', but in-flight data contains ' . $actual_bytes . ' bytes.');
+            }
         }
-
-        $handle = @fopen($partial_path, $actual_bytes === 0 ? 'wb' : 'ab');
+        $handle = @fopen($this->work_inflight_data_path, 'ab');
         if ($handle === false) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open partial file ' . base64_encode($path) . ' for work.');
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open in-flight file data for ' . base64_encode($path) . '.');
         }
         $received = 0;
         try {
-            while (true) {
-                $piece = $this->read_current_upload_body_piece();
-                if ($piece === null) {
-                    break;
-                }
+            while (($piece = $this->read_current_upload_body_piece()) !== null) {
                 $received += strlen($piece);
-                $this->write_all($handle, $piece, 'partial file ' . base64_encode($path));
+                $this->write_all($handle, $piece, 'in-flight file data ' . base64_encode($path));
             }
             if (!fflush($handle)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not flush partial file ' . base64_encode($path) . '.');
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not flush in-flight file data ' . base64_encode($path) . '.');
             }
         } finally {
             fclose($handle);
         }
         $accepted_bytes = $actual_bytes + $received;
         if ($accepted_bytes === $total_bytes) {
-            if (!@rename($partial_path, $complete_path)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not promote completed work file ' . base64_encode($path) . '.');
+            $inflight['phase'] = 'publishing';
+            $this->write_json($this->work_inflight_path, $inflight);
+            $this->ensure_private_parent($complete_path);
+            if (($existing = $this->lstat_path($complete_path)) !== null) {
+                $this->remove_work_path($complete_path);
             }
-            $commit_state = 'complete';
+            if (!@rename($this->work_inflight_data_path, $complete_path)) {
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish completed staged file ' . base64_encode($path) . '.');
+            }
+            if (!@unlink($this->work_inflight_path)) {
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear published in-flight metadata for ' . base64_encode($path) . '.');
+            }
+            $state = 'complete';
         } else {
-            $commit_state = 'partial';
+            $state = 'partial';
         }
-        $this->current_change = ['path_b64' => base64_encode($path), 'state' => $commit_state, 'type' => 'file', 'accepted_bytes' => $accepted_bytes];
+        $this->current_change = ['path_b64' => base64_encode($path), 'state' => $state, 'type' => 'file', 'accepted_bytes' => $accepted_bytes];
     }
 
     /**
      * Accepts one explicit empty-directory MIME part.
      *
      * Directory parts have no body. They create or refresh an empty directory in
-     * the completed work tree, but they reject conflicts with already work
-     * descendants because a single work path cannot be both a leaf value and a
+     * the completed staging tree, but they reject conflicts with already staged
+     * descendants because a single staged path cannot be both a leaf value and a
      * structural parent.
      *
      * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-directory-path:string} $headers
@@ -872,26 +941,36 @@ final class Site_Export_Push_Session {
             throw new InvalidArgumentException('Multipart directory part must have Content-Length 0.');
         }
         $path = $this->decode_path_header($headers, 'x-directory-path');
-        $work_path = $this->work_files_directory . '/' . $path;
-        $partial = $this->work_partial_directory . '/' . $path;
-        $this->ensure_private_parent($work_path);
-        $this->ensure_private_parent($partial, false);
-        $identity = $this->lstat_path($work_path);
-        $partial_identity = $this->lstat_path($partial);
-        if ($identity !== null && $identity['type'] === 'directory' && $this->first_directory_entry($work_path) !== null) {
-            throw new InvalidArgumentException('Explicit empty directory ' . base64_encode($path) . ' conflicts with work descendants.');
+        $target = $this->work_files_directory . '/' . $path;
+        $this->finish_published_inflight();
+        $inflight = $this->read_inflight();
+        if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
+            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished work value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
         }
-        if ($partial_identity !== null && $partial_identity['type'] === 'directory' && $this->first_directory_entry($partial) !== null) {
-            throw new InvalidArgumentException('Explicit empty directory ' . base64_encode($path) . ' conflicts with partial descendants.');
+        $identity = $this->lstat_path($target);
+        if ($identity !== null && $identity['type'] === 'directory' && $this->first_directory_entry($target) !== null) {
+            throw new InvalidArgumentException('Explicit empty directory ' . base64_encode($path) . ' conflicts with staged descendants.');
         }
-        if ($identity !== null && $identity['type'] !== 'directory') {
-            $this->remove_work_path($work_path);
+        if ($inflight === null && $identity !== null && $identity['type'] === 'directory') {
+            $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'directory', 'accepted_bytes' => 0];
+            return;
         }
-        if ($partial_identity !== null) {
-            $this->remove_work_path($partial);
+        $inflight = ['version' => 1, 'phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'directory'];
+        $this->write_json($this->work_inflight_path, $inflight);
+        if ($this->lstat_path($this->work_inflight_data_path) !== null && !@unlink($this->work_inflight_data_path)) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not discard stale in-flight file data.');
         }
-        if (!is_dir($work_path) && !@mkdir($work_path, 0777)) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create an explicit empty work directory ' . base64_encode($path) . '.');
+        if ($identity !== null) {
+            $this->remove_work_path($target);
+        }
+        $inflight['phase'] = 'publishing';
+        $this->write_json($this->work_inflight_path, $inflight);
+        $this->ensure_private_parent($target);
+        if (!is_dir($target) && !@mkdir($target, 0777)) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not stage explicit empty directory ' . base64_encode($path) . '.');
+        }
+        if (!@unlink($this->work_inflight_path)) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear published in-flight metadata for ' . base64_encode($path) . '.');
         }
         $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'directory', 'accepted_bytes' => 0];
     }
@@ -900,8 +979,8 @@ final class Site_Export_Push_Session {
      * Accepts one symlink MIME part.
      *
      * Symlink parts carry their target in a base64 header and have an empty
-     * body. The work value replaces any previous leaf at the same private path
-     * and rejects directory conflicts that would orphan already work children.
+     * body. The staged value replaces any previous leaf at the same private path
+     * and rejects directory conflicts that would orphan already staged children.
      *
      * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-symlink-path:string,x-symlink-target:string} $headers
      *     Normalized symlink part headers.
@@ -913,30 +992,40 @@ final class Site_Export_Push_Session {
             throw new InvalidArgumentException('Multipart symlink part must have Content-Length 0.');
         }
         $path = $this->decode_path_header($headers, 'x-symlink-path');
-        $symlink_target = $this->decode_path_header($headers, 'x-symlink-target', false);
-        if ($symlink_target === '' || strlen($symlink_target) > self::MAX_PATH_BYTES || strpos($symlink_target, "\0") !== false) {
-            throw new InvalidArgumentException('Symlink destination must contain between 1 and ' . self::MAX_PATH_BYTES . ' bytes without NUL.');
+        $target_value = $this->decode_path_header($headers, 'x-symlink-target', false);
+        if ($target_value === '' || strlen($target_value) > self::MAX_PATH_BYTES || strpos($target_value, "\0") !== false) {
+            throw new InvalidArgumentException('Symlink target must contain between 1 and ' . self::MAX_PATH_BYTES . ' bytes without NUL.');
         }
-        $work_path = $this->work_files_directory . '/' . $path;
-        $partial = $this->work_partial_directory . '/' . $path;
-        $this->ensure_private_parent($work_path);
-        $this->ensure_private_parent($partial, false);
-        $identity = $this->lstat_path($work_path);
-        $partial_identity = $this->lstat_path($partial);
-        if ($identity !== null && $identity['type'] === 'directory' && $this->first_directory_entry($work_path) !== null) {
-            throw new InvalidArgumentException('Work symlink ' . base64_encode($path) . ' conflicts with work descendants.');
+        $target = $this->work_files_directory . '/' . $path;
+        $this->finish_published_inflight();
+        $inflight = $this->read_inflight();
+        if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
+            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished work value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
         }
-        if ($partial_identity !== null && $partial_identity['type'] === 'directory' && $this->first_directory_entry($partial) !== null) {
-            throw new InvalidArgumentException('Work symlink ' . base64_encode($path) . ' conflicts with partial descendants.');
+        $identity = $this->lstat_path($target);
+        if ($identity !== null && $identity['type'] === 'directory' && $this->first_directory_entry($target) !== null) {
+            throw new InvalidArgumentException('Staged symlink ' . base64_encode($path) . ' conflicts with staged descendants.');
+        }
+        if ($inflight === null && $identity !== null && $identity['type'] === 'symlink' && @readlink($target) === $target_value) {
+            $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'symlink', 'accepted_bytes' => 0];
+            return;
+        }
+        $inflight = ['version' => 1, 'phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'symlink', 'target_b64' => base64_encode($target_value)];
+        $this->write_json($this->work_inflight_path, $inflight);
+        if ($this->lstat_path($this->work_inflight_data_path) !== null && !@unlink($this->work_inflight_data_path)) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not discard stale in-flight file data.');
         }
         if ($identity !== null) {
-            $this->remove_work_path($work_path);
+            $this->remove_work_path($target);
         }
-        if ($partial_identity !== null) {
-            $this->remove_work_path($partial);
+        $inflight['phase'] = 'publishing';
+        $this->write_json($this->work_inflight_path, $inflight);
+        $this->ensure_private_parent($target);
+        if (!@symlink($target_value, $target)) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not stage symlink ' . base64_encode($path) . '.');
         }
-        if (!@symlink($symlink_target, $work_path)) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create a work symlink ' . base64_encode($path) . '.');
+        if (!@unlink($this->work_inflight_path)) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear published in-flight metadata for ' . base64_encode($path) . '.');
         }
         $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'symlink', 'accepted_bytes' => 0];
     }
@@ -945,7 +1034,7 @@ final class Site_Export_Push_Session {
      * Accepts one segment of the raw NUL-delimited delete stream.
      *
      * The delete stream is append-only, but lost responses may cause callers to
-     * replay bytes already stored in the work delete stream. Overlapping bytes must match
+     * replay bytes already stored by the target. Overlapping bytes must match
      * exactly; new bytes are validated record-by-record before they are flushed.
      * A completion declaration records that no more delete bytes may be added.
      *
@@ -1610,45 +1699,6 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Finds whether a tree contains any work.
-     *
-     * Empty directories can be structural commit-cursor entries rather than
-     * logical values. This descends through such directories until it sees a
-     * leaf value or a directory with its own non-empty descendant.
-     *
-     * @param string $directory Absolute private directory path.
-     * @return string|null Entry name proving pending work exists, or null.
-     */
-    private function first_tree_entry(string $directory): ?string {
-        $handle = @opendir($directory);
-        if ($handle === false) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read directory ' . $directory . '.');
-        }
-        try {
-            while (true) {
-                $entry = readdir($handle);
-                if ($entry === false) {
-                    break;
-                }
-                if ($entry === '.' || $entry === '..') {
-                    continue;
-                }
-                $path = $directory . '/' . $entry;
-                $identity = $this->lstat_path($path);
-                if ($identity === null) {
-                    continue;
-                }
-                if ($identity['type'] !== 'directory' || $this->first_tree_entry($path) !== null) {
-                    return $entry;
-                }
-            }
-        } finally {
-            closedir($handle);
-        }
-        return null;
-    }
-
-    /**
      * Returns a work leaf path below a structural directory.
      *
      * When a document-root structural ancestor conflicts, reporting only the ancestor can
@@ -1786,7 +1836,7 @@ final class Site_Export_Push_Session {
             throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'Push session ' . $this->push_session_id . ' is busy. Retry the request.');
         }
         try {
-            foreach ([$this->push_directory, $this->work_dir, $this->work_files_directory, $this->work_partial_directory] as $directory) {
+            foreach ([$this->push_directory, $this->work_dir, $this->work_files_directory] as $directory) {
                 $identity = $this->lstat_path($directory);
                 if ($identity === null || $identity['type'] !== 'directory') {
                     throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Required push directory is missing or not real: ' . $directory . '.');
@@ -1798,7 +1848,7 @@ final class Site_Export_Push_Session {
                     throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Required push file is missing or not regular: ' . $file . '.');
                 }
             }
-            foreach ([$this->commit_json_path, $this->maintenance_copy_path] as $optional_file) {
+            foreach ([$this->commit_json_path, $this->maintenance_copy_path, $this->work_inflight_path, $this->work_inflight_data_path] as $optional_file) {
                 $identity = $this->lstat_path($optional_file);
                 if ($identity !== null && $identity['type'] !== 'file') {
                     throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Optional push file has an unsupported type: ' . $optional_file . '.');
@@ -1895,8 +1945,12 @@ final class Site_Export_Push_Session {
      *     commit_cursor?:list<array{component_b64:string}>,
      *     deleted_files?:int,
      *     installed_files?:int,
-     *     non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>}
-     * } $value Push metadata or commit checkpoint object to persist.
+     *     non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>},
+     *     path_b64?:string,
+     *     type?:string,
+     *     total_bytes?:int,
+     *     target_b64?:string
+     * } $value Push metadata, commit checkpoint, or in-flight work record to persist.
      */
     private function write_json(string $path, array $value): void {
         $contents = json_encode($value, JSON_UNESCAPED_SLASHES);
@@ -2220,7 +2274,7 @@ final class Site_Export_Push_Session {
     /**
      * Creates or validates private structural parents for a work path.
      *
-     * Only work/files and work/partial paths are accepted. Missing parents are
+     * Only work/files paths are accepted. Missing parents are
      * created when requested; existing parents must be real directories so a
      * work leaf, link, or external path cannot become a container for another
      * value.
@@ -2231,14 +2285,14 @@ final class Site_Export_Push_Session {
     private function ensure_private_parent(string $path, bool $create_missing = true): void {
         $parent = dirname($path);
         $root = null;
-        foreach ([$this->work_files_directory, $this->work_partial_directory] as $candidate) {
+        foreach ([$this->work_files_directory] as $candidate) {
             if ($parent === $candidate || strpos($parent . '/', $candidate . '/') === 0) {
                 $root = $candidate;
                 break;
             }
         }
         if ($root === null) {
-            throw new LogicException('Private work path escaped work/files and work/partial.');
+            throw new LogicException('Private work path escaped work/files.');
         }
         if ($parent === $root) {
             return;

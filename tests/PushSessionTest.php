@@ -29,6 +29,16 @@ final class PushSessionTest extends TestCase {
         $this->assertSame(['operation' => 'receive'], $exception->get_context());
     }
 
+    public function testNewPushSessionHasOneCompletedTreeAndNoPartialTree(): void {
+        $push_session = $this->push_session('10101010101010101010101010101010');
+        $work_directory = $push_session->get_push_directory() . '/work';
+
+        $this->assertDirectoryExists($work_directory . '/files');
+        $this->assertFileDoesNotExist($work_directory . '/partial');
+        $this->assertFileDoesNotExist($work_directory . '/inflight.json');
+        $this->assertFileDoesNotExist($work_directory . '/inflight.data');
+    }
+
     public function testPartialFileProgressComesFromTheFileAndOffsetZeroRestartsIt(): void {
         $push_session = $this->push_session('11111111111111111111111111111111');
         $this->push_parts($push_session, [[
@@ -501,7 +511,7 @@ final class PushSessionTest extends TestCase {
 
             $this->assertSame('complete', $push_session->get_status('changing')['path']['state']);
             $this->assertSame($type, $push_session->get_status('changing')['path']['type']);
-            $this->assertFileDoesNotExist($push_session->get_push_directory() . '/work/partial/changing');
+            $this->assertFileDoesNotExist($push_session->get_push_directory() . '/work/inflight.data');
         }
     }
 
@@ -516,6 +526,23 @@ final class PushSessionTest extends TestCase {
                 'X-Chunk-Offset' => '0',
             ],
             'body' => 'a',
+        ]]);
+
+        $this->assertSame(
+            ['path_b64' => base64_encode('missing'), 'state' => 'missing', 'accepted_bytes' => 0],
+            $push_session->get_status('missing')['path']
+        );
+        $this->assertSame('partial', $push_session->get_status($raw_path)['path']['state']);
+        $this->assertSame(1, $push_session->get_status($raw_path)['path']['accepted_bytes']);
+
+        $this->push_parts($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'file',
+                'X-File-Path' => base64_encode($raw_path),
+                'X-File-Size' => '2',
+                'X-Chunk-Offset' => '1',
+            ],
+            'body' => 'b',
         ]]);
         $this->push_parts($push_session, [
             [
@@ -544,12 +571,6 @@ final class PushSessionTest extends TestCase {
             ],
         ]);
 
-        $this->assertSame(
-            ['path_b64' => base64_encode('missing'), 'state' => 'missing', 'accepted_bytes' => 0],
-            $push_session->get_status('missing')['path']
-        );
-        $this->assertSame('partial', $push_session->get_status($raw_path)['path']['state']);
-        $this->assertSame(1, $push_session->get_status($raw_path)['path']['accepted_bytes']);
         $this->assertSame('file', $push_session->get_status('empty.bin')['path']['type']);
         $this->assertSame('directory', $push_session->get_status('empty-directory')['path']['type']);
         $this->assertSame('symlink', $push_session->get_status('link')['path']['type']);
@@ -612,10 +633,10 @@ final class PushSessionTest extends TestCase {
             try {
                 $this->push_parts($push_session, [['headers' => $headers, 'body' => '']]);
                 $this->fail('A partial file became the parent of a completed ' . $type . '.');
-            } catch (InvalidArgumentException $exception) {
-                $this->assertStringContainsString('parent', $exception->getMessage());
+            } catch (Site_Export_Push_Exception $exception) {
+                $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
             }
-            $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/partial/parent'));
+            $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/inflight.data'));
             $this->assertFileDoesNotExist($push_session->get_push_directory() . '/work/files/parent/child');
         }
     }
@@ -658,11 +679,167 @@ final class PushSessionTest extends TestCase {
             try {
                 $this->push_parts($push_session, [['headers' => $headers, 'body' => $body]]);
                 $this->fail('A completed ' . $type . ' hid a partial descendant.');
-            } catch (InvalidArgumentException $exception) {
-                $this->assertStringContainsString('descendant', $exception->getMessage());
+            } catch (Site_Export_Push_Exception $exception) {
+                $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
             }
-            $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/partial/parent/child'));
+            $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/inflight.data'));
         }
+    }
+
+    public function testOnlyTheMatchingPathCanUseTheInFlightSlot(): void {
+        $push_session = $this->push_session('77777777777777777777777777777777');
+        $this->push_parts($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'file',
+                'X-File-Path' => base64_encode('first.txt'),
+                'X-File-Size' => '2',
+                'X-Chunk-Offset' => '0',
+            ],
+            'body' => 'a',
+        ]]);
+
+        try {
+            $this->push_file($push_session, 'second.txt', 'b');
+            $this->fail('A different path replaced unfinished work.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
+        }
+
+        $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/inflight.data'));
+        $this->assertFileDoesNotExist($push_session->get_push_directory() . '/work/files/second.txt');
+    }
+
+    public function testInFlightFileStatusShadowsThePreviousCompletedFile(): void {
+        $push_session = $this->push_session('67676767676767676767676767676767');
+        $this->push_file($push_session, 'same-size.txt', 'old');
+        $this->push_parts($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'file',
+                'X-File-Path' => base64_encode('same-size.txt'),
+                'X-File-Size' => '3',
+                'X-Chunk-Offset' => '0',
+            ],
+            'body' => 'n',
+        ]]);
+
+        $status = $push_session->get_status('same-size.txt')['path'];
+        $this->assertSame('partial', $status['state']);
+        $this->assertSame('file', $status['type']);
+        $this->assertSame(1, $status['accepted_bytes']);
+        $this->assertSame('old', file_get_contents($push_session->get_push_directory() . '/work/files/same-size.txt'));
+
+        $this->push_parts($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'file',
+                'X-File-Path' => base64_encode('same-size.txt'),
+                'X-File-Size' => '3',
+                'X-Chunk-Offset' => '1',
+            ],
+            'body' => 'ew',
+        ]]);
+        $this->assertSame('new', file_get_contents($push_session->get_push_directory() . '/work/files/same-size.txt'));
+    }
+
+    public function testCommitRejectsUnfinishedWorkBeforeWritingACheckpoint(): void {
+        $push_session = $this->push_session('56565656565656565656565656565656');
+        $this->push_parts($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'file',
+                'X-File-Path' => base64_encode('unfinished.txt'),
+                'X-File-Size' => '2',
+                'X-Chunk-Offset' => '0',
+            ],
+            'body' => 'x',
+        ]]);
+        $this->complete_work_deletes($push_session);
+
+        try {
+            $push_session->commit(1);
+            $this->fail('Commit accepted unfinished work.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('unfinished', $exception->getMessage());
+        }
+
+        $this->assertFileDoesNotExist($push_session->get_push_directory() . '/commit.json');
+        $this->assertFileDoesNotExist($this->docroot . '/unfinished.txt');
+    }
+
+    public function testStatusFinishesPublishedDirectoryAndSymlinkWork(): void {
+        foreach (['directory', 'symlink'] as $index => $type) {
+            $push_session = $this->push_session(sprintf('%032x', 60 + $index));
+            $work_directory = $push_session->get_push_directory() . '/work';
+            $inflight = [
+                'version' => 1,
+                'phase' => 'publishing',
+                'path_b64' => base64_encode($type . '-value'),
+                'type' => $type,
+            ];
+            if ($type === 'symlink') {
+                $inflight['target_b64'] = base64_encode('../target');
+            }
+            file_put_contents($work_directory . '/inflight.json', json_encode($inflight, JSON_THROW_ON_ERROR));
+
+            $status = $push_session->get_status($type . '-value')['path'];
+            $this->assertSame('complete', $status['state']);
+            $this->assertSame($type, $status['type']);
+            $this->assertFileDoesNotExist($work_directory . '/inflight.json');
+        }
+    }
+
+    public function testStatusFinishesPublishedFileDataWithoutAcceptingTheOldValue(): void {
+        $push_session = $this->push_session('34343434343434343434343434343434');
+        $work_directory = $push_session->get_push_directory() . '/work';
+        file_put_contents($work_directory . '/files/same-size.txt', 'old');
+        file_put_contents($work_directory . '/inflight.data', 'new');
+        file_put_contents($work_directory . '/inflight.json', json_encode([
+            'version' => 1,
+            'phase' => 'publishing',
+            'path_b64' => base64_encode('same-size.txt'),
+            'type' => 'file',
+            'total_bytes' => 3,
+        ], JSON_THROW_ON_ERROR));
+
+        $this->assertSame('complete', $push_session->get_status('same-size.txt')['path']['state']);
+        $this->assertSame('new', file_get_contents($work_directory . '/files/same-size.txt'));
+        $this->assertFileDoesNotExist($work_directory . '/inflight.json');
+        $this->assertFileDoesNotExist($work_directory . '/inflight.data');
+    }
+
+    public function testStatusFinishesPublishedFileAfterItsDataWasRenamed(): void {
+        $push_session = $this->push_session('45454545454545454545454545454545');
+        $work_directory = $push_session->get_push_directory() . '/work';
+        file_put_contents($work_directory . '/files/renamed.txt', 'new');
+        file_put_contents($work_directory . '/inflight.json', json_encode([
+            'version' => 1,
+            'phase' => 'publishing',
+            'path_b64' => base64_encode('renamed.txt'),
+            'type' => 'file',
+            'total_bytes' => 3,
+        ], JSON_THROW_ON_ERROR));
+
+        $this->assertSame('complete', $push_session->get_status('renamed.txt')['path']['state']);
+        $this->assertSame('new', file_get_contents($work_directory . '/files/renamed.txt'));
+        $this->assertFileDoesNotExist($work_directory . '/inflight.json');
+    }
+
+    public function testCommitFinishesPublishedFileBeforeWritingItsCheckpoint(): void {
+        $push_session = $this->push_session('46464646464646464646464646464646');
+        $work_directory = $push_session->get_push_directory() . '/work';
+        file_put_contents($work_directory . '/inflight.data', 'new');
+        file_put_contents($work_directory . '/inflight.json', json_encode([
+            'version' => 1,
+            'phase' => 'publishing',
+            'path_b64' => base64_encode('commit.txt'),
+            'type' => 'file',
+            'total_bytes' => 3,
+        ], JSON_THROW_ON_ERROR));
+        $this->complete_work_deletes($push_session);
+
+        $push_session->commit(1);
+
+        $this->assertFileDoesNotExist($work_directory . '/inflight.json');
+        $this->assertSame('new', file_get_contents($work_directory . '/files/commit.txt'));
+        $this->assertFileExists($push_session->get_push_directory() . '/commit.json');
     }
 
     public function testCheckpointMustContainEveryFieldReadByCommit(): void {
