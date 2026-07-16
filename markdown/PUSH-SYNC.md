@@ -91,15 +91,22 @@ push identity and policy plus whether the work-delete stream is complete.
 `commit.json` holds the bounded commit cursor. Both are atomically replaced
 and validated against the current schema.
 
-Multipart file bytes are received directly into `work/partial/` and promoted
-to `work/files/` only after their declared byte count is complete. A file
-replayed from byte zero replaces an incomplete prior copy; a continuation must
-begin at the receiver-confirmed byte count. `work/deletes` is the corresponding
-durable delete queue.
+`work/files/` contains completed work values only. A single `work/inflight.json`
+record identifies the value currently being received or published, and
+`work/inflight.data` contains in-flight file bytes. Its actual size is the
+receiver-confirmed cursor. A file replayed from byte zero restarts the same
+path; a continuation must begin at that confirmed cursor. Another positive-work
+path is rejected until the in-flight work is complete. `work/deletes` is the
+corresponding durable delete queue.
+
+Publication records its phase before it creates work-file parents or replaces
+the completed value. A status, upload, or commit request can therefore finish
+a publication after a lost response. Commit refuses to begin while work is
+still being prepared or received, so it traverses completed work files only.
 
 `remove()` renames a removable push directory to
 `.removing-<push-session-id>/` before bounded cleanup. A false return means
-more cleanup remains and must be retried. A push with an unfinished commit is
+more cleanup remains and must be retried. A push with a commit in progress is
 not removable; its next commit request resumes the durable cursor instead.
 
 ## Where reprint stores its own data on the remote
@@ -123,9 +130,9 @@ root. When the host only allows writing inside the document root:
 Remote-side, journaled, idempotent, driven by repeated commands until done.
 Order:
 
-1. **Receive work, outside maintenance:** multipart requests write bounded
-   chunks into `work/partial/` and promote complete files to `work/files`.
-   The site runs normally throughout receipt.
+1. **Receive work, outside maintenance:** multipart requests write one bounded
+   chunk at a time into `work/inflight.data` and publish complete values in
+   `work/files`. The site runs normally throughout receipt.
 2. **Maintenance on.** Commit writes the `.maintenance` file itself, and since
    WordPress executes that file, ours whitelists reprint API requests
    (`$upgrading = 0` for us, `time()` for everyone else). WordPress's own
