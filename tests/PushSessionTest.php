@@ -1142,14 +1142,14 @@ final class PushSessionTest extends TestCase {
     }
 
     /**
-     * Applies the normal directory mode when publication resumes after a failure.
+     * Applies the process umask when directory publication resumes after a failure.
      *
-     * Normal publication and recovery call mkdir() under the same process umask.
-     * Commit renames the work directory into the document root, preserving the
-     * mode chosen during publication.
+     * 0777 is the pre-umask ceiling, so a 0027 umask creates both normal and
+     * recovered directories as 0750. Commit preserves that mode when it renames
+     * the work directory into the document root.
      */
-    public function testRecoveredDirectoryUsesNormalPublicationMode(): void {
-        $previous_umask = umask(0022);
+    public function testRecoveredDirectoryUsesTheDocumentRootProcessUmask(): void {
+        $previous_umask = umask(0027);
         try {
             $normal_session = $this->push_session('60606060606060606060606060606060');
             $this->push_parts($normal_session, [[
@@ -1180,7 +1180,7 @@ final class PushSessionTest extends TestCase {
             $normal_mode = fileperms($this->docroot . '/normal-directory') & 0777;
             $recovered_mode = fileperms($this->docroot . '/recovered-directory') & 0777;
 
-            $this->assertSame(0755, $normal_mode);
+            $this->assertSame(0750, $normal_mode);
             $this->assertSame($normal_mode, $recovered_mode);
         } finally {
             umask($previous_umask);

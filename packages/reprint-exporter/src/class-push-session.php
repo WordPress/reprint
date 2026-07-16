@@ -864,6 +864,8 @@ final class Site_Export_Push_Session {
         } elseif ($inflight['type'] === 'directory') {
             if ($work_identity === null) {
                 $this->ensure_private_parent($work_path);
+                // The process umask filters 0777 to the document-root mode used by normal publication.
+                // Until commit, 0700 work ancestors deny group and other traversal.
                 if (!@mkdir($work_path, 0777)) {
                     throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the in-flight directory.');
                 }
