@@ -92,8 +92,9 @@ JSON responses use `push_session_id`, `receiving_work`, and
 `work_deletes_bytes`. Push-session failures are
 `lock_acquisition_failure`, `offset_gap`, `push_not_found`, `filesystem_error`,
 `commit_required`, `unexpected_docroot_mutation`, `corrupted_push_state`, and
-`same_device`. Authentication and request-boundary failures are `auth_failed`,
-`not_configured`, `invalid_request`, and `request_too_large`.
+`same_device`. Authentication, authorization, and request-boundary failures
+are `auth_failed`, `push_disabled`, `not_configured`, `invalid_request`, and
+`request_too_large`.
 
 The document-root `.maintenance` file identifies its owner with the push
 session ID. `commit.json` stores no separate maintenance value.

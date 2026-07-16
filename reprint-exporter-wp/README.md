@@ -56,6 +56,27 @@ The supported options are:
 - `maximum_commit_entries` — the maximum number of bounded entries processed
   by one `push_commit` request. It defaults to 256.
 
+
+## Push access
+
+Connection tokens authorize downloads only by default. This also applies to
+tokens that already existed when the plugin was upgraded; no migration enables
+push access. A site administrator can grant push access from the plugin settings
+page. The grant stores a fingerprint of the current connection token, so rotating
+that token revokes the grant and requires fresh consent.
+
+Hosts can manage push access before active plugins load with an immutable boolean:
+
+```php
+define('SITE_EXPORT_PUSH_ENABLED', true);
+```
+
+The `SITE_EXPORT_PUSH_ENABLED` environment variable accepts the same boolean
+policy. The constant wins when both are present. `true` enables push without a
+local grant; `false` hard-disables it even when a local grant exists. Managed
+sites show the effective state as read-only in WordPress admin. Custom
+authentication does not bypass this authorization gate.
+
 ## Using as a library
 
 The export engine can be embedded in another PHP project without the WordPress plugin wrapper. Require `lib.php` instead of `index.php` — it defines constants and functions but does not handle any HTTP requests or check any URLs.

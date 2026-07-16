@@ -22,6 +22,9 @@ if (!defined('SITE_EXPORT_SECRET_FILE')) {
 if (!defined('SITE_EXPORT_SECRET_OPTION')) {
     define('SITE_EXPORT_SECRET_OPTION', 'site_export_secret');
 }
+if (!defined('SITE_EXPORT_PUSH_AUTHORIZATION_OPTION')) {
+    define('SITE_EXPORT_PUSH_AUTHORIZATION_OPTION', 'site_export_push_authorized_token_fingerprint');
+}
 
 /**
  * Maximum age of a request timestamp in seconds.
@@ -62,6 +65,17 @@ function _site_export_push_error(int $http_code, string $reason, string $detail)
         'detail' => $detail,
     ]);
     exit;
+}
+
+/**
+ * Returns whether an endpoint uses the push authentication, authorization,
+ * and error contract.
+ *
+ * @param string $endpoint Exact endpoint query value.
+ * @return bool Whether this is in the push endpoint namespace.
+ */
+function _site_export_is_push_endpoint(string $endpoint): bool {
+    return strpos($endpoint, 'push_') === 0;
 }
 
 /**
@@ -150,6 +164,71 @@ function _site_export_update_shared_secret(string $secret): bool {
     }
 
     return (bool) update_option(SITE_EXPORT_SECRET_OPTION, $secret, false);
+}
+
+/**
+ * Returns the hosting provider's push policy, or null when the site controls it.
+ *
+ * An early boolean SITE_EXPORT_PUSH_ENABLED constant takes precedence over the
+ * environment variable of the same name. Any unrecognized value fails closed.
+ */
+function _site_export_get_managed_push_enabled(): ?bool {
+    if (defined('SITE_EXPORT_PUSH_ENABLED')) {
+        return SITE_EXPORT_PUSH_ENABLED === true;
+    }
+
+    $environment_value = getenv('SITE_EXPORT_PUSH_ENABLED');
+    if ($environment_value === false || $environment_value === '') {
+        return null;
+    }
+
+    $enabled = filter_var($environment_value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+    return $enabled === true;
+}
+
+/** Returns whether the current connection token is authorized for push. */
+function _site_export_is_push_authorized(): bool {
+    $managed_enabled = _site_export_get_managed_push_enabled();
+    if ($managed_enabled !== null) {
+        return $managed_enabled;
+    }
+
+    $secret = _site_export_get_shared_secret();
+    if ($secret === null || !function_exists('get_option')) {
+        return false;
+    }
+
+    $authorized_fingerprint = get_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, '');
+    return is_string($authorized_fingerprint)
+        && $authorized_fingerprint !== ''
+        && hash_equals(hash('sha256', $secret), $authorized_fingerprint);
+}
+
+/**
+ * Grants or revokes personal push authorization for the current token.
+ *
+ * The stored fingerprint is the only local authorization state. A different
+ * current token therefore cannot inherit the prior token's write authority.
+ */
+function _site_export_update_push_authorization(bool $enabled): bool {
+    if (!function_exists('update_option')) {
+        return false;
+    }
+
+    $secret = _site_export_get_shared_secret();
+    if ($enabled && $secret === null) {
+        return false;
+    }
+
+    $fingerprint = '';
+    if ($enabled) {
+        $fingerprint = hash('sha256', $secret);
+    }
+    if (function_exists('get_option') && get_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, '') === $fingerprint) {
+        return true;
+    }
+
+    return (bool) update_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, $fingerprint, false);
 }
 
 /**
@@ -317,7 +396,7 @@ function _site_export_handle_api_request(array $options = []): void {
     $authenticate = $options['authenticate'] ?? null;
     if ($authenticate !== null) {
         $authenticate();
-    } elseif (Site_Export_HTTP_Server::is_push_endpoint($endpoint)) {
+    } elseif (_site_export_is_push_endpoint($endpoint)) {
         if (_site_export_has_secret_file()) {
             $secret = _site_export_get_file_secret();
             if (empty($secret)) {
@@ -348,6 +427,18 @@ function _site_export_handle_api_request(array $options = []): void {
         }
     } else {
         _site_export_default_authenticate();
+    }
+
+    // Authentication completes first. This separate gate prevents custom
+    // authentication or a future push_* operation from inheriting write
+    // access. It runs before endpoint setup can read php://input, create a
+    // push directory, or change the document root.
+    if (_site_export_is_push_endpoint($endpoint) && !_site_export_is_push_authorized()) {
+        _site_export_push_error(
+            403,
+            'push_disabled',
+            'Push access is disabled for the current connection token.'
+        );
     }
 
     // Ensure the Composer autoloader is loaded so Site_Export_HTTP_Server

@@ -52,6 +52,20 @@ of buffering pain. Signing cost is constant per request regardless of payload
 size. The secret travels in no URL and no body, so it never lands in an
 access log.
 
+Authentication does not grant write authority. Connection tokens are
+download-only by default, including tokens that predate push endpoints. After
+authentication, every `push_*` operation passes one authorization gate before
+the endpoint reads upload data, creates a push directory, or changes the
+document root. Missing authorization returns HTTP 403 with
+`reason: "push_disabled"`; custom authentication uses the same gate.
+
+Personal consent stores only the current connection token's SHA-256
+fingerprint. Rotating the token therefore revokes push access. A hosting
+provider may override local consent by defining the boolean
+`SITE_EXPORT_PUSH_ENABLED` constant before active plugins load or by setting
+the environment variable of the same name. Managed `true` enables push and
+managed `false` hard-disables it.
+
 ## Change detection: local machine compared against itself
 
 ctime is machine-local, so push never compares a local timestamp to a remote
