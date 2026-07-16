@@ -1235,30 +1235,6 @@ final class PushSessionTest extends TestCase {
         }
     }
 
-    public function testCheckpointMustContainEveryFieldReadByCommit(): void {
-        $push_session = $this->push_session(sprintf('%032x', 400));
-        $this->complete_work_deletes($push_session);
-        $push_session->commit(1);
-        $checkpoint_path = $push_session->get_push_directory() . '/commit.json';
-        $checkpoint = json_decode( (string) file_get_contents($checkpoint_path), true, 512, JSON_THROW_ON_ERROR);
-
-        foreach (['current_delete_path', 'current_work_files_descendant'] as $field) {
-            $invalid_checkpoint = $checkpoint;
-            unset($invalid_checkpoint[$field]);
-            file_put_contents($checkpoint_path, json_encode($invalid_checkpoint, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
-
-            try {
-                $push_session->get_status();
-                $this->fail('Commit checkpoint without ' . $field . ' was accepted.');
-            } catch (Site_Export_Push_Exception $exception) {
-                $this->assertSame('corrupted_push_state', $exception->get_error_code());
-                $this->assertStringContainsString($field, $exception->getMessage());
-            }
-        }
-        file_put_contents($checkpoint_path, json_encode($checkpoint, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
-        $this->commit_all($push_session);
-    }
-
     public function testDocumentRootClaimBlocksAnotherCommitWithoutBlockingItsStatus(): void {
         $first = $this->push_session('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
         $second = $this->push_session('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');

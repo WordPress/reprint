@@ -442,8 +442,6 @@ final class PushCommitTest extends TestCase {
             'commit_cursor',
             'current_delete_path',
             'current_work_files_descendant',
-            'deleted_files',
-            'installed_files',
             'phase',
             'work_deletes_byte_offset',
         ], $commit_state_keys);
