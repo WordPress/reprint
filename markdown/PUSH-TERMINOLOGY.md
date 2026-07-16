@@ -54,9 +54,9 @@ maintenance copy. The shared `.reprint/push/` directory contains
 `push-create.lock`, `commit-state`, `commit-state.lock`, and bounded removal
 tombstones named `.removing-<push-session-id>/`.
 
-`push.json` is version 4. Its identity and policy keys are
+`push.json` is version 3. Its keys are
 `push_session_id`, `docroot_b64`, `excluded_paths_b64`,
-`work_deletes_complete`, and `commit_started`.
+and `work_deletes_complete`.
 
 `commit.json` is version 3. Its phases are `deleting_files`,
 `installing_files`, and `complete`. Its cursor keys are
