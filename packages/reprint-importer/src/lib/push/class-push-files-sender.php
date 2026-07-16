@@ -116,8 +116,8 @@ final class PushFilesSender
         $this->current_index_file = $current_index_file;
         $this->journal = $journal;
         $this->client = new MultipartPushStreamClient($client_options);
-        if (is_array($state) && is_numeric($state['max_part_bytes'])) {
-            $this->client->set_max_part_bytes( (int) $state['max_part_bytes']);
+        if ($state !== null && $state['max_part_bytes'] !== null) {
+            $this->client->set_max_part_bytes($state['max_part_bytes']);
         }
     }
 
