@@ -84,6 +84,31 @@ failure key is `non_recoverable_commit_failure`.
 These JSON records are unversioned while their schemas are still under
 development. There are no compatibility aliases or migration paths.
 
+## Local sender journal
+
+The sender's durable files are local machine state, not part of the push
+directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
+
+| Surface | Name |
+| --- | --- |
+| Active sender checkpoint | `sender.json`, `$sender_state_path` |
+| Stable index selected for the active push | `sender-index.jsonl`, `$sender_index_path` |
+| Positive-work path list | `local-paths-to-push.jsonl`, `$local_paths_to_push` |
+| Deleted-path list | `local-paths-to-delete.jsonl`, `$local_paths_to_delete` |
+| Raw local work-delete stream | `work-deletes`, `$work_deletes_path` |
+| Selected path-list cursor | `$paths_byte_offset` |
+| Selected positive-work path | `$current_path_b64` |
+| Receiver-confirmed file cursor | `$confirmed_bytes` |
+
+`sender.json` is version 1. Its phases are `creating`, `reconciling_work`,
+`uploading_work`, `reconciling_deletes`, `uploading_deletes`, `committing`,
+and `removing`. It also records the push session ID, selected path, last source
+token confirmed by an upload response, receiver-confirmed file and work-delete
+cursors, recoverable-failure count, target part limit, and request-sizing state.
+`push.json` remains the receiver-owned
+push identity and policy; it does not store local source evidence or transport
+progress.
+
 ## Protocol names
 
 The work-upload endpoint is `push_upload` and its push-session parameter is

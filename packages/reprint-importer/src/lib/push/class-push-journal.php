@@ -59,6 +59,9 @@ class PushJournal
     /** @var string Raw NUL-delimited work deletes. */
     public string $work_deletes_path;
 
+    /** @var string Atomic checkpoint for the active high-level sender. */
+    public string $sender_state_path;
+
     /** @var string Enriched current index selected for the active push. */
     public string $sender_index_path;
 
@@ -68,6 +71,7 @@ class PushJournal
         $this->local_files_baseline_path = $this->site_dir . "/last-sync-local-files.jsonl";
         $this->local_paths_to_push = $this->site_dir . "/local-paths-to-push.jsonl";
         $this->work_deletes_path = $this->site_dir . "/work-deletes";
+        $this->sender_state_path = $this->site_dir . "/sender.json";
         $this->sender_index_path = $this->site_dir . "/sender-index.jsonl";
     }
 
@@ -499,6 +503,87 @@ class PushJournal
                     fclose($handle);
                 }
             }
+        }
+    }
+
+    /**
+     * Reads the active sender checkpoint written by write_sender_state().
+     *
+     * The journal owns this private file and atomically replaces it. A valid
+     * JSON object is therefore trusted as the sender's last durable boundary;
+     * the workflow interprets its phase and correlated fields. `source_token`
+     * and `confirmed_bytes` describe the last positive-work part confirmed by
+     * an upload response, not bytes merely handed to the network.
+     *
+     * @return array{
+     *     version:1,
+     *     push_session_id:string,
+     *     phase:'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     paths_byte_offset:int,
+     *     current_path_b64:?string,
+     *     next_paths_byte_offset:int,
+     *     source_token:array{type:'file'|'directory'|'symlink',size:int,ctime:int}|null,
+     *     confirmed_bytes:int,
+     *     work_deletes_byte_offset:int,
+     *     recoverable_failures:int,
+     *     max_part_bytes:?int,
+     *     request_sizer_state:array{request_body_bytes:int,ceiling_bytes:?int,growth_holdoff_remaining:int}
+     * }|null Durable sender state, or null when no push is active.
+     */
+    public function read_sender_state(): ?array
+    {
+        if (!is_file($this->sender_state_path)) {
+            return null;
+        }
+        $json = file_get_contents($this->sender_state_path);
+        if (!is_string($json)) {
+            throw new RuntimeException("Failed to read sender state: {$this->sender_state_path}");
+        }
+        $state = json_decode($json, true);
+        if (!is_array($state)) {
+            throw new RuntimeException("Sender state does not contain a JSON object: {$this->sender_state_path}");
+        }
+        return $state;
+    }
+
+    /**
+     * Atomically records the sender's last receiver-reconcilable boundary.
+     *
+     * @param array{
+     *     version:1,
+     *     push_session_id:string,
+     *     phase:'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     paths_byte_offset:int,
+     *     current_path_b64:?string,
+     *     next_paths_byte_offset:int,
+     *     source_token:array{type:'file'|'directory'|'symlink',size:int,ctime:int}|null,
+     *     confirmed_bytes:int,
+     *     work_deletes_byte_offset:int,
+     *     recoverable_failures:int,
+     *     max_part_bytes:?int,
+     *     request_sizer_state:array{request_body_bytes:int,ceiling_bytes:?int,growth_holdoff_remaining:int}
+     * } $state Complete sender checkpoint.
+     */
+    public function write_sender_state(array $state): void
+    {
+        $this->ensure_site_dir();
+        $json = json_encode($state, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $temporary = $this->sender_state_path . ".tmp";
+        if (file_put_contents($temporary, $json) !== strlen($json)) {
+            throw new RuntimeException("Failed to write sender state: {$temporary}");
+        }
+        if (!rename($temporary, $this->sender_state_path)) {
+            throw new RuntimeException("Failed to move sender state into place: {$this->sender_state_path}");
+        }
+    }
+
+    /**
+     * Removes the completed or deliberately abandoned sender checkpoint.
+     */
+    public function clear_sender_state(): void
+    {
+        if (is_file($this->sender_state_path) && !unlink($this->sender_state_path)) {
+            throw new RuntimeException("Failed to remove sender state: {$this->sender_state_path}");
         }
     }
 

@@ -676,6 +676,74 @@ final class PushJournalTest extends TestCase
         $this->makeJournal()->diff_local_files($this->tempDir . '/no-such-index.jsonl', $this->docroot);
     }
 
+    /**
+     * Keeps active path lists independent from later caller-index changes.
+     *
+     * The sender copy, positive-work list, and raw work-delete stream must all
+     * describe one index so their persisted byte offsets remain meaningful
+     * after the caller replaces or removes its original index file.
+     */
+    public function testActiveSenderIndexAndWorkDeletesStayStable(): void
+    {
+        $journal = $this->makeJournal();
+        $baseline = $this->writeIndex([
+            'delete-me.txt' => [100, 1, 'file'],
+            'keep.txt' => [100, 1, 'file'],
+        ]);
+        $journal->capture_local_files_baseline($baseline);
+        $current = $this->writeIndex([
+            'keep.txt' => [100, 1, 'file'],
+            'new.txt' => [200, 2, 'file'],
+        ]);
+
+        $journal->capture_sender_index($current);
+        $journal->diff_local_files($journal->sender_index_path);
+        $this->assertSame(strlen("delete-me.txt\0"), $journal->prepare_work_deletes());
+        $this->assertSame("delete-me.txt\0", file_get_contents($journal->work_deletes_path));
+
+        file_put_contents($current, $this->indexLine('later.txt', 300, 3, 'file') . "\n");
+        $this->assertSame(['new.txt'], $this->listPaths($journal->local_paths_to_push));
+        $this->assertSame(['delete-me.txt'], $this->listPaths($journal->local_paths_to_delete));
+        $this->assertStringContainsString(base64_encode('new.txt'), (string) file_get_contents($journal->sender_index_path));
+        $this->assertStringNotContainsString(base64_encode('later.txt'), (string) file_get_contents($journal->sender_index_path));
+    }
+
+    /**
+     * Round-trips and clears the complete sender checkpoint shape.
+     *
+     * The private JSON record is trusted as one atomically replaced unit, so
+     * every correlated cursor and source field must survive unchanged.
+     */
+    public function testSenderStateRoundTripsTheExactCheckpoint(): void
+    {
+        $journal = $this->makeJournal();
+        $state = [
+            'version' => 1,
+            'push_session_id' => str_repeat('a', 32),
+            'phase' => 'reconciling_work',
+            'paths_byte_offset' => 17,
+            'current_path_b64' => base64_encode('file.txt'),
+            'next_paths_byte_offset' => 41,
+            'source_token' => ['type' => 'file', 'size' => 9, 'ctime' => 123],
+            'confirmed_bytes' => 4,
+            'work_deletes_byte_offset' => 7,
+            'recoverable_failures' => 2,
+            'max_part_bytes' => 4194304,
+            'request_sizer_state' => [
+                'request_body_bytes' => 1048576,
+                'ceiling_bytes' => 2097152,
+                'growth_holdoff_remaining' => 1,
+            ],
+        ];
+
+        $this->assertNull($journal->read_sender_state());
+        $journal->write_sender_state($state);
+        $this->assertSame($state, $journal->read_sender_state());
+        $this->assertFileDoesNotExist($journal->sender_state_path . '.tmp');
+        $journal->clear_sender_state();
+        $this->assertNull($journal->read_sender_state());
+    }
+
     // ------------------------------------------------------------------
     //  Helpers
     // ------------------------------------------------------------------
