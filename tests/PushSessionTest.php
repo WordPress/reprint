@@ -1141,6 +1141,52 @@ final class PushSessionTest extends TestCase {
         $this->assertSame('new', file_get_contents($this->docroot . '/commit.txt'));
     }
 
+    /**
+     * Applies the process umask when directory publication resumes after a failure.
+     *
+     * 0777 is the pre-umask ceiling, so a 0027 umask creates both normal and
+     * recovered directories as 0750. Commit preserves that mode when it renames
+     * the work directory into the document root.
+     */
+    public function testRecoveredDirectoryUsesTheDocumentRootProcessUmask(): void {
+        $previous_umask = umask(0027);
+        try {
+            $normal_session = $this->push_session('60606060606060606060606060606060');
+            $this->push_parts($normal_session, [[
+                'headers' => [
+                    'X-Chunk-Type' => 'directory',
+                    'X-Directory-Path' => base64_encode('normal-directory'),
+                ],
+                'body' => '',
+            ]]);
+
+            $recovered_session = $this->push_session('61616161616161616161616161616161');
+            $this->run_upload_with_filesystem_fault($recovered_session, [[
+                'headers' => [
+                    'X-Chunk-Type' => 'directory',
+                    'X-Directory-Path' => base64_encode('recovered-directory'),
+                ],
+                'body' => '',
+            ]], 'mkdir', '/work/files/recovered-directory');
+            $recovered_session->get_status('recovered-directory');
+
+            $this->complete_work_deletes($normal_session);
+            $this->commit_all($normal_session);
+            $this->complete_work_deletes($recovered_session);
+            $this->commit_all($recovered_session);
+
+            clearstatcache(true, $this->docroot . '/normal-directory');
+            clearstatcache(true, $this->docroot . '/recovered-directory');
+            $normal_mode = fileperms($this->docroot . '/normal-directory') & 0777;
+            $recovered_mode = fileperms($this->docroot . '/recovered-directory') & 0777;
+
+            $this->assertSame(0750, $normal_mode);
+            $this->assertSame($normal_mode, $recovered_mode);
+        } finally {
+            umask($previous_umask);
+        }
+    }
+
     public function testDirectoryAndSymlinkPublicationRecoverBeforeAndAfterLeafCreation(): void {
         foreach (['directory', 'symlink'] as $type_index => $type) {
             foreach (['create', 'clear'] as $boundary_index => $boundary) {
