@@ -44,8 +44,6 @@ if (!class_exists('Site_Export_Push_Exception', false)) {
  *     current_delete_path:?string,
  *     current_work_files_descendant:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
  *     commit_cursor:list<array{component_b64:string}>,
- *     deleted_files:int,
- *     installed_files:int,
  *     non_recoverable_commit_failure?:array{reason:'unexpected_docroot_mutation'|'same_device',detail:string,context:array<string,mixed>}
  * }
  */
@@ -559,12 +557,9 @@ final class Site_Export_Push_Session {
                 }
             }
             $commit_state = $this->read_json($this->commit_json_path);
-            if (is_array($commit_state)) {
-                $this->require_valid_commit_state($commit_state);
-            }
             return [
                 'push_session_id' => $this->push_session_id,
-                'phase' => is_array($commit_state) ? $commit_state['phase'] : 'receiving_work',
+                'phase' => $commit_state === null ? 'receiving_work' : $commit_state['phase'],
                 'work_deletes_bytes' => $this->file_size($this->work_deletes_path),
                 'work_deletes_complete' => $this->work_deletes_are_complete(),
                 'path' => $reported_path,
@@ -633,12 +628,8 @@ final class Site_Export_Push_Session {
                     'current_delete_path' => null,
                     'current_work_files_descendant' => null,
                     'commit_cursor' => [],
-                    'deleted_files' => 0,
-                    'installed_files' => 0,
                 ];
                 $this->write_json($this->commit_json_path, $commit_state);
-            } else {
-                $this->require_valid_commit_state($commit_state);
             }
             if (isset($commit_state['non_recoverable_commit_failure'])) {
                 throw new Site_Export_Push_Exception(
@@ -727,11 +718,8 @@ final class Site_Export_Push_Session {
         $lock = $this->acquire_push_lock();
         try {
             $commit_state = $this->read_json($this->commit_json_path);
-            if (is_array($commit_state)) {
-                $this->require_valid_commit_state($commit_state);
-                if ($commit_state['phase'] !== 'complete') {
-                    throw new Site_Export_Push_Exception(self::ERROR_COMMIT_REQUIRED, 'Document-root mutation has begun. Resume commit instead of removing this push session.');
-                }
+            if ($commit_state !== null && $commit_state['phase'] !== 'complete') {
+                throw new Site_Export_Push_Exception(self::ERROR_COMMIT_REQUIRED, 'Document-root mutation has begun. Resume commit instead of removing this push session.');
             }
             if (file_exists($removing_push_directory) || is_link($removing_push_directory)) {
                 throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'A remove tombstone already exists for push session ' . $this->push_session_id . '.');
@@ -1286,8 +1274,6 @@ final class Site_Export_Push_Session {
      *     @type array|null $current_work_files_descendant Work value currently being installed,
      *                                                       with `path_b64` and `expected_type` keys.
      *     @type array $commit_cursor Path components for the bounded tree walk.
-     *     @type int $deleted_files Number of completed deletes.
-     *     @type int $installed_files Number of installed work values.
      *     @type array $non_recoverable_commit_failure Persisted failure reason, detail, and
      *                                                  context. Present only after a
      *                                                  non-recoverable failure.
@@ -1363,7 +1349,6 @@ final class Site_Export_Push_Session {
         }
         $commit_state['work_deletes_byte_offset'] += strlen($path) + 1;
         $commit_state['current_delete_path'] = null;
-        ++$commit_state['deleted_files'];
         $this->write_json($this->commit_json_path, $commit_state);
     }
 
@@ -1425,8 +1410,6 @@ final class Site_Export_Push_Session {
      *     @type array|null $current_work_files_descendant Work value currently being installed,
      *                                                       with `path_b64` and `expected_type` keys.
      *     @type array $commit_cursor Path components for the bounded tree walk.
-     *     @type int $deleted_files Number of completed deletes.
-     *     @type int $installed_files Number of installed work values.
      *     @type array $non_recoverable_commit_failure Persisted failure reason, detail, and
      *                                                  context. Present only after a
      *                                                  non-recoverable failure.
@@ -1470,7 +1453,6 @@ final class Site_Export_Push_Session {
                 }
                 $commit_state['current_work_files_descendant'] = null;
                 array_pop($commit_state['commit_cursor']);
-                ++$commit_state['installed_files'];
                 $this->write_json($this->commit_json_path, $commit_state);
                 return;
             }
@@ -1485,7 +1467,6 @@ final class Site_Export_Push_Session {
                 $this->throw_unexpected_docroot_mutation('install', $path, $path, $expected_type, [$expected_type], $docroot_identity);
             }
             $commit_state['current_work_files_descendant'] = null;
-            ++$commit_state['installed_files'];
             $this->write_json($this->commit_json_path, $commit_state);
 
             return;
@@ -1541,7 +1522,6 @@ final class Site_Export_Push_Session {
             }
             $commit_state['current_work_files_descendant'] = null;
             array_pop($commit_state['commit_cursor']);
-            ++$commit_state['installed_files'];
             $this->write_json($this->commit_json_path, $commit_state);
             return;
         }
@@ -1597,8 +1577,6 @@ final class Site_Export_Push_Session {
      *     @type array|null $current_work_files_descendant Work value currently being installed,
      *                                                       with `path_b64` and `expected_type` keys.
      *     @type array $commit_cursor Path components for the bounded tree walk.
-     *     @type int $deleted_files Number of completed deletes.
-     *     @type int $installed_files Number of installed work values.
      *     @type array $non_recoverable_commit_failure Persisted failure reason, detail, and
      *                                                  context. Present only after a
      *                                                  non-recoverable failure.
@@ -1647,7 +1625,6 @@ final class Site_Export_Push_Session {
             );
         }
         $commit_state['current_work_files_descendant'] = null;
-        ++$commit_state['installed_files'];
         $this->write_json($this->commit_json_path, $commit_state);
     }
 
@@ -2102,8 +2079,6 @@ final class Site_Export_Push_Session {
      *     @type string|null $current_delete_path Current delete path. Present only in a commit checkpoint.
      *     @type array|null $current_work_files_descendant Current installation. Present only in a commit checkpoint.
      *     @type array $commit_cursor Bounded tree cursor. Present only in a commit checkpoint.
-     *     @type int $deleted_files Completed deletes. Present only in a commit checkpoint.
-     *     @type int $installed_files Installed work values. Present only in a commit checkpoint.
      *     @type array $non_recoverable_commit_failure Persisted failure. Present only after a non-recoverable commit failure.
      * }
      * @phpstan-param array{push_session_id:string,docroot_b64:string,excluded_paths_b64:list<string>,work_deletes_complete:bool}|InFlightWork|CommitState $value
@@ -2174,90 +2149,6 @@ final class Site_Export_Push_Session {
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not finish writing ' . $description . '; wrote ' . $offset . ' of ' . $length . ' bytes.');
             }
             $offset += $written;
-        }
-    }
-
-    /**
-     * Validates the durable commit checkpoint schema before it drives mutation.
-     *
-     * Every field that controls delete offsets, the commit cursor, or pending
-     * work-file descendants is checked before use. This keeps a corrupt
-     * checkpoint from being interpreted as document-root authority.
-     *
-     * @param array $commit_state {
-     *     Decoded commit checkpoint.
-     *
-     *     @type mixed $phase                          Optional. Current commit
-     *                                                phase.
-     *     @type mixed $work_deletes_byte_offset       Optional. Confirmed byte
-     *                                                offset in the delete
-     *                                                stream.
-     *     @type mixed $deleted_files                  Optional. Deleted entry
-     *                                                count.
-     *     @type mixed $installed_files                Optional. Installed entry
-     *                                                count.
-     *     @type mixed $current_delete_path            Optional. Delete path
-     *                                                currently being removed.
-     *     @type mixed $current_work_files_descendant  Optional. Work-file
-     *                                                descendant currently being
-     *                                                installed.
-     *     @type mixed $commit_cursor                  Optional. Commit cursor
-     *                                                frames.
-     *     @type mixed $non_recoverable_commit_failure Optional. Stored
-     *                                                permanent commit failure.
-     * }
-     * @phpstan-param array{
-     *     phase?:mixed,
-     *     work_deletes_byte_offset?:mixed,
-     *     deleted_files?:mixed,
-     *     installed_files?:mixed,
-     *     current_delete_path?:mixed,
-     *     current_work_files_descendant?:mixed,
-     *     commit_cursor?:mixed,
-     *     non_recoverable_commit_failure?:mixed
-     * } $commit_state
-     */
-    private function require_valid_commit_state(array $commit_state): void {
-        if (!in_array($commit_state['phase'] ?? null, ['deleting_files', 'installing_files', 'complete'], true)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint has an invalid phase.');
-        }
-        foreach (['work_deletes_byte_offset', 'deleted_files', 'installed_files'] as $field) {
-            if (!isset($commit_state[$field]) || !is_int($commit_state[$field]) || $commit_state[$field] < 0) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint field ' . $field . ' must be a non-negative integer.');
-            }
-        }
-        if (!array_key_exists('current_delete_path', $commit_state)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint is missing current_delete_path.');
-        }
-        if ($commit_state['current_delete_path'] !== null) {
-            $this->decode_commit_path($commit_state['current_delete_path'], 'current delete');
-        }
-        if (!array_key_exists('current_work_files_descendant', $commit_state)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint is missing current_work_files_descendant.');
-        }
-        $current_work_files_descendant = $commit_state['current_work_files_descendant'];
-        if ($current_work_files_descendant !== null) {
-            if (!is_array($current_work_files_descendant) || !is_string($current_work_files_descendant['path_b64'] ?? null)
-                || !in_array($current_work_files_descendant['expected_type'] ?? null, ['file', 'directory', 'symlink'], true)) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint has an invalid current installing_files.');
-            }
-            $this->decode_commit_path($current_work_files_descendant['path_b64'], 'current installing_files');
-        }
-        if (!is_array($commit_state['commit_cursor'] ?? null)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint has an invalid commit cursor.');
-        }
-        foreach ($commit_state['commit_cursor'] as $frame) {
-            if (!is_array($frame) || !is_string($frame['component_b64'] ?? null)) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint has an invalid commit cursor frame.');
-            }
-        }
-        $this->commit_cursor_path($commit_state['commit_cursor']);
-        if (isset($commit_state['non_recoverable_commit_failure'])) {
-            $error = $commit_state['non_recoverable_commit_failure'];
-            if (!is_array($error) || !in_array($error['reason'] ?? null, [self::ERROR_UNEXPECTED_DOCROOT_MUTATION, self::ERROR_SAME_DEVICE], true)
-                || !is_string($error['detail'] ?? null) || !is_array($error['context'] ?? null)) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint has an invalid non_recoverable_commit_failure.');
-            }
         }
     }
 
