@@ -161,23 +161,11 @@ final class Site_Export_Push_Session {
             }
             $push_parent_directory = self::require_directory($push_parent_directory, 'push sessions', false);
         }
-        $creation_push_lock_path = $push_parent_directory . '/push-create.lock';
-        $creation_lock_identity = $push_session->lstat_path($creation_push_lock_path);
-        if ($creation_lock_identity !== null && $creation_lock_identity['type'] !== 'file') {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The push creation lock is not a regular file.');
-        }
-        $creation_lock = @fopen($creation_push_lock_path, 'c+b');
+        $creation_lock = @fopen($push_parent_directory . '/push-create.lock', 'c+b');
         if ($creation_lock === false) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open the push creation lock.');
         }
         try {
-            $opened_lock_identity = fstat($creation_lock);
-            $published_lock_identity = $push_session->lstat_path($creation_push_lock_path);
-            if (!is_array($opened_lock_identity) || $published_lock_identity === null || $published_lock_identity['type'] !== 'file'
-                || (int) $opened_lock_identity['dev'] !== $published_lock_identity['dev']
-                || (int) $opened_lock_identity['ino'] !== $published_lock_identity['ino']) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The push creation lock changed while it was opened.');
-            }
             if (!flock($creation_lock, LOCK_EX | LOCK_NB)) {
                 throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'Push session creation is busy. Retry the create request.');
             }
@@ -199,12 +187,11 @@ final class Site_Export_Push_Session {
                 throw $exception;
             }
             $push_session->write_json($push_session->push_json_path, [
-                'version' => 4,
+                'version' => 3,
                 'push_session_id' => $push_session_id,
                 'docroot_b64' => base64_encode($docroot),
                 'excluded_paths_b64' => array_map('base64_encode', $push_session->excluded_paths),
                 'work_deletes_complete' => false,
-                'commit_started' => false,
             ]);
             return $push_session;
         } finally {
@@ -318,8 +305,8 @@ final class Site_Export_Push_Session {
         }
         $lock = $this->acquire_push_lock();
         try {
-            $push_metadata = $this->assert_push_configuration();
-            if ($this->read_commit_state($push_metadata['commit_started']) !== null) {
+            $this->assert_push_configuration();
+            if (is_file($this->commit_json_path)) {
                 throw new Site_Export_Push_Exception(self::ERROR_COMMIT_REQUIRED, 'Uploads are closed because this push session is committing.');
             }
             $this->upload_lock = $lock;
@@ -487,7 +474,7 @@ final class Site_Export_Push_Session {
      *     unavailable, corrupt, or no longer matches the document-root configuration.
      */
     public function get_status(?string $path = null): array {
-        return $this->with_push_lock(function (array $push_metadata) use ($path): array {
+        return $this->with_push_lock(function () use ($path): array {
             $reported_path = null;
             if ($path !== null) {
                 $this->validate_path($path);
@@ -520,12 +507,15 @@ final class Site_Export_Push_Session {
                     }
                 }
             }
-            $commit = $this->read_commit_state($push_metadata['commit_started']);
+            $commit_state = $this->read_json($this->commit_json_path);
+            if (is_array($commit_state)) {
+                $this->require_valid_commit_state($commit_state);
+            }
             return [
                 'push_session_id' => $this->push_session_id,
-                'phase' => is_array($commit) ? $commit['phase'] : 'receiving_work',
+                'phase' => is_array($commit_state) ? $commit_state['phase'] : 'receiving_work',
                 'work_deletes_bytes' => $this->file_size($this->work_deletes_path),
-                'work_deletes_complete' => $push_metadata['work_deletes_complete'],
+                'work_deletes_complete' => $this->work_deletes_are_complete(),
                 'path' => $reported_path,
             ];
         });
@@ -555,10 +545,10 @@ final class Site_Export_Push_Session {
         if ($maximum_entries <= 0) {
             throw new InvalidArgumentException('The commit entry limit must be greater than zero.');
         }
-        return $this->with_push_lock(function (array $push_metadata) use ($maximum_entries): array {
-            $commit_state = $this->read_commit_state($push_metadata['commit_started']);
+        return $this->with_push_lock(function () use ($maximum_entries): array {
+            $commit_state = $this->read_json($this->commit_json_path);
             if ($commit_state === null) {
-                if (!$push_metadata['work_deletes_complete']) {
+                if (!$this->work_deletes_are_complete()) {
                     throw new InvalidArgumentException('Commit requires an explicit completed delete upload declaration.');
                 }
                 $work_deletes_bytes = $this->file_size($this->work_deletes_path);
@@ -586,14 +576,12 @@ final class Site_Export_Push_Session {
                     'current_delete_path' => null,
                     'current_work_files_descendant' => null,
                     'commit_cursor' => [],
-                        'deleted_files' => 0,
+                    'deleted_files' => 0,
                     'installed_files' => 0,
                 ];
                 $this->write_json($this->commit_json_path, $commit_state);
-            }
-            if (!$push_metadata['commit_started']) {
-                $push_metadata['commit_started'] = true;
-                $this->write_json($this->push_json_path, $push_metadata);
+            } else {
+                $this->require_valid_commit_state($commit_state);
             }
             if (isset($commit_state['non_recoverable_commit_failure'])) {
                 throw new Site_Export_Push_Exception(
@@ -603,6 +591,8 @@ final class Site_Export_Push_Session {
                 );
             }
             if ($commit_state['phase'] === 'complete') {
+                // The complete checkpoint is durable before commit ownership is released.
+                // A retry must finish that release without replaying document-root work.
                 $this->release_commit_state();
                 return [
                     'phase' => $commit_state['phase'],
@@ -612,13 +602,11 @@ final class Site_Export_Push_Session {
             }
             $this->with_commit_state_lock(function (): void {
                 $active_path = $this->reprint_directory . '/.reprint/push/commit-state';
-                $active_owner = $this->read_commit_state_owner();
-                if ($active_owner !== null && $active_owner !== $this->push_session_id) {
-                    throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'Another push session is already committing this document root: ' . $active_owner . '.');
+                $active_owner = @file_get_contents($active_path);
+                if (is_string($active_owner) && trim($active_owner) !== '' && trim($active_owner) !== $this->push_session_id) {
+                    throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'Another push session is already committing this document root: ' . trim($active_owner) . '.');
                 }
-                if ($active_owner === null) {
-                    $this->write_atomic_file($active_path, $this->push_session_id . "\n", 0600);
-                }
+                $this->write_atomic_file($active_path, $this->push_session_id . "\n", 0600);
             });
             $maintenance_docroot_path = $this->docroot_path('.maintenance');
             $maintenance_identity = $this->lstat_path($maintenance_docroot_path);
@@ -681,9 +669,9 @@ final class Site_Export_Push_Session {
         }
         $lock = $this->acquire_push_lock();
         try {
-            $push_metadata = $this->read_push_metadata();
-            $commit_state = $this->read_commit_state($push_metadata['commit_started']);
-            if ($commit_state !== null) {
+            $commit_state = $this->read_json($this->commit_json_path);
+            if (is_array($commit_state)) {
+                $this->require_valid_commit_state($commit_state);
                 if ($commit_state['phase'] !== 'complete') {
                     throw new Site_Export_Push_Exception(self::ERROR_COMMIT_REQUIRED, 'Document-root mutation has begun. Resume commit instead of removing this push session.');
                 }
@@ -814,9 +802,6 @@ final class Site_Export_Push_Session {
         if ($partial !== null && !in_array($partial['type'], ['file', 'directory'], true)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The partial path for ' . base64_encode($path) . ' is a ' . $partial['type'] . ', not a regular file.');
         }
-        // Reaching here with a completed entry means an offset-0 restart: exact
-        // completed-file replays returned above and other nonzero offsets failed.
-        // Remove the old work value before rebuilding it in work/partial.
         if ($complete !== null) {
             $this->remove_work_path($complete_path);
         }
@@ -972,11 +957,10 @@ final class Site_Export_Push_Session {
         $this->require_only_headers($headers, ['content-length', 'content-type', 'x-chunk-type', 'x-delete-offset', 'x-delete-complete'], 'delete-list');
         $offset = $this->require_non_negative_header($headers, 'x-delete-offset');
         $complete = ( $headers['x-delete-complete'] ?? null ) === '1';
-        $work_deletes_complete = $this->work_deletes_are_complete();
         if (isset($headers['x-delete-complete']) && !$complete) {
             throw new InvalidArgumentException('Multipart X-Delete-Complete must be 1 when present.');
         }
-        if ($work_deletes_complete && ( !$complete || $offset !== $this->file_size($this->work_deletes_path) || $part_bytes !== 0 )) {
+        if ($this->work_deletes_are_complete() && ( !$complete || $offset !== $this->file_size($this->work_deletes_path) || $part_bytes !== 0 )) {
             throw new InvalidArgumentException('Delete upload is already complete; only its empty completion declaration may be replayed.');
         }
         $handle = @fopen($this->work_deletes_path, 'r+b');
@@ -1063,7 +1047,10 @@ final class Site_Export_Push_Session {
             fclose($handle);
         }
         if ($complete) {
-            $push_metadata = $this->read_push_metadata();
+            $push_metadata = $this->read_json($this->push_json_path);
+            if (!is_array($push_metadata)) {
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata is missing while completing the delete upload.');
+            }
             $push_metadata['work_deletes_complete'] = true;
             $this->write_json($this->push_json_path, $push_metadata);
         }
@@ -1079,11 +1066,10 @@ final class Site_Export_Push_Session {
      * cursor only after the document-root path is confirmed absent.
      *
      * @param array{
-     *     version:3,
-     *     phase:'deleting_files'|'installing_files'|'complete',
+     *     phase:string,
      *     work_deletes_byte_offset:int,
      *     current_delete_path:?string,
-     *     current_work_files_descendant:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
+     *     current_work_files_descendant:?array{path_b64:string,expected_type:string},
      *     commit_cursor:list<array{component_b64:string}>,
      *     deleted_files:int,
      *     installed_files:int,
@@ -1093,15 +1079,49 @@ final class Site_Export_Push_Session {
     private function advance_delete(array &$commit_state): void {
         if ($commit_state['current_delete_path'] === null) {
             $work_deletes_byte_offset = (int) $commit_state['work_deletes_byte_offset'];
-            $path = $this->read_delete_record_at_offset($work_deletes_byte_offset);
-            if ($path === null) {
+            $delete_size = $this->file_size($this->work_deletes_path);
+            if ($work_deletes_byte_offset === $delete_size) {
                 $commit_state['phase'] = 'installing_files';
                 $this->write_json($this->commit_json_path, $commit_state);
                 return;
             }
-            $commit_state['current_delete_path'] = base64_encode($path);
-            $this->write_json($this->commit_json_path, $commit_state);
-            return;
+            if ($work_deletes_byte_offset < 0 || $work_deletes_byte_offset > $delete_size) {
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Delete-consumption offset ' . $work_deletes_byte_offset . ' is outside the ' . $delete_size . '-byte stream.');
+            }
+            $handle = @fopen($this->work_deletes_path, 'rb');
+            if ($handle === false || fseek($handle, $work_deletes_byte_offset) !== 0) {
+                if (is_resource($handle)) {
+                    fclose($handle);
+                }
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not seek to the confirmed delete-consumption offset.');
+            }
+            $path = '';
+            $path_bytes = 0;
+            try {
+                while ($path_bytes <= self::MAX_PATH_BYTES) {
+                    $byte = fread($handle, 1);
+                    if ($byte === false) {
+                        throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read the work delete stream.');
+                    }
+                    if ($byte === '') {
+                        throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The work delete stream ended before its NUL record terminator.');
+                    }
+                    if ($byte === "\0") {
+                        if ($path === '') {
+                            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The work delete stream contains an empty record at offset ' . $work_deletes_byte_offset . '.');
+                        }
+                        $this->validate_path($path);
+                        $commit_state['current_delete_path'] = base64_encode($path);
+                        $this->write_json($this->commit_json_path, $commit_state);
+                        return;
+                    }
+                    $path .= $byte;
+                    ++$path_bytes;
+                }
+            } finally {
+                fclose($handle);
+            }
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'A work delete path exceeds ' . self::MAX_PATH_BYTES . ' bytes.');
         }
 
         $path = $this->decode_commit_path($commit_state['current_delete_path'], 'current delete');
@@ -1179,11 +1199,10 @@ final class Site_Export_Push_Session {
      * directories after their descendants have been committed.
      *
      * @param array{
-     *     version:3,
-     *     phase:'deleting_files'|'installing_files'|'complete',
+     *     phase:string,
      *     work_deletes_byte_offset:int,
      *     current_delete_path:?string,
-     *     current_work_files_descendant:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
+     *     current_work_files_descendant:?array{path_b64:string,expected_type:string},
      *     commit_cursor:list<array{component_b64:string}>,
      *     deleted_files:int,
      *     installed_files:int,
@@ -1346,15 +1365,9 @@ final class Site_Export_Push_Session {
      * renames are allowed; copy fallback would break the direct-install model.
      *
      * @param array{
-     *     version:3,
-     *     phase:'deleting_files'|'installing_files'|'complete',
-     *     work_deletes_byte_offset:int,
-     *     current_delete_path:?string,
-     *     current_work_files_descendant:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
+     *     current_work_files_descendant:?array{path_b64:string,expected_type:string},
      *     commit_cursor:list<array{component_b64:string}>,
-     *     deleted_files:int,
-     *     installed_files:int,
-     *     non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>}
+     *     installed_files:int
      * } $commit_state Commit checkpoint, mutated in place.
      * @param string $path Document-root-relative value path.
      * @param string $expected_type Work type expected at $path.
@@ -1686,72 +1699,14 @@ final class Site_Export_Push_Session {
     private function release_commit_state(): void {
         $this->with_commit_state_lock(function (): void {
             $active_path = $this->reprint_directory . '/.reprint/push/commit-state';
-            if ($this->read_commit_state_owner() !== $this->push_session_id) {
+            $active_owner = @file_get_contents($active_path);
+            if (!is_string($active_owner) || trim($active_owner) !== $this->push_session_id) {
                 return;
             }
             if (!@unlink($active_path)) {
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not release the commit-state owner.');
             }
         });
-    }
-
-    /**
-     * Reads the exact document-root-wide ownership record without guessing corruption.
-     *
-     * Absence means no push session currently owns the document root. A present record must
-     * remain the same bounded regular file throughout the read and contain one
-     * 32-character lowercase hexadecimal push session ID followed by one newline.
-     * Malformed durable contents are invalid state; an unreadable file is a
-     * filesystem error and is never treated as unclaimed.
-     *
-     * @return string|null Valid owner push session ID, or null when unclaimed.
-     */
-    private function read_commit_state_owner(): ?string {
-        $active_path = $this->reprint_directory . '/.reprint/push/commit-state';
-        $identity = $this->lstat_path($active_path);
-        if ($identity === null) {
-            return null;
-        }
-        if ($identity['type'] !== 'file') {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The commit-state owner must be a regular file when present; observed ' . $identity['type'] . '.');
-        }
-        if ($identity['size'] !== 33) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The commit-state owner must contain exactly 33 bytes; observed ' . $identity['size'] . '.');
-        }
-        $handle = @fopen($active_path, 'rb');
-        if ($handle === false) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read the commit-state owner.');
-        }
-        try {
-            $opened_identity = fstat($handle);
-            $published_identity = $this->lstat_path($active_path);
-            if (!is_array($opened_identity) || $published_identity === null || $published_identity['type'] !== 'file'
-                || (int) $opened_identity['dev'] !== $published_identity['dev']
-                || (int) $opened_identity['ino'] !== $published_identity['ino']) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The commit-state owner changed while it was opened.');
-            }
-            $contents = fread($handle, 34);
-            if (!is_string($contents)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read the commit-state owner.');
-            }
-            $final_opened_identity = fstat($handle);
-            $final_published_identity = $this->lstat_path($active_path);
-            if (!is_array($final_opened_identity) || $final_published_identity === null || $final_published_identity['type'] !== 'file'
-                || (int) $final_opened_identity['dev'] !== $final_published_identity['dev']
-                || (int) $final_opened_identity['ino'] !== $final_published_identity['ino']) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The commit-state owner changed while it was read.');
-            }
-        } finally {
-            fclose($handle);
-        }
-        $observed_bytes = strlen($contents);
-        if ($observed_bytes !== 33 || (int) $final_opened_identity['size'] !== 33 || $final_published_identity['size'] !== 33) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The commit-state owner must remain exactly 33 bytes while read; observed ' . $observed_bytes . ' bytes containing ' . base64_encode($contents) . '.');
-        }
-        if (preg_match('/^[a-f0-9]{32}\n$/D', $contents) !== 1) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The commit-state owner must contain 32 lowercase hexadecimal characters followed by one newline; observed ' . base64_encode($contents) . '.');
-        }
-        return substr($contents, 0, 32);
     }
 
     /**
@@ -1765,23 +1720,11 @@ final class Site_Export_Push_Session {
      * @param callable $callback Critical section to execute while locked.
      */
     private function with_commit_state_lock(callable $callback): void {
-        $push_lock_path = $this->reprint_directory . '/.reprint/push/commit-state.lock';
-        $lock_identity = $this->lstat_path($push_lock_path);
-        if ($lock_identity !== null && $lock_identity['type'] !== 'file') {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The commit-state lock is not a regular file.');
-        }
-        $lock = @fopen($push_lock_path, 'c+b');
+        $lock = @fopen($this->reprint_directory . '/.reprint/push/commit-state.lock', 'c+b');
         if ($lock === false) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open the commit-state lock.');
         }
         try {
-            $opened_lock_identity = fstat($lock);
-            $published_lock_identity = $this->lstat_path($push_lock_path);
-            if (!is_array($opened_lock_identity) || $published_lock_identity === null || $published_lock_identity['type'] !== 'file'
-                || (int) $opened_lock_identity['dev'] !== $published_lock_identity['dev']
-                || (int) $opened_lock_identity['ino'] !== $published_lock_identity['ino']) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The commit-state lock changed while it was opened.');
-            }
             if (!flock($lock, LOCK_EX | LOCK_NB)) {
                 throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'The commit-state owner is busy. Retry the request.');
             }
@@ -1799,21 +1742,13 @@ final class Site_Export_Push_Session {
      * push session ID and the same-filesystem requirement are then checked
      * before the callback can read or mutate push state.
      *
-     * @param callable(array{
-     *     version:4,
-     *     push_session_id:string,
-     *     docroot_b64:string,
-     *     excluded_paths_b64:list<string>,
-     *     work_deletes_complete:bool,
-     *     commit_started:bool
-     * }):mixed $callback Critical section receiving validated push metadata.
      * @return mixed Callback result.
      */
     private function with_push_lock(callable $callback) {
         $lock = $this->acquire_push_lock();
         try {
-            $push_metadata = $this->assert_push_configuration();
-            return $callback($push_metadata);
+            $this->assert_push_configuration();
+            return $callback();
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
@@ -1881,119 +1816,32 @@ final class Site_Export_Push_Session {
      * Verifies that durable push session identity still matches this server configuration.
      *
      * Remove deliberately omits this check: private work may need cleanup
-     * after the document-root or excluded-path configuration has changed. Upload,
-     * status, and commit must agree with the immutable push metadata and
-     * retain the same-filesystem guarantee under which the push session was made.
-     *
-     * @return array{
-     *     version:4,
-     *     push_session_id:string,
-     *     docroot_b64:string,
-     *     excluded_paths_b64:list<string>,
-     *     work_deletes_complete:bool,
-     *     commit_started:bool
-     * } Validated push metadata matching the current configuration.
+     * after the document-root or excluded-path configuration has changed.
+     * Upload, status, and commit must agree with the immutable push metadata
+     * and retain the same-device guarantee under which the push was made.
      */
-    private function assert_push_configuration(): array {
-        $push_metadata = $this->read_push_metadata();
+    private function assert_push_configuration(): void {
+        $push_metadata = $this->read_json($this->push_json_path);
+        if (!is_array($push_metadata) || ( $push_metadata['version'] ?? null ) !== 3 || ( $push_metadata['push_session_id'] ?? null ) !== $this->push_session_id
+            || !is_bool($push_metadata['work_deletes_complete'] ?? null)) {
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata has an unsupported version or push session ID.');
+        }
+        if (!is_string($push_metadata['docroot_b64'] ?? null) || !is_array($push_metadata['excluded_paths_b64'] ?? null)) {
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata does not contain the configured document root and excluded paths.');
+        }
         $docroot = base64_decode($push_metadata['docroot_b64'], true);
         $excluded = [];
         foreach ($push_metadata['excluded_paths_b64'] as $encoded) {
-            $decoded = base64_decode($encoded, true);
+            $decoded = is_string($encoded) ? base64_decode($encoded, true) : false;
+            if (!is_string($decoded)) {
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata contains an invalid excluded path.');
+            }
             $excluded[] = $decoded;
         }
         if ($docroot !== $this->docroot || $excluded !== $this->excluded_paths) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata does not match the current commit configuration.');
-        }
-        $docroot_identity = $this->lstat_path($this->docroot);
-        if ($docroot_identity === null || $docroot_identity['type'] !== 'directory') {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The managed document root is no longer a real directory.');
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata does not match the current push configuration.');
         }
         $this->require_same_device($this->work_files_directory, $this->docroot, 'receive', '');
-        return $push_metadata;
-    }
-
-    /**
-     * Reads and validates the complete durable version-four push metadata.
-     *
-     * This checks the push session's own identity and schema without comparing the
-     * document root or excluded paths with current configuration. Remove uses that
-     * narrower trust boundary so abandoned private work remains removable after
-     * configuration changes.
-     *
-     * @return array{
-     *     version:4,
-     *     push_session_id:string,
-     *     docroot_b64:string,
-     *     excluded_paths_b64:list<string>,
-     *     work_deletes_complete:bool,
-     *     commit_started:bool
-     * } Validated durable push metadata.
-     */
-    private function read_push_metadata(): array {
-        $push_metadata = $this->read_json($this->push_json_path);
-        if ($push_metadata === null) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata is missing for push session ' . $this->push_session_id . '.');
-        }
-        if (( $push_metadata['version'] ?? null ) !== 4) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata version must be 4; observed ' . json_encode($push_metadata['version'] ?? null) . '. Earlier push metadata versions are not migrated.');
-        }
-        if (( $push_metadata['push_session_id'] ?? null ) !== $this->push_session_id) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata identity must equal ' . $this->push_session_id . '; observed ' . json_encode($push_metadata['push_session_id'] ?? null) . '.');
-        }
-        if (!is_bool($push_metadata['work_deletes_complete'] ?? null)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata field work_deletes_complete must be boolean; observed ' . json_encode($push_metadata['work_deletes_complete'] ?? null) . '.');
-        }
-        if (!is_bool($push_metadata['commit_started'] ?? null)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata field commit_started must be boolean; observed ' . json_encode($push_metadata['commit_started'] ?? null) . '.');
-        }
-        if (!is_string($push_metadata['docroot_b64'] ?? null) || !is_string(base64_decode($push_metadata['docroot_b64'], true))) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata docroot_b64 must be valid base64 text; observed ' . json_encode($push_metadata['docroot_b64'] ?? null) . '.');
-        }
-        if (!is_array($push_metadata['excluded_paths_b64'] ?? null) || array_values($push_metadata['excluded_paths_b64']) !== $push_metadata['excluded_paths_b64']) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata excluded paths field excluded_paths_b64 must be a list; observed ' . gettype($push_metadata['excluded_paths_b64'] ?? null) . '.');
-        }
-        foreach ($push_metadata['excluded_paths_b64'] as $encoded) {
-            $decoded = is_string($encoded) ? base64_decode($encoded, true) : false;
-            if (!is_string($decoded)) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata excluded_paths_b64 contains an invalid base64 value: ' . json_encode($encoded) . '.');
-            }
-        }
-        /** @var array{version:4,push_session_id:string,docroot_b64:string,excluded_paths_b64:list<string>,work_deletes_complete:bool,commit_started:bool} $push_metadata */
-        return $push_metadata;
-    }
-
-    /**
-     * Reads the optional commit checkpoint under the monotonic lifecycle fact.
-     *
-     * A missing checkpoint is valid only before commit_started becomes true.
-     * Once commit has started, absence is durable corruption even if the last
-     * known checkpoint had already reached completion.
-     *
-     * @param bool $commit_started Validated monotonic push-session lifecycle fact.
-     * @return array{
-     *     version:3,
-     *     phase:'deleting_files'|'installing_files'|'complete',
-     *     work_deletes_byte_offset:int,
-     *     current_delete_path:?string,
-     *     current_work_files_descendant:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
-     *     commit_cursor:list<array{component_b64:string}>,
-     *     deleted_files:int,
-     *     installed_files:int,
-     *     non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>}
-     * }|null Validated checkpoint, or null before commit starts.
-     */
-    private function read_commit_state(bool $commit_started): ?array {
-        $commit_state = $this->read_json($this->commit_json_path);
-        if ($commit_state === null) {
-            if ($commit_started) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata records commit_started=true, but commit.json is missing for push session ' . $this->push_session_id . '.');
-            }
-            return null;
-        }
-        $this->require_valid_commit_state($commit_state);
-        /** @var array{version:3,phase:'deleting_files'|'installing_files'|'complete',work_deletes_byte_offset:int,current_delete_path:?string,current_work_files_descendant:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},commit_cursor:list<array{component_b64:string}>,deleted_files:int,installed_files:int,non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>}} $commit_state */
-        return $commit_state;
     }
 
     /**
@@ -2035,21 +1883,18 @@ final class Site_Export_Push_Session {
      *
      * @param string $path Absolute metadata file path.
      * @param array{
-     *     version:4,
-     *     push_session_id:string,
-     *     docroot_b64:string,
-     *     excluded_paths_b64:list<string>,
-     *     work_deletes_complete:bool,
-     *     commit_started:bool
-     * }|array{
-     *     version:3,
-     *     phase:'deleting_files'|'installing_files'|'complete',
-     *     work_deletes_byte_offset:int,
-     *     current_delete_path:?string,
-     *     current_work_files_descendant:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
-     *     commit_cursor:list<array{component_b64:string}>,
-     *     deleted_files:int,
-     *     installed_files:int,
+     *     version?:int,
+     *     push_session_id?:string,
+     *     docroot_b64?:string,
+     *     excluded_paths_b64?:list<string>,
+     *     work_deletes_complete?:bool,
+     *     phase?:string,
+     *     work_deletes_byte_offset?:int,
+     *     current_delete_path?:?string,
+     *     current_work_files_descendant?:?array{path_b64:string,expected_type:string},
+     *     commit_cursor?:list<array{component_b64:string}>,
+     *     deleted_files?:int,
+     *     installed_files?:int,
      *     non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>}
      * } $value Push metadata or commit checkpoint object to persist.
      */
@@ -2125,9 +1970,9 @@ final class Site_Export_Push_Session {
     /**
      * Validates the durable commit checkpoint schema before it drives mutation.
      *
-     * Every field that controls delete offsets, the commit cursor, maintenance
-     * ownership, or pending installing_files is checked before use. This keeps a
-     * corrupt checkpoint from being interpreted as document-root authority.
+     * Every field that controls delete offsets, the commit cursor, or pending
+     * work-file descendants is checked before use. This keeps a corrupt
+     * checkpoint from being interpreted as document-root authority.
      *
      * @param array{
      *     version?:mixed,
@@ -2156,9 +2001,8 @@ final class Site_Export_Push_Session {
         if (!array_key_exists('current_delete_path', $commit_state)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint is missing current_delete_path.');
         }
-        $current_delete_path = null;
         if ($commit_state['current_delete_path'] !== null) {
-            $current_delete_path = $this->decode_commit_path($commit_state['current_delete_path'], 'current delete');
+            $this->decode_commit_path($commit_state['current_delete_path'], 'current delete');
         }
         if (!array_key_exists('current_work_files_descendant', $commit_state)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint is missing current_work_files_descendant.');
@@ -2171,8 +2015,8 @@ final class Site_Export_Push_Session {
             }
             $this->decode_commit_path($current_work_files_descendant['path_b64'], 'current installing_files');
         }
-        if (!is_array($commit_state['commit_cursor'] ?? null) || array_values($commit_state['commit_cursor']) !== $commit_state['commit_cursor']) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint commit_cursor must be a list of structural frames.');
+        if (!is_array($commit_state['commit_cursor'] ?? null)) {
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint has an invalid commit cursor.');
         }
         foreach ($commit_state['commit_cursor'] as $frame) {
             if (!is_array($frame) || !is_string($frame['component_b64'] ?? null)) {
@@ -2187,117 +2031,6 @@ final class Site_Export_Push_Session {
                 throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint has an invalid non_recoverable_commit_failure.');
             }
         }
-        $delete_record = $this->read_delete_record_at_offset($commit_state['work_deletes_byte_offset']);
-        if ($commit_state['phase'] === 'deleting_files') {
-            if ($current_work_files_descendant !== null) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'A deleting checkpoint must have current_work_files_descendant=null; observed a pending installing_files for ' . $current_work_files_descendant['path_b64'] . '.');
-            }
-            if ($commit_state['commit_cursor'] !== []) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'A deleting checkpoint must have an empty commit_cursor; observed ' . count($commit_state['commit_cursor']) . ' frames.');
-            }
-            if ($current_delete_path !== null && $delete_record !== $current_delete_path) {
-                throw new Site_Export_Push_Exception(
-                    self::ERROR_CORRUPTED_PUSH_STATE,
-                    'Commit current_delete_path ' . base64_encode($current_delete_path) . ' does not match the durable delete record at offset ' . $commit_state['work_deletes_byte_offset'] . '; observed ' . ( $delete_record === null ? 'EOF' : base64_encode($delete_record) ) . '.'
-                );
-            }
-            return;
-        }
-        if ($delete_record !== null) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'An ' . $commit_state['phase'] . ' checkpoint must consume the complete delete stream; offset ' . $commit_state['work_deletes_byte_offset'] . ' still selects record ' . base64_encode($delete_record) . '.');
-        }
-        if ($current_delete_path !== null) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'An ' . $commit_state['phase'] . ' checkpoint must have current_delete_path=null; observed ' . base64_encode($current_delete_path) . '.');
-        }
-        if ($commit_state['phase'] === 'complete') {
-            if ($current_work_files_descendant !== null) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'A complete checkpoint must have current_work_files_descendant=null; observed a pending installing_files for ' . $current_work_files_descendant['path_b64'] . '.');
-            }
-            if ($commit_state['commit_cursor'] !== []) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'A complete checkpoint must have an empty commit_cursor; observed ' . count($commit_state['commit_cursor']) . ' frames.');
-            }
-        }
-    }
-
-    /**
-     * Reads at most one bounded path from a durable NUL-delimited delete stream.
-     *
-     * The offset must be byte zero, exact EOF, or immediately after a NUL
-     * terminator. A record is returned only after its own terminator and normal
-     * document-root-path safety have been verified. Exact EOF returns null.
-     *
-     * @param int $offset Durable delete-consumption cursor.
-     * @return string|null Raw path bytes at the cursor, or null at exact EOF.
-     */
-    private function read_delete_record_at_offset(int $offset): ?string {
-        $identity = $this->lstat_path($this->work_deletes_path);
-        if ($identity === null || $identity['type'] !== 'file') {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The durable work delete stream must be a regular file; observed ' . ( $identity === null ? 'missing' : $identity['type'] ) . '.');
-        }
-        $delete_size = $identity['size'];
-        if ($offset < 0 || $offset > $delete_size) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Delete-consumption offset ' . $offset . ' is outside the ' . $delete_size . '-byte stream.');
-        }
-        $handle = @fopen($this->work_deletes_path, 'rb');
-        if ($handle === false) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open the durable work delete stream.');
-        }
-        try {
-            $opened_identity = fstat($handle);
-            $published_identity = $this->lstat_path($this->work_deletes_path);
-            if (!is_array($opened_identity) || $published_identity === null || $published_identity['type'] !== 'file'
-                || (int) $opened_identity['dev'] !== $published_identity['dev']
-                || (int) $opened_identity['ino'] !== $published_identity['ino']
-                || (int) $opened_identity['size'] !== $delete_size
-                || $published_identity['size'] !== $delete_size) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The durable work delete stream changed while it was opened.');
-            }
-            if ($offset === $delete_size) {
-                return null;
-            }
-            if ($offset > 0) {
-                if (fseek($handle, $offset - 1) !== 0) {
-                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not inspect the delete-record boundary before offset ' . $offset . '.');
-                }
-                $previous_byte = fread($handle, 1);
-                if ($previous_byte === false) {
-                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read the delete-record boundary before offset ' . $offset . '.');
-                }
-                if ($previous_byte !== "\0") {
-                    throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Delete-consumption offset ' . $offset . ' is not a record boundary; the preceding byte is ' . base64_encode($previous_byte) . '.');
-                }
-            }
-            if (fseek($handle, $offset) !== 0) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not seek to delete-consumption offset ' . $offset . '.');
-            }
-            $path = '';
-            $path_bytes = 0;
-            while ($path_bytes <= self::MAX_PATH_BYTES) {
-                $byte = fread($handle, 1);
-                if ($byte === false) {
-                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read the work delete record at offset ' . $offset . '.');
-                }
-                if ($byte === '') {
-                    throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The work delete record at offset ' . $offset . ' ended without a NUL terminator after path ' . base64_encode($path) . '.');
-                }
-                if ($byte === "\0") {
-                    if ($path === '') {
-                        throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The work delete stream contains an empty record at offset ' . $offset . '.');
-                    }
-                    try {
-                        $this->validate_path($path);
-                    } catch (InvalidArgumentException $exception) {
-                        throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The work delete record at offset ' . $offset . ' contains unsafe path ' . base64_encode($path) . ': ' . $exception->getMessage());
-                    }
-                    return $path;
-                }
-                $path .= $byte;
-                ++$path_bytes;
-            }
-        } finally {
-            fclose($handle);
-        }
-        throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The work delete record at offset ' . $offset . ' exceeds ' . self::MAX_PATH_BYTES . ' bytes.');
     }
 
     /**
@@ -2319,11 +2052,7 @@ final class Site_Export_Push_Session {
         if (!is_string($path)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit ' . $description . ' path is not valid base64.');
         }
-        try {
-            $this->validate_path($path);
-        } catch (InvalidArgumentException $exception) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit ' . $description . ' path is unsafe: ' . $exception->getMessage());
-        }
+        $this->validate_path($path);
         return $path;
     }
 
@@ -2351,11 +2080,7 @@ final class Site_Export_Push_Session {
             }
         }
         if ($path !== '') {
-            try {
-                $this->validate_path($path);
-            } catch (InvalidArgumentException $exception) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit cursor path is unsafe: ' . $exception->getMessage());
-            }
+            $this->validate_path($path);
         }
         return $path;
     }
@@ -2370,7 +2095,10 @@ final class Site_Export_Push_Session {
      * @return bool True once a delete-list part declared completion.
      */
     private function work_deletes_are_complete(): bool {
-        $push_metadata = $this->read_push_metadata();
+        $push_metadata = $this->read_json($this->push_json_path);
+        if (!is_array($push_metadata) || !is_bool($push_metadata['work_deletes_complete'] ?? null)) {
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata has no valid work-deletes completion state.');
+        }
         return $push_metadata['work_deletes_complete'];
     }
 
@@ -2621,42 +2349,28 @@ final class Site_Export_Push_Session {
      * Advances bounded cleanup of a renamed remove tombstone.
      *
      * Remove first renames a push session so it is no longer addressable by its
-     * public id. This method then removes at most REMOVE_ENTRY_LIMIT entries
-     * while holding the tombstone's own lock. It releases any surviving commit-state
-     * claim before removing the first entry and preserves the tombstone lock
-     * until the final empty-directory removal.
+     * public ID. This method then removes at most REMOVE_ENTRY_LIMIT entries
+     * while holding the tombstone's own lock. Commit ownership is released from
+     * this resumable side of the rename before any push state is deleted.
      *
      * @param string $tombstone Absolute tombstone directory path.
      * @return bool True when the tombstone is gone, false when work remains.
      */
     private function remove_tombstone(string $tombstone): bool {
-        $tombstone_identity = $this->lstat_path($tombstone);
-        if ($tombstone_identity === null) {
+        if (!is_dir($tombstone)) {
             return true;
         }
-        if ($tombstone_identity['type'] !== 'directory') {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The push removal tombstone is not a real directory.');
-        }
         $push_lock_path = $tombstone . '/push.lock';
-        $lock_identity = $this->lstat_path($push_lock_path);
-        if ($lock_identity === null || $lock_identity['type'] !== 'file') {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The push removal tombstone lock is missing or not regular.');
-        }
         $lock = @fopen($push_lock_path, 'r+b');
         if ($lock === false) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open the push removal tombstone lock.');
         }
         try {
-            $opened_lock_identity = fstat($lock);
-            $published_lock_identity = $this->lstat_path($push_lock_path);
-            if (!is_array($opened_lock_identity) || $published_lock_identity === null || $published_lock_identity['type'] !== 'file'
-                || (int) $opened_lock_identity['dev'] !== $published_lock_identity['dev']
-                || (int) $opened_lock_identity['ino'] !== $published_lock_identity['ino']) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The push removal tombstone lock changed while it was opened.');
-            }
             if (!flock($lock, LOCK_EX | LOCK_NB)) {
                 throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'Push removal cleanup is busy. Retry remove.');
             }
+            // The push directory rename is durable before commit ownership is released.
+            // Retry that release while the tombstone still preserves push state.
             $this->release_commit_state();
             $remaining_entries = self::REMOVE_ENTRY_LIMIT;
             $empty = self::remove_directory_entries($tombstone, $remaining_entries, true);
