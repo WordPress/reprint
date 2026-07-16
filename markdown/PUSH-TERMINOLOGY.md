@@ -11,8 +11,9 @@ messages, or pull-request descriptions.
 - The **document root** is the directory changed by commit.
 - **Excluded paths** are document-root-relative paths that a push must not
   change.
-- **Work files**, **work partials**, and **work deletes** are the only durable
-  queues owned by a push session.
+- **Work files**, **in-flight work**, and **work deletes** are the only durable
+  work owned by a push session. Work files are complete values. In-flight work
+  is the one value currently being received or published.
 - **Commit** consumes work deletes and work files. It never names another
   lifecycle operation.
 - **Remove** deletes a push directory in bounded calls.
@@ -32,6 +33,8 @@ Use these names verbatim:
 | Push directory | `$push_directory` |
 | Push metadata | `$push_metadata` |
 | Commit checkpoint | `$commit_state` |
+| In-flight work record | `$work_inflight_path` |
+| In-flight file data | `$work_inflight_data_path` |
 | Work-delete offset | `$work_deletes_byte_offset` |
 | Current delete path | `$current_delete_path` |
 | Current work-files descendant | `$current_work_files_descendant` |
@@ -48,11 +51,19 @@ Every push directory is located at:
 <reprint-directory>/.reprint/push/<push-session-id>/
 ```
 
-It contains `push.json`, `push.lock`, `commit.json`, and `work/`. The work
-directory contains `files/`, `partial/`, `deletes`, and the private
-maintenance copy. The shared `.reprint/push/` directory contains
+It contains `push.json`, `push.lock`, optional `commit.json`, and `work/`. The
+work directory contains `files/`, optional `inflight.json` and
+`inflight.data`, `deletes`, and an optional private maintenance copy. `files/`
+is the only path-shaped work tree. The shared `.reprint/push/` directory contains
 `push-create.lock`, `commit-state`, `commit-state.lock`, and bounded removal
 tombstones named `.removing-<push-session-id>/`.
+
+`inflight.json` records the path and type of the one in-flight work value.
+File records use `preparing`, `receiving`, or `publishing` and also contain
+`total_bytes`. Directory and symlink records use `preparing` or `publishing`;
+symlink records also contain `target_b64`. `inflight.data` contains in-flight
+file bytes, and its actual size is the receiver-confirmed cursor. Both paths
+are absent when no work is in flight.
 
 `push.json` has the keys
 `push_session_id`, `docroot_b64`, `excluded_paths_b64`,
