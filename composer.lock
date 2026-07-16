@@ -358,11 +358,11 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-adamziel/push-commit-language",
+            "version": "dev-adamziel/authenticated-push-endpoints",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
-                "reference": "6a5cbcf2ac9d0b34789819f01ccb00033b67581a"
+                "reference": "2050e07227a82c058c6267c5e8b3e77d0cd4dbdc"
             },
             "require": {
                 "php": ">=7.2",
@@ -386,6 +386,7 @@
                     "src/class-http-server.php",
                     "src/class-multipart-processor.php",
                     "src/class-push-exception.php",
+                    "src/class-push-endpoints.php",
                     "src/class-push-session.php",
                     "src/class-sqlite-driver-pdo.php",
                     "src/class-wpdb-driver-pdo.php"

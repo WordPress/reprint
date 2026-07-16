@@ -102,6 +102,40 @@ durable delete queue.
 more cleanup remains and must be retried. A push with an unfinished commit is
 not removable; its next commit request resumes the durable cursor instead.
 
+## Push HTTP operations
+
+The production exporter router exposes five authenticated operations. Control
+and upload requests use the envelope signature described above, so
+`push_upload` passes `php://input` directly to the multipart processor instead
+of reading the complete request for authentication.
+
+- `POST push_create` creates or reopens the caller's 32-character lowercase
+  hexadecimal `push_session_id`. It returns
+  `{status:"created",push_session_id:string,max_part_bytes:int,post_max_bytes:int|null}`.
+  The two limits describe different dimensions: one part and the complete
+  decoded request body.
+- `POST push_upload` accepts `multipart/mixed`. It returns
+  `{status:"accepted",push_session_id:string,changes_accepted:int,last_change:change|null}`,
+  where `change` is exactly the `get_current_change()` file, directory,
+  symlink, or delete-list union. Only the latest change is retained for the
+  response; request memory does not grow with the number of parts.
+- `GET push_status` accepts an optional base64 `path_b64`. It returns
+  `status:"accepted"` together with the exact `get_status()` object: push
+  session phase, work-delete cursor and close bit, and the requested path's
+  missing, partial, or complete receiver-confirmed state.
+- `POST push_commit` performs a server-bounded call to `commit()`. It returns
+  `{status:"accepted",push_session_id:string,phase:"deleting_files"|"installing_files"|"complete",send_next_request:bool,entries_processed:int}`.
+  The sender repeats it while `send_next_request` is true.
+- `POST push_remove` performs one bounded remove step. It returns
+  `{status:"accepted",push_session_id:string,removed:bool}`. The sender repeats
+  it while `removed` is false.
+
+The WordPress plugin stores push work in a document-root-specific private
+directory beside `ABSPATH` unless its embedder supplies `reprint_directory`.
+It always excludes its own plugin directory from push. An embedding router
+must likewise choose its reprint directory and excluded paths as server
+configuration; request parameters cannot select either one.
+
 ## Where reprint stores its own data on the remote
 
 The remote is configured with one storage path for everything reprint keeps:

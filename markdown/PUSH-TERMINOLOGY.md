@@ -73,10 +73,11 @@ development. There are no compatibility aliases or migration paths.
 The work-upload endpoint is `push_upload` and its push-session parameter is
 `push_session_id`. Endpoint names and endpoint prefixes begin with `push_`.
 JSON responses use `push_session_id`, `receiving_work`, and
-`work_deletes_bytes`. The stable classified failures are
+`work_deletes_bytes`. Push-session failures are
 `lock_acquisition_failure`, `offset_gap`, `push_not_found`, `filesystem_error`,
 `commit_required`, `unexpected_docroot_mutation`, `corrupted_push_state`, and
-`same_device`.
+`same_device`. Authentication and request-boundary failures are `auth_failed`,
+`not_configured`, `invalid_request`, and `request_too_large`.
 
 The document-root `.maintenance` file identifies its owner with the push
 session ID. `commit.json` stores no separate maintenance value.

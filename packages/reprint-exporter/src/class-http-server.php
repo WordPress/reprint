@@ -22,11 +22,20 @@ final class Site_Export_HTTP_Server {
     /** @var string|null */
     private $default_directory;
 
+    /** @var Site_Export_Push_Endpoints|null */
+    private $push_endpoints;
+
     /** @var string[] Endpoints dispatched without a resource budget. */
-    private $no_budget_endpoints = ['preflight'];
+    private $no_budget_endpoints = [
+        'preflight',
+        'push_create',
+        'push_upload',
+        'push_status',
+        'push_commit',
+        'push_remove',
+    ];
 
     public function __construct(array $options = []) {
-        $this->handlers = $options['handlers'] ?? $this->default_handlers();
         $this->budget_factory = $options['budget_factory'] ?? [$this, 'default_budget_factory'];
         $this->body_reader = $options['body_reader'] ?? static function (): string {
             $body = file_get_contents('php://input');
@@ -34,7 +43,17 @@ final class Site_Export_HTTP_Server {
         };
         $this->cursor_header_name = $options['cursor_header_name'] ?? 'HTTP_X_EXPORT_CURSOR';
         $this->default_directory = $options['default_directory'] ?? null;
-
+        $this->push_endpoints = null;
+        if (array_key_exists('push', $options)) {
+            if (!is_array($options['push'])) {
+                throw new InvalidArgumentException('The push HTTP server option must be an array.');
+            }
+            if (!class_exists('Site_Export_Push_Endpoints', false)) {
+                require_once __DIR__ . '/class-push-endpoints.php';
+            }
+            $this->push_endpoints = new Site_Export_Push_Endpoints($options['push']);
+        }
+        $this->handlers = $options['handlers'] ?? $this->default_handlers();
     }
 
     public function handle_request(array $request = []): void {
@@ -286,13 +305,21 @@ final class Site_Export_HTTP_Server {
      * @return array<string, callable>
      */
     private function default_handlers(): array {
-        return [
+        $handlers = [
             'file_index' => 'endpoint_file_index',
             'file_fetch' => 'endpoint_file_fetch',
             'sql_chunk' => 'endpoint_sql_chunk',
             'db_index' => 'endpoint_db_index',
             'preflight' => 'endpoint_preflight',
         ];
+        if ($this->push_endpoints !== null) {
+            $handlers['push_create'] = [$this->push_endpoints, 'create'];
+            $handlers['push_upload'] = [$this->push_endpoints, 'upload'];
+            $handlers['push_status'] = [$this->push_endpoints, 'status'];
+            $handlers['push_commit'] = [$this->push_endpoints, 'commit'];
+            $handlers['push_remove'] = [$this->push_endpoints, 'remove'];
+        }
+        return $handlers;
     }
 
     private function is_json_content_type(array $server): bool {

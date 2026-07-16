@@ -554,7 +554,7 @@ class MultipartPushStreamClient
      * - `body_bytes_sent`: MIME entity-body bytes accounted for this request.
      *
      * @return array{
-     *     status:string,
+     *     status:'complete'|'retry'|'failed',
      *     reason:?string,
      *     detail:?string,
      *     response:?array<string,mixed>,
@@ -670,7 +670,7 @@ class MultipartPushStreamClient
      *     Their keys are encoded and signed but are not interpreted here.
      * @param string[] $expected_statuses Successful protocol statuses for this endpoint.
      * @return array{
-     *     status:string,
+     *     status:'complete'|'retry'|'failed',
      *     reason:?string,
      *     detail:?string,
      *     response:array<string,mixed>,
@@ -1003,15 +1003,16 @@ class MultipartPushStreamClient
     /**
      * Classifies every decoded upload and control response by protocol reason.
      *
-     * `busy` and `offset_gap` are recoverable because a later request can use
-     * the receiver-confirmed cursor. Every other rejection fails the request; HTTP
-     * status alone never promotes an unknown reason into a retry.
+     * `lock_acquisition_failure` and `offset_gap` are recoverable because a
+     * later request can retry the locked operation or use the receiver-
+     * confirmed cursor. Every other rejection fails the request; HTTP status
+     * alone never promotes an unknown reason into a retry.
      *
      * Classification reads these response keys:
      *
      * - `status`: target protocol status compared with `$expected_statuses`.
-     * - `reason`: optional machine-readable rejection reason. Only `busy` and
-     *   `offset_gap` are recoverable.
+     * - `reason`: optional machine-readable rejection reason. Only
+     *   `lock_acquisition_failure` and `offset_gap` are recoverable.
      * - `detail`: optional human-readable rejection detail.
      * - `http_code`: observed HTTP status used when no detail was supplied.
      *
@@ -1021,7 +1022,7 @@ class MultipartPushStreamClient
      *     the classification keys above.
      * @param string[] $expected_statuses Successful statuses for this request.
      * @return array{
-     *     status:string,
+     *     status:'complete'|'retry'|'failed',
      *     reason:?string,
      *     detail:?string,
      *     response:array<string,mixed>,
@@ -1043,7 +1044,7 @@ class MultipartPushStreamClient
         }
         $reason = is_string($response['reason'] ?? null) ? $response['reason'] : 'unexpected_response';
         return [
-            'status' => in_array($reason, ['busy', 'offset_gap'], true) ? 'retry' : 'failed',
+            'status' => in_array($reason, ['lock_acquisition_failure', 'offset_gap'], true) ? 'retry' : 'failed',
             'reason' => $reason,
             'detail' => is_string($response['detail'] ?? null)
                 ? $response['detail']

@@ -1,0 +1,468 @@
+<?php
+
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped,WordPress.Security.EscapeOutput.OutputNotEscaped -- Authenticated protocol responses are JSON, never HTML output.
+// phpcs:disable WordPress.Security.ValidatedSanitizedInput -- HTTP grammar and receiver validation require the exact request bytes.
+
+use function WordPress\Reprint\Exporter\parse_size;
+
+/**
+ * Exposes push-session operations through the exporter HTTP dispatcher.
+ *
+ * The endpoint configuration is supplied by the server, not by request
+ * parameters. It fixes the reprint directory, document root, excluded paths,
+ * maximum multipart part size, and bounded commit work for every request.
+ * Authentication happens in the embedding router before these methods run.
+ *
+ * Upload requests pass php://input directly to Site_Export_Push_Session. The
+ * endpoint retains only the latest accepted change while the receiver reads
+ * each multipart part in bounded fragments; it never buffers the request body
+ * or a list of all parts.
+ */
+final class Site_Export_Push_Endpoints {
+
+    private const DEFAULT_MAXIMUM_PART_BYTES = 4194304;
+    private const DEFAULT_MAXIMUM_COMMIT_ENTRIES = 256;
+
+    /** @var string */
+    private $reprint_directory;
+
+    /** @var string */
+    private $docroot;
+
+    /** @var list<string> */
+    private $excluded_paths;
+
+    /** @var int */
+    private $maximum_part_bytes;
+
+    /** @var int */
+    private $maximum_commit_entries;
+
+    /** @var int|null */
+    private $post_max_bytes;
+
+    /**
+     * Configures the server-owned push roots and request limits.
+     *
+     * Missing numeric options use bounded defaults. Present numeric options
+     * must be positive so a malformed server configuration cannot silently
+     * change the protocol limit.
+     *
+     * @param array<string,mixed> $options {
+     *     Trusted endpoint configuration.
+     *
+     *     @type string $reprint_directory Required private reprint directory.
+     *     @type string $docroot Required managed document-root directory.
+     *     @type list<string> $excluded_paths Required document-root-relative
+     *         paths which push must preserve.
+     *     @type int|float|string $maximum_part_bytes Maximum Content-Length
+     *         accepted for one multipart part. Default 4 MiB.
+     *     @type int|float|string $maximum_commit_entries Maximum entries one
+     *         commit request may process. Default 256.
+     *     @type int|float|string|null $post_max_bytes Decoded request-body
+     *         limit reported to senders. Defaults to PHP's post_max_size;
+     *         null means PHP reports no positive limit.
+     * }
+     *
+     * @throws InvalidArgumentException If required configuration is absent or
+     *     a present numeric limit is not positive.
+     */
+    public function __construct(array $options) {
+        $reprint_directory = $options['reprint_directory'] ?? null;
+        $docroot = $options['docroot'] ?? null;
+        $excluded_paths = $options['excluded_paths'] ?? null;
+        if (!is_string($reprint_directory) || $reprint_directory === '') {
+            throw new InvalidArgumentException('Push endpoints require a non-empty reprint_directory option.');
+        }
+        if (!is_string($docroot) || $docroot === '') {
+            throw new InvalidArgumentException('Push endpoints require a non-empty docroot option.');
+        }
+        if (!is_array($excluded_paths)) {
+            throw new InvalidArgumentException('Push endpoints require an excluded_paths array.');
+        }
+
+        $maximum_part_bytes = $options['maximum_part_bytes'] ?? self::DEFAULT_MAXIMUM_PART_BYTES;
+        $maximum_commit_entries = $options['maximum_commit_entries'] ?? self::DEFAULT_MAXIMUM_COMMIT_ENTRIES;
+        if (!is_numeric($maximum_part_bytes) || (int) $maximum_part_bytes <= 0) {
+            throw new InvalidArgumentException('maximum_part_bytes must be a positive integer.');
+        }
+        if (!is_numeric($maximum_commit_entries) || (int) $maximum_commit_entries <= 0) {
+            throw new InvalidArgumentException('maximum_commit_entries must be a positive integer.');
+        }
+
+        if (array_key_exists('post_max_bytes', $options)) {
+            $post_max_bytes = $options['post_max_bytes'];
+            if ($post_max_bytes !== null && ( !is_numeric($post_max_bytes) || (int) $post_max_bytes <= 0 )) {
+                throw new InvalidArgumentException('post_max_bytes must be null or a positive integer.');
+            }
+            $this->post_max_bytes = $post_max_bytes === null ? null : (int) $post_max_bytes;
+        } else {
+            $post_max_size = ini_get('post_max_size');
+            $parsed_post_max_bytes = is_string($post_max_size) && $post_max_size !== ''
+                ? parse_size($post_max_size)
+                : 0;
+            $this->post_max_bytes = $parsed_post_max_bytes > 0 ? $parsed_post_max_bytes : null;
+        }
+
+        $this->reprint_directory = $reprint_directory;
+        $this->docroot = $docroot;
+        $this->excluded_paths = $excluded_paths;
+        $this->maximum_part_bytes = (int) $maximum_part_bytes;
+        $this->maximum_commit_entries = (int) $maximum_commit_entries;
+    }
+
+    /**
+     * Creates or reopens the caller-named push session.
+     *
+     * This operation is idempotent for the same push session ID and immutable
+     * server configuration. A successful response reports the independent
+     * multipart-part and decoded request-body limits the sender must apply.
+     *
+     * Emits HTTP 200 with:
+     *
+     *     {status:"created", push_session_id:string,
+     *      max_part_bytes:int, post_max_bytes:int|null}
+     *
+     * @param array<string,mixed> $config Request parameters containing
+     *     `push_session_id`.
+     */
+    public function create(array $config): void {
+        try {
+            $this->require_method('POST');
+            $push_session_id = $this->require_push_session_id($config);
+            $push_session = Site_Export_Push_Session::create(
+                $this->reprint_directory,
+                $this->docroot,
+                $this->excluded_paths,
+                $push_session_id
+            );
+            // create() deliberately defers validation when the directory
+            // already exists. An endpoint success must not bless stale or
+            // incompatible durable state, so validate it under the push lock.
+            $push_session->get_status();
+            $this->respond(200, [
+                'status' => 'created',
+                'push_session_id' => $push_session_id,
+                'max_part_bytes' => $this->maximum_part_bytes,
+                'post_max_bytes' => $this->post_max_bytes,
+            ]);
+        } catch (Throwable $exception) {
+            $this->respond_to_failure($exception);
+        }
+    }
+
+    /**
+     * Streams one multipart request into an existing push session.
+     *
+     * The request must be POST multipart/mixed with one valid boundary. Each
+     * part is accepted before the next part is read. The response retains only
+     * the latest receiver-confirmed change, so response memory does not grow
+     * with the number of parts in the request.
+     *
+     * Emits HTTP 200 with one of these `last_change` branches, or null for an
+     * empty request:
+     *
+     *     {status:"accepted", push_session_id:string, changes_accepted:int,
+     *      last_change:
+     *        {path_b64:string,state:"partial"|"complete",type:"file",accepted_bytes:int}
+     *        | {path_b64:string,state:"complete",type:"directory"|"symlink",accepted_bytes:0}
+     *        | {state:"partial"|"complete",type:"delete-list",accepted_bytes:int}
+     *        | null}
+     *
+     * @param array<string,mixed> $config Request parameters containing
+     *     `push_session_id`.
+     */
+    public function upload(array $config): void {
+        $input = null;
+        $push_session = null;
+        $upload_open = false;
+        try {
+            $this->require_method('POST');
+            $push_session_id = $this->require_push_session_id($config);
+            $content_type = (string) ( $_SERVER['CONTENT_TYPE'] ?? '' );
+            $boundary = Site_Export_Multipart_Processor::boundary_from_content_type($content_type);
+            $declared_request_bytes = $_SERVER['CONTENT_LENGTH'] ?? null;
+            if (
+                $this->post_max_bytes !== null
+                && is_numeric($declared_request_bytes)
+                && (int) $declared_request_bytes > $this->post_max_bytes
+            ) {
+                $this->respond(413, [
+                    'status' => 'rejected',
+                    'reason' => 'request_too_large',
+                    'detail' => 'The decoded request body exceeds the target post_max_size of ' . $this->post_max_bytes . ' bytes.',
+                    'post_max_bytes' => $this->post_max_bytes,
+                ]);
+                return;
+            }
+            $input = fopen('php://input', 'rb');
+            if ($input === false) {
+                throw new Site_Export_Push_Exception(
+                    Site_Export_Push_Session::ERROR_FILESYSTEM,
+                    'Could not open the multipart upload request body.'
+                );
+            }
+            $push_session = Site_Export_Push_Session::open(
+                $this->reprint_directory,
+                $this->docroot,
+                $push_session_id,
+                $this->excluded_paths
+            );
+            $push_session->accept_upload(
+                $input,
+                new Site_Export_Multipart_Processor($boundary),
+                $this->maximum_part_bytes
+            );
+            $upload_open = true;
+            $changes_accepted = 0;
+            $last_change = null;
+            while ($push_session->next_change()) {
+                ++$changes_accepted;
+                $last_change = $push_session->get_current_change();
+            }
+            $push_session->finish_upload();
+            $upload_open = false;
+            fclose($input);
+            $input = null;
+            $this->respond(200, [
+                'status' => 'accepted',
+                'push_session_id' => $push_session_id,
+                'changes_accepted' => $changes_accepted,
+                'last_change' => $last_change,
+            ]);
+        } catch (Throwable $exception) {
+            if ($upload_open && $push_session instanceof Site_Export_Push_Session) {
+                $push_session->finish_upload();
+            }
+            if (is_resource($input)) {
+                fclose($input);
+            }
+            $this->respond_to_failure($exception);
+        }
+    }
+
+    /**
+     * Reports receiver-confirmed progress for a push session and optional path.
+     *
+     * `path_b64`, when supplied, is strict base64 for the raw document-root-
+     * relative path. The receiver reads actual work state under the push lock;
+     * it never echoes a sender-supplied cursor.
+     *
+     * Emits HTTP 200 with the exact Site_Export_Push_Session::get_status()
+     * object plus `status:"accepted"`:
+     *
+     *     {status:"accepted",push_session_id:string,
+     *      phase:"receiving_work"|"deleting_files"|"installing_files"|"complete",
+     *      work_deletes_bytes:int,work_deletes_complete:bool,
+     *      path:null
+     *        | {path_b64:string,state:"missing",accepted_bytes:0}
+     *        | {path_b64:string,state:"partial",type:"file",accepted_bytes:int}
+     *        | {path_b64:string,state:"partial",type:"directory"|"symlink",accepted_bytes:0}
+     *        | {path_b64:string,state:"complete",type:"file",accepted_bytes:int}
+     *        | {path_b64:string,state:"complete",type:"directory"|"symlink",accepted_bytes:0}}
+     *
+     * @param array<string,mixed> $config Request parameters containing
+     *     `push_session_id` and optional `path_b64`.
+     */
+    public function status(array $config): void {
+        try {
+            $this->require_method('GET');
+            $push_session_id = $this->require_push_session_id($config);
+            $path = null;
+            if (array_key_exists('path_b64', $config)) {
+                if (!is_string($config['path_b64'])) {
+                    throw new InvalidArgumentException('path_b64 must be base64 text.');
+                }
+                $path = base64_decode($config['path_b64'], true);
+                if ($path === false) {
+                    throw new InvalidArgumentException('path_b64 must be valid base64 text.');
+                }
+            }
+            $push_session = Site_Export_Push_Session::open(
+                $this->reprint_directory,
+                $this->docroot,
+                $push_session_id,
+                $this->excluded_paths
+            );
+            $this->respond(200, array_merge(
+                ['status' => 'accepted'],
+                $push_session->get_status($path)
+            ));
+        } catch (Throwable $exception) {
+            $this->respond_to_failure($exception);
+        }
+    }
+
+    /**
+     * Advances bounded commit work for one push session.
+     *
+     * The server-owned entry limit controls each call. Senders repeat this
+     * operation while `send_next_request` is true; a repeated request after an
+     * indeterminate response resumes the receiver's durable commit checkpoint.
+     *
+     * Emits HTTP 200 with:
+     *
+     *     {status:"accepted",push_session_id:string,
+     *      phase:"deleting_files"|"installing_files"|"complete",
+     *      send_next_request:bool,entries_processed:int}
+     *
+     * @param array<string,mixed> $config Request parameters containing
+     *     `push_session_id`.
+     */
+    public function commit(array $config): void {
+        try {
+            $this->require_method('POST');
+            $push_session_id = $this->require_push_session_id($config);
+            $push_session = Site_Export_Push_Session::open(
+                $this->reprint_directory,
+                $this->docroot,
+                $push_session_id,
+                $this->excluded_paths
+            );
+            $commit = $push_session->commit($this->maximum_commit_entries);
+            $this->respond(200, array_merge([
+                'status' => 'accepted',
+                'push_session_id' => $push_session_id,
+            ], $commit));
+        } catch (Throwable $exception) {
+            $this->respond_to_failure($exception);
+        }
+    }
+
+    /**
+     * Performs one bounded removal step for a push session.
+     *
+     * A false `removed` value means the sender must call this operation again.
+     * Repeating the operation after a lost response is safe: a missing push
+     * directory and completed removal tombstone report true.
+     *
+     * Emits HTTP 200 with:
+     *
+     *     {status:"accepted",push_session_id:string,removed:bool}
+     *
+     * @param array<string,mixed> $config Request parameters containing
+     *     `push_session_id`.
+     */
+    public function remove(array $config): void {
+        try {
+            $this->require_method('POST');
+            $push_session_id = $this->require_push_session_id($config);
+            $removed = Site_Export_Push_Session::remove(
+                $this->reprint_directory,
+                $this->docroot,
+                $push_session_id,
+                $this->excluded_paths
+            );
+            $this->respond(200, [
+                'status' => 'accepted',
+                'push_session_id' => $push_session_id,
+                'removed' => $removed,
+            ]);
+        } catch (Throwable $exception) {
+            $this->respond_to_failure($exception);
+        }
+    }
+
+    /**
+     * Requires the exact HTTP method assigned to an endpoint.
+     *
+     * @param string $expected_method Uppercase protocol method.
+     *
+     * @throws InvalidArgumentException If the current request uses another method.
+     */
+    private function require_method(string $expected_method): void {
+        $observed_method = strtoupper( (string) ( $_SERVER['REQUEST_METHOD'] ?? '' ));
+        if ($observed_method !== $expected_method) {
+            throw new InvalidArgumentException(
+                'Push endpoint requires ' . $expected_method . '; observed ' . ( $observed_method === '' ? 'no request method' : $observed_method ) . '.'
+            );
+        }
+    }
+
+    /**
+     * Reads the required push session identity from request parameters.
+     *
+     * Site_Export_Push_Session performs the canonical 32-character lowercase
+     * hexadecimal validation. This method only rejects missing or non-string
+     * values before a factory method is selected.
+     *
+     * @param array<string,mixed> $config Endpoint request parameters.
+     * @return string Caller-supplied push session ID.
+     *
+     * @throws InvalidArgumentException If `push_session_id` is not a string.
+     */
+    private function require_push_session_id(array $config): string {
+        $push_session_id = $config['push_session_id'] ?? null;
+        if (!is_string($push_session_id)) {
+            throw new InvalidArgumentException('push_session_id must be a string.');
+        }
+        return $push_session_id;
+    }
+
+    /**
+     * Maps a push exception onto its stable protocol reason and HTTP status.
+     *
+     * Classified context is copied without rewriting its keys. Invalid or
+     * malformed request data receives `invalid_request`; unexpected failures
+     * receive `filesystem_error` without exposing a PHP trace.
+     *
+     * @param Throwable $exception Failure raised while handling an endpoint.
+     */
+    private function respond_to_failure(Throwable $exception): void {
+        if ($exception instanceof Site_Export_Push_Exception) {
+            $reason = $exception->get_error_code();
+            $http_code = 409;
+            if ($reason === Site_Export_Push_Session::ERROR_PUSH_NOT_FOUND) {
+                $http_code = 404;
+            } elseif ($reason === Site_Export_Push_Session::ERROR_LOCK_ACQUISITION_FAILURE) {
+                $http_code = 423;
+            } elseif (
+                $reason === Site_Export_Push_Session::ERROR_FILESYSTEM
+                || $reason === Site_Export_Push_Session::ERROR_CORRUPTED_PUSH_STATE
+            ) {
+                $http_code = 500;
+            }
+            $this->respond($http_code, array_merge([
+                'status' => 'rejected',
+                'reason' => $reason,
+                'detail' => $exception->getMessage(),
+            ], $exception->get_context()));
+            return;
+        }
+        if (
+            $exception instanceof InvalidArgumentException
+            || $exception instanceof LogicException
+            || $exception instanceof RuntimeException
+        ) {
+            $this->respond(400, [
+                'status' => 'rejected',
+                'reason' => 'invalid_request',
+                'detail' => $exception->getMessage(),
+            ]);
+            return;
+        }
+        $this->respond(500, [
+            'status' => 'rejected',
+            'reason' => Site_Export_Push_Session::ERROR_FILESYSTEM,
+            'detail' => 'The push endpoint failed while processing the request.',
+        ]);
+    }
+
+    /**
+     * Emits one complete JSON protocol response.
+     *
+     * @param int $http_code HTTP status code.
+     * @param array<string,mixed> $body Exact endpoint-specific response object.
+     */
+    private function respond(int $http_code, array $body): void {
+        http_response_code($http_code);
+        header('Content-Type: application/json');
+        $json = json_encode($body);
+        if ($json === false) {
+            http_response_code(500);
+            echo '{"status":"rejected","reason":"filesystem_error","detail":"Could not encode the push response."}';
+            return;
+        }
+        echo $json;
+    }
+}
