@@ -14,9 +14,6 @@ final class PushEndpointsTest extends TestCase {
     /** @var resource|null */
     private $server_process;
 
-    /** @var resource[] */
-    private array $server_pipes = [];
-
     private string $root;
     private string $docroot;
     private string $reprint_directory;
@@ -47,19 +44,15 @@ final class PushEndpointsTest extends TestCase {
             'REPRINT_PUSH_TEST_DOCROOT' => $this->docroot,
             'REPRINT_PUSH_TEST_DIRECTORY' => $this->reprint_directory,
         ]);
+        $server_log = $this->root . '/server.log';
         $descriptors = [
-            0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
+            0 => ['file', '/dev/null', 'r'],
+            1 => ['file', $server_log, 'a'],
+            2 => ['file', $server_log, 'a'],
         ];
         $process = proc_open([PHP_BINARY, '-d', 'post_max_size=1M', '-S', $address, $router], $descriptors, $pipes, dirname($router), $environment);
         $this->assertIsResource($process);
         $this->server_process = $process;
-        $this->server_pipes = $pipes;
-        fclose($this->server_pipes[0]);
-        unset($this->server_pipes[0]);
-        stream_set_blocking($this->server_pipes[1], false);
-        stream_set_blocking($this->server_pipes[2], false);
         $deadline = microtime(true) + 5;
         do {
             $connection = @stream_socket_client('tcp://' . $address, $connect_error, $connect_error_message, 0.1);
@@ -70,19 +63,13 @@ final class PushEndpointsTest extends TestCase {
             }
             usleep(20000);
         } while (microtime(true) < $deadline);
-        $stderr = stream_get_contents($this->server_pipes[2]);
-        $this->fail('Push endpoint test server did not start: ' . $stderr);
+        $this->fail('Push endpoint test server did not start: ' . file_get_contents($server_log));
     }
 
     protected function tearDown(): void
     {
         if (is_resource($this->server_process)) {
             proc_terminate($this->server_process);
-            foreach ($this->server_pipes as $pipe) {
-                if (is_resource($pipe)) {
-                    fclose($pipe);
-                }
-            }
             proc_close($this->server_process);
         }
         if (isset($this->root)) {
