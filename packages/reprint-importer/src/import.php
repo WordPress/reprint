@@ -56,7 +56,7 @@ require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 // Typed state objects for the persisted import state.
 require_once __DIR__ . '/lib/state/class-import-state.php';
 
-// Adaptive sizing for staged push request bodies
+// Adaptive sizing for push request bodies
 require_once __DIR__ . '/lib/upload/class-push-request-sizer.php';
 
 // High-level pull commands — orchestrate lower-level commands into pipelines

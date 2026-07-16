@@ -2,7 +2,7 @@
 
 Push local changes to a remote WordPress site: files and database, driven
 entirely from the local machine, resumable at every step, never leaving the
-remote half-applied. This document is the agreed design; the delivery plan at
+remote partially committed. This document is the agreed design; the delivery plan at
 the end maps it to a PR stack.
 
 ## Shape of a push
@@ -12,11 +12,11 @@ the end maps it to a PR stack.
    baselines it stored at the end of that push.
 2. It shows a summary of local uploads and deletions. The user confirms that
    local should win for those paths and rows.
-3. It transfers everything into a staging area on the remote — file bytes,
+3. It transfers everything into a private push directory on the remote — file bytes,
    a deletion manifest, and (phase two) the database diff. The transfer is
    resumable at byte granularity.
-4. It drives the apply step with repeated commands until done. The remote
-   moves staged files into place, executes deletions, applies the database
+4. It drives the commit step with repeated commands until done. The remote
+   moves work files into place, executes deletions, and commits the database
    diff, and fixes symlinks — inside a maintenance window that lasts seconds,
    not the length of the transfer.
 5. It stores the current local indexes as the new local baselines. The push is
@@ -32,7 +32,7 @@ There is one package: Reprint. Every peer ships the same code with three
 capabilities:
 
 - **serve** — index and fetch endpoints (today's export surface),
-- **apply** — staging store, apply engine, database batch,
+- **commit** — push session, commit engine, database batch,
 - **drive** — the CLI that runs syncs.
 
 "Reprint lite" is a serve-only build for peers that only ever get pulled
@@ -59,7 +59,7 @@ one. It only answers "what changed locally since my last successful push to
 this remote" by comparing the current local indexes against local baselines.
 
 The local machine keeps one set of baselines **per remote site**, overwritten
-after each successful apply:
+after each successful commit:
 
     <state-dir>/push/<site>/last-sync-local-files.jsonl
     <state-dir>/push/<site>/last-sync-local-rows.jsonl   (phase two)
@@ -76,56 +76,41 @@ outside Reprint, a later push of the same path or row overwrites that remote
 edit. This keeps push as a simple deployment tool instead of a conflict
 manager.
 
-## Deletions
+## Deletes
 
 Local deletions since the last push come out of the baseline comparison. They
-travel as a deletion manifest — itself a staged artifact, uploaded through
-the same store as file bytes — and the apply step executes the unlinks inside
-the same window as the moves.
+travel as NUL-delimited document-root-relative paths in `work/deletes`. Commit
+records its byte offset before and after every destructive mutation, so a
+later request can resume from durable evidence instead of repeating a delete.
 
-The manifest is staged at one reserved artifact id, `.reprint/deletions.jsonl`,
-whose content is the `local-paths-to-delete.jsonl` the journal produces. To
-keep that namespace trustworthy, the exporter refuses any sender-named
-artifact under the top-level `.reprint/` segment except that one id — on the
-push stream and on the `finalize`/`status`/`discard` control routes alike
-(`reserved_artifact_id`, HTTP 400). So a site that happens to hold a
-`.reprint/` file cannot overwrite the manifest, and apply can trust that
-everything under `.reprint/` is reprint's own. The staging code that actually
-writes the manifest lands with the push command; this reservation is in place
-ahead of it so the namespace is clean from the first push.
+## The push session
 
-## The staging store
+`Site_Export_Push_Session` stores each session at
+`<reprint-directory>/.reprint/push/<push-session-id>/`. `push.json` is the
+immutable session policy plus the monotonic `commit_started` fact. `commit.json`
+holds the bounded commit cursor. Both are atomically replaced and their
+versions are rejected when they do not match the current schema.
 
-The staging area is `Site_Export_Staged_Artifacts` as built: artifact bytes
-at plain target-relative paths under `files/`, a cursor in `state.json`
-(replaced by writing a temp file and renaming it, so readers never see a
-half-written record), one small verified marker per finished artifact under
-`verified/`, and one `lock` file. The caller
-drives the loop — one `append()` per buffer, individually committed, so the
-transfer can stop after any step and resume from `committed_bytes` in a new
-request. `finalize()` checks the assembled size against the size declared in
-the plan; nothing re-reads or hashes artifacts. A missing, shortened, or
-non-regular file behind the cursor is damaged staging, not a valid resume
-point: status reports a zero frontier, a mid-file frame ends the request with
-`staging_file_damaged` before its payload is read, and a later offset-zero push
-replaces the damaged state.
+Multipart file bytes are received directly into `work/partial/` and promoted
+to `work/files/` only after their declared byte count is complete. A file
+replayed from byte zero replaces an incomplete prior copy; a continuation must
+begin at the receiver-confirmed byte count. `work/deletes` is the corresponding
+durable delete queue.
 
-Driver rule: **a discard that did not return true must be retried until it
-does** so all stale bytes are eventually removed. Discard invalidates cursor
-and verification records before unlinking the artifact, so an interrupted
-discard may leave untrusted bytes behind but never metadata authorizing bytes
-that were already removed. A fresh offset-zero upload safely replaces such an
-orphan.
+`remove()` renames a removable push directory to
+`.removing-<push-session-id>/` before bounded cleanup. A false return means
+more cleanup remains and must be retried. A push with an unfinished commit is
+not removable; its next commit request resumes the durable cursor instead.
 
 ## Where reprint stores its own data on the remote
 
 The remote is configured with one storage path for everything reprint keeps:
-the staging area and any apply bookkeeping. Preferably outside the document
+the private push directory and any commit bookkeeping. Preferably outside the document
 root. When the host only allows writing inside the document root:
 
 - the file indexer never lists anything under it. `storage_path` is the
   server's own setting, so every index request knows it — including a
-  pulling peer's, which never scans this site's staging data,
+   pulling peer's, which never scans this site's push work,
 - the deletion step refuses to touch anything under it,
 - an `.htaccess` (deny-all) and an empty `index.php` are written into
   it. That is all that can be done from inside the directory: Apache
@@ -133,43 +118,43 @@ root. When the host only allows writing inside the document root:
   their presence. Do not keep this directory inside the document root
   unless the host offers nowhere else to write.
 
-## Apply
+## Commit
 
 Remote-side, journaled, idempotent, driven by repeated commands until done.
 Order:
 
-1. **Copy-first, outside maintenance:** static assets (uploads, media) move
-   to their final paths; PHP, plugins, and themes are materialized as `.new`
-   siblings next to their targets. The site runs normally throughout.
-2. **Maintenance on.** We write the `.maintenance` file ourselves, and since
+1. **Receive work, outside maintenance:** multipart requests write bounded
+   chunks into `work/partial/` and promote complete files to `work/files`.
+   The site runs normally throughout receipt.
+2. **Maintenance on.** Commit writes the `.maintenance` file itself, and since
    WordPress executes that file, ours whitelists reprint API requests
    (`$upgrading = 0` for us, `time()` for everyone else). WordPress's own
    rule that a `.maintenance` file older than 10 minutes is ignored stays
-   intact, so an interrupted apply can never leave the site down for good.
-3. **Swap:** journaled `.new`/`.bak` renames, deletion unlinks, the database
-   batch, symlink fixes. The window contains renames and a row batch —
-   seconds, independent of payload size.
-4. **Maintenance off**, local baselines updated by the driver after apply
+   intact, so an interrupted commit can never leave the site down for good.
+3. **Commit:** consume `work/deletes`, then `work/files`, with the durable
+   `commit.json` checkpoint written before each document-root mutation. The
+   future database batch and symlink updates follow the same bounded cursor.
+4. **Maintenance off:** commit releases its `commit-state` ownership after
+   completion; the driver updates local baselines after commit
    completes.
 
-If the driver dies mid-apply: WordPress stops honoring the `.maintenance`
-file after 10 minutes on its own, the journal is resumable by the next apply
-command, and any authenticated push request that notices an unfinished
-journal finishes it before doing its own work — no worker or cron needed.
+If the driver dies mid-commit: WordPress stops honoring the `.maintenance`
+file after 10 minutes on its own, and the next commit request resumes from
+`commit.json` — no worker or cron needed.
 
-**The reprint plugin's own directory is never touched by apply.** It is
-excluded from swaps and deletions and reported as excluded in the summary.
+**The reprint plugin's own directory is never touched by commit.** It is
+excluded from installs and deletes and reported as excluded in the summary.
 Updating reprint itself is a separate concern, never part of a sync.
 
-## Escape hatch: apply without booting WordPress
+## Escape hatch: commit without booting WordPress
 
 Normally the endpoint runs through the WordPress boot because it is
-convenient. But an apply step can break that boot — a fatal in a half-swapped
-plugin — so the same endpoint is also reachable as a standalone PHP file that
+convenient. But a commit step can break that boot — a fatal in a partially
+committed plugin — so the same endpoint is also reachable as a standalone PHP file that
 never loads WordPress: it reads database credentials from `wp-config.php`
 directly and operates on the filesystem and database with reprint's own code.
 The driver falls back to it automatically when the normal route stops
-answering sensibly. This is what makes apply failures recoverable from the
+answering sensibly. This is what makes commit failures recoverable from the
 outside instead of requiring SSH.
 
 ## Database diff (phase two)
@@ -184,10 +169,10 @@ that replaces tables. The mechanics mirror the file design:
 - Push is local-wins for rows too. Rows changed on the remote outside Reprint
   are overwritten when the local diff touches the same primary key.
 - The diff stream passes through the URL rewriter in the local-to-remote
-  direction before staging.
+  direction before work.
 - Volatile rows are excluded by default (transients, sessions, cron), the
   same way volatile files are handled in pull.
-- The batch executes inside the apply maintenance window, bounded and
+- The batch executes inside the commit maintenance window, bounded and
   resumable like every other step.
 
 ## Accepted limitations
@@ -196,7 +181,7 @@ Stated here so nobody rediscovers them as surprises:
 
 - **Same-size corruption is invisible.** Transfers are verified by byte
   count only. Corruption that preserves length passes. We decided detection
-  is not worth hashing multi-gigabyte artifacts inside PHP time limits.
+  is not worth hashing multi-gigabyte work files inside PHP time limits.
 - **Remote edits are overwritten.** Push is a local-wins deployment tool, not
   a bidirectional conflict resolver. Developers who edit the remote site
   outside Reprint are responsible for pulling or preserving those changes
@@ -212,7 +197,7 @@ Files first, database second, each PR small and stacked in this order:
    X-Auth-Content-Hash header carries the literal string UNSIGNED-PAYLOAD,
    and the signature covers the method and request target instead of a
    body hash.
-3. **Staged artifact store** — the store itself (PR #317, which succeeded
+3. **Work value store** — the store itself (PR #317, which succeeded
    the closed #298).
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
    the configured storage path; web guards for inside-docroot placement.
@@ -220,32 +205,31 @@ Files first, database second, each PR small and stacked in this order:
    overwrite logic, local change and deletion detection.
 6. **Push stream endpoint** — the store's HTTP surface plus a sender that
    streams framed chunks for many files through one authenticated request;
-   deletion manifest staged; `--force-http` with honest help text (the first
+   deletion work received; `--force-http` with honest help text (the first
    push networking this flag can gate). Decisions this slice locked in:
    sending streams through libcurl's pause mechanism, which PHP's curl
    extension supports from 8.1 — so `reprint push` requires PHP 8.1+ (pull
    keeps 7.4+; the full story is
-   https://github.com/WordPress/reprint/issues/327) — and artifact ids
+   https://github.com/WordPress/reprint/issues/327) — and paths
    travel base64-encoded in frames, response cursors, and control-plane
    parameters, because file paths are arbitrary bytes and JSON strings must
    be UTF-8.
 7. **Package unification** — importer and exporter become one Reprint
-   package (lite = serve-only build). Placed here because apply is the
+   package (lite = serve-only build). Placed here because commit is the
    first piece that needs import-side code running on the remote.
-8. **Apply engine, files** — journaled swaps, copy-first, the whitelisted
-   maintenance file, unfinished-journal completion. Reuses the apply code
-   already built in PR #277 (the journaled `.new`/`.bak` swaps and the
-   copy-first flow); the relay around that code is dropped.
+8. **Commit engine, files** — delete `work/deletes`, then rename values from
+   `work/files` into the document root with the whitelisted maintenance file
+   and resumable `commit.json` cursor.
 9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
 10. **Row index and database diff** — the local row index, row baseline,
-    diff generation and URL rewrite, the apply batch.
+    diff generation and URL rewrite, the commit batch.
 11. **`reprint push`** — the one command that orchestrates plan, confirm,
-    transfer, apply, resume.
+    transfer, commit, resume.
 12. **Budgets and resumable limits** — push requests stay bounded by two
     budgets of different dimensions: the fixed chunk (the sender's in-memory
     unit of one read) and the host-learned request body budget that
     PushRequestSizer sizes from reported php.ini limits and 413s, plus a
     wall-clock budget per request; any endpoint that stops after durable work
-    returns the exact committed state the driver needs to retry. The apply step
+    returns the exact committed state the driver needs to retry. The commit step
     gets the main budgeted loop: process until a deadline or operation limit,
     return progress, and let the driver re-enter until complete.

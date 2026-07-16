@@ -35,7 +35,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
         $received = $this->read_available($connection);
-        $this->assertStringContainsString('POST /?reprint-api=1&endpoint=staged_session_upload&session_id=', $received);
+        $this->assertStringContainsString('POST /?reprint-api=1&endpoint=push_upload&push_session_id=', $received);
         $this->assertStringNotContainsString('Expect: 100-continue', $received);
 
         $this->assertTrue($client->send_part([

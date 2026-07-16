@@ -14,7 +14,7 @@
  *
  * Example:
  *
- *     if (!$client->start_upload_request($session_id)) {
+ *     if (!$client->start_upload_request($push_session_id)) {
  *         throw new RuntimeException($client->get_last_error());
  *     }
  *
@@ -217,7 +217,7 @@ class MultipartPushStreamClient
     }
 
     /**
-     * Starts one signed upload request for the supplied target-owned session id.
+     * Starts one signed upload request for the supplied target-owned push session ID.
      *
      * This resets all per-request state, generates a fresh MIME boundary, adds
      * the easy handle to the reusable multi handle, and pumps until libcurl asks
@@ -229,21 +229,21 @@ class MultipartPushStreamClient
      * answers `100 Continue`, which would otherwise consume the full phase
      * timeout before any body bytes move.
      *
-     * @param string $session_id Target-issued 32-character hexadecimal id.
+     * @param string $push_session_id Target-issued 32-character hexadecimal push session ID.
      *
      * @return bool False when connection setup failed; get_last_error()
      *     explains why.
      *
-     * @throws InvalidArgumentException If the session id is malformed.
+     * @throws InvalidArgumentException If the push session ID is malformed.
      * @throws RuntimeException If another upload request is already open.
      */
-    public function start_upload_request(string $session_id): bool
+    public function start_upload_request(string $push_session_id): bool
     {
         if ($this->curl_handle !== null) {
             throw new RuntimeException('An upload request is already open; call finish_request() first.');
         }
-        if (preg_match('/^[a-f0-9]{32}$/D', $session_id) !== 1) {
-            throw new InvalidArgumentException('Target session_id must be a 32-character lowercase hexadecimal value.');
+        if (preg_match('/^[a-f0-9]{32}$/D', $push_session_id) !== 1) {
+            throw new InvalidArgumentException('Target push_session_id must be a 32-character lowercase hexadecimal value.');
         }
         $this->boundary = 'reprint-' . bin2hex(random_bytes(16));
         $this->outbound_prefix = '';
@@ -259,7 +259,7 @@ class MultipartPushStreamClient
         $this->parts_sent = 0;
         $this->last_error = null;
 
-        $request_url = $this->endpoint_url('staged_session_upload', ['session_id' => $session_id]);
+        $request_url = $this->endpoint_url('push_upload', ['push_session_id' => $push_session_id]);
         $headers = $this->hmac_client->get_envelope_auth_headers('POST', $request_url);
         $headers['Content-Type'] = 'multipart/mixed; boundary=' . $this->boundary;
         $header_lines = [];
@@ -1004,14 +1004,14 @@ class MultipartPushStreamClient
      * Classifies every decoded upload and control response by protocol reason.
      *
      * `busy` and `offset_gap` are recoverable because a later request can use
-     * the target-confirmed cursor. Every other rejection is terminal; HTTP
+     * the receiver-confirmed cursor. Every other rejection fails the request; HTTP
      * status alone never promotes an unknown reason into a retry.
      *
      * Classification reads these response keys:
      *
      * - `status`: target protocol status compared with `$expected_statuses`.
      * - `reason`: optional machine-readable rejection reason. Only `busy` and
-     *   `offset_gap` are retryable.
+     *   `offset_gap` are recoverable.
      * - `detail`: optional human-readable rejection detail.
      * - `http_code`: observed HTTP status used when no detail was supplied.
      *

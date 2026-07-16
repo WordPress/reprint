@@ -30,12 +30,12 @@ if (!class_exists('Site_Export_Multipart_Processor', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-multipart-processor.php';
 }
 
-if (!class_exists('Site_Export_Staged_Apply_Exception', false)) {
-    require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-apply-exception.php';
+if (!class_exists('Site_Export_Push_Exception', false)) {
+    require_once __DIR__ . '/../packages/reprint-exporter/src/class-push-exception.php';
 }
 
-if (!class_exists('Site_Export_Staged_Apply_Session', false)) {
-    require_once __DIR__ . '/../packages/reprint-exporter/src/class-staged-apply-session.php';
+if (!class_exists('Site_Export_Push_Session', false)) {
+    require_once __DIR__ . '/../packages/reprint-exporter/src/class-push-session.php';
 }
 
 // Load the test base class

@@ -6,12 +6,19 @@ class that survived several review rounds before being caught. Follow them
 the first time. Project structure and commands live in CLAUDE.md; this file
 is about how to work.
 
+## Push language contract
+
+Read `markdown/PUSH-TERMINOLOGY.md` before proposing or changing push work.
+Use its terms verbatim in identifiers, comments, tests, documentation, plans,
+review replies, commit messages, and pull-request descriptions. Do not replace
+them with near-synonyms.
+
 ## Streaming is the point — never buffer
 
 - Never accumulate a request body, a frame plan, or any "send later"
   structure. A stepping API (`send_chunk()`, `next_chunk()`) must perform
   its real I/O before returning: when
-  `StagedPushStreamClient::send_chunk()` returns true, the frame has left
+  `MultipartPushStreamClient::send_chunk()` returns true, the frame has left
   for the network.
 - The one permissible in-memory unit is a single bounded chunk (a few MiB,
   the `chunk_bytes` option). Read it, send it, drop it. PHP string
@@ -68,9 +75,9 @@ is about how to work.
   numeric strings.
 - Classify remote rejections by the protocol's own design: `busy` and
   `offset_gap` are recoverable (retry with the returned cursor); auth
-  failures and redirects are terminal with pointed messages ("The target
+  failures and redirects fail permanently with pointed messages ("The target
   redirected to X. Use that address as the push base_url."). "Retry" must
-  never be a terminal status — exhausted retries become `failed`.
+  never be a final status — exhausted retries become `failed`.
 - Cursors and status responses report only what the store has confirmed —
   never echo a sender's claimed offset back as truth.
 
@@ -83,9 +90,9 @@ is about how to work.
 - The mechanisms here: the sender persists a source token (size + ctime —
   the same signals the journal diff keys on; mtime can be backdated by
   touch(), ctime cannot) alongside every cursor and restarts a changed file
-  at offset 0; the target treats an offset-0 frame for anything it cannot
-  vouch for as a restart (discard, then stage fresh), while verified
-  artifacts replayed at their verified size are skipped.
+  at offset 0; the receiver treats an offset-0 frame for anything it cannot
+  vouch for as a restart (remove, then upload fresh), while verified work
+  files replayed at their verified size are skipped.
 - Document the honest gaps where the mechanism is documented: a same-size
   edit within one timestamp second escapes the token; the diff layer is the
   deeper net.
@@ -111,7 +118,7 @@ is about how to work.
 - Never state a guarantee in a docblock, PR description, or review reply
   without pointing at the line that enforces it. Real defects here were
   sentences written from memory: "a 409 catches resume-after-change" (true
-  only for verified artifacts), "the token uses the signals the diff
+  only for verified work files), "the token uses the signals the diff
   trusts" (the diff keys on ctime; the token used mtime).
 - Probe platform behavior empirically instead of assuming, and record the
   result: PHP's curl binding honors CURL_READFUNC_PAUSE only from 8.1 —
