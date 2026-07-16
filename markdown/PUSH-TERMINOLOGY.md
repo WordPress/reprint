@@ -58,6 +58,11 @@ is the only path-shaped work tree. The shared `.reprint/push/` directory contain
 `push-create.lock`, `commit-state`, `commit-state.lock`, and bounded removal
 tombstones named `.removing-<push-session-id>/`.
 
+`push-create.lock` is the lifecycle lock. Create and every bounded remove call
+acquire it non-blockingly. Remove holds it while inspecting and renaming the
+live push directory and while performing one tombstone cleanup step, so create
+cannot recreate the same push session until that cleanup finishes.
+
 `inflight.json` records the path and type of the one in-flight work value.
 File records use `preparing`, `receiving`, or `publishing` and also contain
 `total_bytes`. Directory and symlink records use `preparing` or `publishing`;

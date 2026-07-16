@@ -11,6 +11,14 @@ if (!class_exists('Site_Export_Push_Configuration_Exception', false)) {
  */
 final class Site_Export_HTTP_Server {
 
+    private const PUSH_ENDPOINT_METHODS = [
+        'push_create' => 'create',
+        'push_upload' => 'upload',
+        'push_status' => 'status',
+        'push_commit' => 'commit',
+        'push_remove' => 'remove',
+    ];
+
     /** @var array<string, callable> */
     private $handlers;
 
@@ -28,16 +36,6 @@ final class Site_Export_HTTP_Server {
 
     /** @var Site_Export_Push_Endpoints|null */
     private $push_endpoints;
-
-    /** @var string[] Endpoints dispatched without a resource budget. */
-    private $no_budget_endpoints = [
-        'preflight',
-        'push_create',
-        'push_upload',
-        'push_status',
-        'push_commit',
-        'push_remove',
-    ];
 
     public function __construct(array $options = []) {
         $this->budget_factory = $options['budget_factory'] ?? [$this, 'default_budget_factory'];
@@ -307,7 +305,7 @@ final class Site_Export_HTTP_Server {
         }
 
         $handler = $this->handlers[$endpoint];
-        if (in_array($endpoint, $this->no_budget_endpoints, true)) {
+        if ($endpoint === 'preflight' || self::is_push_endpoint($endpoint)) {
             call_user_func($handler, $config);
             return;
         }
@@ -317,6 +315,10 @@ final class Site_Export_HTTP_Server {
         }
 
         call_user_func($handler, $config, $budget);
+    }
+
+    public static function is_push_endpoint(string $endpoint): bool {
+        return isset(self::PUSH_ENDPOINT_METHODS[$endpoint]);
     }
 
     /**
@@ -331,11 +333,9 @@ final class Site_Export_HTTP_Server {
             'preflight' => 'endpoint_preflight',
         ];
         if ($this->push_endpoints !== null) {
-            $handlers['push_create'] = [$this->push_endpoints, 'create'];
-            $handlers['push_upload'] = [$this->push_endpoints, 'upload'];
-            $handlers['push_status'] = [$this->push_endpoints, 'status'];
-            $handlers['push_commit'] = [$this->push_endpoints, 'commit'];
-            $handlers['push_remove'] = [$this->push_endpoints, 'remove'];
+            foreach (self::PUSH_ENDPOINT_METHODS as $endpoint => $method) {
+                $handlers[$endpoint] = [$this->push_endpoints, $method];
+            }
         }
         return $handlers;
     }

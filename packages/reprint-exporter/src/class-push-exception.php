@@ -50,7 +50,8 @@ final class Site_Export_Push_Exception extends RuntimeException {
      * @param array<string,mixed> $context Additional authenticated response
      *     fields. Common keys are operation, path_b64, conflict_path_b64,
      *     expected_docroot_types, observed_docroot_identity, work_device,
-     *     document-root_device, work_type, and detail.
+     *     document-root_device, work_type, observed_request_body_bytes, and
+     *     detail.
      */
     public function __construct(string $error_code, string $message, array $context = []) {
         parent::__construct($message);
@@ -78,7 +79,8 @@ final class Site_Export_Push_Exception extends RuntimeException {
      * @return array<string,mixed> Structured fields safe to copy into JSON.
      *     Common keys are operation, path_b64, conflict_path_b64,
      *     expected_docroot_types, observed_docroot_identity, work_device,
-     *     document-root_device, work_type, and detail.
+     *     document-root_device, work_type, observed_request_body_bytes, and
+     *     detail.
      */
     public function get_context(): array {
         return $this->context;

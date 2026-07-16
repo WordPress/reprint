@@ -176,20 +176,15 @@ final class Site_Export_Push_Session {
         $reprint_directory = self::require_directory($reprint_directory, 'reprint directory', true);
         $docroot = self::require_directory($docroot, 'document root', false);
         $push_session = new self($reprint_directory, $docroot, $push_session_id, $excluded_paths);
-        $push_parent_directory = $reprint_directory . '/.reprint/push';
-        if (!@mkdir($push_parent_directory, 0700, true)) {
-            if (!is_dir($push_parent_directory)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create push sessions directory ' . $push_parent_directory . '.');
-            }
-            $push_parent_directory = self::require_directory($push_parent_directory, 'push sessions', false);
-        }
-        $creation_lock = @fopen($push_parent_directory . '/push-create.lock', 'c+b');
-        if ($creation_lock === false) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open the push creation lock.');
-        }
+        $push_parent_directory = self::require_push_parent_directory($reprint_directory);
+        $lifecycle_lock = self::acquire_lifecycle_lock($push_parent_directory, 'create');
         try {
-            if (!flock($creation_lock, LOCK_EX | LOCK_NB)) {
-                throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'Push session creation is busy. Retry the create request.');
+            $removing_push_directory = $push_parent_directory . '/.removing-' . $push_session_id;
+            if (file_exists($removing_push_directory) || is_link($removing_push_directory)) {
+                throw new Site_Export_Push_Exception(
+                    self::ERROR_LOCK_ACQUISITION_FAILURE,
+                    'Push session removal is incomplete. Retry create after remove finishes.'
+                );
             }
             if (file_exists($push_session->push_directory) || is_link($push_session->push_directory)) {
                 return $push_session;
@@ -216,8 +211,8 @@ final class Site_Export_Push_Session {
             ]);
             return $push_session;
         } finally {
-            flock($creation_lock, LOCK_UN);
-            fclose($creation_lock);
+            flock($lifecycle_lock, LOCK_UN);
+            fclose($lifecycle_lock);
         }
     }
 
@@ -724,27 +719,34 @@ final class Site_Export_Push_Session {
      *              limit left tombstone work for another call.
      */
     public function remove_push_directory(): bool {
-        $removing_push_directory = $this->reprint_directory . '/.reprint/push/.removing-' . $this->push_session_id;
-        if ($this->lstat_path($this->push_directory) === null) {
-            return $this->remove_tombstone($removing_push_directory);
-        }
-        $lock = $this->acquire_push_lock();
+        $push_parent_directory = self::require_push_parent_directory($this->reprint_directory);
+        $removing_push_directory = $push_parent_directory . '/.removing-' . $this->push_session_id;
+        $lifecycle_lock = self::acquire_lifecycle_lock($push_parent_directory, 'remove');
         try {
-            $commit_state = $this->read_json($this->commit_json_path);
-            if ($commit_state !== null && $commit_state['phase'] !== 'complete') {
-                throw new Site_Export_Push_Exception(self::ERROR_COMMIT_REQUIRED, 'Document-root mutation has begun. Resume commit instead of removing this push session.');
+            if ($this->lstat_path($this->push_directory) === null) {
+                return $this->remove_tombstone($removing_push_directory);
             }
-            if (file_exists($removing_push_directory) || is_link($removing_push_directory)) {
-                throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'A remove tombstone already exists for push session ' . $this->push_session_id . '.');
+            $lock = $this->acquire_push_lock();
+            try {
+                $commit_state = $this->read_json($this->commit_json_path);
+                if ($commit_state !== null && $commit_state['phase'] !== 'complete') {
+                    throw new Site_Export_Push_Exception(self::ERROR_COMMIT_REQUIRED, 'Document-root mutation has begun. Resume commit instead of removing this push session.');
+                }
+                if (file_exists($removing_push_directory) || is_link($removing_push_directory)) {
+                    throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'A remove tombstone already exists for push session ' . $this->push_session_id . '.');
+                }
+                if (!@rename($this->push_directory, $removing_push_directory)) {
+                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the push removal tombstone.');
+                }
+            } finally {
+                flock($lock, LOCK_UN);
+                fclose($lock);
             }
-            if (!@rename($this->push_directory, $removing_push_directory)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the push removal tombstone.');
-            }
+            return $this->remove_tombstone($removing_push_directory);
         } finally {
-            flock($lock, LOCK_UN);
-            fclose($lock);
+            flock($lifecycle_lock, LOCK_UN);
+            fclose($lifecycle_lock);
         }
-        return $this->remove_tombstone($removing_push_directory);
     }
 
     /**
@@ -789,39 +791,62 @@ final class Site_Export_Push_Session {
     private function next_upload_token(): bool {
         while (!$this->upload_processor->next_token()) {
             if ($this->upload_processor->is_complete()) {
+                $trailing_bytes = $this->read_upload_request_fragment();
+                if ($trailing_bytes !== '') {
+                    throw new InvalidArgumentException(
+                        'Multipart data contains ' . strlen($trailing_bytes) . ' bytes after the closing boundary.'
+                    );
+                }
+                $this->upload_processor->finish_input();
                 return false;
             }
             if (!$this->upload_processor->paused_at_incomplete_input()) {
                 throw new LogicException('Multipart processor stopped without completing or requesting input.');
             }
-            $maximum_fragment_bytes = Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES;
-            $remaining_request_body_bytes = PHP_INT_MAX;
-            if ($this->maximum_upload_request_body_bytes !== PHP_INT_MAX) {
-                $remaining_request_body_bytes = $this->maximum_upload_request_body_bytes - $this->upload_request_body_bytes_read;
-                $maximum_fragment_bytes = min($maximum_fragment_bytes, $remaining_request_body_bytes + 1);
-            }
-            $bytes = fread($this->upload_input, $maximum_fragment_bytes);
-            if ($bytes === false) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read the multipart upload request body.');
-            }
+            $bytes = $this->read_upload_request_fragment();
             if ($bytes === '') {
                 $this->upload_processor->finish_input();
                 return false;
             }
-            $fragment_bytes = strlen($bytes);
-            if ($fragment_bytes > $remaining_request_body_bytes) {
-                $observed_request_body_bytes = $this->upload_request_body_bytes_read + $fragment_bytes;
-                throw new Site_Export_Push_Exception(
-                    self::ERROR_REQUEST_TOO_LARGE,
-                    'The decoded request body reached ' . $observed_request_body_bytes
-                    . ' bytes, exceeding the target post_max_size of '
-                    . $this->maximum_upload_request_body_bytes . ' bytes.'
-                );
-            }
-            $this->upload_request_body_bytes_read += $fragment_bytes;
             $this->upload_processor->append_bytes($bytes);
         }
         return true;
+    }
+
+    /**
+     * Reads and accounts for one bounded decoded request-body fragment.
+     *
+     * When a request-body limit remains, the extra byte in the read size proves
+     * the exact observed size which crossed it without buffering another chunk.
+     * EOF is returned as an empty string so the multipart caller can finish the
+     * processor in both incomplete and complete parser states.
+     *
+     * @return string Next bounded request-body fragment, or an empty string at EOF.
+     */
+    private function read_upload_request_fragment(): string {
+        $maximum_fragment_bytes = Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES;
+        $remaining_request_body_bytes = PHP_INT_MAX;
+        if ($this->maximum_upload_request_body_bytes !== PHP_INT_MAX) {
+            $remaining_request_body_bytes = $this->maximum_upload_request_body_bytes - $this->upload_request_body_bytes_read;
+            $maximum_fragment_bytes = min($maximum_fragment_bytes, $remaining_request_body_bytes + 1);
+        }
+        $bytes = fread($this->upload_input, $maximum_fragment_bytes);
+        if ($bytes === false) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read the multipart upload request body.');
+        }
+        $fragment_bytes = strlen($bytes);
+        if ($fragment_bytes > $remaining_request_body_bytes) {
+            $observed_request_body_bytes = $this->upload_request_body_bytes_read + $fragment_bytes;
+            throw new Site_Export_Push_Exception(
+                self::ERROR_REQUEST_TOO_LARGE,
+                'The decoded request body reached ' . $observed_request_body_bytes
+                . ' bytes, exceeding the target post_max_size of '
+                . $this->maximum_upload_request_body_bytes . ' bytes.',
+                ['observed_request_body_bytes' => $observed_request_body_bytes]
+            );
+        }
+        $this->upload_request_body_bytes_read += $fragment_bytes;
+        return $bytes;
     }
 
     /**
@@ -1466,6 +1491,7 @@ final class Site_Export_Push_Session {
             $work_identity = $this->lstat_path($work_path);
 
             if ($structural_cleanup) {
+                $this->validate_structural_path($path);
                 $this->require_docroot_ancestors($path, 'install', 'directory');
                 $docroot_identity = $this->lstat_path($this->docroot_path($path));
                 if ($work_identity !== null) {
@@ -1487,6 +1513,7 @@ final class Site_Export_Push_Session {
                 return;
             }
 
+            $this->validate_path($path);
             if ($work_identity !== null) {
                 $this->install_work_value($commit_state, $path, $expected_type, true);
                 return;
@@ -1557,13 +1584,14 @@ final class Site_Export_Push_Session {
         }
 
         $path = $parent_path === '' ? $entry : $parent_path . '/' . $entry;
-        $this->validate_path($path);
+        $this->validate_path_syntax($path);
         $work_path = $this->work_files_directory . '/' . $path;
         $identity = $this->lstat_path($work_path);
         if ($identity === null) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Selected work path disappeared before installing_files: ' . base64_encode($path) . '.');
         }
         if ($identity['type'] === 'directory' && $this->first_directory_entry($work_path) !== null) {
+            $this->validate_structural_path($path);
             $commit_state['commit_cursor'][] = ['component_b64' => base64_encode($entry)];
             $this->write_json($this->commit_json_path, $commit_state);
             $requested_path = $this->first_work_files_descendant_path($work_path, $path);
@@ -1584,6 +1612,7 @@ final class Site_Export_Push_Session {
             }
             return;
         }
+        $this->validate_path($path);
         if (!in_array($identity['type'], ['file', 'directory', 'symlink'], true)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Work path ' . base64_encode($path) . ' has unsupported type ' . $identity['type'] . '.');
         }
@@ -2186,8 +2215,9 @@ final class Site_Export_Push_Session {
      * Decodes and validates a base64 path stored in a commit checkpoint.
      *
      * Checkpoints store arbitrary filesystem bytes as base64 to remain valid
-     * JSON. This method rejects missing, malformed, or unsafe paths before they
-     * are used to select document-root filesystem work.
+     * JSON. This method rejects missing, malformed, or grammatically unsafe
+     * paths. Its caller applies the requested-value or structural-directory
+     * excluded-path policy before any document-root mutation.
      *
      * @param mixed $encoded Candidate base64 value from metadata.
      * @param string $description Field name used in error messages.
@@ -2201,7 +2231,7 @@ final class Site_Export_Push_Session {
         if (!is_string($path)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit ' . $description . ' path is not valid base64.');
         }
-        $this->validate_path($path);
+        $this->validate_path_syntax($path);
         return $path;
     }
 
@@ -2210,7 +2240,7 @@ final class Site_Export_Push_Session {
      *
      * Each frame stores exactly one base64 path component. The method validates
      * each component independently, rebuilds the slash-separated path, and then
-     * applies the normal document-root-relative path rules to the result.
+     * applies the implicit structural-directory path rules to the result.
      *
      * @param array $stack {
      *     Commit cursor frames.
@@ -2234,7 +2264,7 @@ final class Site_Export_Push_Session {
             }
         }
         if ($path !== '') {
-            $this->validate_path($path);
+            $this->validate_structural_path($path);
         }
         return $path;
     }
@@ -2262,25 +2292,56 @@ final class Site_Export_Push_Session {
      * Paths are byte strings carried through base64 on the wire. They must be
      * relative, bounded, free of NUL/backslash and dot segments, outside the
      * WordPress maintenance marker, and not equal to or an ancestor/descendant
-     * of a excluded path.
+     * of an excluded path.
      *
      * @param string $path Document-root-relative raw path bytes.
      */
     private function validate_path(string $path): void {
-        if ($path === '' || strlen($path) > self::MAX_PATH_BYTES || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
-            throw new InvalidArgumentException('Document-root-relative path must contain between 1 and ' . self::MAX_PATH_BYTES . ' safe bytes; observed ' . base64_encode($path) . '.');
-        }
-        foreach (explode('/', $path) as $segment) {
-            if ($segment === '' || $segment === '.' || $segment === '..') {
-                throw new InvalidArgumentException('Document-root-relative path contains an empty, dot, or parent segment: ' . base64_encode($path) . '.');
-            }
-        }
+        $this->validate_path_syntax($path);
         if ($path === '.maintenance' || strpos($path, '.maintenance/') === 0) {
             throw new InvalidArgumentException('Excluded document-root-relative path cannot be changed: ' . base64_encode($path) . '.');
         }
         foreach ($this->excluded_paths as $excluded_path) {
             if ($path === $excluded_path || strpos($path, $excluded_path . '/') === 0 || strpos($excluded_path, $path . '/') === 0) {
                 throw new InvalidArgumentException('Excluded document-root-relative path cannot be changed: ' . base64_encode($path) . '.');
+            }
+        }
+    }
+
+    /**
+     * Validates one implicit structural work-tree directory.
+     *
+     * A structural directory is traversed only to reach requested descendant
+     * work. It may therefore be an ancestor of an excluded path when the work
+     * lies in an unrelated sibling, but it must never equal or descend from an
+     * excluded path itself.
+     *
+     * @param string $path Document-root-relative structural directory path.
+     */
+    private function validate_structural_path(string $path): void {
+        $this->validate_path_syntax($path);
+        if ($path === '.maintenance' || strpos($path, '.maintenance/') === 0) {
+            throw new InvalidArgumentException('Excluded document-root-relative path cannot be changed: ' . base64_encode($path) . '.');
+        }
+        foreach ($this->excluded_paths as $excluded_path) {
+            if ($path === $excluded_path || strpos($path, $excluded_path . '/') === 0) {
+                throw new InvalidArgumentException('Excluded document-root-relative path cannot be changed: ' . base64_encode($path) . '.');
+            }
+        }
+    }
+
+    /**
+     * Validates path grammar without applying the excluded-path policy.
+     *
+     * @param string $path Document-root-relative raw path bytes.
+     */
+    private function validate_path_syntax(string $path): void {
+        if ($path === '' || strlen($path) > self::MAX_PATH_BYTES || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
+            throw new InvalidArgumentException('Document-root-relative path must contain between 1 and ' . self::MAX_PATH_BYTES . ' safe bytes; observed ' . base64_encode($path) . '.');
+        }
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                throw new InvalidArgumentException('Document-root-relative path contains an empty, dot, or parent segment: ' . base64_encode($path) . '.');
             }
         }
     }
@@ -2360,9 +2421,9 @@ final class Site_Export_Push_Session {
     /**
      * Joins the managed document root with one validated relative path.
      *
-     * The caller is responsible for validate_path() where the value originates.
-     * This method only preserves correct slash handling for both `/` and normal
-     * directory roots.
+     * The caller applies the appropriate requested-value or structural-path
+     * validation where the value originates. This method only preserves correct
+     * slash handling for both `/` and normal directory roots.
      *
      * @param string $relative_path Document-root-relative path.
      * @return string Absolute path in the document root.
@@ -2505,6 +2566,50 @@ final class Site_Export_Push_Session {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Expected a regular file at ' . $path . '.');
         }
         return $identity['size'];
+    }
+
+    /**
+     * Creates or validates the directory shared by every push session.
+     *
+     * Create and remove both establish this directory before acquiring the
+     * lifecycle lock. This lets an idempotent remove coordinate with a create
+     * even when no push session or tombstone currently exists.
+     *
+     * @param string $reprint_directory Canonical private reprint directory.
+     * @return string Canonical push parent directory.
+     */
+    private static function require_push_parent_directory(string $reprint_directory): string {
+        $push_parent_directory = $reprint_directory . '/.reprint/push';
+        if (!@mkdir($push_parent_directory, 0700, true) && !is_dir($push_parent_directory)) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create push sessions directory ' . $push_parent_directory . '.');
+        }
+        return self::require_directory($push_parent_directory, 'push sessions', false);
+    }
+
+    /**
+     * Acquires the cross-session lock for one create or bounded remove call.
+     *
+     * The historical filename remains `push-create.lock`, but the lock covers
+     * creation and every bounded removal step so create cannot race a
+     * live-directory rename or an unfinished removal tombstone.
+     *
+     * @param string $push_parent_directory Canonical push parent directory.
+     * @param string $operation Current `create` or `remove` operation.
+     * @return resource Exclusively locked lifecycle handle.
+     */
+    private static function acquire_lifecycle_lock(string $push_parent_directory, string $operation) {
+        $lifecycle_lock = @fopen($push_parent_directory . '/push-create.lock', 'c+b');
+        if ($lifecycle_lock === false) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open the push lifecycle lock for ' . $operation . '.');
+        }
+        if (!flock($lifecycle_lock, LOCK_EX | LOCK_NB)) {
+            fclose($lifecycle_lock);
+            throw new Site_Export_Push_Exception(
+                self::ERROR_LOCK_ACQUISITION_FAILURE,
+                'Push session lifecycle is busy. Retry the ' . $operation . ' request.'
+            );
+        }
+        return $lifecycle_lock;
     }
 
     /**

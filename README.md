@@ -114,6 +114,14 @@ On the **migration source** side:
  - ext-zlib — deflate_init/deflate_add for gzip streaming
  - ext-pdo + ext-pdo_mysql — database access (already in composer.json)
 
+Hosts exposing the push endpoints must set `display_errors=Off` at PHP
+startup, through `php.ini`, `.user.ini`, or the PHP-FPM pool configuration.
+`log_errors=On` is recommended so startup failures remain available to
+operators. PHP and the web server can reject an oversized request before the
+exporter runs, so those responses are not guaranteed to use the push JSON
+protocol. The sender accepts a bare HTTP 413 and learns a smaller request
+ceiling from it.
+
 On the **migration target** side:
 
  - PHP 7.4+

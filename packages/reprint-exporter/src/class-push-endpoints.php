@@ -161,12 +161,14 @@ final class Site_Export_Push_Endpoints {
      *
      * This operation is idempotent for the same push session ID and immutable
      * server configuration. A successful response reports the independent
-     * multipart-part and decoded request-body limits the sender must apply.
+     * multipart-part and decoded request-body limits the sender must apply,
+     * plus the normalized server-owned excluded paths stored for the session.
      *
      * Emits HTTP 200 with:
      *
      *     {status:"created", push_session_id:string,
-     *      max_part_bytes:int, post_max_bytes:int|null}
+     *      max_part_bytes:int, post_max_bytes:int|null,
+     *      excluded_paths_b64:string[]}
      *
      * @param array $config {
      *     Create request parameters.
@@ -194,6 +196,7 @@ final class Site_Export_Push_Endpoints {
                 'push_session_id' => $push_session_id,
                 'max_part_bytes' => $this->maximum_part_bytes,
                 'post_max_bytes' => $this->post_max_bytes,
+                'excluded_paths_b64' => array_map('base64_encode', $this->excluded_paths),
             ]);
         } catch (Throwable $exception) {
             $this->respond_to_failure($exception);
@@ -537,6 +540,9 @@ final class Site_Export_Push_Endpoints {
      */
     private function respond(int $http_code, array $body): void {
         http_response_code($http_code);
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('Expires: 0');
         header('Content-Type: application/json');
         $json = json_encode($body);
         if ($json === false) {

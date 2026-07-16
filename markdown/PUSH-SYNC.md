@@ -118,11 +118,15 @@ of reading the complete request for authentication.
 
 - `POST push_create` creates or reopens the caller's 32-character lowercase
   hexadecimal `push_session_id`. It returns
-  `{status:"created",push_session_id:string,max_part_bytes:int,post_max_bytes:int|null}`.
+  `{status:"created",push_session_id:string,max_part_bytes:int,post_max_bytes:int|null,excluded_paths_b64:string[]}`.
   The two limits describe different dimensions: one part and the complete
   decoded request body. The endpoint enforces the request-body limit while
   reading bounded fragments, including chunked requests without
-  `Content-Length`.
+  `Content-Length`. `excluded_paths_b64` is the normalized, sorted, immutable
+  server policy stored for the push session; base64 preserves arbitrary path
+  bytes which JSON cannot represent directly. A sender consuming this field
+  must omit indexed paths equal to, below, or ancestors of any advertised
+  exclusion.
 - `POST push_upload` accepts `multipart/mixed`. It returns
   `{status:"accepted",push_session_id:string,changes_accepted:int,last_change:change|null}`,
   where `change` is exactly the `get_current_change()` file, directory,
@@ -139,15 +143,28 @@ of reading the complete request for authentication.
   `{status:"accepted",push_session_id:string,removed:bool}`. The sender repeats
   it while `removed` is false.
 
-The WordPress plugin stores push work in a document-root-specific private
-directory beside the resolved `ABSPATH` document root unless its embedder
-supplies `reprint_directory`.
+Push deployments must set `display_errors=Off` at PHP startup through
+`php.ini`, `.user.ini`, or the PHP-FPM pool configuration; changing it after
+the request starts is too late for PHP's own `post_max_size` warning.
+`log_errors=On` is recommended. When the endpoint code receives an oversized
+request it returns a classified push JSON failure, but PHP or the web server
+may reject a request before the exporter runs and that response need not use
+the push JSON protocol. The sender therefore also treats a bare HTTP 413 as
+`request_too_large` and learns a smaller request ceiling.
+
+The WordPress plugin manages the trusted `docroot` supplied by its embedder, or
+the web server's `DOCUMENT_ROOT` by default. The path must resolve to an existing
+directory. `ABSPATH` remains the default only for pull endpoints because it may
+point at a separate shared WordPress core tree. Push work lives in a
+document-root-specific private directory beside the canonical managed document
+root unless its embedder supplies `reprint_directory`.
 Configured reprint directories must remain outside the document root; the HTTP
 endpoints reject an inside path because they do not yet apply the indexing and
-web-access protections described below. The plugin always excludes its own
-directory from push. An embedding router must likewise choose its reprint
-directory and excluded paths as server configuration; request parameters cannot
-select either one.
+web-access protections described below. The plugin always excludes its logical
+installed directory from push, including when that directory is a symlink to a
+physical target outside the document root. An embedding router must likewise
+choose its document root, reprint directory, and excluded paths as server
+configuration; request parameters cannot select any of them.
 
 ## Where reprint stores its own data on the remote
 

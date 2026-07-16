@@ -52,6 +52,9 @@ function _site_export_error(int $code, string $message): void {
  */
 function _site_export_push_error(int $http_code, string $reason, string $detail): void {
     http_response_code($http_code);
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('Expires: 0');
     header('Content-Type: application/json');
     echo json_encode([
         'status' => 'rejected',
@@ -59,16 +62,6 @@ function _site_export_push_error(int $http_code, string $reason, string $detail)
         'detail' => $detail,
     ]);
     exit;
-}
-
-/**
- * Returns whether an endpoint uses the push authentication and error contract.
- *
- * @param string $endpoint Exact endpoint query value.
- * @return bool Whether this is a registered push endpoint.
- */
-function _site_export_is_push_endpoint(string $endpoint): bool {
-    return in_array($endpoint, ['push_create', 'push_upload', 'push_status', 'push_commit', 'push_remove'], true);
 }
 
 /**
@@ -225,13 +218,16 @@ function _site_export_default_authenticate(): void {
  *
  *     @type callable $authenticate Optional. Authenticates the request.
  *                                  Defaults to _site_export_default_authenticate().
+ *     @type string $docroot Optional. Managed document root for push. Defaults
+ *                           to the server's DOCUMENT_ROOT. The configured path
+ *                           must resolve to an existing directory.
  *     @type string $reprint_directory Optional. Private push storage path
- *                                     outside the resolved ABSPATH document
- *                                     root. Defaults to a document-root-specific sibling.
+ *                                     outside the managed document root.
+ *                                     Defaults to a document-root-specific sibling.
  *     @type string[] $excluded_paths Optional. Document-root-relative paths
  *                                    push must preserve. The exporter plugin
  *                                    directory is always included when it is
- *                                    below ABSPATH.
+ *                                    below the managed document root.
  *     @type int $maximum_part_bytes Optional. Maximum Content-Length for one
  *                                   push upload part. Defaults to 4 MiB.
  *     @type int $maximum_commit_entries Optional. Maximum bounded entries one
@@ -240,6 +236,7 @@ function _site_export_default_authenticate(): void {
  * }
  * @phpstan-param array{
  *     authenticate?:callable,
+ *     docroot?:string,
  *     reprint_directory?:string,
  *     excluded_paths?:string[],
  *     maximum_part_bytes?:int,
@@ -317,7 +314,7 @@ function _site_export_handle_api_request(array $options = []): void {
     $authenticate = $options['authenticate'] ?? null;
     if ($authenticate !== null) {
         $authenticate();
-    } elseif (_site_export_is_push_endpoint($endpoint)) {
+    } elseif (Site_Export_HTTP_Server::is_push_endpoint($endpoint)) {
         if (_site_export_has_secret_file()) {
             $secret = _site_export_get_file_secret();
             if (empty($secret)) {
@@ -363,11 +360,30 @@ function _site_export_handle_api_request(array $options = []): void {
     // -- Dispatch --
     try {
         $server_options = ['default_directory' => ABSPATH];
-        if (_site_export_is_push_endpoint($endpoint)) {
-            // Resolve ABSPATH before deriving its sibling so a symlinked
-            // document root cannot place private push storage inside itself.
-            $canonical_docroot = realpath(ABSPATH);
-            $docroot = rtrim($canonical_docroot === false ? ABSPATH : $canonical_docroot, '/\\');
+        if (Site_Export_HTTP_Server::is_push_endpoint($endpoint)) {
+            // Push manages the web server's document root. ABSPATH remains the
+            // pull default because it may point at a separate shared core tree.
+            if (array_key_exists('docroot', $options)) {
+                $configured_docroot = $options['docroot'];
+            } else {
+                // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- DOCUMENT_ROOT is trusted server configuration and must retain exact filesystem bytes.
+                $configured_docroot = $_SERVER['DOCUMENT_ROOT'] ?? null;
+            }
+            if (!is_string($configured_docroot) || $configured_docroot === '') {
+                throw new Site_Export_Push_Configuration_Exception(
+                    'Push endpoints require docroot or DOCUMENT_ROOT to name an existing directory; observed '
+                    . json_encode($configured_docroot) . '.'
+                );
+            }
+            $canonical_docroot = realpath($configured_docroot);
+            if ($canonical_docroot === false || !is_dir($canonical_docroot)) {
+                throw new Site_Export_Push_Configuration_Exception(
+                    'Push endpoints require docroot or DOCUMENT_ROOT to name an existing directory; observed '
+                    . json_encode($configured_docroot) . '.'
+                );
+            }
+            $docroot = $canonical_docroot === '/' ? '/' : rtrim($canonical_docroot, '/\\');
+            $lexical_docroot = \WordPress\Reprint\Exporter\normalize_path(str_replace('\\', '/', $configured_docroot));
             $reprint_directory = $options['reprint_directory'] ?? (
                 dirname($docroot) . '/.reprint-' . substr(hash('sha256', $docroot), 0, 12)
             );
@@ -377,12 +393,67 @@ function _site_export_handle_api_request(array $options = []): void {
             }
             $canonical_plugin_directory = realpath(SITE_EXPORT_PLUGIN_DIR);
             $plugin_directory = rtrim($canonical_plugin_directory === false ? SITE_EXPORT_PLUGIN_DIR : $canonical_plugin_directory, '/\\');
-            $docroot_prefix = $docroot . DIRECTORY_SEPARATOR;
-            if (strpos($plugin_directory . DIRECTORY_SEPARATOR, $docroot_prefix) === 0) {
-                $relative_plugin_directory = str_replace('\\', '/', substr($plugin_directory, strlen($docroot_prefix)));
-                if ($relative_plugin_directory !== '') {
-                    $excluded_paths[] = $relative_plugin_directory;
+            $docroot_relative_offset = $docroot === '/' ? 1 : strlen($docroot) + 1;
+            $logical_plugin_path_added = false;
+            if (defined('WP_PLUGIN_DIR') && function_exists('plugin_basename')) {
+                // Keep the registered installation path lexical until its
+                // document-root-relative name is known. realpath() would turn a
+                // symlinked plugin into its outside target and omit protection.
+                $registered_plugin_file = str_replace('\\', '/', plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'));
+                $registered_plugin_directory = dirname($registered_plugin_file);
+                $logical_plugin_directory = \WordPress\Reprint\Exporter\normalize_path(
+                    str_replace('\\', '/', (string) WP_PLUGIN_DIR)
+                    . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
+                );
+                $logical_plugin_directory_to_verify = $logical_plugin_directory;
+                $logical_plugin_relative_path = null;
+                if (\WordPress\Reprint\Exporter\path_is_within_root($logical_plugin_directory, $lexical_docroot)) {
+                    $lexical_docroot_relative_offset = $lexical_docroot === '/' ? 1 : strlen($lexical_docroot) + 1;
+                    $logical_plugin_relative_path = substr($logical_plugin_directory, $lexical_docroot_relative_offset);
+                } elseif (\WordPress\Reprint\Exporter\path_is_within_root($logical_plugin_directory, $docroot)) {
+                    $logical_plugin_relative_path = substr($logical_plugin_directory, $docroot_relative_offset);
+                } else {
+                    // WP_PLUGIN_DIR may itself be a symlink alias into the
+                    // managed root. Resolve that parent, but keep the
+                    // registered plugin subdirectory lexical so its installed
+                    // path survives a final symlink to the outside target.
+                    $canonical_wordpress_plugin_directory = realpath( (string) WP_PLUGIN_DIR );
+                    if ($canonical_wordpress_plugin_directory !== false) {
+                        $logical_plugin_directory_from_canonical_parent = \WordPress\Reprint\Exporter\normalize_path(
+                            str_replace('\\', '/', $canonical_wordpress_plugin_directory)
+                            . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
+                        );
+                        if (\WordPress\Reprint\Exporter\path_is_within_root($logical_plugin_directory_from_canonical_parent, $docroot)) {
+                            $logical_plugin_relative_path = substr($logical_plugin_directory_from_canonical_parent, $docroot_relative_offset);
+                            $logical_plugin_directory_to_verify = $logical_plugin_directory_from_canonical_parent;
+                        }
+                    }
                 }
+                if ($logical_plugin_relative_path !== null) {
+                    $resolved_logical_plugin_directory = realpath($logical_plugin_directory_to_verify);
+                    if (
+                        $logical_plugin_relative_path === ''
+                        || $resolved_logical_plugin_directory === false
+                        || $canonical_plugin_directory === false
+                        || rtrim($resolved_logical_plugin_directory, '/\\') !== $plugin_directory
+                    ) {
+                        throw new Site_Export_Push_Configuration_Exception(
+                            'WordPress reports the Reprint Exporter plugin inside the managed document root at '
+                            . json_encode($logical_plugin_directory_to_verify)
+                            . ', but that path does not resolve to SITE_EXPORT_PLUGIN_DIR '
+                            . json_encode(SITE_EXPORT_PLUGIN_DIR) . '.'
+                        );
+                    }
+                    $excluded_paths[] = $logical_plugin_relative_path;
+                    $logical_plugin_path_added = true;
+                }
+            }
+            if (
+                !$logical_plugin_path_added
+                && \WordPress\Reprint\Exporter\path_is_within_root($plugin_directory, $docroot)
+                && $plugin_directory !== $docroot
+            ) {
+                $excluded_paths[] = str_replace('\\', '/', substr($plugin_directory, $docroot_relative_offset));
             }
             $push_options = [
                 'reprint_directory' => $reprint_directory,
@@ -399,7 +470,7 @@ function _site_export_handle_api_request(array $options = []): void {
         }
         Site_Export_HTTP_Server::serve($server_options);
     } catch (Exception $e) {
-        if (_site_export_is_push_endpoint($endpoint)) {
+        if (Site_Export_HTTP_Server::is_push_endpoint($endpoint)) {
             if ($e instanceof Site_Export_Push_Configuration_Exception) {
                 _site_export_push_error(503, 'not_configured', $e->getMessage());
             }
