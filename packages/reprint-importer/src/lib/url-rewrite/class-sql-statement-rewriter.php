@@ -164,7 +164,14 @@ class SqlStatementRewriter
      * statement shapes return null so callers can fall back to the normal
      * MySQL-on-SQLite execution path.
      *
-     * @return array{sql: string, params: list<mixed>, param_types: list<int>}|null
+     * @return array|null {
+     *     SQLite prepared statement, or null for an unsupported statement shape.
+     *
+     *     @type string $sql         SQL with placeholders.
+     *     @type array  $params      Decoded parameter values.
+     *     @type array  $param_types SQLite parameter types.
+     * }
+     * @phpstan-return array{sql: string, params: list<mixed>, param_types: list<int>}|null
      */
     public function build_sqlite_prepared_insert(string $sql): ?array
     {
@@ -203,7 +210,14 @@ class SqlStatementRewriter
      * Run the value-rewriting loop given an already-populated scanner and
      * the table/column-map context. Shared between the fast and lexer paths.
      *
-     * @param array{table: string, column_map: list<array{int, int, string}>}|null $value_to_column_map
+     * @param array|null $value_to_column_map {
+     *     Table and column ranges for the current statement, or null when the
+     *     statement shape is unknown.
+     *
+     *     @type string $table      Table name.
+     *     @type array  $column_map Value ranges mapped to column names.
+     * }
+     * @phpstan-param array{table: string, column_map: list<array{int, int, string}>}|null $value_to_column_map
      */
     private function rewrite_with_scanner(Base64ValueScanner $scanner, ?array $value_to_column_map): string
     {
@@ -279,7 +293,13 @@ class SqlStatementRewriter
      * contain `(`, `)`, `,` etc. arrive as a single token and never affect
      * depth.
      *
-     * @return array{table: string, column_map: list<array{int, int, string}>}|null
+     * @return array|null {
+     *     Table and column ranges, or null when the statement shape is unknown.
+     *
+     *     @type string $table      Table name.
+     *     @type array  $column_map Value ranges mapped to column names.
+     * }
+     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
      */
     // Called via reflection in SqlStatementRewriterLexerWalkerTest.
     // @phpstan-ignore method.unused
@@ -293,7 +313,13 @@ class SqlStatementRewriter
      * statement avoid a second WP_MySQL_Lexer pass.
      *
      * @param WP_MySQL_Token[] $tokens
-     * @return array{table: string, column_map: list<array{int, int, string}>}|null
+     * @return array|null {
+     *     Table and column ranges, or null when the statement shape is unknown.
+     *
+     *     @type string $table      Table name.
+     *     @type array  $column_map Value ranges mapped to column names.
+     * }
+     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
      */
     private function map_values_to_columns_from_tokens(array $tokens): ?array
     {
@@ -324,7 +350,13 @@ class SqlStatementRewriter
      * `$cursor` (which already points at the leading verb).
      *
      * @param WP_MySQL_Token[] $tokens
-     * @return array{table: string, column_map: list<array{int, int, string}>}|null
+     * @return array|null {
+     *     Table and column ranges, or null when the statement shape is unknown.
+     *
+     *     @type string $table      Table name.
+     *     @type array  $column_map Value ranges mapped to column names.
+     * }
+     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
      */
     private static function walk_insert(array $tokens, int $token_count, int $cursor): ?array
     {
@@ -504,7 +536,13 @@ class SqlStatementRewriter
      * first occurrence of WHERE / ORDER / LIMIT / `;` / end of input.
      *
      * @param WP_MySQL_Token[] $tokens
-     * @return array{table: string, column_map: list<array{int, int, string}>}|null
+     * @return array|null {
+     *     Table and column ranges, or null when the statement shape is unknown.
+     *
+     *     @type string $table      Table name.
+     *     @type array  $column_map Value ranges mapped to column names.
+     * }
+     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
      */
     private static function walk_update(array $tokens, int $token_count, int $cursor): ?array
     {
@@ -634,7 +672,14 @@ class SqlStatementRewriter
      * the linear cost was quadratic in row count and showed up as ~150 µs per
      * lookup under WASM PHP.
      *
-     * @param list<array{int, int, string}> $column_map [start, end, column_name] entries.
+     * @param array $column_map {
+     *     Column range entries.
+     *
+     *     @type int    $0 Start byte offset.
+     *     @type int    $1 End byte offset.
+     *     @type string $2 Column name.
+     * }
+     * @phpstan-param list<array{int, int, string}> $column_map
      * @param int $offset Byte offset of the CONVERT or FROM_BASE64 token.
      * @return string|null Column name, or null if the offset isn't in any range.
      */

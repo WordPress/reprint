@@ -125,7 +125,14 @@ function generate_runtime_php(RuntimeManifest $manifest, string $fs_root): strin
  * A mysqli_connect() stub is defined when the function doesn't exist,
  * because WordPress checks for it even when $wpdb is pre-set.
  *
- * @param array{plugin_dir: string, db_dir: string, db_file: string} $sqlite
+ * @param array $sqlite {
+ *     SQLite runtime paths.
+ *
+ *     @type string $plugin_dir SQLite plugin directory.
+ *     @type string $db_dir     SQLite database directory.
+ *     @type string $db_file    SQLite database file path.
+ * }
+ * @phpstan-param array{plugin_dir: string, db_dir: string, db_file: string} $sqlite
  *     'plugin_dir' is the absolute path to the copied plugin inside the
  *     output directory (set by the caller after copy_sqlite_plugin()).
  */

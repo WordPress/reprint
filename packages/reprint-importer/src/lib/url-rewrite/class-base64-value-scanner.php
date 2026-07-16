@@ -70,7 +70,24 @@ class Base64ValueScanner
      * already located every FROM_BASE64() expression and captured its payload,
      * the scanner skips the lexer and still decodes values lazily.
      *
-     * @param list<array{expr_start: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}> $entries
+     * @param array $entries {
+     *     FROM_BASE64() entries captured by the fast path.
+     *
+     *     @type int         $expr_start    Byte offset where the expression starts.
+     *     @type int         $quote_start   Byte offset where the quoted payload starts.
+     *     @type int         $quote_length  Quoted payload length in bytes.
+     *     @type string      $encoded_value Base64 payload.
+     *     @type string|null $value         Decoded value, when already decoded.
+     *     @type string|null $new_value     Rewritten value, when already set.
+     * }
+     * @phpstan-param list<array{
+     *     expr_start: int,
+     *     quote_start: int,
+     *     quote_length: int,
+     *     encoded_value: string,
+     *     value: ?string,
+     *     new_value: ?string
+     * }> $entries
      */
     public static function from_entries(string $sql, array $entries): self
     {

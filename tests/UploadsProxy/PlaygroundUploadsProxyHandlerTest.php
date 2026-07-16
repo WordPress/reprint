@@ -69,7 +69,14 @@ class PlaygroundUploadsProxyHandlerTest extends TestCase
      * sidecar JSON-lines file (in invocation order), and streams the
      * body to stdout via curl's WRITEFUNCTION. We parse both.
      *
-     * @return array{0:?int,1:array<int,string>,2:string}
+     * @return array {
+     *     Proxy response tuple.
+     *
+     *     @type int|null $0 HTTP status code.
+     *     @type array    $1 Header lines.
+     *     @type string   $2 Response body.
+     * }
+     * @phpstan-return array{0:?int,1:array<int,string>,2:string}
      */
     private function runProxy(string $sourcePath): array
     {
@@ -108,7 +115,14 @@ class PlaygroundUploadsProxyHandlerTest extends TestCase
     }
 
     /**
-     * @return array{0:?int,1:array<int,string>,2:string}
+     * @return array {
+     *     Proxy response tuple.
+     *
+     *     @type int|null $0 HTTP status code.
+     *     @type array    $1 Header lines.
+     *     @type string   $2 Response body.
+     * }
+     * @phpstan-return array{0:?int,1:array<int,string>,2:string}
      */
     private function parseSidecar(string $sidecar, string $body): array
     {

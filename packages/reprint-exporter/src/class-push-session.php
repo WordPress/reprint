@@ -905,8 +905,24 @@ final class Site_Export_Push_Session {
      * and promotes the file atomically inside the private reprint directory only when the
      * declared total size has been reached.
      *
-     * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-file-path:string,x-file-size:string,x-chunk-offset:string} $headers
+     * @param array $headers {
      *     Normalized file part headers.
+     *
+     *     @type string $content-length Declared Content-Length header.
+     *     @type string $content-type   Optional. Content-Type header.
+     *     @type string $x-chunk-type   Chunk type header.
+     *     @type string $x-file-path    Base64-encoded file path header.
+     *     @type string $x-file-size    Declared file size header.
+     *     @type string $x-chunk-offset Declared chunk offset header.
+     * }
+     * @phpstan-param array{
+     *     content-length:string,
+     *     content-type?:string,
+     *     x-chunk-type:string,
+     *     x-file-path:string,
+     *     x-file-size:string,
+     *     x-chunk-offset:string
+     * } $headers
      * @param int $part_bytes Declared Content-Length for this file chunk.
      */
     private function receive_file_part(array $headers, int $part_bytes): void {
@@ -1001,8 +1017,15 @@ final class Site_Export_Push_Session {
      * the completed work tree. A directory part cannot replace a non-empty
      * directory because that directory contains other completed work values.
      *
-     * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-directory-path:string} $headers
+     * @param array $headers {
      *     Normalized directory part headers.
+     *
+     *     @type string $content-length   Declared Content-Length header.
+     *     @type string $content-type     Optional. Content-Type header.
+     *     @type string $x-chunk-type     Chunk type header.
+     *     @type string $x-directory-path Base64-encoded directory path header.
+     * }
+     * @phpstan-param array{content-length:string,content-type?:string,x-chunk-type:string,x-directory-path:string} $headers
      * @param int $part_bytes Declared Content-Length, which must be zero.
      */
     private function receive_directory_part(array $headers, int $part_bytes): void {
@@ -1053,8 +1076,22 @@ final class Site_Export_Push_Session {
      * private path and rejects directory conflicts that would orphan completed
      * work descendants.
      *
-     * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-symlink-path:string,x-symlink-target:string} $headers
+     * @param array $headers {
      *     Normalized symlink part headers.
+     *
+     *     @type string $content-length   Declared Content-Length header.
+     *     @type string $content-type     Optional. Content-Type header.
+     *     @type string $x-chunk-type     Chunk type header.
+     *     @type string $x-symlink-path   Base64-encoded symlink path header.
+     *     @type string $x-symlink-target Base64-encoded symlink target header.
+     * }
+     * @phpstan-param array{
+     *     content-length:string,
+     *     content-type?:string,
+     *     x-chunk-type:string,
+     *     x-symlink-path:string,
+     *     x-symlink-target:string
+     * } $headers
      * @param int $part_bytes Declared Content-Length, which must be zero.
      */
     private function receive_symlink_part(array $headers, int $part_bytes): void {
@@ -1109,8 +1146,23 @@ final class Site_Export_Push_Session {
      * exactly; new bytes are validated record-by-record before they are flushed.
      * A completion declaration records that no more delete bytes may be added.
      *
-     * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-delete-offset:string,x-delete-complete?:string} $headers
+     * @param array $headers {
      *     Normalized delete-list part headers.
+     *
+     *     @type string $content-length    Declared Content-Length header.
+     *     @type string $content-type      Optional. Content-Type header.
+     *     @type string $x-chunk-type      Chunk type header.
+     *     @type string $x-delete-offset   Declared delete-list offset header.
+     *     @type string $x-delete-complete Optional. Delete-list completion
+     *                                    declaration header.
+     * }
+     * @phpstan-param array{
+     *     content-length:string,
+     *     content-type?:string,
+     *     x-chunk-type:string,
+     *     x-delete-offset:string,
+     *     x-delete-complete?:string
+     * } $headers
      * @param int $part_bytes Declared Content-Length for this delete segment.
      */
     private function receive_delete_list_part(array $headers, int $part_bytes): void {
@@ -1644,8 +1696,16 @@ final class Site_Export_Push_Session {
     /**
      * @param list<string> $expected_docroot_types Document-root identity types accepted at
      *                                          the conflicting path.
-     * @param array{type:string,dev:int,ino:int,size:int,ctime:int}|null $observed_identity
+     * @param array|null $observed_identity {
      *     Observed document-root filesystem identity, or null when absent.
+     *
+     *     @type string $type  Path type.
+     *     @type int    $dev   Device number.
+     *     @type int    $ino   Inode number.
+     *     @type int    $size  Size in bytes.
+     *     @type int    $ctime Change time.
+     * }
+     * @phpstan-param array{type:string,dev:int,ino:int,size:int,ctime:int}|null $observed_identity
      */
     private function throw_unexpected_docroot_mutation(
         string $operation,
@@ -2124,7 +2184,29 @@ final class Site_Export_Push_Session {
      * work-file descendants is checked before use. This keeps a corrupt
      * checkpoint from being interpreted as document-root authority.
      *
-     * @param array{
+     * @param array $commit_state {
+     *     Decoded commit checkpoint.
+     *
+     *     @type mixed $phase                          Optional. Current commit
+     *                                                phase.
+     *     @type mixed $work_deletes_byte_offset       Optional. Confirmed byte
+     *                                                offset in the delete
+     *                                                stream.
+     *     @type mixed $deleted_files                  Optional. Deleted entry
+     *                                                count.
+     *     @type mixed $installed_files                Optional. Installed entry
+     *                                                count.
+     *     @type mixed $current_delete_path            Optional. Delete path
+     *                                                currently being removed.
+     *     @type mixed $current_work_files_descendant  Optional. Work-file
+     *                                                descendant currently being
+     *                                                installed.
+     *     @type mixed $commit_cursor                  Optional. Commit cursor
+     *                                                frames.
+     *     @type mixed $non_recoverable_commit_failure Optional. Stored
+     *                                                permanent commit failure.
+     * }
+     * @phpstan-param array{
      *     phase?:mixed,
      *     work_deletes_byte_offset?:mixed,
      *     deleted_files?:mixed,
@@ -2133,7 +2215,7 @@ final class Site_Export_Push_Session {
      *     current_work_files_descendant?:mixed,
      *     commit_cursor?:mixed,
      *     non_recoverable_commit_failure?:mixed
-     * } $commit_state Decoded commit checkpoint.
+     * } $commit_state
      */
     private function require_valid_commit_state(array $commit_state): void {
         if (!in_array($commit_state['phase'] ?? null, ['deleting_files', 'installing_files', 'complete'], true)) {
@@ -2209,7 +2291,12 @@ final class Site_Export_Push_Session {
      * each component independently, rebuilds the slash-separated path, and then
      * applies the normal document-root-relative path rules to the result.
      *
-     * @param list<array{component_b64:string}> $stack Commit cursor frames.
+     * @param array $stack {
+     *     Commit cursor frames.
+     *
+     *     @type string $component_b64 Base64-encoded path component.
+     * }
+     * @phpstan-param list<array{component_b64:string}> $stack
      * @return string Document-root-relative path for the current commit cursor directory.
      */
     private function commit_cursor_path(array $stack): string {
@@ -2417,8 +2504,16 @@ final class Site_Export_Push_Session {
      * gives status, recovery, and drift reporting the same view of a path.
      *
      * @param string $path Absolute path to inspect.
-     * @return array{type:string,dev:int,ino:int,size:int,ctime:int}|null Type,
-     *     device, inode, size, and ctime, or null if absent.
+     * @return array|null {
+     *     Filesystem identity, or null if absent.
+     *
+     *     @type string $type  Path type.
+     *     @type int    $dev   Device number.
+     *     @type int    $ino   Inode number.
+     *     @type int    $size  Size in bytes.
+     *     @type int    $ctime Change time.
+     * }
+     * @phpstan-return array{type:string,dev:int,ino:int,size:int,ctime:int}|null
      */
     private function lstat_path(string $path): ?array {
         clearstatcache(true, $path);

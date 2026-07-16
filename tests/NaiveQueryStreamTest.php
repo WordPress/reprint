@@ -16,7 +16,13 @@ class NaiveQueryStreamTest extends TestCase
      * @param int    $chunk_size How many bytes per fread() call.
      * @param int    $seek       Starting byte offset (simulates fseek on resume).
      * @param int    $limit      Stop after extracting this many queries (0 = all).
-     * @return array{queries: string[], bytes_consumed: int}
+     * @return array {
+     *     Streamed query result.
+     *
+     *     @type array $queries        Parsed queries.
+     *     @type int   $bytes_consumed Cumulative bytes consumed.
+     * }
+     * @phpstan-return array{queries: string[], bytes_consumed: int}
      */
     private function streamQueries(
         string $sql,

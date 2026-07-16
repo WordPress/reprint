@@ -34,7 +34,19 @@ class FastInsertScanner
     /**
      * Try to scan a producer-shape INSERT statement.
      *
-     * @return array{
+     * @return array|null {
+     *     Producer-shape INSERT scan result, or null when the SQL does not match
+     *     the recognised shape.
+     *
+     *     @type string $table          Table name.
+     *     @type array  $columns        Column names in statement order.
+     *     @type array  $column_map     Value ranges mapped to column names.
+     *     @type bool   $has_base64     Whether any FROM_BASE64() value was found.
+     *     @type array  $base64_entries FROM_BASE64() entries captured by the
+     *                                  fast path.
+     *     @type array  $value_entries  Value entries captured by the fast path.
+     * }
+     * @phpstan-return array{
      *   table: string,
      *   columns: list<string>,
      *   column_map: list<array{int, int, string}>,
@@ -42,7 +54,6 @@ class FastInsertScanner
      *   base64_entries: list<array{expr_start: int, expr_length: int, quote_start: int, quote_length: int, encoded_value: string, value: ?string, new_value: ?string}>,
      *   value_entries: list<array{kind: string, column: string, start?: int, end?: int, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}>
      * }|null
-     *   Null when the SQL doesn't match the recognised shape.
      */
     public static function scan(string $sql, bool $include_column_map = true, bool $include_base64_entries = true): ?array
     {
@@ -216,8 +227,26 @@ class FastInsertScanner
     /**
      * Scan one value in producer's tuple shape, advancing $cursor past it.
      *
-     * @return null|array{kind: string, raw?: string, expr_start?: int, expr_length?: int, quote_start?: int, quote_length?: int, encoded_value?: string}
-     *   null = unrecognized shape (caller bails)
+     * @return array|null {
+     *     Scanned value entry, or null for an unrecognized shape.
+     *
+     *     @type string $kind          Value kind.
+     *     @type string $raw           Optional. Raw SQL value.
+     *     @type int    $expr_start    Optional. Expression start byte offset.
+     *     @type int    $expr_length   Optional. Expression length in bytes.
+     *     @type int    $quote_start   Optional. Quoted payload start byte offset.
+     *     @type int    $quote_length  Optional. Quoted payload length in bytes.
+     *     @type string $encoded_value Optional. Base64 payload.
+     * }
+     * @phpstan-return null|array{
+     *     kind: string,
+     *     raw?: string,
+     *     expr_start?: int,
+     *     expr_length?: int,
+     *     quote_start?: int,
+     *     quote_length?: int,
+     *     encoded_value?: string
+     * }
      */
     private static function scan_value(string $sql, int $sql_len, int &$cursor, bool $include_base64_offsets = true)
     {
@@ -375,7 +404,16 @@ class FastInsertScanner
      * paren. Reads the quoted base64 string and the closing paren. Returns
      * the [expr_start, expr_length, quote_start, quote_length, encoded] tuple.
      *
-     * @return array{int,int,int,int,string}|null
+     * @return array|null {
+     *     FROM_BASE64() byte-offset tuple, or null when the call is malformed.
+     *
+     *     @type int    $0 Expression start byte offset.
+     *     @type int    $1 Expression length in bytes.
+     *     @type int    $2 Quoted payload start byte offset.
+     *     @type int    $3 Quoted payload length in bytes.
+     *     @type string $4 Base64 payload.
+     * }
+     * @phpstan-return array{int,int,int,int,string}|null
      */
     private static function consume_base64_call(string $sql, int $sql_len, int &$cursor, int $expr_start)
     {

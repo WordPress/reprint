@@ -166,7 +166,13 @@ class ExternalMergeSort
      * Sort a chunk in memory and write it to a temp file.
      * Returns the path to the temp file.
      *
-     * @param array{key: string, line: string}[] $chunk
+     * @param array[] $chunk {
+     *     Sorted chunk entries.
+     *
+     *     @type string $key  Sort key.
+     *     @type string $line Original line.
+     * }
+     * @phpstan-param array{key: string, line: string}[] $chunk
      */
     private function flush_chunk(array $chunk): string
     {
@@ -274,7 +280,13 @@ class ExternalMergeSort
      *
      * @param resource $fh
      * @param callable(string): ?string $extract
-     * @return array{key: string, line: string}|null  Null when EOF.
+     * @return array|null {
+     *     Next keyed line, or null when EOF.
+     *
+     *     @type string $key  Sort key.
+     *     @type string $line Original line.
+     * }
+     * @phpstan-return array{key: string, line: string}|null
      */
     private function read_next($fh, callable $extract): ?array
     {

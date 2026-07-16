@@ -97,7 +97,15 @@ final class Site_Export_HMAC_Server {
      * returned hash with the digest of a bounded control payload before acting
      * on that payload. Do not use this as a large-upload authentication scheme.
      *
-     * @return array{error:?string,content_hash:?string}
+     * @return array {
+     *     Signed content-hash verification result.
+     *
+     *     @type string|null $error        Verification error, or null when the
+     *                                     signed hash is valid.
+     *     @type string|null $content_hash Signed content hash, or null when
+     *                                     verification failed.
+     * }
+     * @phpstan-return array{error:?string,content_hash:?string}
      */
     public function verify_signed_content_hash(array $headers, ?float $now = null): array {
         $auth = $this->collect_auth_headers($headers);

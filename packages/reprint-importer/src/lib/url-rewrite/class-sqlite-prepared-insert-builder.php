@@ -31,7 +31,14 @@ class SQLitePreparedInsertBuilder
     /**
      * @param callable|null $rewrite_value Optional callback:
      *        fn(string $value, string $table, ?string $column): string
-     * @return array{sql: string, params: list<mixed>, param_types: list<int>}|null
+     * @return array|null {
+     *     SQLite prepared statement, or null for an unsupported statement shape.
+     *
+     *     @type string $sql         SQL with placeholders.
+     *     @type array  $params      Decoded parameter values.
+     *     @type array  $param_types SQLite parameter types.
+     * }
+     * @phpstan-return array{sql: string, params: list<mixed>, param_types: list<int>}|null
      */
     public static function build(string $sql, ?callable $rewrite_value = null): ?array
     {
@@ -45,7 +52,14 @@ class SQLitePreparedInsertBuilder
     /**
      * @param callable|null $rewrite_value Optional callback:
      *        fn(string $value, string $table, ?string $column): string
-     * @return array{sql: string, params: list<mixed>, param_types: list<int>}|null
+     * @return array|null {
+     *     SQLite prepared statement, or null for an unsupported statement shape.
+     *
+     *     @type string $sql         SQL with placeholders.
+     *     @type array  $params      Decoded parameter values.
+     *     @type array  $param_types SQLite parameter types.
+     * }
+     * @phpstan-return array{sql: string, params: list<mixed>, param_types: list<int>}|null
      */
     private static function build_with_fast_insert_scanner(string $sql, ?callable $rewrite_value): ?array
     {

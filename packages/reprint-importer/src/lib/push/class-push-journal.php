@@ -129,7 +129,13 @@ class PushJournal
      * line from each input file and the lists go straight to disk, so an
      * index with a million entries costs the same as one with ten.
      *
-     * @return array{changed: int, deleted: int} Entry counts, for the push summary.
+     * @return array {
+     *     Entry counts for the push summary.
+     *
+     *     @type int $changed Changed entry count.
+     *     @type int $deleted Deleted entry count.
+     * }
+     * @phpstan-return array{changed: int, deleted: int}
      */
     public function diff_local_files(string $current_index_file): array
     {

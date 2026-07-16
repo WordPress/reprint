@@ -11,7 +11,14 @@ class FastQueryStreamTest extends TestCase
      * Helper that drains every query out of the given parser and returns
      * the queries plus the final cumulative bytes_consumed value.
      *
-     * @return array{queries: list<string>, bytes_consumed: int, state: string}
+     * @return array {
+     *     Drained stream result.
+     *
+     *     @type array  $queries        Parsed queries.
+     *     @type int    $bytes_consumed Cumulative bytes consumed.
+     *     @type string $state          Final parser state.
+     * }
+     * @phpstan-return array{queries: list<string>, bytes_consumed: int, state: string}
      */
     private function drain($stream, string $sql): array
     {
