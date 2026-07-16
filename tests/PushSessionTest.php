@@ -511,7 +511,7 @@ final class PushSessionTest extends TestCase {
 
             $this->assertSame('complete', $push_session->get_status('changing')['path']['state']);
             $this->assertSame($type, $push_session->get_status('changing')['path']['type']);
-            $this->assertFileDoesNotExist($push_session->get_push_directory() . '/work/partial/changing');
+            $this->assertFileDoesNotExist($push_session->get_push_directory() . '/work/inflight.data');
         }
     }
 
@@ -622,10 +622,10 @@ final class PushSessionTest extends TestCase {
             try {
                 $this->push_parts($push_session, [['headers' => $headers, 'body' => '']]);
                 $this->fail('A partial file became the parent of a completed ' . $type . '.');
-            } catch (InvalidArgumentException $exception) {
-                $this->assertStringContainsString('parent', $exception->getMessage());
+            } catch (Site_Export_Push_Exception $exception) {
+                $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
             }
-            $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/partial/parent'));
+            $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/inflight.data'));
             $this->assertFileDoesNotExist($push_session->get_push_directory() . '/work/files/parent/child');
         }
     }
@@ -668,10 +668,10 @@ final class PushSessionTest extends TestCase {
             try {
                 $this->push_parts($push_session, [['headers' => $headers, 'body' => $body]]);
                 $this->fail('A completed ' . $type . ' hid a partial descendant.');
-            } catch (InvalidArgumentException $exception) {
-                $this->assertStringContainsString('descendant', $exception->getMessage());
+            } catch (Site_Export_Push_Exception $exception) {
+                $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
             }
-            $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/partial/parent/child'));
+            $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/inflight.data'));
         }
     }
 
