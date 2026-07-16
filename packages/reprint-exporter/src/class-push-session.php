@@ -13,13 +13,41 @@ if (!class_exists('Site_Export_Push_Exception', false)) {
  * Receives push work privately, then commits its deletes and files directly.
  *
  * `work/files/` is both the completed work tree and the work-file queue.
- * One unfinished value is recorded in `work/inflight.json`; unfinished file
- * bytes live in `work/inflight.data` rather than in a second path-shaped tree.
+ * In-flight work is recorded in `work/inflight.json`; bytes for an in-flight
+ * file live in `work/inflight.data` rather than in a second path-shaped tree.
  * Successful file installation consumes each entry. Deletes remain raw NUL-delimited
  * bytes in `work/deletes`; their confirmed cursor is the file's actual size.
  * Commit persists only one delete, one work-files descendant, and a path-depth-bounded
  * commit cursor. It never builds a candidate tree, action plan, backup, path
  * index, or second queue.
+ *
+ * @phpstan-type CurrentChange (
+ *     array{path_b64:string,state:'partial'|'complete',type:'file',accepted_bytes:int}
+ *     | array{path_b64:string,state:'complete',type:'directory'|'symlink',accepted_bytes:0}
+ *     | array{state:'partial'|'complete',type:'delete-list',accepted_bytes:int}
+ * )
+ * @phpstan-type PathStatus (
+ *     array{path_b64:string,state:'missing',accepted_bytes:0}
+ *     | array{path_b64:string,state:'partial',type:'file',accepted_bytes:int}
+ *     | array{path_b64:string,state:'partial',type:'directory'|'symlink',accepted_bytes:0}
+ *     | array{path_b64:string,state:'complete',type:'file',accepted_bytes:int}
+ *     | array{path_b64:string,state:'complete',type:'directory'|'symlink',accepted_bytes:0}
+ * )
+ * @phpstan-type InFlightWork (
+ *     array{phase:'preparing'|'receiving'|'publishing',path_b64:string,type:'file',total_bytes:int}
+ *     | array{phase:'preparing'|'publishing',path_b64:string,type:'directory'}
+ *     | array{phase:'preparing'|'publishing',path_b64:string,type:'symlink',target_b64:string}
+ * )
+ * @phpstan-type CommitState array{
+ *     phase:'deleting_files'|'installing_files'|'complete',
+ *     work_deletes_byte_offset:int,
+ *     current_delete_path:?string,
+ *     current_work_files_descendant:?array{path_b64:string,expected_type:'file'|'directory'|'symlink'},
+ *     commit_cursor:list<array{component_b64:string}>,
+ *     deleted_files:int,
+ *     installed_files:int,
+ *     non_recoverable_commit_failure?:array{reason:'unexpected_docroot_mutation'|'same_device',detail:string,context:array<string,mixed>}
+ * }
  */
 final class Site_Export_Push_Session {
 
@@ -42,7 +70,7 @@ final class Site_Export_Push_Session {
     private $docroot;
     /** @var string */
     private $push_session_id;
-    /** @var string[] */
+    /** @var list<string> */
     private $excluded_paths;
     /** @var string */
     private $push_directory;
@@ -73,7 +101,7 @@ final class Site_Export_Push_Session {
     private $upload_processor = null;
     /** @var bool */
     private $current_upload_part_ended = false;
-    /** @var array<string,mixed>|null */
+    /** @var CurrentChange|null */
     private $current_change = null;
     /** @var int */
     private $maximum_upload_part_bytes = PHP_INT_MAX;
@@ -334,8 +362,8 @@ final class Site_Export_Push_Session {
      *
      * Returning true means the complete part has been accepted into the work
      * directory and get_current_change() describes the resulting work state.
-     * A file part may leave its value in the fixed in-flight slot, so true does
-     * not mean the logical file or the complete multipart request is finished.
+     * A file part may leave the current value in flight, so true does not mean
+     * the logical file or the complete multipart request is finished.
      *
      * Returning false means the closing multipart boundary was consumed. EOF
      * in a header, body, or boundary throws instead, so truncation is never
@@ -429,9 +457,21 @@ final class Site_Export_Push_Session {
      * next_change() again clears the previous value before processing, and
      * finish_upload() clears it when the request closes.
      *
-     * @return array{state:string,type:string,accepted_bytes:int,path_b64?:string}|null
-     *     Accepted type, state, byte cursor, and path when applicable, or null
-     *     when no result is current.
+     * @return array|null {
+     *     Accepted work state, or null when no result is current.
+     *
+     *     @type string $path_b64 Base64-encoded work path. Present for file,
+     *                            directory, and symlink changes; absent for the
+     *                            delete list.
+     *     @type string $state Whether the part left partial or complete work.
+     *                         Directory and symlink parts are always complete.
+     *     @type string $type One of `file`, `directory`, `symlink`, or
+     *                        `delete-list`.
+     *     @type int $accepted_bytes Receiver-confirmed file or delete-list
+     *                               bytes. Always zero for directories and
+     *                               symlinks.
+     * }
+     * @phpstan-return CurrentChange|null
      */
     public function get_current_change(): ?array {
         return $this->current_change;
@@ -445,13 +485,14 @@ final class Site_Export_Push_Session {
      * sender's claimed offset. Calling it without a path returns only push-session
      * progress; it never enumerates the complete work-files tree.
      *
-     * The optional path is the one in-flight file whose upload response was
-     * lost. Delete-list resume does not need a path; use work_deletes_bytes from
+     * The optional path is the in-flight work whose upload response was lost.
+     * Delete-list resume does not need a path; use work_deletes_bytes from
      * the push-session result. The path status is encoded as path_b64 so arbitrary
      * filesystem bytes remain representable. It is reported as one of:
      *
      *  - missing, with an accepted_bytes cursor of zero;
-     *  - partial, with the regular file's actual stored byte size; or
+     *  - partial, with its type and the regular file's actual stored byte size,
+     *    or zero for a directory or symlink; or
      *  - complete, with its file, directory, or symlink type and a file-size
      *    cursor where applicable.
      *
@@ -462,13 +503,29 @@ final class Site_Export_Push_Session {
      * the push lock.
      *
      * @param string|null $path Raw document-root-relative path byte string to inspect.
-     * @return array{
+     * @return array {
+     *     Work-confirmed push-session and optional path progress.
+     *
+     *     @type string $push_session_id Push session ID.
+     *     @type string $phase One of `receiving_work`, `deleting_files`,
+     *                         `installing_files`, or `complete`.
+     *     @type int $work_deletes_bytes Receiver-confirmed delete-list bytes.
+     *     @type bool $work_deletes_complete Whether the delete-list upload was
+     *                                       explicitly completed.
+     *     @type array|null $path Selected path status, or null when no path was
+     *                            requested. A status contains `path_b64`, `state`,
+     *                            and `accepted_bytes`; `type` is present unless
+     *                            `state` is `missing`. `accepted_bytes` is the
+     *                            stored file size and zero for missing paths,
+     *                            directories, and symlinks.
+     * }
+     * @phpstan-return array{
      *     push_session_id:string,
-     *     phase:string,
+     *     phase:'receiving_work'|'deleting_files'|'installing_files'|'complete',
      *     work_deletes_bytes:int,
      *     work_deletes_complete:bool,
-     *     path:array{path_b64:string,state:string,accepted_bytes:int,type?:string}|null
-     * } Work-confirmed push-session and optional path progress.
+     *     path:PathStatus|null
+     * }
      *
      * @throws InvalidArgumentException If the requested path is unsafe.
      * @throws Site_Export_Push_Exception If the push session is busy,
@@ -519,7 +576,7 @@ final class Site_Export_Push_Session {
      * Advances a bounded amount of document-root mutation for this push session.
      *
      * Commit starts only after the delete upload has been explicitly closed and
-     * every work file is complete. The first call creates a durable checkpoint
+     * no work remains in flight. The first call creates a durable checkpoint
      * and claims the document root so no other push session can mutate it.
      * Subsequent calls resume from that checkpoint, refresh the WordPress
      * maintenance marker, and perform at most $maximum_entries units of delete or
@@ -531,9 +588,15 @@ final class Site_Export_Push_Session {
      * retry the same bounded step from the durable state.
      *
      * @param int $maximum_entries Maximum bounded commit entries to process in this call.
-     * @return array{phase:string,send_next_request:bool,entries_processed:int}
-     *     Current phase, whether another request is needed, and entries
-     *     processed by this call.
+     * @return array {
+     *     Current bounded commit result.
+     *
+     *     @type string $phase Current `deleting_files`, `installing_files`, or
+     *                         `complete` phase.
+     *     @type bool $send_next_request Whether another commit request is needed.
+     *     @type int $entries_processed Entries processed by this call.
+     * }
+     * @phpstan-return array{phase:'deleting_files'|'installing_files'|'complete',send_next_request:bool,entries_processed:int}
      */
     public function commit(int $maximum_entries = 1): array {
         if ($maximum_entries <= 0) {
@@ -562,7 +625,7 @@ final class Site_Export_Push_Session {
                 }
                 $this->finish_published_inflight();
                 if ($this->read_inflight() !== null) {
-                    throw new InvalidArgumentException('Commit cannot begin while an unfinished work value remains.');
+                    throw new InvalidArgumentException('Commit cannot begin while work remains in flight.');
                 }
                 $commit_state = [
                     'phase' => 'deleting_files',
@@ -744,10 +807,10 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Reads the durable description of the unfinished work value.
+     * Reads the durable description of in-flight work.
      *
      * A push receives or publishes one work value at a time. Its identity and
-     * phase are stored in `work/inflight.json`; unfinished file bytes, when
+     * phase are stored in `work/inflight.json`; file bytes, when
      * applicable, are stored separately in `work/inflight.data`. This method
      * reads the record before upload, status, or commit decides what work is
      * safe to perform.
@@ -755,9 +818,19 @@ final class Site_Export_Push_Session {
      * The JSON record is the authority for whether work is in flight. Callers
      * use its type and phase to decide whether they can receive more bytes,
      * publish the completed value, or begin commit work. A missing record means
-     * there is no unfinished value.
+     * there is no in-flight work.
      *
-     * @return array{phase:'preparing'|'receiving'|'publishing',path_b64:string,type:'file',total_bytes:int}|array{phase:'preparing'|'publishing',path_b64:string,type:'directory'}|array{phase:'preparing'|'publishing',path_b64:string,type:'symlink',target_b64:string}|null In-flight work, or null when none exists.
+     * @return array|null {
+     *     In-flight work, or null when none exists.
+     *
+     *     @type string $phase Current `preparing`, `receiving`, or `publishing`
+     *                         phase. Only files use `receiving`.
+     *     @type string $path_b64 Base64-encoded work path.
+     *     @type string $type One of `file`, `directory`, or `symlink`.
+     *     @type int $total_bytes Declared file size. Present only for files.
+     *     @type string $target_b64 Base64-encoded target. Present only for symlinks.
+     * }
+     * @phpstan-return InFlightWork|null
      */
     private function read_inflight(): ?array {
         return $this->read_json($this->work_inflight_path);
@@ -859,7 +932,7 @@ final class Site_Export_Push_Session {
             throw new Site_Export_Push_Exception(self::ERROR_OFFSET_GAP, 'File part for ' . base64_encode($path) . ' starts at offset ' . $offset . ', but no matching in-flight file exists. Start at offset 0.');
         }
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
-            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished work value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
+            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'In-flight work already occupies the slot: ' . $inflight['path_b64'] . '.');
         }
         if ($inflight === null || $offset === 0) {
             if ($inflight !== null && $this->lstat_path($this->work_inflight_data_path) !== null && !@unlink($this->work_inflight_data_path)) {
@@ -909,7 +982,7 @@ final class Site_Export_Push_Session {
                 $this->remove_work_path($complete_path);
             }
             if (!@rename($this->work_inflight_data_path, $complete_path)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish completed staged file ' . base64_encode($path) . '.');
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish completed work file ' . base64_encode($path) . '.');
             }
             if (!@unlink($this->work_inflight_path)) {
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear published in-flight metadata for ' . base64_encode($path) . '.');
@@ -925,9 +998,8 @@ final class Site_Export_Push_Session {
      * Accepts one explicit empty-directory MIME part.
      *
      * Directory parts have no body. They create or refresh an empty directory in
-     * the completed staging tree, but they reject conflicts with already staged
-     * descendants because a single staged path cannot be both a leaf value and a
-     * structural parent.
+     * the completed work tree. A directory part cannot replace a non-empty
+     * directory because that directory contains other completed work values.
      *
      * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-directory-path:string} $headers
      *     Normalized directory part headers.
@@ -943,11 +1015,11 @@ final class Site_Export_Push_Session {
         $this->finish_published_inflight();
         $inflight = $this->read_inflight();
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
-            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished work value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
+            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'In-flight work already occupies the slot: ' . $inflight['path_b64'] . '.');
         }
         $identity = $this->lstat_path($target);
         if ($identity !== null && $identity['type'] === 'directory' && $this->first_directory_entry($target) !== null) {
-            throw new InvalidArgumentException('Explicit empty directory ' . base64_encode($path) . ' conflicts with staged descendants.');
+            throw new InvalidArgumentException('Explicit empty directory ' . base64_encode($path) . ' conflicts with completed work descendants.');
         }
         if ($inflight === null && $identity !== null && $identity['type'] === 'directory') {
             $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'directory', 'accepted_bytes' => 0];
@@ -977,8 +1049,9 @@ final class Site_Export_Push_Session {
      * Accepts one symlink MIME part.
      *
      * Symlink parts carry their target in a base64 header and have an empty
-     * body. The staged value replaces any previous leaf at the same private path
-     * and rejects directory conflicts that would orphan already staged children.
+     * body. The completed work value replaces any previous leaf at the same
+     * private path and rejects directory conflicts that would orphan completed
+     * work descendants.
      *
      * @param array{content-length:string,content-type?:string,x-chunk-type:string,x-symlink-path:string,x-symlink-target:string} $headers
      *     Normalized symlink part headers.
@@ -998,11 +1071,11 @@ final class Site_Export_Push_Session {
         $this->finish_published_inflight();
         $inflight = $this->read_inflight();
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
-            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'An unfinished work value already occupies the in-flight slot: ' . $inflight['path_b64'] . '.');
+            throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'In-flight work already occupies the slot: ' . $inflight['path_b64'] . '.');
         }
         $identity = $this->lstat_path($target);
         if ($identity !== null && $identity['type'] === 'directory' && $this->first_directory_entry($target) !== null) {
-            throw new InvalidArgumentException('Staged symlink ' . base64_encode($path) . ' conflicts with staged descendants.');
+            throw new InvalidArgumentException('Work symlink ' . base64_encode($path) . ' conflicts with completed work descendants.');
         }
         if ($inflight === null && $identity !== null && $identity['type'] === 'symlink' && @readlink($target) === $target_value) {
             $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'symlink', 'accepted_bytes' => 0];
@@ -1152,16 +1225,22 @@ final class Site_Export_Push_Session {
      * most one leaf or empty directory beneath that root and advances the byte
      * cursor only after the document-root path is confirmed absent.
      *
-     * @param array{
-     *     phase:string,
-     *     work_deletes_byte_offset:int,
-     *     current_delete_path:?string,
-     *     current_work_files_descendant:?array{path_b64:string,expected_type:string},
-     *     commit_cursor:list<array{component_b64:string}>,
-     *     deleted_files:int,
-     *     installed_files:int,
-     *     non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>}
-     * } $commit_state Commit checkpoint, mutated in place.
+     * @param array $commit_state {
+     *     Commit checkpoint, mutated in place.
+     *
+     *     @type string $phase Current commit phase.
+     *     @type int $work_deletes_byte_offset Confirmed delete-list cursor.
+     *     @type string|null $current_delete_path Delete path currently being consumed.
+     *     @type array|null $current_work_files_descendant Work value currently being installed,
+     *                                                       with `path_b64` and `expected_type` keys.
+     *     @type array $commit_cursor Path components for the bounded tree walk.
+     *     @type int $deleted_files Number of completed deletes.
+     *     @type int $installed_files Number of installed work values.
+     *     @type array $non_recoverable_commit_failure Persisted failure reason, detail, and
+     *                                                  context. Present only after a
+     *                                                  non-recoverable failure.
+     * }
+     * @phpstan-param CommitState $commit_state
      */
     private function advance_delete(array &$commit_state): void {
         if ($commit_state['current_delete_path'] === null) {
@@ -1285,16 +1364,22 @@ final class Site_Export_Push_Session {
      * installing one leaf value per step, and consuming empty structural work
      * directories after their descendants have been committed.
      *
-     * @param array{
-     *     phase:string,
-     *     work_deletes_byte_offset:int,
-     *     current_delete_path:?string,
-     *     current_work_files_descendant:?array{path_b64:string,expected_type:string},
-     *     commit_cursor:list<array{component_b64:string}>,
-     *     deleted_files:int,
-     *     installed_files:int,
-     *     non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>}
-     * } $commit_state Commit checkpoint, mutated in place.
+     * @param array $commit_state {
+     *     Commit checkpoint, mutated in place.
+     *
+     *     @type string $phase Current commit phase.
+     *     @type int $work_deletes_byte_offset Confirmed delete-list cursor.
+     *     @type string|null $current_delete_path Delete path currently being consumed.
+     *     @type array|null $current_work_files_descendant Work value currently being installed,
+     *                                                       with `path_b64` and `expected_type` keys.
+     *     @type array $commit_cursor Path components for the bounded tree walk.
+     *     @type int $deleted_files Number of completed deletes.
+     *     @type int $installed_files Number of installed work values.
+     *     @type array $non_recoverable_commit_failure Persisted failure reason, detail, and
+     *                                                  context. Present only after a
+     *                                                  non-recoverable failure.
+     * }
+     * @phpstan-param CommitState $commit_state
      */
     private function advance_installing_files(array &$commit_state): void {
         if ($commit_state['current_work_files_descendant'] !== null) {
@@ -1451,11 +1536,22 @@ final class Site_Export_Push_Session {
      * the document root already contains the committed value. Only same-filesystem
      * renames are allowed; copy fallback would break the direct-install model.
      *
-     * @param array{
-     *     current_work_files_descendant:?array{path_b64:string,expected_type:string},
-     *     commit_cursor:list<array{component_b64:string}>,
-     *     installed_files:int
-     * } $commit_state Commit checkpoint, mutated in place.
+     * @param array $commit_state {
+     *     Commit checkpoint, mutated in place.
+     *
+     *     @type string $phase Current commit phase.
+     *     @type int $work_deletes_byte_offset Confirmed delete-list cursor.
+     *     @type string|null $current_delete_path Delete path currently being consumed.
+     *     @type array|null $current_work_files_descendant Work value currently being installed,
+     *                                                       with `path_b64` and `expected_type` keys.
+     *     @type array $commit_cursor Path components for the bounded tree walk.
+     *     @type int $deleted_files Number of completed deletes.
+     *     @type int $installed_files Number of installed work values.
+     *     @type array $non_recoverable_commit_failure Persisted failure reason, detail, and
+     *                                                  context. Present only after a
+     *                                                  non-recoverable failure.
+     * }
+     * @phpstan-param CommitState $commit_state
      * @param string $path Document-root-relative value path.
      * @param string $expected_type Work type expected at $path.
      * @param bool $recovering Whether current_work_files_descendant is already durable.
@@ -1930,24 +2026,27 @@ final class Site_Export_Push_Session {
      * object must fit the same ceiling enforced by read_json().
      *
      * @param string $path Absolute metadata file path.
-     * @param array{
-     *     push_session_id?:string,
-     *     docroot_b64?:string,
-     *     excluded_paths_b64?:list<string>,
-     *     work_deletes_complete?:bool,
-     *     phase?:string,
-     *     work_deletes_byte_offset?:int,
-     *     current_delete_path?:?string,
-     *     current_work_files_descendant?:?array{path_b64:string,expected_type:string},
-     *     commit_cursor?:list<array{component_b64:string}>,
-     *     deleted_files?:int,
-     *     installed_files?:int,
-     *     non_recoverable_commit_failure?:array{reason:string,detail:string,context:array<string,mixed>},
-     *     path_b64?:string,
-     *     type?:string,
-     *     total_bytes?:int,
-     *     target_b64?:string
-     * } $value Push metadata, commit checkpoint, or in-flight work record to persist.
+     * @param array $value {
+     *     Push metadata, in-flight work, or a commit checkpoint.
+     *
+     *     @type string $push_session_id Push session ID. Present only in push metadata.
+     *     @type string $docroot_b64 Base64-encoded document root. Present only in push metadata.
+     *     @type string[] $excluded_paths_b64 Base64-encoded excluded paths. Present only in push metadata.
+     *     @type bool $work_deletes_complete Delete-list completion. Present only in push metadata.
+     *     @type string $phase In-flight or commit phase. Absent from push metadata.
+     *     @type string $path_b64 In-flight work path. Present only in in-flight work.
+     *     @type string $type In-flight work type. Present only in in-flight work.
+     *     @type int $total_bytes Declared file size. Present only for an in-flight file.
+     *     @type string $target_b64 Base64-encoded symlink target. Present only for an in-flight symlink.
+     *     @type int $work_deletes_byte_offset Confirmed delete-list cursor. Present only in a commit checkpoint.
+     *     @type string|null $current_delete_path Current delete path. Present only in a commit checkpoint.
+     *     @type array|null $current_work_files_descendant Current installation. Present only in a commit checkpoint.
+     *     @type array $commit_cursor Bounded tree cursor. Present only in a commit checkpoint.
+     *     @type int $deleted_files Completed deletes. Present only in a commit checkpoint.
+     *     @type int $installed_files Installed work values. Present only in a commit checkpoint.
+     *     @type array $non_recoverable_commit_failure Persisted failure. Present only after a non-recoverable commit failure.
+     * }
+     * @phpstan-param array{push_session_id:string,docroot_b64:string,excluded_paths_b64:list<string>,work_deletes_complete:bool}|InFlightWork|CommitState $value
      */
     private function write_json(string $path, array $value): void {
         $contents = json_encode($value, JSON_UNESCAPED_SLASHES);

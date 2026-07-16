@@ -29,7 +29,7 @@ final class PushSessionTest extends TestCase {
         $this->assertSame(['operation' => 'receive'], $exception->get_context());
     }
 
-    public function testNewPushSessionHasOneCompletedTreeAndNoPartialTree(): void {
+    public function testNewPushSessionHasOneCompletedTreeAndNoSecondPathShapedTree(): void {
         $push_session = $this->push_session('10101010101010101010101010101010');
         $work_directory = $push_session->get_push_directory() . '/work';
 
@@ -46,7 +46,7 @@ final class PushSessionTest extends TestCase {
         $this->assertArrayNotHasKey('version', $push_metadata);
     }
 
-    public function testPartialFileProgressComesFromTheFileAndOffsetZeroRestartsIt(): void {
+    public function testInFlightFileProgressComesFromTheDataFileAndOffsetZeroRestartsIt(): void {
         $push_session = $this->push_session('11111111111111111111111111111111');
         $this->push_parts($push_session, [[
             'headers' => [
@@ -621,7 +621,7 @@ final class PushSessionTest extends TestCase {
         }
     }
 
-    public function testPartialFileCannotBecomeAParentOfCompletedValues(): void {
+    public function testInFlightFileCannotBecomeAParentOfCompletedValues(): void {
         foreach (['directory', 'symlink'] as $index => $type) {
             $push_session = $this->push_session(sprintf('%032x', 200 + $index));
             $this->push_parts($push_session, [[
@@ -646,7 +646,7 @@ final class PushSessionTest extends TestCase {
 
             try {
                 $this->push_parts($push_session, [['headers' => $headers, 'body' => '']]);
-                $this->fail('A partial file became the parent of a completed ' . $type . '.');
+                $this->fail('An in-flight file became the parent of a completed ' . $type . '.');
             } catch (Site_Export_Push_Exception $exception) {
                 $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
             }
@@ -655,7 +655,7 @@ final class PushSessionTest extends TestCase {
         }
     }
 
-    public function testCompletedLeafCannotHidePartialDescendants(): void {
+    public function testCompletedLeafCannotHideInFlightDescendants(): void {
         foreach (['file', 'directory', 'symlink'] as $index => $type) {
             $push_session = $this->push_session(sprintf('%032x', 300 + $index));
             $this->push_parts($push_session, [[
@@ -692,7 +692,7 @@ final class PushSessionTest extends TestCase {
 
             try {
                 $this->push_parts($push_session, [['headers' => $headers, 'body' => $body]]);
-                $this->fail('A completed ' . $type . ' hid a partial descendant.');
+                $this->fail('A completed ' . $type . ' hid an in-flight descendant.');
             } catch (Site_Export_Push_Exception $exception) {
                 $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
             }
@@ -714,7 +714,7 @@ final class PushSessionTest extends TestCase {
 
         try {
             $this->push_file($push_session, 'second.txt', 'b');
-            $this->fail('A different path replaced unfinished work.');
+            $this->fail('A different path replaced in-flight work.');
         } catch (Site_Export_Push_Exception $exception) {
             $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         }
@@ -754,12 +754,12 @@ final class PushSessionTest extends TestCase {
         $this->assertSame('new', file_get_contents($push_session->get_push_directory() . '/work/files/same-size.txt'));
     }
 
-    public function testCommitRejectsUnfinishedWorkBeforeWritingACheckpoint(): void {
+    public function testCommitRejectsInFlightWorkBeforeWritingACheckpoint(): void {
         $push_session = $this->push_session('56565656565656565656565656565656');
         $this->push_parts($push_session, [[
             'headers' => [
                 'X-Chunk-Type' => 'file',
-                'X-File-Path' => base64_encode('unfinished.txt'),
+                'X-File-Path' => base64_encode('inflight.txt'),
                 'X-File-Size' => '2',
                 'X-Chunk-Offset' => '0',
             ],
@@ -769,13 +769,13 @@ final class PushSessionTest extends TestCase {
 
         try {
             $push_session->commit(1);
-            $this->fail('Commit accepted unfinished work.');
+            $this->fail('Commit accepted in-flight work.');
         } catch (InvalidArgumentException $exception) {
-            $this->assertStringContainsString('unfinished', $exception->getMessage());
+            $this->assertStringContainsString('in flight', $exception->getMessage());
         }
 
         $this->assertFileDoesNotExist($push_session->get_push_directory() . '/commit.json');
-        $this->assertFileDoesNotExist($this->docroot . '/unfinished.txt');
+        $this->assertFileDoesNotExist($this->docroot . '/inflight.txt');
     }
 
     public function testStatusFinishesPublishedDirectoryAndSymlinkWork(): void {
