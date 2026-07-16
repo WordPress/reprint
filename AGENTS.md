@@ -196,6 +196,19 @@ them with near-synonyms.
   defect. Update docs in the same commit as the behavior they describe,
   including the delivery plan (markdown/PUSH-SYNC.md) when a decision
   changes it.
+- Keep PHPDoc array shapes readable. Prefer WordPress hash notation for
+  human-facing docs: put the summary on the `@param array $args {` or
+  `@return array {` line, then document each key with aligned `@type` entries.
+  Do not force reviewers to parse a dense inline union before they understand
+  what the method accepts or returns.
+- Array arguments must document their keys in PHPDoc. Prefer
+  `@param array $work { ... @type string $path_b64 ... }` over a bare `array`.
+  Use named `@phpstan-type` aliases only when static analysis needs a reusable
+  type that WordPress hash notation cannot express clearly.
+- For structured array returns, use the same WordPress hash notation:
+  `@return array { ... @type string $path_b64 Description. ... }`. Each key
+  gets its own description, including when it is present only for one variant
+  of the returned structure.
 - PR descriptions: the first sentence states the observable effect and
   ideally why; describe concrete triggers and results, never vague causal
   phrases ("could be found again", "restore more predictably"); the
