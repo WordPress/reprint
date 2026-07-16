@@ -13,7 +13,7 @@ the end maps it to a PR stack.
 2. It shows a summary of local uploads and deletions. The user confirms that
    local should win for those paths and rows.
 3. It transfers everything into a private push directory on the remote — file bytes,
-   a deletion manifest, and (phase two) the database diff. The transfer is
+   the work-delete stream, and (phase two) the database diff. The transfer is
    resumable at byte granularity.
 4. It drives the commit step with repeated commands until done. The remote
    moves work files into place, executes deletions, and commits the database
@@ -136,6 +136,55 @@ It always excludes its own plugin directory from push. An embedding router
 must likewise choose its reprint directory and excluded paths as server
 configuration; request parameters cannot select either one.
 
+## Local files sender
+
+`PushFilesSender` drives those operations from one local `PushJournal`. An
+active push keeps these files under `<state-dir>/push/<site>/`:
+
+```text
+sender-index.jsonl          stable local index selected when the push began
+local-paths-to-push.jsonl   positive-work paths from that index
+local-paths-to-delete.jsonl deleted paths from that index
+work-deletes                raw NUL-delimited work-delete stream
+sender.json                 atomic sender checkpoint
+```
+
+The checkpoint names the push session, the next request phase, the selected
+positive-work path, the last source token confirmed by an upload response,
+receiver-confirmed file and work-delete cursors, bounded retry count, target
+part limit, and learned request-body
+sizing state. Before any positive-work request can become
+ambiguous, the durable phase tells a reopened sender to query `push_status` for
+that same path. Local counters never advance the checkpoint merely because
+bytes reached the network. A work-delete upload is likewise reconciled against
+`work_deletes_bytes`, and commit and remove requests are repeated until their
+durable target operation reports completion.
+
+The source token is its current type, size, and ctime. A changed token restarts
+the same in-flight work at offset zero, so new-version bytes are never appended
+behind an old-version prefix. A vanished selected path or a receiver work-delete
+cursor beyond the stable local stream abandons the upload-only push session by
+repeating bounded remove calls, then tells the caller to regenerate its local
+index. The caller must also regenerate that index before a later push. The
+stable `sender-index.jsonl` becomes the local baseline only after commit
+completes. A freshly generated later index selects any path whose size, ctime,
+or type now differs from that stable evidence.
+
+One upload request contains as many bounded chunks and work values as its
+decoded entity-body budget permits. The sender holds only one payload string,
+derives each part Content-Length from the bytes actually read, closes work
+deletes explicitly, and never selects another positive-work path until the
+current one is complete. Recoverable target contention, offset gaps, and
+ambiguous transport failures are retried at a fixed bounded count; exhaustion
+returns a terminal failure rather than a final retry.
+
+The token has one honest timestamp-resolution gap: a same-size edit that keeps
+the same ctime second is not detected by the token, and remains invisible when
+a freshly generated index contains the same size/ctime/type evidence. Other
+drift remains detectable by the next local-index diff. Push streaming requires
+PHP 8.1 or newer because older PHP cURL bindings can truncate a paused upload;
+pull remains PHP 7.4-compatible.
+
 ## Where reprint stores its own data on the remote
 
 The remote is configured with one storage path for everything reprint keeps:
@@ -238,14 +287,14 @@ Files first, database second, each PR small and stacked in this order:
 5. **Push journal and local diff** — per-site local baselines, capture and
    overwrite logic, local change and deletion detection.
 6. **Push stream endpoint** — the store's HTTP surface plus a sender that
-   streams framed chunks for many files through one authenticated request;
+   streams multipart chunks for many files through one authenticated request;
    deletion work received; `--force-http` with honest help text (the first
    push networking this flag can gate). Decisions this slice locked in:
    sending streams through libcurl's pause mechanism, which PHP's curl
    extension supports from 8.1 — so `reprint push` requires PHP 8.1+ (pull
    keeps 7.4+; the full story is
    https://github.com/WordPress/reprint/issues/327) — and paths
-   travel base64-encoded in frames, response cursors, and control-plane
+   travel base64-encoded in MIME headers, response cursors, and control-plane
    parameters, because file paths are arbitrary bytes and JSON strings must
    be UTF-8.
 7. **Package unification** — importer and exporter become one Reprint

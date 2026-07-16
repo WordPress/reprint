@@ -23,6 +23,6 @@ require_once dirname(__DIR__, 2) . '/reprint-exporter-wp/lib.php';
 _site_export_handle_api_request([
     'reprint_directory' => (string) getenv('REPRINT_PUSH_TEST_DIRECTORY'),
     'excluded_paths' => ['preserved'],
-    'maximum_part_bytes' => 4,
+    'maximum_part_bytes' => 64,
     'maximum_commit_entries' => 1,
 ]);

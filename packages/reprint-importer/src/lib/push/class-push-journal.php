@@ -1,4 +1,6 @@
 <?php
+
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 /**
  * Per-remote-site memory of the last completed push: the local baseline.
  *
@@ -26,6 +28,10 @@
  *                                  ctime, size, or type differs
  *     local-paths-to-delete.jsonl  paths in the baseline but gone from the
  *                                  current index
+ *     work-deletes                 the same deletions as raw NUL-delimited
+ *                                  path bytes for the receiver
+ *     sender-index.jsonl           stable index selected for the active push
+ *     sender.json                  the active sender's resumable request state
  *
  * The diff parses one JSON line at a time from each input. Ordering compares
  * decoded paths; two entries with the same path count as unchanged when their
@@ -39,10 +45,10 @@
  * With no baseline yet — the first push to a site — every current entry
  * counts as changed and no deletion can be detected.
  *
- * Producing the current index is the caller's job; this class only
- * compares and stores. The lists belong to the run that produced them:
- * a resumed push reruns the diff (one cheap local pass) rather than
- * trusting lists from an earlier run.
+ * Producing the current index is the caller's job; this class only compares
+ * and stores. A new push replaces the lists. An active sender keeps using the
+ * lists named by sender.json so its byte offsets continue to identify the
+ * same records after a process restart.
  */
 class PushJournal
 {
@@ -57,12 +63,24 @@ class PushJournal
     /** @var string JSONL file of local paths whose deletion should be pushed, written by diff_local_files(). */
     public string $local_paths_to_delete;
 
+    /** @var string Raw NUL-delimited work deletes prepared for the receiver. */
+    public string $work_deletes_path;
+
+    /** @var string Atomic checkpoint for the active high-level sender. */
+    public string $sender_state_path;
+
+    /** @var string Stable local index selected when the active push began. */
+    public string $sender_index_path;
+
     public function __construct(string $state_dir, string $site_url)
     {
         $this->site_dir = rtrim($state_dir, "/") . "/push/" . self::site_key($site_url);
         $this->local_files_baseline_path = $this->site_dir . "/last-sync-local-files.jsonl";
         $this->local_paths_to_push = $this->site_dir . "/local-paths-to-push.jsonl";
         $this->local_paths_to_delete = $this->site_dir . "/local-paths-to-delete.jsonl";
+        $this->work_deletes_path = $this->site_dir . "/work-deletes";
+        $this->sender_state_path = $this->site_dir . "/sender.json";
+        $this->sender_index_path = $this->site_dir . "/sender-index.jsonl";
     }
 
     /**
@@ -111,6 +129,21 @@ class PushJournal
     public function capture_local_files_baseline(string $index_file): void
     {
         $this->replace_file($this->local_files_baseline_path, $index_file);
+    }
+
+    /**
+     * Captures the stable index whose path lists and final baseline belong to
+     * the active push.
+     *
+     * Source tokens may still change after this copy; that restarts the value
+     * being sent and leaves the start-of-push index evidence as the baseline.
+     * A later index whose size, ctime, or type differs therefore selects the
+     * path again. Replacing the caller's index during a long push can never mark
+     * paths absent from the stable index as synchronized.
+     */
+    public function capture_sender_index(string $index_file): void
+    {
+        $this->replace_file($this->sender_index_path, $index_file);
     }
 
     /**
@@ -235,6 +268,142 @@ class PushJournal
     }
 
     /**
+     * Converts the deletion JSONL into the receiver's raw work-delete stream.
+     *
+     * Each input record is decoded and written immediately as `path + NUL`.
+     * A temporary file is renamed only after the complete list is consumed, so
+     * sender.json never refers to a torn work-delete record after interruption.
+     *
+     * @return int Complete raw work-delete byte count.
+     */
+    public function prepare_work_deletes(): int
+    {
+        if (!is_file($this->local_paths_to_delete)) {
+            throw new RuntimeException("Cannot prepare work deletes, the local deletion list is missing: {$this->local_paths_to_delete}");
+        }
+        $this->ensure_site_dir();
+        $input = fopen($this->local_paths_to_delete, "rb");
+        if (!$input) {
+            throw new RuntimeException("Failed to open local_paths_to_delete: {$this->local_paths_to_delete}");
+        }
+        $temporary = $this->work_deletes_path . ".tmp";
+        $output = fopen($temporary, "wb");
+        if (!$output) {
+            fclose($input);
+            throw new RuntimeException("Failed to open work deletes for writing: {$temporary}");
+        }
+        $bytes = 0;
+        try {
+            while (true) {
+                $this->read_line($input, $entry, $path, $base64_path);
+                if ($entry === null) {
+                    break;
+                }
+                $record = $path . "\0";
+                if (fwrite($output, $record) !== strlen($record)) {
+                    throw new RuntimeException("Short write on work deletes, is the disk full?");
+                }
+                $bytes += strlen($record);
+            }
+            if (!fclose($output)) {
+                $output = null;
+                throw new RuntimeException("Failed to close work deletes: {$temporary}");
+            }
+            $output = null;
+            if (!rename($temporary, $this->work_deletes_path)) {
+                throw new RuntimeException("Failed to move work deletes into place: {$this->work_deletes_path}");
+            }
+        } finally {
+            fclose($input);
+            if (is_resource($output)) {
+                fclose($output);
+            }
+        }
+        return $bytes;
+    }
+
+    /**
+     * Reads the active sender checkpoint written by write_sender_state().
+     *
+     * The journal owns this private file and atomically replaces it. A valid
+     * JSON object is therefore trusted as the sender's last durable boundary;
+     * the workflow interprets its phase and correlated fields. `source_token`
+     * and `confirmed_bytes` describe the last positive-work part confirmed by
+     * an upload response, not bytes merely handed to the network.
+     *
+     * @return array{
+     *     version:1,
+     *     push_session_id:string,
+     *     phase:'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     paths_byte_offset:int,
+     *     current_path_b64:?string,
+     *     next_paths_byte_offset:int,
+     *     source_token:array{type:'file'|'directory'|'symlink',size:int,ctime:int}|null,
+     *     confirmed_bytes:int,
+     *     work_deletes_byte_offset:int,
+     *     recoverable_failures:int,
+     *     max_part_bytes:?int,
+     *     request_sizer_state:array{request_body_bytes:int,ceiling_bytes:?int,growth_holdoff_remaining:int}
+     * }|null Durable sender state, or null when no push is active.
+     */
+    public function read_sender_state(): ?array
+    {
+        if (!is_file($this->sender_state_path)) {
+            return null;
+        }
+        $json = file_get_contents($this->sender_state_path);
+        if (!is_string($json)) {
+            throw new RuntimeException("Failed to read sender state: {$this->sender_state_path}");
+        }
+        $state = json_decode($json, true);
+        if (!is_array($state)) {
+            throw new RuntimeException("Sender state does not contain a JSON object: {$this->sender_state_path}");
+        }
+        return $state;
+    }
+
+    /**
+     * Atomically records the sender's last receiver-reconcilable boundary.
+     *
+     * @param array{
+     *     version:1,
+     *     push_session_id:string,
+     *     phase:'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     paths_byte_offset:int,
+     *     current_path_b64:?string,
+     *     next_paths_byte_offset:int,
+     *     source_token:array{type:'file'|'directory'|'symlink',size:int,ctime:int}|null,
+     *     confirmed_bytes:int,
+     *     work_deletes_byte_offset:int,
+     *     recoverable_failures:int,
+     *     max_part_bytes:?int,
+     *     request_sizer_state:array{request_body_bytes:int,ceiling_bytes:?int,growth_holdoff_remaining:int}
+     * } $state Complete sender checkpoint.
+     */
+    public function write_sender_state(array $state): void
+    {
+        $this->ensure_site_dir();
+        $json = json_encode($state, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $temporary = $this->sender_state_path . ".tmp";
+        if (file_put_contents($temporary, $json) !== strlen($json)) {
+            throw new RuntimeException("Failed to write sender state: {$temporary}");
+        }
+        if (!rename($temporary, $this->sender_state_path)) {
+            throw new RuntimeException("Failed to move sender state into place: {$this->sender_state_path}");
+        }
+    }
+
+    /**
+     * Removes the completed or deliberately abandoned sender checkpoint.
+     */
+    public function clear_sender_state(): void
+    {
+        if (is_file($this->sender_state_path) && !unlink($this->sender_state_path)) {
+            throw new RuntimeException("Failed to remove sender state: {$this->sender_state_path}");
+        }
+    }
+
+    /**
      * Read the next index line and parse its JSON object.
      *
      * All three out-parameters become null at end of file: $entry is the
@@ -275,21 +444,23 @@ class PushJournal
     }
 
     /**
-     * Copy an index file over a baseline: temp file in the same directory,
-     * then rename, so readers only ever see the old or the new baseline.
+     * Copies an index into a journal file by same-directory temp and rename.
+     *
+     * This supplies the atomic replacement used by both the completed local
+     * baseline and the stable index selected for an active sender.
      */
     private function replace_file(string $target, string $source_index_file): void
     {
         if (!is_file($source_index_file)) {
-            throw new RuntimeException("Cannot capture a baseline, the index file is missing: {$source_index_file}");
+            throw new RuntimeException("Cannot replace a journal file, the source index file is missing: {$source_index_file}");
         }
         $this->ensure_site_dir();
         $tmp = $target . ".tmp";
         if (!copy($source_index_file, $tmp)) {
-            throw new RuntimeException("Failed to copy the index into a baseline temp file: {$tmp}");
+            throw new RuntimeException("Failed to copy the source index into a temporary journal file: {$tmp}");
         }
         if (!rename($tmp, $target)) {
-            throw new RuntimeException("Failed to move the baseline into place: {$target}");
+            throw new RuntimeException("Failed to move the journal file into place: {$target}");
         }
     }
 
