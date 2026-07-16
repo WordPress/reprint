@@ -189,7 +189,6 @@ final class Site_Export_Push_Session {
                 throw $exception;
             }
             $push_session->write_json($push_session->push_json_path, [
-                'version' => 3,
                 'push_session_id' => $push_session_id,
                 'docroot_b64' => base64_encode($docroot),
                 'excluded_paths_b64' => array_map('base64_encode', $push_session->excluded_paths),
@@ -566,7 +565,6 @@ final class Site_Export_Push_Session {
                     throw new InvalidArgumentException('Commit cannot begin while an unfinished work value remains.');
                 }
                 $commit_state = [
-                    'version' => 3,
                     'phase' => 'deleting_files',
                     'work_deletes_byte_offset' => 0,
                     'current_delete_path' => null,
@@ -759,7 +757,7 @@ final class Site_Export_Push_Session {
      * publish the completed value, or begin commit work. A missing record means
      * there is no unfinished value.
      *
-     * @return array{version:1,phase:'preparing'|'receiving'|'publishing',path_b64:string,type:'file',total_bytes:int}|array{version:1,phase:'preparing'|'publishing',path_b64:string,type:'directory'}|array{version:1,phase:'preparing'|'publishing',path_b64:string,type:'symlink',target_b64:string}|null In-flight work, or null when none exists.
+     * @return array{phase:'preparing'|'receiving'|'publishing',path_b64:string,type:'file',total_bytes:int}|array{phase:'preparing'|'publishing',path_b64:string,type:'directory'}|array{phase:'preparing'|'publishing',path_b64:string,type:'symlink',target_b64:string}|null In-flight work, or null when none exists.
      */
     private function read_inflight(): ?array {
         return $this->read_json($this->work_inflight_path);
@@ -867,7 +865,7 @@ final class Site_Export_Push_Session {
             if ($inflight !== null && $this->lstat_path($this->work_inflight_data_path) !== null && !@unlink($this->work_inflight_data_path)) {
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not discard in-flight file data for restart.');
             }
-            $inflight = ['version' => 1, 'phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'file', 'total_bytes' => $total_bytes];
+            $inflight = ['phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'file', 'total_bytes' => $total_bytes];
             $this->write_json($this->work_inflight_path, $inflight);
             $handle = @fopen($this->work_inflight_data_path, 'wb');
             if ($handle === false) {
@@ -955,7 +953,7 @@ final class Site_Export_Push_Session {
             $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'directory', 'accepted_bytes' => 0];
             return;
         }
-        $inflight = ['version' => 1, 'phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'directory'];
+        $inflight = ['phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'directory'];
         $this->write_json($this->work_inflight_path, $inflight);
         if ($this->lstat_path($this->work_inflight_data_path) !== null && !@unlink($this->work_inflight_data_path)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not discard stale in-flight file data.');
@@ -1010,7 +1008,7 @@ final class Site_Export_Push_Session {
             $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'symlink', 'accepted_bytes' => 0];
             return;
         }
-        $inflight = ['version' => 1, 'phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'symlink', 'target_b64' => base64_encode($target_value)];
+        $inflight = ['phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'symlink', 'target_b64' => base64_encode($target_value)];
         $this->write_json($this->work_inflight_path, $inflight);
         if ($this->lstat_path($this->work_inflight_data_path) !== null && !@unlink($this->work_inflight_data_path)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not discard stale in-flight file data.');
@@ -1872,9 +1870,9 @@ final class Site_Export_Push_Session {
      */
     private function assert_push_configuration(): void {
         $push_metadata = $this->read_json($this->push_json_path);
-        if (!is_array($push_metadata) || ( $push_metadata['version'] ?? null ) !== 3 || ( $push_metadata['push_session_id'] ?? null ) !== $this->push_session_id
+        if (!is_array($push_metadata) || ( $push_metadata['push_session_id'] ?? null ) !== $this->push_session_id
             || !is_bool($push_metadata['work_deletes_complete'] ?? null)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata has an unsupported version or push session ID.');
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata has an invalid push session ID or work-deletes completion state.');
         }
         if (!is_string($push_metadata['docroot_b64'] ?? null) || !is_array($push_metadata['excluded_paths_b64'] ?? null)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata does not contain the configured document root and excluded paths.');
@@ -1933,7 +1931,6 @@ final class Site_Export_Push_Session {
      *
      * @param string $path Absolute metadata file path.
      * @param array{
-     *     version?:int,
      *     push_session_id?:string,
      *     docroot_b64?:string,
      *     excluded_paths_b64?:list<string>,
@@ -2029,7 +2026,6 @@ final class Site_Export_Push_Session {
      * checkpoint from being interpreted as document-root authority.
      *
      * @param array{
-     *     version?:mixed,
      *     phase?:mixed,
      *     work_deletes_byte_offset?:mixed,
      *     deleted_files?:mixed,
@@ -2041,9 +2037,6 @@ final class Site_Export_Push_Session {
      * } $commit_state Decoded commit checkpoint.
      */
     private function require_valid_commit_state(array $commit_state): void {
-        if (( $commit_state['version'] ?? null ) !== 3) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint has an unsupported version.');
-        }
         if (!in_array($commit_state['phase'] ?? null, ['deleting_files', 'installing_files', 'complete'], true)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit checkpoint has an invalid phase.');
         }

@@ -89,7 +89,7 @@ later request can resume from durable evidence instead of repeating a delete.
 `<reprint-directory>/.reprint/push/<push-session-id>/`. `push.json` is the
 push identity and policy plus whether the work-delete stream is complete.
 `commit.json` holds the bounded commit cursor. Both are atomically replaced
-and their versions are rejected when they do not match the current schema.
+and validated against the current schema.
 
 Multipart file bytes are received directly into `work/partial/` and promoted
 to `work/files/` only after their declared byte count is complete. A file

@@ -37,6 +37,13 @@ final class PushSessionTest extends TestCase {
         $this->assertFileDoesNotExist($work_directory . '/partial');
         $this->assertFileDoesNotExist($work_directory . '/inflight.json');
         $this->assertFileDoesNotExist($work_directory . '/inflight.data');
+        $push_metadata = json_decode(
+            (string) file_get_contents($push_session->get_push_directory() . '/push.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertArrayNotHasKey('version', $push_metadata);
     }
 
     public function testPartialFileProgressComesFromTheFileAndOffsetZeroRestartsIt(): void {
@@ -51,6 +58,13 @@ final class PushSessionTest extends TestCase {
             'body' => 'old',
         ]]);
         $this->assertSame(3, $push_session->get_status('upload.bin')['path']['accepted_bytes']);
+        $inflight = json_decode(
+            (string) file_get_contents($push_session->get_push_directory() . '/work/inflight.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertArrayNotHasKey('version', $inflight);
 
         $this->push_parts($push_session, [[
             'headers' => [
@@ -769,7 +783,6 @@ final class PushSessionTest extends TestCase {
             $push_session = $this->push_session(sprintf('%032x', 60 + $index));
             $work_directory = $push_session->get_push_directory() . '/work';
             $inflight = [
-                'version' => 1,
                 'phase' => 'publishing',
                 'path_b64' => base64_encode($type . '-value'),
                 'type' => $type,
@@ -792,7 +805,6 @@ final class PushSessionTest extends TestCase {
         file_put_contents($work_directory . '/files/same-size.txt', 'old');
         file_put_contents($work_directory . '/inflight.data', 'new');
         file_put_contents($work_directory . '/inflight.json', json_encode([
-            'version' => 1,
             'phase' => 'publishing',
             'path_b64' => base64_encode('same-size.txt'),
             'type' => 'file',
@@ -810,7 +822,6 @@ final class PushSessionTest extends TestCase {
         $work_directory = $push_session->get_push_directory() . '/work';
         file_put_contents($work_directory . '/files/renamed.txt', 'new');
         file_put_contents($work_directory . '/inflight.json', json_encode([
-            'version' => 1,
             'phase' => 'publishing',
             'path_b64' => base64_encode('renamed.txt'),
             'type' => 'file',
@@ -827,7 +838,6 @@ final class PushSessionTest extends TestCase {
         $work_directory = $push_session->get_push_directory() . '/work';
         file_put_contents($work_directory . '/inflight.data', 'new');
         file_put_contents($work_directory . '/inflight.json', json_encode([
-            'version' => 1,
             'phase' => 'publishing',
             'path_b64' => base64_encode('commit.txt'),
             'type' => 'file',

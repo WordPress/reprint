@@ -54,19 +54,19 @@ maintenance copy. The shared `.reprint/push/` directory contains
 `push-create.lock`, `commit-state`, `commit-state.lock`, and bounded removal
 tombstones named `.removing-<push-session-id>/`.
 
-`push.json` is version 3. Its keys are
+`push.json` has the keys
 `push_session_id`, `docroot_b64`, `excluded_paths_b64`,
 and `work_deletes_complete`.
 
-`commit.json` is version 3. Its phases are `deleting_files`,
+`commit.json` has the phases `deleting_files`,
 `installing_files`, and `complete`. Its cursor keys are
 `work_deletes_byte_offset`, `current_delete_path`,
 `current_work_files_descendant`, and `commit_cursor`. Path values remain
 base64 text even where a key does not include a suffix. Its non-recoverable
 failure key is `non_recoverable_commit_failure`.
 
-Prior versions are rejected. There are no compatibility aliases or migration
-paths.
+These JSON records are unversioned while their schemas are still under
+development. There are no compatibility aliases or migration paths.
 
 ## Protocol names
 

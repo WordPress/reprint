@@ -437,7 +437,6 @@ final class PushCommitTest extends TestCase {
             'deleted_files',
             'installed_files',
             'phase',
-            'version',
             'work_deletes_byte_offset',
         ], $commit_state_keys);
         $this->assertStringNotContainsString("line\nbreak", (string) file_get_contents($push_session->get_push_directory() . '/commit.json'));
