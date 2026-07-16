@@ -66,6 +66,24 @@ final class PushSessionTest extends TestCase {
         );
         $this->assertArrayNotHasKey('version', $inflight);
 
+        foreach ([2, 4] as $offset) {
+            try {
+                $this->push_parts($push_session, [[
+                    'headers' => [
+                        'X-Chunk-Type' => 'file',
+                        'X-File-Path' => base64_encode('upload.bin'),
+                        'X-File-Size' => '6',
+                        'X-Chunk-Offset' => (string) $offset,
+                    ],
+                    'body' => 'x',
+                ]]);
+                $this->fail('An in-flight file accepted cursor ' . $offset . ' while its data file contained 3 bytes.');
+            } catch (Site_Export_Push_Exception $exception) {
+                $this->assertSame('offset_gap', $exception->get_error_code());
+            }
+            $this->assertSame('old', file_get_contents($push_session->get_push_directory() . '/work/inflight.data'));
+        }
+
         $this->push_parts($push_session, [[
             'headers' => [
                 'X-Chunk-Type' => 'file',
@@ -81,6 +99,116 @@ final class PushSessionTest extends TestCase {
 
         $this->commit_all($push_session);
         $this->assertSame('new', file_get_contents($this->docroot . '/upload.bin'));
+    }
+
+    public function testCurrentChangeReturnsEveryDocumentedShapeAndResets(): void {
+        $push_session = $this->push_session('12121212121212121212121212121212');
+        $boundary = 'current-change-boundary';
+        $parts = [
+            [
+                'headers' => [
+                    'X-Chunk-Type' => 'file',
+                    'X-File-Path' => base64_encode('file.txt'),
+                    'X-File-Size' => '2',
+                    'X-Chunk-Offset' => '0',
+                ],
+                'body' => 'a',
+            ],
+            [
+                'headers' => [
+                    'X-Chunk-Type' => 'file',
+                    'X-File-Path' => base64_encode('file.txt'),
+                    'X-File-Size' => '2',
+                    'X-Chunk-Offset' => '1',
+                ],
+                'body' => 'b',
+            ],
+            [
+                'headers' => [
+                    'X-Chunk-Type' => 'directory',
+                    'X-Directory-Path' => base64_encode('empty'),
+                ],
+                'body' => '',
+            ],
+            [
+                'headers' => [
+                    'X-Chunk-Type' => 'symlink',
+                    'X-Symlink-Path' => base64_encode('link'),
+                    'X-Symlink-Target' => base64_encode('file.txt'),
+                ],
+                'body' => '',
+            ],
+            [
+                'headers' => [
+                    'X-Chunk-Type' => 'delete-list',
+                    'X-Delete-Offset' => '0',
+                ],
+                'body' => "gone\0",
+            ],
+            [
+                'headers' => [
+                    'X-Chunk-Type' => 'delete-list',
+                    'X-Delete-Offset' => '5',
+                    'X-Delete-Complete' => '1',
+                ],
+                'body' => '',
+            ],
+        ];
+        $body = '';
+        foreach ($parts as $part) {
+            $body .= '--' . $boundary . "\r\n";
+            foreach ($part['headers'] as $name => $value) {
+                $body .= $name . ': ' . $value . "\r\n";
+            }
+            $body .= 'Content-Length: ' . strlen($part['body']) . "\r\n\r\n" . $part['body'] . "\r\n";
+        }
+        $body .= '--' . $boundary . "--\r\n";
+        $input = fopen('php://temp', 'w+b');
+        fwrite($input, $body);
+        rewind($input);
+
+        $push_session->accept_upload($input, new Site_Export_Multipart_Processor($boundary));
+        try {
+            $this->assertNull($push_session->get_current_change());
+            $expected_changes = [
+                ['path_b64' => base64_encode('file.txt'), 'state' => 'partial', 'type' => 'file', 'accepted_bytes' => 1],
+                ['path_b64' => base64_encode('file.txt'), 'state' => 'complete', 'type' => 'file', 'accepted_bytes' => 2],
+                ['path_b64' => base64_encode('empty'), 'state' => 'complete', 'type' => 'directory', 'accepted_bytes' => 0],
+                ['path_b64' => base64_encode('link'), 'state' => 'complete', 'type' => 'symlink', 'accepted_bytes' => 0],
+                ['state' => 'partial', 'type' => 'delete-list', 'accepted_bytes' => 5],
+                ['state' => 'complete', 'type' => 'delete-list', 'accepted_bytes' => 5],
+            ];
+            foreach ($expected_changes as $expected_change) {
+                $this->assertTrue($push_session->next_change());
+                $this->assertSame($expected_change, $push_session->get_current_change());
+            }
+            $this->assertFalse($push_session->next_change());
+            $this->assertNull($push_session->get_current_change());
+        } finally {
+            $push_session->finish_upload();
+            fclose($input);
+        }
+        $this->assertNull($push_session->get_current_change());
+
+        $input = fopen('php://temp', 'w+b');
+        fwrite(
+            $input,
+            '--' . $boundary . "\r\n"
+            . "X-Chunk-Type: directory\r\n"
+            . 'X-Directory-Path: ' . base64_encode('empty') . "\r\n"
+            . "Content-Length: 0\r\n\r\n\r\n"
+            . '--' . $boundary . "--\r\n"
+        );
+        rewind($input);
+        $push_session->accept_upload($input, new Site_Export_Multipart_Processor($boundary));
+        try {
+            $this->assertTrue($push_session->next_change());
+            $this->assertNotNull($push_session->get_current_change());
+        } finally {
+            $push_session->finish_upload();
+            fclose($input);
+        }
+        $this->assertNull($push_session->get_current_change());
     }
 
     public function testInvalidPartStopsBeforeTheFollowingPartIsRead(): void {
@@ -105,6 +233,7 @@ final class PushSessionTest extends TestCase {
         } catch (Site_Export_Push_Exception $exception) {
             $this->assertSame('offset_gap', $exception->get_error_code());
             $this->assertStringContainsString('Start at offset 0', $exception->getMessage());
+            $this->assertNull($push_session->get_current_change());
         } finally {
             $push_session->finish_upload();
             fclose($input);
@@ -216,6 +345,51 @@ final class PushSessionTest extends TestCase {
         }
     }
 
+    public function testCompletedEmptyDirectoryCanBecomeNonEmpty(): void {
+        foreach (['file', 'directory', 'symlink'] as $index => $type) {
+            $push_session = $this->push_session(sprintf('%032x', 700 + $index));
+            $this->push_parts($push_session, [[
+                'headers' => [
+                    'X-Chunk-Type' => 'directory',
+                    'X-Directory-Path' => base64_encode('parent'),
+                ],
+                'body' => '',
+            ]]);
+
+            if ($type === 'file') {
+                $headers = [
+                    'X-Chunk-Type' => 'file',
+                    'X-File-Path' => base64_encode('parent/child'),
+                    'X-File-Size' => '1',
+                    'X-Chunk-Offset' => '0',
+                ];
+                $body = 'x';
+            } elseif ($type === 'directory') {
+                $headers = [
+                    'X-Chunk-Type' => 'directory',
+                    'X-Directory-Path' => base64_encode('parent/child'),
+                ];
+                $body = '';
+            } else {
+                $headers = [
+                    'X-Chunk-Type' => 'symlink',
+                    'X-Symlink-Path' => base64_encode('parent/child'),
+                    'X-Symlink-Target' => base64_encode('../elsewhere'),
+                ];
+                $body = '';
+            }
+
+            $this->push_parts($push_session, [['headers' => $headers, 'body' => $body]]);
+
+            $this->assertSame('complete', $push_session->get_status('parent')['path']['state']);
+            $this->assertSame('directory', $push_session->get_status('parent')['path']['type']);
+            $this->assertSame('complete', $push_session->get_status('parent/child')['path']['state']);
+            $this->assertSame($type, $push_session->get_status('parent/child')['path']['type']);
+            $this->assertFileDoesNotExist($push_session->get_push_directory() . '/work/inflight.json');
+            $this->assertFileDoesNotExist($push_session->get_push_directory() . '/work/inflight.data');
+        }
+    }
+
     public function testForeignMaintenanceStopsBeforeMutationAndOwnedMarkerRefreshes(): void {
         $push_session = $this->push_session('44444444444444444444444444444444');
         $this->push_file($push_session, 'pending.txt', 'new');
@@ -301,6 +475,59 @@ final class PushSessionTest extends TestCase {
         }
 
         $this->assertSame('receiving_work', $reopened->get_status()['phase']);
+    }
+
+    public function testPushSessionLockIsReleasedWhenTheUploadProcessDies(): void {
+        $push_session = $this->push_session('67676767676767676767676767676768');
+        $ready_path = $this->root . '/upload-lock-ready';
+        $configuration = base64_encode(json_encode([
+            'bootstrap_path' => __DIR__ . '/bootstrap.php',
+            'reprint_directory' => $this->reprint_directory,
+            'docroot' => $this->docroot,
+            'push_session_id' => $push_session->get_push_session_id(),
+            'ready_path' => $ready_path,
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        $script = '$configuration = json_decode(base64_decode($argv[1], true), true, 512, JSON_THROW_ON_ERROR);'
+            . 'require $configuration["bootstrap_path"];'
+            . '$push_session = Site_Export_Push_Session::open($configuration["reprint_directory"], $configuration["docroot"], $configuration["push_session_id"], ["wp-content/plugins/reprint"]);'
+            . '$input = fopen("php://temp", "w+b");'
+            . '$push_session->accept_upload($input, new Site_Export_Multipart_Processor("dead-owner-boundary"));'
+            . 'file_put_contents($configuration["ready_path"], "ready");'
+            . 'sleep(30);';
+        $process = proc_open(
+            [PHP_BINARY, '-r', $script, $configuration],
+            [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+            $pipes
+        );
+        $this->assertIsResource($process);
+        foreach ($pipes as $pipe) {
+            fclose($pipe);
+        }
+        $deadline = microtime(true) + 10;
+        while (!is_file($ready_path) && microtime(true) < $deadline) {
+            usleep(1000);
+        }
+        $this->assertFileExists($ready_path);
+
+        $process_closed = false;
+        try {
+            try {
+                $push_session->get_status();
+                $this->fail('Status acquired the push lock while another process held an upload open.');
+            } catch (Site_Export_Push_Exception $exception) {
+                $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
+            }
+
+            $this->assertTrue(proc_terminate($process, 9));
+            proc_close($process);
+            $process_closed = true;
+        } finally {
+            if (!$process_closed) {
+                @proc_terminate($process, 9);
+                proc_close($process);
+            }
+        }
+        $this->assertSame('receiving_work', $push_session->get_status()['phase']);
     }
 
     public function testTruncatedUploadDoesNotBecomeACompleteChangeAndReleasesCleanly(): void {
@@ -471,6 +698,49 @@ final class PushSessionTest extends TestCase {
         }
     }
 
+    public function testMalformedInFlightFilesAreClassifiedAsCorruption(): void {
+        $malformed_session = $this->push_session('34563456345634563456345634563457');
+        file_put_contents($malformed_session->get_push_directory() . '/work/inflight.json', '{not-json');
+        try {
+            $malformed_session->get_status();
+            $this->fail('Malformed in-flight JSON was accepted.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('corrupted_push_state', $exception->get_error_code());
+            $this->assertStringContainsString('does not contain a JSON object', $exception->getMessage());
+        }
+
+        $oversized_session = $this->push_session('34563456345634563456345634563458');
+        file_put_contents($oversized_session->get_push_directory() . '/work/inflight.json', str_repeat('x', 1048577));
+        try {
+            $oversized_session->get_status();
+            $this->fail('Oversized in-flight JSON was accepted.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('corrupted_push_state', $exception->get_error_code());
+            $this->assertStringContainsString('not a bounded regular file', $exception->getMessage());
+        }
+
+        $wrong_type_session = $this->push_session('34563456345634563456345634563459');
+        mkdir($wrong_type_session->get_push_directory() . '/work/inflight.data');
+        try {
+            $wrong_type_session->get_status();
+            $this->fail('A directory was accepted as in-flight file data.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('corrupted_push_state', $exception->get_error_code());
+            $this->assertStringContainsString('unsupported type', $exception->getMessage());
+        }
+    }
+
+    public function testSourceKeepsOnePathShapedWorkTreeAndSharedInFlightHelpers(): void {
+        $source = file_get_contents(__DIR__ . '/../packages/reprint-exporter/src/class-push-session.php');
+        $this->assertIsString($source);
+        $this->assertStringNotContainsString('work/partial', $source);
+        $this->assertStringNotContainsString('work_partial', $source);
+        $this->assertStringNotContainsString('first_tree_entry', $source);
+        foreach (['read_inflight', 'finish_published_inflight'] as $method) {
+            $this->assertGreaterThanOrEqual(2, substr_count($source, '$this->' . $method . '('), $method . ' must remain shared by multiple callers.');
+        }
+    }
+
     public function testReopenRejectsDocumentRootAndExcludedPathConfigurationDrift(): void {
         $push_session = $this->push_session('45674567456745674567456745674567');
         $other_docroot = $this->root . '/other-docroot';
@@ -499,7 +769,7 @@ final class PushSessionTest extends TestCase {
         }
     }
 
-    public function testCompletedTypeChangeRemovesThePartialFileAtTheSamePath(): void {
+    public function testCompletedTypeChangeDiscardsInFlightFileDataAtTheSamePath(): void {
         foreach (['directory', 'symlink'] as $index => $type) {
             $push_session = $this->push_session(sprintf('%032x', 500 + $index));
             $this->push_parts($push_session, [[
@@ -529,7 +799,7 @@ final class PushSessionTest extends TestCase {
         }
     }
 
-    public function testStatusReportsMissingPartialAndEveryCompletedValueType(): void {
+    public function testStatusReportsMissingInFlightAndEveryCompletedValueType(): void {
         $push_session = $this->push_session('88888888888888888888888888888888');
         $raw_path = "line\nbreak.bin";
         $this->push_parts($push_session, [[
@@ -546,8 +816,10 @@ final class PushSessionTest extends TestCase {
             ['path_b64' => base64_encode('missing'), 'state' => 'missing', 'accepted_bytes' => 0],
             $push_session->get_status('missing')['path']
         );
-        $this->assertSame('partial', $push_session->get_status($raw_path)['path']['state']);
-        $this->assertSame(1, $push_session->get_status($raw_path)['path']['accepted_bytes']);
+        $this->assertSame(
+            ['path_b64' => base64_encode($raw_path), 'state' => 'partial', 'type' => 'file', 'accepted_bytes' => 1],
+            $push_session->get_status($raw_path)['path']
+        );
 
         $this->push_parts($push_session, [[
             'headers' => [
@@ -585,10 +857,29 @@ final class PushSessionTest extends TestCase {
             ],
         ]);
 
-        $this->assertSame('file', $push_session->get_status('empty.bin')['path']['type']);
-        $this->assertSame('directory', $push_session->get_status('empty-directory')['path']['type']);
-        $this->assertSame('symlink', $push_session->get_status('link')['path']['type']);
-        $this->assertNull($push_session->get_status()['path']);
+        $this->assertSame(
+            ['path_b64' => base64_encode($raw_path), 'state' => 'complete', 'type' => 'file', 'accepted_bytes' => 2],
+            $push_session->get_status($raw_path)['path']
+        );
+        $this->assertSame(
+            ['path_b64' => base64_encode('empty.bin'), 'state' => 'complete', 'type' => 'file', 'accepted_bytes' => 0],
+            $push_session->get_status('empty.bin')['path']
+        );
+        $this->assertSame(
+            ['path_b64' => base64_encode('empty-directory'), 'state' => 'complete', 'type' => 'directory', 'accepted_bytes' => 0],
+            $push_session->get_status('empty-directory')['path']
+        );
+        $this->assertSame(
+            ['path_b64' => base64_encode('link'), 'state' => 'complete', 'type' => 'symlink', 'accepted_bytes' => 0],
+            $push_session->get_status('link')['path']
+        );
+        $this->assertSame([
+            'push_session_id' => '88888888888888888888888888888888',
+            'phase' => 'receiving_work',
+            'work_deletes_bytes' => 0,
+            'work_deletes_complete' => false,
+            'path' => null,
+        ], $push_session->get_status());
     }
 
     public function testCompletedFileReplayRequiresItsExactEmptyEndCursor(): void {
@@ -702,23 +993,40 @@ final class PushSessionTest extends TestCase {
 
     public function testOnlyTheMatchingPathCanUseTheInFlightSlot(): void {
         $push_session = $this->push_session('77777777777777777777777777777777');
-        $this->push_parts($push_session, [[
-            'headers' => [
-                'X-Chunk-Type' => 'file',
-                'X-File-Path' => base64_encode('first.txt'),
-                'X-File-Size' => '2',
-                'X-Chunk-Offset' => '0',
-            ],
-            'body' => 'a',
-        ]]);
-
         try {
-            $this->push_file($push_session, 'second.txt', 'b');
-            $this->fail('A different path replaced in-flight work.');
+            $this->push_parts($push_session, [
+                [
+                    'headers' => [
+                        'X-Chunk-Type' => 'file',
+                        'X-File-Path' => base64_encode('first.txt'),
+                        'X-File-Size' => '2',
+                        'X-Chunk-Offset' => '0',
+                    ],
+                    'body' => 'a',
+                ],
+                [
+                    'headers' => [
+                        'X-Chunk-Type' => 'file',
+                        'X-File-Path' => base64_encode('second.txt'),
+                        'X-File-Size' => '1',
+                        'X-Chunk-Offset' => '0',
+                    ],
+                    'body' => 'b',
+                ],
+            ]);
+            $this->fail('A different path replaced in-flight work in the same request.');
         } catch (Site_Export_Push_Exception $exception) {
             $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
         }
 
+        $this->assertSame(
+            ['path_b64' => base64_encode('first.txt'), 'state' => 'partial', 'type' => 'file', 'accepted_bytes' => 1],
+            $push_session->get_status('first.txt')['path']
+        );
+        $this->assertSame(
+            ['path_b64' => base64_encode('second.txt'), 'state' => 'missing', 'accepted_bytes' => 0],
+            $push_session->get_status('second.txt')['path']
+        );
         $this->assertSame('a', file_get_contents($push_session->get_push_directory() . '/work/inflight.data'));
         $this->assertFileDoesNotExist($push_session->get_push_directory() . '/work/files/second.txt');
     }
@@ -765,7 +1073,16 @@ final class PushSessionTest extends TestCase {
             ],
             'body' => 'x',
         ]]);
+        $this->push_parts($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'delete-list',
+                'X-Delete-Offset' => '0',
+            ],
+            'body' => "gone.txt\0",
+        ]]);
         $this->complete_work_deletes($push_session);
+        $this->assertSame(9, $push_session->get_status()['work_deletes_bytes']);
+        $this->assertTrue($push_session->get_status()['work_deletes_complete']);
 
         try {
             $push_session->commit(1);
@@ -776,80 +1093,146 @@ final class PushSessionTest extends TestCase {
 
         $this->assertFileDoesNotExist($push_session->get_push_directory() . '/commit.json');
         $this->assertFileDoesNotExist($this->docroot . '/inflight.txt');
+        $this->assertFileDoesNotExist($this->docroot . '/.maintenance');
+        $this->assertFileDoesNotExist($this->reprint_directory . '/.reprint/push/commit-state');
     }
 
-    public function testStatusFinishesPublishedDirectoryAndSymlinkWork(): void {
-        foreach (['directory', 'symlink'] as $index => $type) {
-            $push_session = $this->push_session(sprintf('%032x', 60 + $index));
-            $work_directory = $push_session->get_push_directory() . '/work';
-            $inflight = [
-                'phase' => 'publishing',
-                'path_b64' => base64_encode($type . '-value'),
-                'type' => $type,
-            ];
-            if ($type === 'symlink') {
-                $inflight['target_b64'] = base64_encode('../target');
-            }
-            file_put_contents($work_directory . '/inflight.json', json_encode($inflight, JSON_THROW_ON_ERROR));
-
-            $status = $push_session->get_status($type . '-value')['path'];
-            $this->assertSame('complete', $status['state']);
-            $this->assertSame($type, $status['type']);
-            $this->assertFileDoesNotExist($work_directory . '/inflight.json');
-        }
-    }
-
-    public function testStatusFinishesPublishedFileDataWithoutAcceptingTheOldValue(): void {
+    public function testFilePublicationRecoversAtBothDurableBoundaries(): void {
         $push_session = $this->push_session('34343434343434343434343434343434');
         $work_directory = $push_session->get_push_directory() . '/work';
-        file_put_contents($work_directory . '/files/same-size.txt', 'old');
-        file_put_contents($work_directory . '/inflight.data', 'new');
-        file_put_contents($work_directory . '/inflight.json', json_encode([
-            'phase' => 'publishing',
-            'path_b64' => base64_encode('same-size.txt'),
-            'type' => 'file',
-            'total_bytes' => 3,
-        ], JSON_THROW_ON_ERROR));
+        $this->push_file($push_session, 'same-size.txt', 'old');
 
+        $this->run_upload_with_filesystem_fault($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'file',
+                'X-File-Path' => base64_encode('same-size.txt'),
+                'X-File-Size' => '3',
+                'X-Chunk-Offset' => '0',
+            ],
+            'body' => 'new',
+        ]], 'unlink', '/work/files/same-size.txt');
+
+        $this->assertSame('old', file_get_contents($work_directory . '/files/same-size.txt'));
+        $this->assertSame('new', file_get_contents($work_directory . '/inflight.data'));
+        $this->assertFileExists($work_directory . '/inflight.json');
         $this->assertSame('complete', $push_session->get_status('same-size.txt')['path']['state']);
         $this->assertSame('new', file_get_contents($work_directory . '/files/same-size.txt'));
         $this->assertFileDoesNotExist($work_directory . '/inflight.json');
         $this->assertFileDoesNotExist($work_directory . '/inflight.data');
-    }
 
-    public function testStatusFinishesPublishedFileAfterItsDataWasRenamed(): void {
         $push_session = $this->push_session('45454545454545454545454545454545');
         $work_directory = $push_session->get_push_directory() . '/work';
-        file_put_contents($work_directory . '/files/renamed.txt', 'new');
-        file_put_contents($work_directory . '/inflight.json', json_encode([
-            'phase' => 'publishing',
-            'path_b64' => base64_encode('renamed.txt'),
-            'type' => 'file',
-            'total_bytes' => 3,
-        ], JSON_THROW_ON_ERROR));
+        $this->run_upload_with_filesystem_fault($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'file',
+                'X-File-Path' => base64_encode('commit.txt'),
+                'X-File-Size' => '3',
+                'X-Chunk-Offset' => '0',
+            ],
+            'body' => 'new',
+        ]], 'unlink', '/work/inflight.json');
 
-        $this->assertSame('complete', $push_session->get_status('renamed.txt')['path']['state']);
-        $this->assertSame('new', file_get_contents($work_directory . '/files/renamed.txt'));
+        $this->assertSame('new', file_get_contents($work_directory . '/files/commit.txt'));
+        $this->assertFileDoesNotExist($work_directory . '/inflight.data');
+        $this->assertFileExists($work_directory . '/inflight.json');
+        $this->complete_work_deletes($push_session);
+        $this->commit_all($push_session);
         $this->assertFileDoesNotExist($work_directory . '/inflight.json');
+        $this->assertSame('new', file_get_contents($this->docroot . '/commit.txt'));
     }
 
-    public function testCommitFinishesPublishedFileBeforeWritingItsCheckpoint(): void {
-        $push_session = $this->push_session('46464646464646464646464646464646');
-        $work_directory = $push_session->get_push_directory() . '/work';
-        file_put_contents($work_directory . '/inflight.data', 'new');
-        file_put_contents($work_directory . '/inflight.json', json_encode([
-            'phase' => 'publishing',
-            'path_b64' => base64_encode('commit.txt'),
-            'type' => 'file',
-            'total_bytes' => 3,
-        ], JSON_THROW_ON_ERROR));
-        $this->complete_work_deletes($push_session);
+    public function testDirectoryAndSymlinkPublicationRecoverBeforeAndAfterLeafCreation(): void {
+        foreach (['directory', 'symlink'] as $type_index => $type) {
+            foreach (['create', 'clear'] as $boundary_index => $boundary) {
+                $push_session = $this->push_session(sprintf('%032x', 800 + ( $type_index * 10 ) + $boundary_index));
+                $work_directory = $push_session->get_push_directory() . '/work';
+                $path = 'nested/' . $type . '-' . $boundary;
+                if ($type === 'directory') {
+                    $headers = [
+                        'X-Chunk-Type' => 'directory',
+                        'X-Directory-Path' => base64_encode($path),
+                    ];
+                    $operation = 'mkdir';
+                } else {
+                    $headers = [
+                        'X-Chunk-Type' => 'symlink',
+                        'X-Symlink-Path' => base64_encode($path),
+                        'X-Symlink-Target' => base64_encode('../target'),
+                    ];
+                    $operation = 'symlink';
+                }
+                $fault_operation = $boundary === 'create' ? $operation : 'unlink';
+                $fault_path_suffix = $boundary === 'create' ? '/work/files/' . $path : '/work/inflight.json';
 
-        $push_session->commit(1);
+                $this->run_upload_with_filesystem_fault(
+                    $push_session,
+                    [['headers' => $headers, 'body' => '']],
+                    $fault_operation,
+                    $fault_path_suffix
+                );
 
-        $this->assertFileDoesNotExist($work_directory . '/inflight.json');
-        $this->assertSame('new', file_get_contents($work_directory . '/files/commit.txt'));
-        $this->assertFileExists($push_session->get_push_directory() . '/commit.json');
+                $this->assertFileExists($work_directory . '/inflight.json');
+                if ($boundary === 'create') {
+                    $this->assertFileDoesNotExist($work_directory . '/files/' . $path);
+                    $this->assertDirectoryExists($work_directory . '/files/nested');
+                } elseif ($type === 'directory') {
+                    $this->assertDirectoryExists($work_directory . '/files/' . $path);
+                } else {
+                    $this->assertTrue(is_link($work_directory . '/files/' . $path));
+                }
+
+                $this->assertSame(
+                    [
+                        'path_b64' => base64_encode($path),
+                        'state' => 'complete',
+                        'type' => $type,
+                        'accepted_bytes' => 0,
+                    ],
+                    $push_session->get_status($path)['path']
+                );
+                $this->assertFileDoesNotExist($work_directory . '/inflight.json');
+            }
+        }
+    }
+
+    public function testStatusReportsPreparingDirectoryAndSymlinkFromAProductionFailure(): void {
+        foreach (['directory', 'symlink'] as $index => $type) {
+            $push_session = $this->push_session(sprintf('%032x', 900 + $index));
+            $path = $type . '-replacement';
+            $this->push_parts($push_session, [[
+                'headers' => [
+                    'X-Chunk-Type' => 'file',
+                    'X-File-Path' => base64_encode($path),
+                    'X-File-Size' => '2',
+                    'X-Chunk-Offset' => '0',
+                ],
+                'body' => 'x',
+            ]]);
+            $headers = $type === 'directory'
+                ? [
+                    'X-Chunk-Type' => 'directory',
+                    'X-Directory-Path' => base64_encode($path),
+                ]
+                : [
+                    'X-Chunk-Type' => 'symlink',
+                    'X-Symlink-Path' => base64_encode($path),
+                    'X-Symlink-Target' => base64_encode('../target'),
+                ];
+
+            $this->run_upload_with_filesystem_fault(
+                $push_session,
+                [['headers' => $headers, 'body' => '']],
+                'unlink',
+                '/work/inflight.data'
+            );
+
+            $this->assertSame(
+                ['path_b64' => base64_encode($path), 'state' => 'partial', 'type' => $type, 'accepted_bytes' => 0],
+                $push_session->get_status($path)['path']
+            );
+            $this->push_parts($push_session, [['headers' => $headers, 'body' => '']]);
+            $this->assertSame('complete', $push_session->get_status($path)['path']['state']);
+        }
     }
 
     public function testCheckpointMustContainEveryFieldReadByCommit(): void {
@@ -916,6 +1299,110 @@ final class PushSessionTest extends TestCase {
         } while (!$remove_complete);
         $this->assertFileExists($outside . '/sentinel');
         $this->assertDirectoryDoesNotExist($push_session->get_push_directory());
+    }
+
+    /**
+     * Runs an upload while one named filesystem call fails in production code.
+     *
+     * The upload runs in a separate PHP process with a small shared library
+     * interposed at the libc boundary. The library fails only the requested
+     * operation and path suffix. This leaves the same durable state that the
+     * production method wrote before the failed call, without rewriting private
+     * push-session files in the test.
+     *
+     * @param Site_Export_Push_Session $push_session Push session to reopen in the child process.
+     * @param array<int,array{headers:array<string,string>,body:string}> $parts Multipart parts to upload.
+     * @param string $operation One of unlink, mkdir, or symlink.
+     * @param string $path_suffix Absolute-path suffix whose operation must fail.
+     * @return array{class:string,reason:string|null,message:string} Classified child-process exception.
+     */
+    private function run_upload_with_filesystem_fault(
+        Site_Export_Push_Session $push_session,
+        array $parts,
+        string $operation,
+        string $path_suffix
+    ): array {
+        if (!in_array(PHP_OS_FAMILY, ['Linux', 'Darwin'], true)) {
+            $this->markTestSkipped('Filesystem publication fault tests require libc interposition on Linux or macOS.');
+        }
+
+        $source_path = __DIR__ . '/fixtures/push-session-filesystem-fault.c';
+        $library_extension = PHP_OS_FAMILY === 'Darwin' ? 'dylib' : 'so';
+        $library_path = sys_get_temp_dir() . '/reprint-push-session-fault-' . hash_file('sha256', $source_path) . '.' . $library_extension;
+        if (!is_file($library_path)) {
+            $compile_command = PHP_OS_FAMILY === 'Darwin'
+                ? ['cc', '-dynamiclib', '-O2', '-o', $library_path, $source_path]
+                : ['cc', '-shared', '-fPIC', '-O2', '-o', $library_path, $source_path, '-ldl'];
+            $compile_descriptors = [
+                0 => ['pipe', 'r'],
+                1 => ['pipe', 'w'],
+                2 => ['pipe', 'w'],
+            ];
+            $compile_process = proc_open($compile_command, $compile_descriptors, $compile_pipes);
+            $this->assertIsResource($compile_process, 'Could not start the filesystem fault-library compiler.');
+            fclose($compile_pipes[0]);
+            $compile_stdout = stream_get_contents($compile_pipes[1]);
+            $compile_stderr = stream_get_contents($compile_pipes[2]);
+            fclose($compile_pipes[1]);
+            fclose($compile_pipes[2]);
+            $compile_exit_code = proc_close($compile_process);
+            $this->assertSame(0, $compile_exit_code, "Could not compile the filesystem fault library.\n" . $compile_stdout . $compile_stderr);
+        }
+
+        $boundary = 'filesystem-fault-boundary';
+        $body = '';
+        foreach ($parts as $part) {
+            $body .= '--' . $boundary . "\r\n";
+            foreach ($part['headers'] as $name => $value) {
+                $body .= $name . ': ' . $value . "\r\n";
+            }
+            $body .= 'Content-Length: ' . strlen($part['body']) . "\r\n\r\n" . $part['body'] . "\r\n";
+        }
+        $body .= '--' . $boundary . "--\r\n";
+        $configuration = base64_encode(json_encode([
+            'reprint_directory' => $this->reprint_directory,
+            'docroot' => $this->docroot,
+            'push_session_id' => $push_session->get_push_session_id(),
+            'excluded_paths' => ['wp-content/plugins/reprint'],
+            'boundary' => $boundary,
+            'body_b64' => base64_encode($body),
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        $environment = getenv();
+        if (!is_array($environment)) {
+            $environment = [];
+        }
+        $environment['REPRINT_FAULT_OPERATION'] = $operation;
+        $environment['REPRINT_FAULT_PATH_SUFFIX'] = $path_suffix;
+        if (PHP_OS_FAMILY === 'Darwin') {
+            $environment['DYLD_INSERT_LIBRARIES'] = $library_path;
+            $environment['DYLD_FORCE_FLAT_NAMESPACE'] = '1';
+        } else {
+            $environment['LD_PRELOAD'] = $library_path;
+        }
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+        $process = proc_open(
+            [PHP_BINARY, __DIR__ . '/fixtures/run-push-session-upload.php', $configuration],
+            $descriptors,
+            $pipes,
+            null,
+            $environment
+        );
+        $this->assertIsResource($process, 'Could not start the faulted push-session upload process.');
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exit_code = proc_close($process);
+        $this->assertSame(73, $exit_code, "The requested filesystem call did not fail.\nstdout: " . $stdout . "\nstderr: " . $stderr);
+        $failure = json_decode($stdout, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(Site_Export_Push_Exception::class, $failure['class']);
+        $this->assertSame('filesystem_error', $failure['reason']);
+        return $failure;
     }
 
     private function push_session(string $id): Site_Export_Push_Session {
