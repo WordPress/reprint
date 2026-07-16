@@ -11,8 +11,7 @@ is about how to work.
 Read `markdown/PUSH-TERMINOLOGY.md` before proposing or changing push work.
 Use its terms verbatim in identifiers, comments, tests, documentation, plans,
 review replies, commit messages, and pull-request descriptions. Do not replace
-them with near-synonyms. Run `composer lint:push-terminology` before staging a
-push change.
+them with near-synonyms.
 
 ## Streaming is the point — never buffer
 

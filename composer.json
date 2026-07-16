@@ -43,7 +43,6 @@
         "analyze": "phpstan analyze --memory-limit=1G",
         "lint:php": "phpcs --standard=phpcs.xml.dist",
         "lint:php:fix": "phpcbf --standard=phpcs.xml.dist",
-        "lint:push-terminology": "php bin/lint-push-terminology.php",
         "lint:php:compat": [
             "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.2- -ps packages/reprint-exporter/src reprint-exporter-wp --ignore=reprint-exporter-wp/wordpress",
             "phpcs --standard=PHPCompatibility --runtime-set testVersion 7.4- -ps packages/reprint-importer/src"

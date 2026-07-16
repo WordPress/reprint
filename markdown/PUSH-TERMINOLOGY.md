@@ -80,9 +80,3 @@ JSON responses use `push_session_id`, `receiving_work`, and
 
 The document-root `.maintenance` file identifies its owner with the push
 session ID. `commit.json` stores no separate maintenance value.
-
-## Enforcement
-
-Run `composer lint:push-terminology` before staging a push change. The checker
-reads its rejected-spelling list from an audit fixture; that fixture is the
-only approved location for those spellings.

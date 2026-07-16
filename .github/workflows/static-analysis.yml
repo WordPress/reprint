@@ -21,10 +21,6 @@ jobs:
 
       - run: composer install --no-interaction --prefer-dist
 
-      - run: composer install --no-interaction --prefer-dist --working-dir=reprint-exporter-wp
-
-      - run: composer lint:push-terminology
-
       - run: composer analyze
 
   compat:
