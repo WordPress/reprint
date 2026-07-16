@@ -864,7 +864,7 @@ final class Site_Export_Push_Session {
         } elseif ($inflight['type'] === 'directory') {
             if ($work_identity === null) {
                 $this->ensure_private_parent($work_path);
-                if (!@mkdir($work_path, 0700)) {
+                if (!@mkdir($work_path, 0777)) {
                     throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the in-flight directory.');
                 }
             } elseif ($work_identity['type'] !== 'directory') {
