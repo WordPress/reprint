@@ -1036,7 +1036,10 @@ class ImportClient
     /** @var string|null Type ("file", "link", "dir") of the last upserted index entry. */
     private $last_update_type = null;
 
-    /** @var string Path to .import-remote-index.jsonl — latest file index received from the server. */
+    /**
+     * @var string Path to .import-remote-index.jsonl — latest file index received
+     * from the server, including directory `empty` fields when available.
+     */
     private $remote_index_file;
 
     /** @var string Path to .import-download-list.jsonl — files to download, computed by diffing remote vs local index. */
@@ -6337,6 +6340,15 @@ class ImportClient
                     }
                     if (!empty($item["intermediate"])) {
                         $entry["intermediate"] = true;
+                    }
+                    if (array_key_exists("empty", $item) && !is_bool($item["empty"])) {
+                        throw new RuntimeException(
+                            "Invalid index batch item: empty must be a boolean, received "
+                            . json_encode($item["empty"]),
+                        );
+                    }
+                    if (isset($item["empty"])) {
+                        $entry["empty"] = $item["empty"];
                     }
                     $line = json_encode(
                         $entry,
@@ -12767,7 +12779,8 @@ if (
             "short" => "Index all remote files (initial) or detect changes (delta)",
             "description" =>
                 "Streams the full remote directory tree over HTTP and writes each\n" .
-                "entry (path, size, ctime, type) to .import-remote-index.jsonl.\n" .
+                "entry (path, size, ctime, type, and directory emptiness) to\n" .
+                ".import-remote-index.jsonl.\n" .
                 "\n" .
                 "On the first run, builds the complete index. On subsequent runs,\n" .
                 "re-indexes and diffs against the prior snapshot to produce a\n" .

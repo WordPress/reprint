@@ -85,9 +85,19 @@ after each successful commit:
     <state-dir>/push/<site>/last-sync-local-files.jsonl
     <state-dir>/push/<site>/last-sync-local-rows.jsonl   (phase two)
 
-Each file baseline is a copy of a local file index in the `.import-index.jsonl`
-format the pull path already reads and writes — one JSON object per line,
-sorted by path.
+Each file baseline is a copy of the `sender-index.jsonl` selected for the
+completed push. It uses the file-index record shape — one JSON object per line,
+sorted by path — with a boolean `empty` field on every directory the indexer
+could inspect. The indexer records physical emptiness while it observes the
+directory; the later planner never reopens the live tree to classify it.
+
+Before upload, `PushJournal::diff_local_files()` merges that baseline with a
+path-sorted current source index in bounded steps. It copies the selected source
+snapshot to `sender-index.jsonl`, writes changed files, symlinks, and empty
+directories to `local-paths-to-push.jsonl`, and writes raw NUL-delimited roots
+to `work-deletes`. Its checkpoint pins the current-index file identity, both
+input offsets, and all three committed output lengths so a discarded step can
+truncate and replay only its uncommitted tails.
 
 The first push to a site has no baselines: every current local file counts as
 changed, and no local deletion can be detected yet.

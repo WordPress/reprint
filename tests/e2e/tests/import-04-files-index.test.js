@@ -49,6 +49,16 @@ describe('Import: Files Index', () => {
             return typeof path === 'string' && path.length > 0;
         });
         assert.ok(hasPaths, `Expected entries with file paths, got: ${JSON.stringify(entries.slice(0, 2))}`);
+
+        const directories = entries.filter(e => e.type === 'dir');
+        assert.ok(directories.length > 0, 'Expected directory entries in remote index');
+        for (const directory of directories) {
+            assert.equal(
+                typeof directory.empty,
+                'boolean',
+                `Expected directory emptiness in remote index: ${JSON.stringify(directory)}`,
+            );
+        }
     });
 
     it('remote index has at least 3000 entries', () => {

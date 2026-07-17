@@ -11,17 +11,15 @@
  *
  *     <state-dir>/push/<site>/last-sync-local-files.jsonl
  *
- * The baseline is the sender index from the last completed push. It uses the
- * .import-index.jsonl fields and adds an `empty` boolean to directory entries.
- * That fact distinguishes an empty directory from a non-empty directory after
- * the source may have changed. The push driver captures the sender index only
- * after the receiver commits successfully.
+ * The baseline is the sender index from the last completed push, captured only
+ * after the receiver commits successfully. The source index records an `empty`
+ * boolean on every directory entry, so both inputs distinguish an empty
+ * directory from a non-empty one and planning never reads the source tree.
  *
  * diff_local_files() performs one bounded planning step. It merges the
  * path-sorted current index and baseline while writing three durable files:
  *
- *     sender-index.jsonl          every current entry, with directory
- *                                 emptiness recorded
+ *     sender-index.jsonl          every current source-index entry
  *     local-paths-to-push.jsonl   files, symlinks, and empty directories to
  *                                 inspect and upload
  *     work-deletes                raw NUL-delimited roots to delete
@@ -31,10 +29,6 @@
  * the two saved input offsets. A process that dies before saving a checkpoint
  * therefore replays only uncommitted work, without duplicate output records.
  *
- * Directory emptiness is computed when a current directory entry is consumed.
- * The planner checks the indexed type and ctime before and after reading only
- * far enough to find the first child. A mismatch returns `source_changed`
- * rather than combining index evidence with a different source tree.
  * With no baseline, every current file, symlink, and empty directory is
  * selected and no deletion can be detected. The positive-work list carries
  * only paths because the sender rechecks the filesystem before upload.
@@ -50,7 +44,7 @@ class PushJournal
 
     private string $site_dir;
 
-    /** @var string Enriched sender index from the last completed push. */
+    /** @var string Sender index from the last completed push. */
     public string $local_files_baseline_path;
 
     /** @var string JSONL file of local paths to push. */
@@ -59,7 +53,7 @@ class PushJournal
     /** @var string Raw NUL-delimited work deletes. */
     public string $work_deletes_path;
 
-    /** @var string Enriched current index selected for the active push. */
+    /** @var string Current source index selected for the active push. */
     public string $sender_index_path;
 
     public function __construct(string $state_dir, string $site_url)
@@ -108,7 +102,7 @@ class PushJournal
     }
 
     /**
-     * Store an enriched sender index as the new local baseline.
+     * Store the pushed sender index as the new local baseline.
      *
      * The push driver calls this at the end of a successful push; from then
      * on "changed locally" means "different from this index". The copy is
@@ -128,14 +122,14 @@ class PushJournal
      * returned `planning` checkpoint resumes the same plan. `complete` means
      * all three output files are immutable and ready for the sender.
      * `source_changed` returns the input checkpoint after rolling output back
-     * to its committed lengths; the caller must regenerate the current index.
+     * to its committed lengths; the caller must regenerate the current index
+     * and start a new plan.
      *
      * Every current entry is copied to sender-index.jsonl, including paths
      * which conflict with an excluded path. Exclusions suppress network work,
      * not the complete source snapshot used by later baseline publication.
      *
      * @param string $current_index_file Path-sorted current source index.
-     * @param string $docroot Document root described by the current index.
      * @param string[] $excluded_paths Receiver-owned document-root-relative paths.
      * @param array|null $checkpoint {
      *     Last durable planning boundary, or null to begin.
@@ -162,7 +156,6 @@ class PushJournal
      */
     public function diff_local_files(
         string $current_index_file,
-        string $docroot,
         array $excluded_paths = [],
         ?array $checkpoint = null
     ): array {
@@ -308,24 +301,10 @@ class PushJournal
                 }
 
                 $current_shape = null;
-                $current_output_entry = null;
                 if ($order <= 0) {
-                    $current_output_entry = $this->enrich_current_entry(
-                        $current_entry,
-                        $current_path,
-                        $docroot
-                    );
-                    if ($current_output_entry === null) {
-                        return $this->source_changed_result(
-                            $checkpoint,
-                            $sender_index_handle,
-                            $local_paths_to_push_handle,
-                            $work_deletes_handle
-                        );
-                    }
-                    $current_shape = $this->entry_shape($current_output_entry, "current index");
+                    $current_shape = $this->entry_shape($current_entry, "current index");
                     $sender_index_line = json_encode(
-                        $current_output_entry,
+                        $current_entry,
                         JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
                     ) . "\n";
                     if (fwrite($sender_index_handle, $sender_index_line) !== strlen($sender_index_line)) {
@@ -383,7 +362,7 @@ class PushJournal
                     $empty_directory_needs_install = $current_shape === "empty_directory"
                         && $baseline_shape !== "empty_directory";
                     $changed_file_or_symlink_needs_install = $current_is_file_or_symlink
-                        && $current_output_entry != $baseline_entry;
+                        && $current_entry != $baseline_entry;
                     $needs_delete = $current_is_file_or_symlink !== $baseline_is_file_or_symlink
                         || $non_empty_directory_becomes_empty;
                     $needs_push = $empty_directory_needs_install
@@ -541,76 +520,6 @@ class PushJournal
         if (fseek($handle, $byte_offset) !== 0) {
             throw new RuntimeException("Failed to seek the {$description} to byte {$byte_offset}.");
         }
-    }
-
-    /**
-     * Add current directory emptiness after verifying the indexed source.
-     *
-     * @param array<string, mixed> $entry Current index entry.
-     * @return array<string, mixed>|null Enriched entry, or null after source drift.
-     */
-    private function enrich_current_entry(array $entry, string $path, string $docroot): ?array
-    {
-        $type = $entry["type"] ?? null;
-        if ($type === "file" || $type === "link") {
-            return $entry;
-        }
-        if ($type !== "dir") {
-            throw new RuntimeException(
-                "Unexpected current index type for " . base64_encode($path) . ": " . json_encode($type)
-            );
-        }
-        if (!isset($entry["ctime"]) || !is_int($entry["ctime"])) {
-            throw new RuntimeException(
-                "Current directory index entry has no integer ctime: " . base64_encode($path)
-            );
-        }
-        if (!$this->is_safe_document_root_relative_path($path)) {
-            throw new RuntimeException(
-                "Current directory index path is not document-root-relative: " . base64_encode($path)
-            );
-        }
-
-        $absolute_path = rtrim($docroot, "/") . "/" . $path;
-        if (!$this->directory_matches_index($absolute_path, $entry["ctime"])) {
-            return null;
-        }
-        $directory_handle = @opendir($absolute_path);
-        if (!$directory_handle) {
-            // A directory deleted between the identity check and the open is
-            // ordinary source drift. One that still matches the index is not:
-            // indexing aborts on unreadable directories and a chmod would
-            // have changed the ctime, so re-indexing cannot repair it.
-            if (!$this->directory_matches_index($absolute_path, $entry["ctime"])) {
-                return null;
-            }
-            throw new RuntimeException(
-                "Current directory " . base64_encode($path)
-                . " matches its index entry but cannot be opened for reading."
-            );
-        }
-        $empty = true;
-        try {
-            while (true) {
-                $child = readdir($directory_handle);
-                if ($child === false) {
-                    break;
-                }
-                if ($child !== "." && $child !== "..") {
-                    $empty = false;
-                    break;
-                }
-            }
-        } finally {
-            closedir($directory_handle);
-        }
-        // The directory may have changed while its handle was open.
-        clearstatcache(true, $absolute_path);
-        if (!$this->directory_matches_index($absolute_path, $entry["ctime"])) {
-            return null;
-        }
-        $entry["empty"] = $empty;
-        return $entry;
     }
 
     /**
@@ -820,29 +729,6 @@ class PushJournal
             "ctime" => (int) $identity["ctime"],
             "mtime" => (int) $identity["mtime"],
         ];
-    }
-
-    /** @phpstan-impure Reads mutable filesystem state. */
-    private function directory_matches_index(string $absolute_path, int $indexed_ctime): bool
-    {
-        clearstatcache(true, $absolute_path);
-        $identity = @lstat($absolute_path);
-        return is_array($identity)
-            && ((int) $identity["mode"] & 0170000) === 0040000
-            && (int) $identity["ctime"] === $indexed_ctime;
-    }
-
-    private function is_safe_document_root_relative_path(string $path): bool
-    {
-        if ($path === "" || $path[0] === "/" || strpos($path, "\0") !== false || strpos($path, "\\") !== false) {
-            return false;
-        }
-        foreach (explode("/", $path) as $segment) {
-            if ($segment === "" || $segment === "." || $segment === "..") {
-                return false;
-            }
-        }
-        return true;
     }
 
     /**

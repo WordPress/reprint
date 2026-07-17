@@ -9,23 +9,21 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push
 /**
  * Coverage for PushJournal's per-target baseline and bounded local planner.
  *
- * Planning enriches the stable sender index with directory emptiness while it
- * merges that index with the last successful baseline. The tests pin the
- * resulting positive-work JSONL, raw NUL-delimited work deletes, checkpoint
- * replay, and every transition among files, symlinks, empty directories, and
- * non-empty directories.
+ * Planning merges the current index, whose directory entries carry an `empty`
+ * boolean from the indexer, with the last successful baseline. The tests pin
+ * the resulting positive-work JSONL, raw NUL-delimited work deletes,
+ * checkpoint replay, and every transition among files, symlinks, empty
+ * directories, and non-empty directories.
  */
 final class PushJournalTest extends TestCase
 {
     private string $tempDir;
-    private string $docroot;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/push-journal-test-' . uniqid();
-        $this->docroot = $this->tempDir . '/docroot';
-        mkdir($this->docroot, 0755, true);
+        mkdir($this->tempDir, 0755, true);
     }
 
     protected function tearDown(): void
@@ -100,12 +98,9 @@ final class PushJournalTest extends TestCase
 
     public function testFirstPushTreatsOnlyInstallableEntriesAsChanged(): void
     {
-        file_put_contents($this->docroot . '/index.php', 'index');
-        mkdir($this->docroot . '/wp-content/themes/foo', 0755, true);
-        file_put_contents($this->docroot . '/wp-content/themes/foo/style.css', 'style');
         $index = $this->writeIndex([
             'index.php' => [100, 5, 'file'],
-            'wp-content' => [$this->pathCtime('wp-content'), 0, 'dir'],
+            'wp-content' => [100, 0, 'dir', false],
             'wp-content/themes/foo/style.css' => [150, 5, 'file'],
         ]);
 
@@ -126,15 +121,8 @@ final class PushJournalTest extends TestCase
         $this->assertSame('{"path":"' . base64_encode('index.php') . '"}', $firstLine);
     }
 
-    public function testPlanningEnrichesEverySenderIndexEntryAndExcludesOnlyWork(): void
+    public function testPlanningCopiesEverySourceIndexEntryAndExcludesOnlyWork(): void
     {
-        mkdir($this->docroot . '/empty');
-        mkdir($this->docroot . '/full');
-        file_put_contents($this->docroot . '/full/child.txt', 'child');
-        mkdir($this->docroot . '/private');
-        file_put_contents($this->docroot . '/private/current.txt', 'private');
-        file_put_contents($this->docroot . '/public.txt', 'public');
-
         $journal = $this->makeJournal();
         $journal->capture_local_files_baseline($this->writeIndex([
             'gone.txt' => [1, 1, 'file'],
@@ -142,10 +130,10 @@ final class PushJournalTest extends TestCase
             'private/gone.txt' => [1, 1, 'file'],
         ]));
         $current = $this->writeIndex([
-            'empty' => [$this->pathCtime('empty'), 0, 'dir'],
-            'full' => [$this->pathCtime('full'), 0, 'dir'],
+            'empty' => [2, 0, 'dir', true],
+            'full' => [2, 0, 'dir', false],
             'full/child.txt' => [2, 5, 'file'],
-            'private' => [$this->pathCtime('private'), 0, 'dir'],
+            'private' => [2, 0, 'dir', false],
             'private/current.txt' => [2, 7, 'file'],
             'public.txt' => [2, 6, 'file'],
         ]);
@@ -240,8 +228,8 @@ final class PushJournalTest extends TestCase
         foreach ($matrix as $previousType => $transitions) {
             foreach ($transitions as $currentType => [$expectedPushes, $expectedDeletes]) {
                 $journal = $this->makeJournal();
-                $journal->capture_local_files_baseline($this->writeLogicalBaselineIndex($previousType, 1));
-                $current = $this->writeCurrentLogicalIndex($currentType, 2);
+                $journal->capture_local_files_baseline($this->writeLogicalIndex($previousType, 1));
+                $current = $this->writeLogicalIndex($currentType, 2);
 
                 $result = $this->planToCompletion($journal, $current);
                 $message = $previousType . ' to ' . $currentType;
@@ -286,9 +274,9 @@ final class PushJournalTest extends TestCase
         }
         $current = $this->writeIndex($entries);
 
-        $initial = $journal->diff_local_files($current, $this->docroot);
+        $initial = $journal->diff_local_files($current);
         $this->assertInitialPlanningCheckpoint($initial);
-        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+        $first = $journal->diff_local_files($current, [], $initial['checkpoint']);
 
         $this->assertSame('planning', $first['status']);
         $this->assertSame([base64_encode('a')], $first['checkpoint']['active_work_delete_roots_b64']);
@@ -419,7 +407,7 @@ final class PushJournalTest extends TestCase
         $this->assertGreaterThan(0, filesize($journal->work_deletes_path));
 
         $current = $this->writeIndex($this->manyFileEntries(1001));
-        $initial = $journal->diff_local_files($current, $this->docroot);
+        $initial = $journal->diff_local_files($current);
 
         $this->assertInitialPlanningCheckpoint($initial);
         $this->assertSame(filesize($current), $initial['checkpoint']['current_index_identity']['size']);
@@ -433,7 +421,7 @@ final class PushJournalTest extends TestCase
         $current = $this->tempDir . '/current-index.jsonl';
         copy($this->writeIndex(['value.txt' => [1, 1, 'file']]), $current);
         $journal = $this->makeJournal();
-        $initial = $journal->diff_local_files($current, $this->docroot);
+        $initial = $journal->diff_local_files($current);
         $this->assertInitialPlanningCheckpoint($initial);
 
         // Simulate a process dying after it persisted the empty checkpoint.
@@ -443,7 +431,7 @@ final class PushJournalTest extends TestCase
         rename($replacement, $current);
         clearstatcache(true, $current);
 
-        $changed = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+        $changed = $journal->diff_local_files($current, [], $initial['checkpoint']);
 
         $this->assertSame('source_changed', $changed['status']);
         $this->assertSame($initial['checkpoint'], $changed['checkpoint']);
@@ -458,9 +446,9 @@ final class PushJournalTest extends TestCase
         $current = $this->writeIndex($entries);
         $journal = $this->makeJournal();
 
-        $initial = $journal->diff_local_files($current, $this->docroot);
+        $initial = $journal->diff_local_files($current);
         $this->assertInitialPlanningCheckpoint($initial);
-        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+        $first = $journal->diff_local_files($current, [], $initial['checkpoint']);
 
         $this->assertSame('planning', $first['status']);
         $checkpoint = $first['checkpoint'];
@@ -498,15 +486,15 @@ final class PushJournalTest extends TestCase
         $journal = $this->makeJournal();
         $journal->capture_local_files_baseline($this->writeIndex($baselineEntries));
 
-        $initial = $journal->diff_local_files($current, $this->docroot);
+        $initial = $journal->diff_local_files($current);
         $this->assertInitialPlanningCheckpoint($initial);
-        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+        $first = $journal->diff_local_files($current, [], $initial['checkpoint']);
         $this->assertSame('planning', $first['status']);
         $durableCheckpoint = $first['checkpoint'];
 
         // These writes reached disk, but the caller dies before persisting the
         // returned checkpoint. A new process must discard and replay this tail.
-        $discarded = $journal->diff_local_files($current, $this->docroot, [], $durableCheckpoint);
+        $discarded = $journal->diff_local_files($current, [], $durableCheckpoint);
         $this->assertSame('planning', $discarded['status']);
         $this->assertGreaterThan(
             $durableCheckpoint['sender_index_bytes'],
@@ -522,7 +510,7 @@ final class PushJournalTest extends TestCase
         );
 
         $reopened = $this->makeJournal();
-        $replayed = $reopened->diff_local_files($current, $this->docroot, [], $durableCheckpoint);
+        $replayed = $reopened->diff_local_files($current, [], $durableCheckpoint);
         $this->assertSame($discarded, $replayed);
         $result = $this->planToCompletion($reopened, $current, [], $replayed['checkpoint']);
 
@@ -536,13 +524,13 @@ final class PushJournalTest extends TestCase
     {
         $current = $this->writeIndex($this->manyFileEntries(1001));
         $journal = $this->makeJournal();
-        $initial = $journal->diff_local_files($current, $this->docroot);
+        $initial = $journal->diff_local_files($current);
         $this->assertInitialPlanningCheckpoint($initial);
-        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+        $first = $journal->diff_local_files($current, [], $initial['checkpoint']);
         $this->assertSame('planning', $first['status']);
 
         $reopened = $this->makeJournal();
-        $complete = $reopened->diff_local_files($current, $this->docroot, [], $first['checkpoint']);
+        $complete = $reopened->diff_local_files($current, [], $first['checkpoint']);
         $this->assertSame('complete', $complete['status']);
         $senderIndex = file_get_contents($reopened->sender_index_path);
         $pathsToPush = file_get_contents($reopened->local_paths_to_push);
@@ -550,7 +538,6 @@ final class PushJournalTest extends TestCase
 
         $replayedEof = $this->makeJournal()->diff_local_files(
             $current,
-            $this->docroot,
             [],
             $complete['checkpoint']
         );
@@ -567,9 +554,9 @@ final class PushJournalTest extends TestCase
         $source = $this->writeIndex($this->manyFileEntries(1001));
         copy($source, $current);
         $journal = $this->makeJournal();
-        $initial = $journal->diff_local_files($current, $this->docroot);
+        $initial = $journal->diff_local_files($current);
         $this->assertInitialPlanningCheckpoint($initial);
-        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+        $first = $journal->diff_local_files($current, [], $initial['checkpoint']);
         $this->assertSame('planning', $first['status']);
 
         // Keep the same bytes so device/inode identity, rather than content or
@@ -579,71 +566,10 @@ final class PushJournalTest extends TestCase
         rename($replacement, $current);
         clearstatcache(true, $current);
 
-        $changed = $journal->diff_local_files($current, $this->docroot, [], $first['checkpoint']);
+        $changed = $journal->diff_local_files($current, [], $first['checkpoint']);
 
         $this->assertSame('source_changed', $changed['status']);
         $this->assertSame($first['checkpoint'], $changed['checkpoint']);
-    }
-
-    public function testDirectoryTypeDriftAfterACheckpointReturnsSourceChanged(): void
-    {
-        mkdir($this->docroot . '/value');
-        $entries = $this->manyFileEntries(1000);
-        $entries['value'] = [$this->pathCtime('value'), 0, 'dir'];
-        $current = $this->writeIndex($entries);
-        $journal = $this->makeJournal();
-        $initial = $journal->diff_local_files($current, $this->docroot);
-        $this->assertInitialPlanningCheckpoint($initial);
-        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
-        $this->assertSame('planning', $first['status']);
-
-        rmdir($this->docroot . '/value');
-        file_put_contents($this->docroot . '/value', 'now a file');
-        clearstatcache(true, $this->docroot . '/value');
-
-        $changed = $journal->diff_local_files($current, $this->docroot, [], $first['checkpoint']);
-
-        $this->assertSame('source_changed', $changed['status']);
-        $this->assertSame($first['checkpoint'], $changed['checkpoint']);
-    }
-
-    public function testDirectoryCtimeDriftReturnsSourceChanged(): void
-    {
-        mkdir($this->docroot . '/value');
-        $current = $this->writeIndex([
-            'value' => [$this->pathCtime('value') + 10, 0, 'dir'],
-        ]);
-
-        $journal = $this->makeJournal();
-        $initial = $journal->diff_local_files($current, $this->docroot);
-        $this->assertInitialPlanningCheckpoint($initial);
-        $changed = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
-
-        $this->assertSame('source_changed', $changed['status']);
-        $this->assertSame(0, $changed['checkpoint']['changed']);
-        $this->assertSame(0, $changed['checkpoint']['current_index_byte_offset']);
-    }
-
-    public function testPlanningFailsLoudlyWhenAMatchingDirectoryCannotBeOpened(): void
-    {
-        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
-            $this->markTestSkipped('Directory permissions do not restrict root.');
-        }
-        mkdir($this->docroot . '/value');
-        chmod($this->docroot . '/value', 0000);
-        // Indexed after the chmod, so the entry carries the unreadable
-        // directory's real ctime and the drift check passes.
-        $current = $this->writeIndex([
-            'value' => [$this->pathCtime('value'), 0, 'dir'],
-        ]);
-
-        try {
-            $this->expectException(RuntimeException::class);
-            $this->expectExceptionMessage('cannot be opened for reading');
-            $this->planToCompletion($this->makeJournal(), $current);
-        } finally {
-            chmod($this->docroot . '/value', 0755);
-        }
     }
 
     // ------------------------------------------------------------------
@@ -677,25 +603,35 @@ final class PushJournalTest extends TestCase
 
     public function testPlanningRejectsABaselineDirectoryWithoutEmptyState(): void
     {
-        mkdir($this->docroot . '/value');
         $journal = $this->makeJournal();
         $journal->capture_local_files_baseline($this->writeIndex([
             'value' => [1, 0, 'dir'],
         ]));
         $current = $this->writeIndex([
-            'value' => [$this->pathCtime('value'), 0, 'dir'],
+            'value' => [2, 0, 'dir', true],
         ]);
 
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('empty');
+        $this->expectExceptionMessage('local baseline has no boolean empty');
         $this->planToCompletion($journal, $current);
+    }
+
+    public function testPlanningRejectsACurrentDirectoryWithoutEmptyState(): void
+    {
+        $current = $this->writeIndex([
+            'value' => [2, 0, 'dir'],
+        ]);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('current index has no boolean empty');
+        $this->planToCompletion($this->makeJournal(), $current);
     }
 
     public function testPlanningRequiresTheCurrentIndexToExist(): void
     {
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('current index file is missing');
-        $this->makeJournal()->diff_local_files($this->tempDir . '/no-such-index.jsonl', $this->docroot);
+        $this->makeJournal()->diff_local_files($this->tempDir . '/no-such-index.jsonl');
     }
 
     // ------------------------------------------------------------------
@@ -721,7 +657,7 @@ final class PushJournalTest extends TestCase
         ?array $checkpoint = null
     ): array {
         for ($step = 0; $step < 100; ++$step) {
-            $result = $journal->diff_local_files($currentIndex, $this->docroot, $excludedPaths, $checkpoint);
+            $result = $journal->diff_local_files($currentIndex, $excludedPaths, $checkpoint);
             if ($result['status'] === 'complete') {
                 return $result;
             }
@@ -765,7 +701,7 @@ final class PushJournalTest extends TestCase
         );
     }
 
-    private function writeLogicalBaselineIndex(string $logicalType, int $version): string
+    private function writeLogicalIndex(string $logicalType, int $version): string
     {
         if ($logicalType === 'file') {
             return $this->writeIndex(['value' => [$version, $version, 'file']]);
@@ -782,39 +718,6 @@ final class PushJournalTest extends TestCase
         ]);
     }
 
-    private function writeCurrentLogicalIndex(string $logicalType, int $version): string
-    {
-        $this->clearDocroot();
-        if ($logicalType === 'file') {
-            file_put_contents($this->docroot . '/value', 'file-' . $version);
-            return $this->writeIndex([
-                'value' => [$this->pathCtime('value'), filesize($this->docroot . '/value'), 'file'],
-            ]);
-        }
-        if ($logicalType === 'symlink') {
-            symlink('target-' . $version, $this->docroot . '/value');
-            return $this->writeIndex([
-                'value' => [$this->pathCtime('value'), 0, 'link'],
-            ]);
-        }
-        if ($logicalType === 'empty_directory') {
-            mkdir($this->docroot . '/value');
-            return $this->writeIndex([
-                'value' => [$this->pathCtime('value'), 0, 'dir'],
-            ]);
-        }
-        mkdir($this->docroot . '/value');
-        file_put_contents($this->docroot . '/value/child.txt', 'child-' . $version);
-        return $this->writeIndex([
-            'value' => [$this->pathCtime('value'), 0, 'dir'],
-            'value/child.txt' => [
-                $this->pathCtime('value/child.txt'),
-                filesize($this->docroot . '/value/child.txt'),
-                'file',
-            ],
-        ]);
-    }
-
     /** @return array<string,array{0:int,1:int,2:string}> */
     private function manyFileEntries(int $count): array
     {
@@ -827,7 +730,7 @@ final class PushJournalTest extends TestCase
 
     /**
      * Write a sorted index. Entries map path to ctime, size, type, and the
-     * optional empty flag carried only by enriched baseline directories.
+     * empty flag the indexer records on directory entries.
      *
      * @param array<string,array{0:int,1:int,2:string,3?:bool}> $entries
      */
@@ -856,7 +759,6 @@ final class PushJournalTest extends TestCase
         string $type,
         ?bool $directoryIsEmpty = null
     ): string {
-        // Match production index fields; only the sender index adds `empty`.
         $entry = ['path' => base64_encode($path), 'ctime' => $ctime, 'size' => $size, 'type' => $type];
         if ($directoryIsEmpty !== null) {
             $entry['empty'] = $directoryIsEmpty;
@@ -912,30 +814,6 @@ final class PushJournalTest extends TestCase
             $entries[$path] = $entry;
         }
         return $entries;
-    }
-
-    private function pathCtime(string $relativePath): int
-    {
-        $path = $this->docroot . '/' . $relativePath;
-        clearstatcache(true, $path);
-        $stat = lstat($path);
-        $this->assertIsArray($stat);
-        return (int) $stat['ctime'];
-    }
-
-    private function clearDocroot(): void
-    {
-        foreach (scandir($this->docroot) as $item) {
-            if ($item === '.' || $item === '..') {
-                continue;
-            }
-            $path = $this->docroot . '/' . $item;
-            if (is_dir($path) && !is_link($path)) {
-                $this->recursiveDelete($path);
-                continue;
-            }
-            unlink($path);
-        }
     }
 
     private function recursiveDelete(string $dir): void

@@ -2727,13 +2727,17 @@ function encode_index_batch(array $batch_items): array
         if (!empty($item["intermediate"])) {
             $entry["intermediate"] = true;
         }
+        if (isset($item["empty"])) {
+            $entry["empty"] = $item["empty"];
+        }
         $encoded[] = $entry;
     }
     return $encoded;
 }
 
 /**
- * Streams a directory index as gzipped JSON batches of {path, ctime, size, type}.
+ * Streams a directory index as gzipped JSON batches of {path, ctime, size,
+ * type}, plus an `empty` boolean on every inspected directory.
  *
  * The client supplies list_dir and drives traversal depth-first by
  * enqueuing directories as they are discovered. Resumption is supported
@@ -3163,6 +3167,32 @@ function endpoint_file_index(
                 ];
                 if ($link_target !== null) {
                     $item["target"] = $link_target;
+                }
+                if ($type === "dir") {
+                    // Record physical emptiness in the source index so later
+                    // push planning compares two index files without reopening
+                    // the live source tree. Skipped or storage-owned children
+                    // still make the directory non-empty: calling it empty
+                    // could turn their omission into destructive root work.
+                    $directory_handle = @opendir($path);
+                    if ($directory_handle !== false) {
+                        $item["empty"] = true;
+                        while (true) {
+                            $directory_entry = readdir($directory_handle);
+                            if ($directory_entry === false) {
+                                break;
+                            }
+                            if ($directory_entry !== "." && $directory_entry !== "..") {
+                                $item["empty"] = false;
+                                break;
+                            }
+                        }
+                        closedir($directory_handle);
+                    }
+                    // When the directory cannot be inspected, leave `empty`
+                    // absent. Pull keeps its existing dir_open reporting, while
+                    // push planning fails closed instead of treating missing
+                    // descendants as deletions.
                 }
                 $batch_items[] = $item;
 

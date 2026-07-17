@@ -245,6 +245,69 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/reprint-storage/state.json', $withCaches);
     }
 
+    public function testFileIndexRecordsPhysicalDirectoryEmptiness(): void
+    {
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir . '/empty', 0755, true);
+        mkdir($siteDir . '/full', 0755, true);
+        file_put_contents($siteDir . '/full/child.txt', 'child');
+        mkdir($siteDir . '/skipped-only/.git', 0755, true);
+        file_put_contents($siteDir . '/skipped-only/.git/HEAD', 'ref: refs/heads/main');
+        $storage = $siteDir . '/storage-parent/reprint-storage';
+        mkdir($storage, 0755, true);
+        file_put_contents($storage . '/state.json', '{}');
+        file_put_contents($siteDir . '/file.txt', 'file');
+
+        $entries = $this->relativeEntries(
+            $this->runFileIndexEntries($siteDir, false, 5000, $storage),
+            $siteDir
+        );
+
+        foreach ($entries as $path => $entry) {
+            if ($entry['type'] !== 'dir') {
+                continue;
+            }
+            $this->assertArrayHasKey('empty', $entry, $path);
+            $this->assertIsBool($entry['empty'], $path);
+        }
+        $this->assertTrue($entries['empty']['empty']);
+        $this->assertFalse($entries['full']['empty']);
+        $this->assertFalse($entries['skipped-only']['empty']);
+        $this->assertFalse($entries['storage-parent']['empty']);
+        $this->assertArrayNotHasKey('empty', $entries['file.txt']);
+        $this->assertArrayNotHasKey('skipped-only/.git', $entries);
+        $this->assertArrayNotHasKey('storage-parent/reprint-storage', $entries);
+    }
+
+    public function testFileIndexDoesNotClaimAnUnreadableDirectoryIsEmpty(): void
+    {
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $this->markTestSkipped('Directory permissions do not restrict root.');
+        }
+
+        $siteDir = $this->tempDir . '/site';
+        $unreadable = $siteDir . '/unreadable';
+        mkdir($unreadable, 0755, true);
+        chmod($unreadable, 0000);
+        $probe = @opendir($unreadable);
+        if ($probe !== false) {
+            closedir($probe);
+            chmod($unreadable, 0755);
+            $this->markTestSkipped('Directory permissions did not prevent inspection.');
+        }
+
+        try {
+            $entries = $this->relativeEntries(
+                $this->runFileIndexEntries($siteDir, false),
+                $siteDir
+            );
+            $this->assertSame('dir', $entries['unreadable']['type']);
+            $this->assertArrayNotHasKey('empty', $entries['unreadable']);
+        } finally {
+            chmod($unreadable, 0755);
+        }
+    }
+
     public function testFileIndexFilterDoesNotBreakResume(): void
     {
         // The skip is applied AFTER the cursor's "after" pointer is updated,
@@ -318,9 +381,11 @@ final class FileIndexSkipDefaultsTest extends TestCase
      *     File-index entries.
      *
      *     @type string $path Indexed path.
-     *     @type string $type Indexed path type.
+     *     @type string $type  Indexed path type.
+     *     @type bool   $empty Whether a directory was physically empty. Present
+     *                         only when the directory could be inspected.
      * }
-     * @phpstan-return list<array{path: string, type: string}>
+     * @phpstan-return list<array{path: string, type: string, empty?: bool}>
      */
     private function runFileIndexEntries(string $siteDir, bool $includeCaches, int $batchSize = 5000, ?string $storagePath = null): array
     {
@@ -365,10 +430,14 @@ final class FileIndexSkipDefaultsTest extends TestCase
                 $this->fail('index_batch chunk did not decode to an array: ' . substr($body, 0, 200));
             }
             foreach ($json as $item) {
-                $entries[] = [
+                $entry = [
                     'path' => base64_decode($item['path'], true),
                     'type' => $item['type'] ?? 'file',
                 ];
+                if (array_key_exists('empty', $item)) {
+                    $entry['empty'] = $item['empty'];
+                }
+                $entries[] = $entry;
             }
         }
 
@@ -380,15 +449,26 @@ final class FileIndexSkipDefaultsTest extends TestCase
      */
     private function relativePaths(array $entries, string $siteDir): array
     {
-        $prefix = $siteDir . '/';
+        return array_keys($this->relativeEntries($entries, $siteDir));
+    }
+
+    /**
+     * @return array<string,array{path:string,type:string,empty?:bool}>
+     */
+    private function relativeEntries(array $entries, string $siteDir): array
+    {
+        // endpoint_file_index() reports canonical paths. macOS exposes /tmp
+        // and /var through /private symlinks, so compare against the same form.
+        $siteRoot = realpath($siteDir) ?: $siteDir;
+        $prefix = rtrim($siteRoot, '/') . '/';
         $out = [];
         foreach ($entries as $e) {
             $p = $e['path'];
             if (strpos($p, $prefix) === 0) {
-                $out[] = substr($p, strlen($prefix));
+                $out[substr($p, strlen($prefix))] = $e;
             }
         }
-        sort($out);
+        ksort($out);
         return $out;
     }
 
