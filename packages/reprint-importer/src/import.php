@@ -11,6 +11,7 @@
  */
 
 use function WordPress\Filesystem\wp_join_unix_paths;
+use Reprint\Importer\FileSync\FilePlacementRules;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
@@ -50,6 +51,9 @@ require_once __DIR__ . '/lib/tuning/class-adaptive-tuner.php';
 if (!class_exists('AdaptiveTuner', false)) {
     class_alias(\Reprint\Importer\Tuning\AdaptiveTuner::class, 'AdaptiveTuner');
 }
+
+// File placement, remap, --only, and symlink bundle rules.
+require_once __DIR__ . '/lib/file-sync/class-file-placement-rules.php';
 
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
@@ -4814,10 +4818,7 @@ class ImportClient
      */
     private function clean_preflight_path($value): ?string
     {
-        if (!is_string($value) || trim($value) === "") {
-            return null;
-        }
-        return rtrim($value, "/");
+        return FilePlacementRules::cleanPreflightPath($value);
     }
 
     /**
@@ -4832,22 +4833,7 @@ class ImportClient
         string $from,
         string $to
     ): string {
-        $from_parts = explode("/", trim($from, "/"));
-        $to_parts = explode("/", trim($to, "/"));
-
-        // Find common prefix length
-        $common = 0;
-        $max = min(count($from_parts), count($to_parts));
-        while ($common < $max && $from_parts[$common] === $to_parts[$common]) {
-            $common++;
-        }
-
-        // Go up from $from to the common ancestor, then down to $to
-        $up = count($from_parts) - $common;
-        $down = array_slice($to_parts, $common);
-
-        $parts = array_merge(array_fill(0, $up, ".."), $down);
-        return implode("/", $parts) ?: ".";
+        return FilePlacementRules::relativePath($from, $to);
     }
 
     /**
@@ -8388,20 +8374,11 @@ class ImportClient
         string $target,
         string $root
     ): void {
-        if (str_starts_with($target, "/")) {
-            // Absolute target: must be under root
-            $resolved = normalize_path($target);
-        } else {
-            // Relative target: resolve against the symlink's parent directory
-            $resolved = normalize_path($symlink_parent_dir . "/" . $target);
-        }
-
-        if (!path_is_within_root($resolved, $root)) {
-            throw new RuntimeException(
-                "Security: symlink target escapes filesystem root: {$target} " .
-                "(resolves to {$resolved}, root is {$root})"
-            );
-        }
+        FilePlacementRules::assertSymlinkTargetWithinRoot(
+            $symlink_parent_dir,
+            $target,
+            $root,
+        );
     }
 
     /**
@@ -8443,14 +8420,7 @@ class ImportClient
         string $local_path,
         string $target
     ): string {
-        // Resolve to an absolute source path (relative targets against the
-        // symlink's source dir) so both spellings are handled the same way.
-        $source_target = str_starts_with($target, "/")
-            ? normalize_path($target)
-            : normalize_path(dirname($path) . "/" . $target);
-
-        // Only rewrite a target whose subtree was actually followed and indexed;
-        // everything else keeps its original (portable) spelling.
+        $source_target = FilePlacementRules::resolveSymlinkTargetSourcePath($path, $target);
         if (
             !$this->follow_symlinks ||
             !$this->remote_index_contains_path_prefix($source_target)
@@ -8458,18 +8428,24 @@ class ImportClient
             return $target;
         }
 
-        // Repoint to wherever the target's content is actually placed,
-        // the same seam file chunks use, so that the link never dangles.
-        $mapped_absolute = $this->remote_path_to_local_path_within_import_root($source_target);
-        $mapped_relative = self::compute_relative_path(
-            dirname($local_path),
-            $mapped_absolute
+        $mapped_relative = FilePlacementRules::mapSymlinkTargetForLocalMirror(
+            $path,
+            $local_path,
+            $target,
+            true,
+            true,
+            $this->get_filesystem_root_path(),
+            $this->remap_rules,
+            $this->symlink_bundle_directory,
+            $this->get_export_directories(),
         );
 
-        $this->audit_log(
-            "SYMLINK TARGET REMAP | {$path}: {$target} -> {$mapped_relative}",
-            false,
-        );
+        if ($mapped_relative !== $target) {
+            $this->audit_log(
+                "SYMLINK TARGET REMAP | {$path}: {$target} -> {$mapped_relative}",
+                false,
+            );
+        }
 
         return $mapped_relative;
     }
@@ -8557,23 +8533,14 @@ class ImportClient
     {
         $fingerprint = $this->files_remap_fingerprint();
         $previous = $this->import_state()->files_remap_fingerprint ?? null;
-
         $has_existing_index = file_exists($this->index_file) && filesize($this->index_file) > 0;
-        if ($previous === null && $has_existing_index && !empty($this->remap_rules)) {
-            throw new RuntimeException(
-                "Cannot use --remap with an existing files index that was created before remap tracking. " .
-                    "Use a new --state-dir or clear the existing files index first.",
-            );
-        }
 
-        if ($previous !== null && $previous !== $fingerprint) {
-            throw new RuntimeException(
-                "Cannot change --remap rules while reusing the same files index. " .
-                    "Use the original --remap rules, or use a new --state-dir for a fresh files-pull.",
-            );
-        }
-
-        if ($previous === null) {
+        if (FilePlacementRules::assertFilesRemapConsistent(
+            $fingerprint,
+            $previous,
+            $has_existing_index,
+            !empty($this->remap_rules),
+        )) {
             $this->import_state()->files_remap_fingerprint = $fingerprint;
             $this->save_state($this->state);
         }
@@ -8587,9 +8554,7 @@ class ImportClient
      */
     private function files_remap_fingerprint(): string
     {
-        $rules = $this->remap_rules;
-        ksort($rules, SORT_STRING);
-        return hash("sha256", json_encode($rules, JSON_UNESCAPED_SLASHES));
+        return FilePlacementRules::remapFingerprint($this->remap_rules);
     }
 
     /**
@@ -8603,23 +8568,14 @@ class ImportClient
      */
     private function assert_files_pull_only_unchanged_while_resuming(bool $has_progress): void
     {
-        if (!$has_progress) {
-            return;
-        }
-
         $fingerprint = $this->files_pull_only_fingerprint();
         $previous = $this->import_state()->files_pull_only_fingerprint ?? null;
 
-        if ($previous !== null && $previous !== $fingerprint) {
-            throw new RuntimeException(
-                "Cannot change --only while resuming files-pull. " .
-                    "Use the original --only values, or use --abort to start a new files-pull.",
-            );
-        }
-
-        // Older in-progress state may not have this guard persisted yet. Record
-        // the current value so subsequent resumes cannot drift.
-        if ($previous === null) {
+        if (FilePlacementRules::assertPullOnlyUnchangedWhileResuming(
+            $has_progress,
+            $fingerprint,
+            $previous,
+        )) {
             $this->import_state()->files_pull_only_fingerprint = $fingerprint;
             $this->save_state($this->state);
         }
@@ -8633,10 +8589,7 @@ class ImportClient
      */
     private function files_pull_only_fingerprint(): string
     {
-        return hash(
-            "sha256",
-            json_encode($this->pull_only_files_with_path_prefixes, JSON_UNESCAPED_SLASHES),
-        );
+        return FilePlacementRules::pullOnlyFingerprint($this->pull_only_files_with_path_prefixes);
     }
 
     /**
@@ -8650,14 +8603,7 @@ class ImportClient
         $fingerprint = $this->symlink_bundle_directory_fingerprint();
         $previous = $this->import_state()->symlink_bundle_directory_fingerprint ?? null;
 
-        if ($previous !== null && $previous !== $fingerprint) {
-            throw new RuntimeException(
-                "Cannot change the --follow-symlinks bundle directory for an existing files-pull. " .
-                    "Use the original value, or use --abort to start a new files-pull.",
-            );
-        }
-
-        if ($previous === null) {
+        if (FilePlacementRules::assertSymlinkBundleDirectoryUnchanged($fingerprint, $previous)) {
             $this->import_state()->symlink_bundle_directory_fingerprint = $fingerprint;
             $this->save_state($this->state);
         }
@@ -8670,8 +8616,10 @@ class ImportClient
      */
     private function symlink_bundle_directory_fingerprint(): string
     {
-        $effective = $this->symlink_bundle_directory ?? rtrim($this->get_filesystem_root_path(), "/");
-        return hash("sha256", $effective);
+        return FilePlacementRules::symlinkBundleDirectoryFingerprint(
+            $this->symlink_bundle_directory,
+            $this->get_filesystem_root_path(),
+        );
     }
 
     /**
@@ -8682,17 +8630,10 @@ class ImportClient
      */
     private function resolve_symlink_bundle_directory(string $raw): string
     {
-        $fs_root = rtrim($this->get_filesystem_root_path(), "/");
-        $directory = $this->resolve_token_path($raw, ["fs-root" => $fs_root]);
-
-        if (!path_is_within_root($directory, $fs_root)) {
-            throw new InvalidArgumentException(
-                "--follow-symlinks bundle directory \"{$directory}\" resolves outside --fs-root ({$fs_root}); " .
-                    "it must stay within the destination root",
-            );
-        }
-
-        return $directory;
+        return FilePlacementRules::resolveSymlinkBundleDirectory(
+            $raw,
+            $this->get_filesystem_root_path(),
+        );
     }
 
     /**
@@ -8708,127 +8649,28 @@ class ImportClient
      */
     private function resolve_remap(array $remap_raw): array
     {
-        $fs_root = rtrim($this->get_filesystem_root_path(), "/");
-
-        $source_tokens = $this->wp_source_path_tokens();
-        $target_tokens = ["fs-root" => $fs_root];
-
-        $rules = [];
-        $wp_content_target = null;
-        foreach ($remap_raw as [$source_raw, $target_raw]) {
-            $source = $this->resolve_token_path($source_raw, $source_tokens);
-            $target = $this->resolve_token_path($target_raw, $target_tokens);
-
-            if (!path_is_within_root($target, $fs_root)) {
-                throw new InvalidArgumentException(
-                    "--remap target \"{$target}\" resolves outside --fs-root ({$fs_root}); " .
-                        "targets must stay within the destination root",
-                );
-            }
-
-            $rules[$source] = $target;
-            if ($source === $source_tokens["wp-content"]) {
-                $wp_content_target = $target;
-            }
-        }
-
-        // When remapping wp-content, also remap plugins, mu-plugins, and uploads
-        // directories that live outside WP_CONTENT_DIR. Skip any directory that already
-        // has its own explicit --remap rule.
-        if ($wp_content_target !== null) {
-            foreach ($this->content_directories_outside_wp_content($source_tokens) as $name => $source) {
-                if (!isset($rules[$source])) {
-                    $rules[$source] = wp_join_unix_paths($wp_content_target, $name);
-                }
-            }
-        }
-
-        return $rules;
-    }
-
-    /**
-     * Find plugins, mu-plugins, and uploads directories that WordPress reports
-     * outside WP_CONTENT_DIR.
-     *
-     * When wp-content is selected with --only or --remap, these directories are not
-     * covered by WP_CONTENT_DIR itself, so callers need to handle them separately.
-     * Unknown paths are omitted because both WP_CONTENT_DIR and the directory path
-     * are needed to decide whether the directory lives outside WP_CONTENT_DIR.
-     *
-     * @param array<string,string|null> $source_tokens From wp_source_path_tokens().
-     * @return array<string,string> Directory name => real source path, for
-     *                              directories outside WP_CONTENT_DIR only.
-     */
-    private function content_directories_outside_wp_content(array $source_tokens): array
-    {
-        $content = $source_tokens["wp-content"];
-        if ($content === null) {
-            return [];
-        }
-
-        $directories = [];
-        foreach (["wp-plugins" => "plugins", "wp-mu-plugins" => "mu-plugins", "wp-uploads" => "uploads"] as $token => $name) {
-            $source = $source_tokens[$token];
-            if ($source !== null && !path_is_within_root($source, $content)) {
-                $directories[$name] = $source;
-            }
-        }
-
-        return $directories;
+        return FilePlacementRules::resolveRemap(
+            $remap_raw,
+            $this->import_state()->preflight["data"] ?? [],
+            $this->get_filesystem_root_path(),
+        );
     }
 
     /**
      * Resolve raw `--only` sources into a deduped list of real source absolute
      * prefixes selected for files-pull. Each source is a `:token:` template (e.g.
      * `:wp-content:`, `:wp-uploads:`) or a raw absolute path,
-     * resolved through the same source token table (wp_source_path_tokens)
-     * as --remap.
+     * resolved through the same source token table as --remap.
      *
      * @param array<int,string> $only_raw Raw SOURCE values from the CLI.
      * @return array<int,string> Real source prefixes (deduped).
      */
     private function resolve_pull_only_files_with_path_prefixes(array $only_raw): array
     {
-        $source_tokens = $this->wp_source_path_tokens();
-
-        $prefixes = [];
-        foreach ($only_raw as $src) {
-            if ($src === "") {
-                throw new InvalidArgumentException("--only source cannot be empty");
-            }
-
-            $resolved = $this->resolve_token_path($src, $source_tokens);
-            $prefixes[$resolved] = true;
-
-            // Selecting content_dir with --only also pulls in any plugins, mu-plugins,
-            // or uploads directory outside WP_CONTENT_DIR so files-pull enumerates it too.
-            if ($resolved === $source_tokens["wp-content"]) {
-                foreach ($this->content_directories_outside_wp_content($source_tokens) as $source) {
-                    $prefixes[$source] = true;
-                }
-            }
-        }
-
-        // Drop any prefix already covered by a broader one (e.g. wp-content and wp-content/plugins)
-        // A files-pull --only run doesn't need to walk the same subtree twice.
-        $sources = array_keys($prefixes);
-        $minimal = [];
-        foreach ($sources as $path) {
-            $covered = false;
-
-            foreach ($sources as $other) {
-                if ($other !== $path && path_is_within_root($path, $other)) {
-                    $covered = true;
-                    break;
-                }
-            }
-
-            if (!$covered) {
-                $minimal[] = $path;
-            }
-        }
-
-        return $minimal;
+        return FilePlacementRules::resolvePullOnlyFilesWithPathPrefixes(
+            $only_raw,
+            $this->import_state()->preflight["data"] ?? [],
+        );
     }
 
     /**
@@ -8843,133 +8685,10 @@ class ImportClient
      */
     private function is_file_path_selected_by_pull_only_files(string $path): bool
     {
-        if (empty($this->pull_only_files_with_path_prefixes)) {
-            return true;
-        }
-
-        foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
-            $remainder = self::path_remainder_under($path, $prefix);
-            if ($remainder === "") {
-                return false;
-            }
-            if ($remainder !== null) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * The source site's real paths from preflight data, as remap/--only token
-     * name => absolute path (wp-content, wp-plugins, wp-mu-plugins, wp-uploads,
-     * abspath).
-     *
-     * Plugins, mu-plugins, and uploads fall back to their conventional locations
-     * under WP_CONTENT_DIR when WP_CONTENT_DIR is known. This is a pure
-     * data-gatherer: any entry may be null when preflight lacks it (no
-     * content_dir, abspath undetermined).
-     */
-    private function wp_source_path_tokens(): array
-    {
-        $preflight = $this->import_state()->preflight["data"] ?? [];
-        $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
-
-        $content_dir = $this->clean_preflight_path( $paths["content_dir"] ?? null);
-
-        $abspath = $this->clean_preflight_path( $paths["abspath"] ?? null);
-        if ($abspath === null) {
-            $abspath = $this->clean_preflight_path( $preflight["wp_detect"]["roots"][0]["path"] ?? null);
-        }
-
-        $plugins_dir = $this->clean_preflight_path( $paths["plugins_dir"] ?? null);
-        $mu_plugins_dir = $this->clean_preflight_path( $paths["mu_plugins_dir"] ?? null);
-        $uploads_dir = $this->clean_preflight_path( $paths["uploads"]["basedir"] ?? null);
-
-        // If preflight did not report a directory path, use its conventional
-        // location under WP_CONTENT_DIR when WP_CONTENT_DIR is known.
-        if ($content_dir !== null) {
-            $plugins_dir = $plugins_dir ?? wp_join_unix_paths( $content_dir, "plugins" );
-            $mu_plugins_dir = $mu_plugins_dir ?? wp_join_unix_paths( $content_dir, "mu-plugins" );
-            $uploads_dir = $uploads_dir ?? wp_join_unix_paths( $content_dir, "uploads" );
-        }
-
-        return [
-            "abspath" => $abspath,
-            "wp-content" => $content_dir,
-            "wp-plugins" => $plugins_dir,
-            "wp-mu-plugins" => $mu_plugins_dir,
-            "wp-uploads" => $uploads_dir,
-        ];
-    }
-
-    /**
-     * Resolve a --remap/--only path argument into an absolute path.
-     *
-     * Substitutes a known leading `:token:` (see the token tables in
-     * resolve_remap and resolve_pull_only_files_with_path_prefixes) with its
-     * value, then trims trailing slashes. The result must be a valid absolute
-     * path with no `.`/`..` segments; a relative path or an unknown token (left
-     * unsubstituted) fails that check. Referencing a token whose value is
-     * unavailable in preflight is a distinct, clear error.
-     *
-     * @param string $raw The raw argument.
-     * @param array<string,string|null> $tokens Token name => value (null = unavailable).
-     */
-    private function resolve_token_path(string $raw, array $tokens): string
-    {
-        $resolved = $raw;
-        foreach ($tokens as $name => $value) {
-            $token = ":{$name}:";
-            $token_offset = strpos($resolved, $token);
-            if ($token_offset === false) {
-                continue;
-            }
-
-            if ($token_offset !== 0 || strpos($resolved, $token, strlen($token)) !== false) {
-                throw new InvalidArgumentException(
-                    "token \"{$token}\" must appear only at the beginning of the path"
-                );
-            }
-
-            if ($value === null) {
-                throw new InvalidArgumentException(
-                    "Cannot resolve token \"{$token}\": not available in preflight data. Run preflight first."
-                );
-            }
-
-            $resolved = $value . substr($resolved, strlen($token));
-        }
-
-        $resolved = rtrim($resolved, "/");
-        assert_valid_path($resolved, "path \"{$raw}\"");
-
-        return $resolved;
-    }
-
-    /**
-     * Map a source absolute path to its absolute local target via the remap
-     * rules (most specific source wins), or null when no rule applies.
-     *
-     * Any rules that match the same path are nested (each is a path-prefix of
-     * it, and prefixes of one string are ordered by length), so the longest
-     * matching source is the deepest — i.e. the most specific — match. Ranking
-     * by source, not target: a rule applies based purely on its source side.
-     */
-    private function remap_source_path_to_target(string $source_path): ?string
-    {
-        $best = null;
-        $best_source_length = -1;
-
-        foreach ($this->remap_rules as $source => $target) {
-            $rest = self::path_remainder_under($source_path, $source);
-            if ($rest !== null && strlen($source) > $best_source_length) {
-                $best = wp_join_unix_paths($target, $rest);
-                $best_source_length = strlen($source);
-            }
-        }
-
-        return $best;
+        return FilePlacementRules::isFilePathSelectedByPullOnlyFiles(
+            $path,
+            $this->pull_only_files_with_path_prefixes,
+        );
     }
 
     /**
@@ -8988,44 +8707,13 @@ class ImportClient
     private function remote_path_to_local_path_within_import_root(
         string $path
     ): string {
-        assert_valid_path($path, "remote path");
-        if (!empty($this->remap_rules)) {
-            $target = $this->remap_source_path_to_target($path);
-            if ($target !== null) {
-                return $target;
-            }
-        }
-
-        // Following symlinks is currently the only way paths outside the original export scope reach this mapper.
-        // Use the same bundle mapping for copied content and rewritten symlink targets so the links do not dangle.
-        if ($this->symlink_bundle_directory !== null
-            && !$this->path_is_within_original_export_scope($path)) {
-            return $this->symlink_bundle_directory . $path;
-        }
-
-        return $this->get_filesystem_root_path() . $path;
-    }
-
-
-    /**
-     * Returns the remainder of $path underneath $prefix,
-     * empty string if $path === $prefix,
-     * or null if $path is not under $prefix.
-     */
-    private static function path_remainder_under(string $path, string $prefix): ?string
-    {
-        $path = rtrim($path, "/");
-        $prefix = rtrim($prefix, "/");
-
-        if ($path === $prefix) {
-            return "";
-        }
-
-        if (str_starts_with($path, $prefix . "/")) {
-            return substr($path, strlen($prefix));
-        }
-
-        return null;
+        return FilePlacementRules::remotePathToLocalPathWithinImportRoot(
+            $path,
+            $this->get_filesystem_root_path(),
+            $this->remap_rules,
+            $this->symlink_bundle_directory,
+            $this->get_export_directories(),
+        );
     }
 
     /**
@@ -9796,18 +9484,9 @@ class ImportClient
      */
     private function get_root_directories_from_preflight(): array
     {
-        $roots = $this->import_state()->preflight["data"]["wp_detect"]["roots"] ?? [];
-        if (!is_array($roots) || empty($roots)) {
-            return [];
-        }
-        $dirs = [];
-        foreach ($roots as $root) {
-            $path = $root["path"] ?? null;
-            if (is_string($path) && $path !== "") {
-                $dirs[] = rtrim($path, "/");
-            }
-        }
-        $dirs = array_values(array_unique($dirs));
+        $dirs = FilePlacementRules::rootDirectoriesFromPreflight(
+            $this->import_state()->preflight["data"] ?? [],
+        );
         if (!empty($dirs)) {
             $this->audit_log(
                 "DIRECTORY AUTO-DETECT | from preflight wp_detect.roots: " .
@@ -9815,22 +9494,6 @@ class ImportClient
             );
         }
         return $dirs;
-    }
-
-    /**
-     * Whether $path falls under one of the ORIGINAL export directories (the
-     * --only prefixes, or the base roots without --only) — i.e. it was going to
-     * be pulled anyway. Evaluated against the pre-follow scope; a followed
-     * target outside all of these is "escaping" and eligible for symlink bundling.
-     */
-    private function path_is_within_original_export_scope(string $path): bool
-    {
-        foreach ($this->get_export_directories() as $root) {
-            if (path_is_within_root($path, $root)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -9851,80 +9514,28 @@ class ImportClient
             return $this->export_directories_cache;
         }
 
-        // With --only, files-pull should enumerate only the selected source path
-        // prefixes. Do not add the default roots, remap sources, document root, or
-        // auto-prepend/append directories below.
-        if (!empty($this->pull_only_files_with_path_prefixes)) {
-            $this->export_directories_cache = $this->pull_only_files_with_path_prefixes;
-            return $this->export_directories_cache;
+        $resolution = FilePlacementRules::resolveExportDirectories(
+            $this->import_state()->preflight["data"] ?? [],
+            $this->extra_directory,
+            $this->remap_rules,
+            $this->pull_only_files_with_path_prefixes,
+        );
+
+        if (!empty($resolution["root_directories"])) {
+            $this->audit_log(
+                "DIRECTORY AUTO-DETECT | from preflight wp_detect.roots: " .
+                    implode(", ", $resolution["root_directories"]),
+            );
         }
 
-        $dirs = $this->get_root_directories_from_preflight();
-        if (empty($dirs)) {
-            $this->export_directories_cache = [];
-            return $this->export_directories_cache;
+        foreach ($resolution["auto_detected"] as $label => $path) {
+            $this->audit_log(
+                "DIRECTORY AUTO-DETECT | adding {$label} outside roots: " .
+                    $path,
+            );
         }
 
-        $preflight = $this->import_state()->preflight["data"] ?? [];
-
-        // Collect extra paths that may live outside the wp_detect roots.
-        $extra_paths = [
-            "document_root" => rtrim($preflight["runtime"]["document_root"] ?? "", "/"),
-            "content_dir" => rtrim($preflight["database"]["wp"]["paths_urls"]["content_dir"] ?? "", "/"),
-        ];
-
-        if ($this->extra_directory !== null && $this->extra_directory !== "") {
-            $extra_paths["extra_directory"] = rtrim($this->extra_directory, "/");
-        }
-
-        // Ensure every --remap source is enumerated — including plugins or
-        // uploads directories that live outside the WordPress roots and so
-        // wouldn't be discovered by traversal alone.
-        $remap_index = 0;
-        foreach (array_keys($this->remap_rules) as $source) {
-            $extra_paths["remap_source_{$remap_index}"] = $source;
-            $remap_index++;
-        }
-
-        // auto_prepend_file / auto_append_file may point to directories
-        // outside the WordPress roots (e.g. /scripts/env.php on Atomic).
-        // Include those directories so the remote exporter traverses them.
-        $ini_all = $preflight["runtime"]["ini_get_all"] ?? [];
-        foreach (["auto_prepend_file", "auto_append_file"] as $ini_key) {
-            $ini_path = $ini_all[$ini_key] ?? "";
-            if (is_string($ini_path) && $ini_path !== "" && $ini_path[0] === "/") {
-                $ini_dir = rtrim(dirname($ini_path), "/");
-                if ($ini_dir !== "" && $ini_dir !== "/") {
-                    $extra_paths[$ini_key] = $ini_dir;
-                }
-            }
-        }
-
-        foreach ($extra_paths as $label => $path) {
-            if ($path === "") {
-                continue;
-            }
-            // Check if this path is already covered by an existing dir.
-            $covered = false;
-            foreach ($dirs as $root) {
-                if (
-                    $path === $root ||
-                    str_starts_with($path, $root . "/")
-                ) {
-                    $covered = true;
-                    break;
-                }
-            }
-            if (!$covered) {
-                $dirs[] = $path;
-                $this->audit_log(
-                    "DIRECTORY AUTO-DETECT | adding {$label} outside roots: " .
-                        $path,
-                );
-            }
-        }
-
-        $this->export_directories_cache = $dirs;
+        $this->export_directories_cache = $resolution["directories"];
         return $this->export_directories_cache;
     }
 

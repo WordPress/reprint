@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FilePlacementRules;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -94,10 +95,7 @@ class SymlinkBundleTest extends TestCase
 
     private function inScope(array $onlyPrefixes, string $path): bool
     {
-        $c = $this->newClient();
-        $rc = new \ReflectionClass($c);
-        $rc->getProperty('pull_only_files_with_path_prefixes')->setValue($c, $onlyPrefixes);
-        return $rc->getMethod('path_is_within_original_export_scope')->invoke($c, $path);
+        return FilePlacementRules::pathIsWithinOriginalExportScope($path, $onlyPrefixes);
     }
 
     public function testTargetUnderScopeIsInScope(): void

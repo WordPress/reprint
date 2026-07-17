@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\FileSync\FilePlacementRules;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -133,8 +134,7 @@ class RemapSeamTest extends TestCase
      */
     public function testPathRemainderUnder(?string $expected, string $path, string $prefix): void
     {
-        $c = $this->clientWithRules(array());
-        $this->assertSame($expected, $this->call($c, 'path_remainder_under', array($path, $prefix)));
+        $this->assertSame($expected, FilePlacementRules::pathRemainderUnder($path, $prefix));
     }
 
     public static function providePathRemainderCases(): array

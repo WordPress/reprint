@@ -89,9 +89,10 @@ function _site_export_is_push_endpoint(string $endpoint): bool {
 function _site_export_load_exporter_runtime(): ?string {
     static $loaded_export_path = null;
 
-    if ($loaded_export_path !== null) {
+    if ($loaded_export_path !== null && file_exists($loaded_export_path)) {
         return $loaded_export_path;
     }
+    $loaded_export_path = null;
 
     $repo_root = dirname(SITE_EXPORT_PLUGIN_DIR);
     $candidates = [

@@ -202,6 +202,9 @@ final class SiteExportSecretTest extends TestCase
     /** @var string|false */
     private $original_push_enabled_environment;
 
+    /** @var array<int,string> */
+    private $extra_paths_to_remove = [];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -236,13 +239,16 @@ final class SiteExportSecretTest extends TestCase
             unlink(SITE_EXPORT_SECRET_FILE);
         }
 
-        if (is_dir(SITE_EXPORT_PLUGIN_DIR)) {
-            rmdir(SITE_EXPORT_PLUGIN_DIR);
+        $this->removePath(SITE_EXPORT_PLUGIN_DIR);
+        foreach ($this->extra_paths_to_remove as $path) {
+            $this->removePath($path);
         }
+        $this->extra_paths_to_remove = [];
 
         $_SERVER = $this->original_server;
         $_FILES = $this->original_files;
         $_POST = $this->original_post;
+        unset($GLOBALS['site_export_runtime_loader_autoloads']);
         if ($this->original_push_enabled_environment === false) {
             putenv('SITE_EXPORT_PUSH_ENABLED');
         } else {
@@ -300,6 +306,73 @@ final class SiteExportSecretTest extends TestCase
         $_SERVER['HTTP_X_AUTH_CONTENT_HASH'] = $content_hash;
 
         $this->assertNull(_site_export_verify_hmac($secret));
+    }
+
+    public function testRuntimeLoaderUsesCanonicalAutoloadPathForSymlinkedPluginDirectory(): void
+    {
+        $this->removePath(SITE_EXPORT_PLUGIN_DIR);
+
+        $real_plugin_directory = sys_get_temp_dir()
+            . '/site-export-runtime-real-' . getmypid() . '-' . uniqid() . '/';
+        $this->extra_paths_to_remove[] = $real_plugin_directory;
+        mkdir($real_plugin_directory . 'vendor/wp-php-toolkit/reprint-exporter/src', 0755, true);
+        symlink(rtrim($real_plugin_directory, '/'), rtrim(SITE_EXPORT_PLUGIN_DIR, '/'));
+
+        $autoload = $real_plugin_directory . 'vendor/autoload.php';
+        $export = $real_plugin_directory . 'vendor/wp-php-toolkit/reprint-exporter/src/export.php';
+        file_put_contents(
+            $autoload,
+            "<?php\n\$GLOBALS['site_export_runtime_loader_autoloads'][] = __FILE__;\n"
+        );
+        file_put_contents($export, "<?php\n");
+        $GLOBALS['site_export_runtime_loader_autoloads'] = [];
+
+        $this->assertSame(realpath($export), _site_export_load_exporter_runtime());
+        $this->assertSame([realpath($autoload)], $GLOBALS['site_export_runtime_loader_autoloads']);
+
+        _site_export_load_exporter_runtime();
+
+        $this->assertSame([realpath($autoload)], $GLOBALS['site_export_runtime_loader_autoloads']);
+    }
+
+    public function testRuntimeLoaderDoesNotReloadComposerAutoloaderDeclaredThroughSymlink(): void
+    {
+        $this->removePath(SITE_EXPORT_PLUGIN_DIR);
+
+        $real_plugin_directory = sys_get_temp_dir()
+            . '/site-export-runtime-preloaded-real-' . getmypid() . '-' . uniqid() . '/';
+        $this->extra_paths_to_remove[] = $real_plugin_directory;
+        mkdir($real_plugin_directory . 'vendor/composer', 0755, true);
+        mkdir($real_plugin_directory . 'vendor/wp-php-toolkit/reprint-exporter/src', 0755, true);
+        symlink(rtrim($real_plugin_directory, '/'), rtrim(SITE_EXPORT_PLUGIN_DIR, '/'));
+
+        $init_class = str_replace('.', '_', uniqid('ComposerAutoloaderInitSiteExportRuntimeTest', true));
+        $autoload = $real_plugin_directory . 'vendor/autoload.php';
+        $autoload_real = $real_plugin_directory . 'vendor/composer/autoload_real.php';
+        $export = $real_plugin_directory . 'vendor/wp-php-toolkit/reprint-exporter/src/export.php';
+        file_put_contents(
+            $autoload,
+            "<?php\n"
+            . "\$GLOBALS['site_export_runtime_loader_autoloads'][] = __FILE__;\n"
+            . "require_once __DIR__ . '/composer/autoload_real.php';\n"
+            . "return {$init_class}::getLoader();\n"
+        );
+        file_put_contents(
+            $autoload_real,
+            "<?php\n"
+            . "class {$init_class} {\n"
+            . "    public static function getLoader() {\n"
+            . "        return null;\n"
+            . "    }\n"
+            . "}\n"
+        );
+        file_put_contents($export, "<?php\n");
+        $GLOBALS['site_export_runtime_loader_autoloads'] = [];
+
+        require_once SITE_EXPORT_PLUGIN_DIR . 'vendor/autoload.php';
+
+        $this->assertSame(realpath($export), _site_export_load_exporter_runtime());
+        $this->assertCount(1, $GLOBALS['site_export_runtime_loader_autoloads']);
     }
 
     public function testPushAuthorizationMatchesOnlyTheCurrentConnectionToken(): void
@@ -458,5 +531,27 @@ final class SiteExportSecretTest extends TestCase
         ob_start();
         Site_Export_Plugin::get_instance()->render_admin_page();
         return (string) ob_get_clean();
+    }
+
+    private function removePath(string $path): void
+    {
+        $path = rtrim($path, '/\\');
+        if (is_link($path) || is_file($path)) {
+            unlink($path);
+            return;
+        }
+
+        if (!is_dir($path)) {
+            return;
+        }
+
+        foreach (scandir($path) as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $this->removePath($path . DIRECTORY_SEPARATOR . $entry);
+        }
+
+        rmdir($path);
     }
 }
