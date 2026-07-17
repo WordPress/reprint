@@ -65,7 +65,7 @@ function action_sites(): void {
     $token = reprint_wpcom_token();
     if ($token === '') { http_response_code(401); echo json_encode(['error' => 'not_authenticated']); return; }
     $sites = wpcom_get([
-        'url' => 'https://public-api.wordpress.com/rest/v1.1/me/sites?filter=atomic,wpcom&fields=ID,URL,name,icon,is_wpcom_atomic',
+        'url' => 'https://public-api.wordpress.com/rest/v1.1/me/sites?filter=atomic,wpcom,jetpack&fields=ID,URL,name,icon,is_wpcom_atomic',
         'token' => $token,
     ]);
     echo $sites;
@@ -141,73 +141,45 @@ function wpcom_post(string $url, string $token, array $body, string $encoding = 
  * current token scope doesn't always cover.
  */
 function wpcom_provision_reprint(int $site_id, string $site_url, string $token): array {
-    // Step 1: set reprint_exporter_enabled=<timestamp> via /sites/<id>/settings.
-    // WP.com's settings endpoint whitelists keys and silently drops
-    // unknown ones with a 200 OK, so we verify that the key actually
-    // appears in the response's `updated` object — matching Studio's
-    // enableReprintExporter behavior in yangon/apps/cli/lib/api.ts.
-    $enabled = wpcom_post(
-        "https://public-api.wordpress.com/rest/v1.1/sites/{$site_id}/settings",
+    // TEMP (STU-1929 v2 test): drive the new jetpack/v4 endpoints instead of the
+    // wpcomsh v1 ones. Both enable + rotate go through the Jetpack REST bridge,
+    // which works on Pressable *and* Atomic — unlike the v1 enable via
+    // /sites/<id>/settings, a WP.com-only whitelist that never propagates to a
+    // plain Jetpack/Pressable site. Our v2 rotate-export-secret also opens the
+    // 60-minute window, so this enable call is belt-and-suspenders.
+    $enable = wpcom_post(
+        "https://public-api.wordpress.com/rest/v1.1/jetpack-blogs/{$site_id}/rest-api?http_envelope=1",
         $token,
-        ['reprint_exporter_enabled' => time()],
-        'form'
+        ['path' => '/jetpack/v4/reprint/enable-export']
     );
-    if ($enabled['status'] >= 400) {
-        throw new RuntimeException("enable-export-api failed (HTTP {$enabled['status']}): " . substr((string)$enabled['body'], 0, 300));
-    }
-    $updated = $enabled['json']['updated'] ?? null;
-    if (!is_array($updated) || !array_key_exists('reprint_exporter_enabled', $updated)) {
-        throw new RuntimeException(
-            'The site did not acknowledge the reprint exporter activation. ' .
-            'The feature may not be available yet on this WordPress.com site. ' .
-            'Response: ' . substr((string) $enabled['body'], 0, 400)
-        );
-    }
 
-    // Step 2: rotate the HMAC secret via the Jetpack bridge.
+    // Rotate the HMAC secret via the Jetpack bridge (also opens the window).
     $rotated = wpcom_post(
         "https://public-api.wordpress.com/rest/v1.1/jetpack-blogs/{$site_id}/rest-api?http_envelope=1",
         $token,
-        ['path' => '/wpcomsh/v1/reprint/rotate-export-secret']
+        ['path' => '/jetpack/v4/reprint/rotate-export-secret']
     );
     $env = $rotated['json'] ?? null;
     if (!is_array($env) || ($env['code'] ?? 0) !== 200) {
         throw new RuntimeException('rotate-export-secret failed: ' . substr((string)$rotated['body'], 0, 300));
     }
-    // Jetpack bridge returns the inner response in `body`. WP.com sometimes
-    // hands it back as an object, sometimes as a JSON-encoded string —
-    // normalise both shapes.
+    // Jetpack bridge returns the inner response in `body`, sometimes as an
+    // object, sometimes JSON-encoded — normalise both shapes.
     $inner = $env['body'] ?? null;
     if (is_string($inner)) {
         $inner = json_decode($inner, true);
     }
-    $secret = is_array($inner) ? ($inner['data']['secret'] ?? null) : null;
+    // v2 returns {secret}; v1 nested it under {data:{secret}} — accept both.
+    $secret = is_array($inner) ? ($inner['secret'] ?? $inner['data']['secret'] ?? null) : null;
     if (!$secret) {
         throw new RuntimeException('No secret in rotate response: ' . substr((string)$rotated['body'], 0, 400));
     }
 
-    // Belt-and-suspenders: if the site also has the legacy
-    // `reprint-exporter-wp` standalone plugin installed, that plugin
-    // intercepts ?reprint-api at plugin-load time and reads its secret
-    // from the `site_export_secret` option (NOT wpcomsh's
-    // `reprint_exporter_secret`). Writing the rotated value to both
-    // options means whichever handler fires first will accept us.
-    // The settings endpoint silently drops keys it doesn't whitelist,
-    // so this is a no-op on sites without the legacy plugin.
-    $legacy_sync = wpcom_post(
-        "https://public-api.wordpress.com/rest/v1.1/sites/{$site_id}/settings",
-        $token,
-        ['site_export_secret' => $secret],
-        'form'
-    );
-
     $debug = [
-        'enable_updated' => $updated,
+        'enable_raw' => (string) $enable['body'],
         'rotate_raw' => (string) $rotated['body'],
-        'legacy_sync_status' => $legacy_sync['status'],
-        'legacy_sync_updated' => $legacy_sync['json']['updated'] ?? null,
     ];
-    return [rtrim($site_url, '/') . '/?reprint-api', $secret, $debug];
+    return [rtrim($site_url, '/') . '/?reprint-api-v2', $secret, $debug];
 }
 
 // ──────────────────────────────────────────────────────────────────────────
