@@ -624,6 +624,28 @@ final class PushJournalTest extends TestCase
         $this->assertSame(0, $changed['checkpoint']['current_index_byte_offset']);
     }
 
+    public function testPlanningFailsLoudlyWhenAMatchingDirectoryCannotBeOpened(): void
+    {
+        if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+            $this->markTestSkipped('Directory permissions do not restrict root.');
+        }
+        mkdir($this->docroot . '/value');
+        chmod($this->docroot . '/value', 0000);
+        // Indexed after the chmod, so the entry carries the unreadable
+        // directory's real ctime and the drift check passes.
+        $current = $this->writeIndex([
+            'value' => [$this->pathCtime('value'), 0, 'dir'],
+        ]);
+
+        try {
+            $this->expectException(RuntimeException::class);
+            $this->expectExceptionMessage('cannot be opened for reading');
+            $this->planToCompletion($this->makeJournal(), $current);
+        } finally {
+            chmod($this->docroot . '/value', 0755);
+        }
+    }
+
     // ------------------------------------------------------------------
     //  Invalid input
     // ------------------------------------------------------------------

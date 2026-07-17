@@ -577,8 +577,16 @@ class PushJournal
         }
         $directory_handle = @opendir($absolute_path);
         if (!$directory_handle) {
+            // A directory deleted between the identity check and the open is
+            // ordinary source drift. One that still matches the index is not:
+            // indexing aborts on unreadable directories and a chmod would
+            // have changed the ctime, so re-indexing cannot repair it.
+            if (!$this->directory_matches_index($absolute_path, $entry["ctime"])) {
+                return null;
+            }
             throw new RuntimeException(
-                "Failed to inspect current directory " . base64_encode($path) . "."
+                "Current directory " . base64_encode($path)
+                . " matches its index entry but cannot be opened for reading."
             );
         }
         $empty = true;
