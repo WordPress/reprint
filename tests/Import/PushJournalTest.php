@@ -677,6 +677,53 @@ final class PushJournalTest extends TestCase
     }
 
     /**
+     * Filters every path that conflicts with receiver-owned exclusions.
+     *
+     * The next baseline combines the current non-excluded evidence with the
+     * last synchronized evidence under excluded roots. This keeps skipped
+     * bytes honest and makes later policy removal detect both changes and
+     * deletions. Paths remain raw bytes throughout.
+     */
+    public function testExcludedPathsFilterWorkAndPreservePriorBaselineEvidence(): void
+    {
+        $arbitrary_bytes_root = "private-\xff";
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'ordinary-deleted.txt' => [1, 1, 'file'],
+            'private/owned' => [1, 1, 'dir'],
+            'private/owned/deleted.txt' => [1, 1, 'file'],
+            'private/owned/value.txt' => [1, 3, 'file'],
+            $arbitrary_bytes_root . '/value.txt' => [1, 3, 'file'],
+        ]));
+        $current = $this->writeIndex([
+            'private' => [2, 2, 'dir'],
+            'private/owned' => [2, 2, 'dir'],
+            'private/owned/value.txt' => [2, 7, 'file'],
+            'private/sibling.txt' => [2, 7, 'file'],
+            $arbitrary_bytes_root . '/value.txt' => [2, 7, 'file'],
+        ]);
+        $excluded_paths = ['private/owned', $arbitrary_bytes_root];
+
+        $this->assertSame(
+            ['changed' => 1, 'deleted' => 1],
+            $journal->diff_local_files($current, $excluded_paths)
+        );
+        $this->assertSame(['private/sibling.txt'], $this->listPaths($journal->local_paths_to_push));
+        $this->assertSame(['ordinary-deleted.txt'], $this->listPaths($journal->local_paths_to_delete));
+
+        $journal->capture_local_files_baseline($current, $excluded_paths);
+        $expected_baseline_paths = [
+            'private/owned',
+            'private/owned/deleted.txt',
+            'private/owned/value.txt',
+            'private/sibling.txt',
+            $arbitrary_bytes_root . '/value.txt',
+        ];
+        usort($expected_baseline_paths, 'strcmp');
+        $this->assertSame($expected_baseline_paths, $this->listPaths($journal->local_files_baseline_path));
+    }
+
+    /**
      * Keeps active path lists independent from later caller-index changes.
      *
      * The sender copy, positive-work list, and raw work-delete stream must all
@@ -718,7 +765,6 @@ final class PushJournalTest extends TestCase
     {
         $journal = $this->makeJournal();
         $state = [
-            'version' => 1,
             'push_session_id' => str_repeat('a', 32),
             'phase' => 'reconciling_work',
             'paths_byte_offset' => 17,
@@ -729,6 +775,7 @@ final class PushJournalTest extends TestCase
             'work_deletes_byte_offset' => 7,
             'recoverable_failures' => 2,
             'max_part_bytes' => 4194304,
+            'excluded_paths_b64' => [base64_encode('private')],
             'request_sizer_state' => [
                 'request_body_bytes' => 1048576,
                 'ceiling_bytes' => 2097152,

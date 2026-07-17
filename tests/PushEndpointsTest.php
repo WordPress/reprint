@@ -57,6 +57,7 @@ final class PushEndpointsTest extends TestCase {
         file_put_contents($this->reprint_configuration_path, $this->reprint_directory);
         $this->writeDocrootConfiguration([
             'document_root' => $this->docroot,
+            'maximum_part_bytes' => 64,
         ]);
         $this->writeExcludedPaths(['preserved']);
         file_put_contents($this->docroot . '/remove.txt', 'old');
@@ -332,7 +333,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
         $this->assertSame('created', $create['response']['status']);
         $this->assertSame($push_session_id, $create['response']['push_session_id']);
-        $this->assertSame(4, $create['response']['max_part_bytes']);
+        $this->assertSame(64, $create['response']['max_part_bytes']);
         $this->assertSame(self::POST_MAX_BYTES, $create['response']['post_max_bytes']);
         $this->assertSame(200, $create['response']['http_code']);
         $client->set_max_part_bytes($create['response']['max_part_bytes']);
@@ -628,7 +629,7 @@ final class PushEndpointsTest extends TestCase {
         $expected_response = [
             'status' => 'created',
             'push_session_id' => $push_session_id,
-            'max_part_bytes' => 4,
+            'max_part_bytes' => 64,
             'post_max_bytes' => self::POST_MAX_BYTES,
             'excluded_paths_b64' => $expected_excluded_paths_b64,
             'http_code' => 200,
@@ -1318,9 +1319,6 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * @return array{http_code:int,response:array<string,mixed>} Decoded raw HTTP response.
-     */
-    /**
      * Completes a mixed-value push while reconstructing the sender each step.
      *
      * The first upload request carries multiple work values and multiple
@@ -1432,6 +1430,166 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * Defers a sender step while another process owns the same site journal.
+     *
+     * The second call resumes after the lock is released. It must not create a
+     * competing push session or replace any of the first process's fixed-name
+     * journal files while the lock is held.
+     */
+    public function testHighLevelSenderWaitsForLocalJournalLockAndResumes(): void
+    {
+        $local_docroot = $this->root . '/local-lock-source';
+        mkdir($local_docroot, 0700, true);
+        $current_index = $this->root . '/local-lock-index.jsonl';
+        $this->writeIndex($current_index, []);
+        $journal = new PushJournal($this->root . '/local-lock-state', $this->base_url);
+        $site_directory = dirname($journal->sender_state_path);
+        mkdir($site_directory, 0700, true);
+        $sender_lock_process = $this->startLockProcess($site_directory . '/sender.lock');
+
+        try {
+            $sender = $this->newSender($local_docroot, $current_index, $journal);
+            $blocked = $sender->send_next_request();
+            $this->assertSame('continue', $blocked['status'], (string) json_encode($blocked));
+            $this->assertSame('sender_busy', $blocked['reason'], (string) json_encode($blocked));
+            $this->assertNull($blocked['push_session_id']);
+            $this->assertNull($journal->read_sender_state());
+        } finally {
+            $this->stopLockProcess($sender_lock_process);
+        }
+
+        $resumed = $sender->send_next_request();
+        $this->assertSame('continue', $resumed['status'], (string) json_encode($resumed));
+        $this->assertNull($resumed['reason'], (string) json_encode($resumed));
+        $state = $journal->read_sender_state();
+        $this->assertIsArray($state);
+        $this->assertSame('reconciling_work', $state['phase']);
+    }
+
+    /**
+     * Reloads target limits when another process advanced the sender journal.
+     */
+    public function testHighLevelSenderReloadsStateReadBeforeAnotherProcessAdvancedIt(): void
+    {
+        $local_docroot = $this->root . '/stale-sender-source';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.bin', str_repeat('S', 256));
+        $identity = lstat($local_docroot . '/value.bin');
+        $this->assertIsArray($identity);
+        $current_index = $this->root . '/stale-sender-index.jsonl';
+        $this->writeIndex($current_index, [
+            'value.bin' => [ (int) $identity['ctime'], (int) $identity['size'], 'file'],
+        ]);
+        $journal = new PushJournal($this->root . '/stale-sender-state', $this->base_url);
+        $stale_sender = new PushFilesSender([
+            'docroot' => $local_docroot,
+            'current_index_file' => $current_index,
+            'journal' => $journal,
+            'base_url' => $this->base_url,
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'chunk_bytes' => 128,
+            'request_sizer_config' => [
+                'floor_bytes' => 2048,
+                'start_bytes' => 2048,
+                'max_bytes' => 2048,
+            ],
+            'connect_timeout' => 3,
+            'stall_timeout' => 3,
+            'response_timeout' => 5,
+        ]);
+
+        $created = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+        $this->assertSame('continue', $created['status'], (string) json_encode($created));
+        $reconciled = $stale_sender->send_next_request();
+        $this->assertSame('continue', $reconciled['status'], (string) json_encode($reconciled));
+        $uploaded = $stale_sender->send_next_request();
+        $this->assertSame('continue', $uploaded['status'], (string) json_encode($uploaded));
+        $state = $journal->read_sender_state();
+        $this->assertIsArray($state);
+        $this->assertSame(64, $state['max_part_bytes']);
+        $this->assertSame(
+            str_repeat('S', 256),
+            file_get_contents(
+                $this->reprint_directory . '/.reprint/push/' . $state['push_session_id'] . '/work/files/value.bin'
+            )
+        );
+    }
+
+    /**
+     * Applies the receiver's exclusion policy without claiming skipped values.
+     *
+     * The first push preserves an excluded subtree and its prior baseline
+     * evidence. Removing the policy must then select the unchanged local value
+     * and the local deletion that were deliberately skipped before.
+     */
+    public function testHighLevelSenderPreservesExcludedPathsAndReselectsThemAfterPolicyRemoval(): void
+    {
+        file_put_contents($this->docroot . '/preserved/deleted-locally.txt', 'remote-only');
+        $local_docroot = $this->root . '/excluded-source';
+        mkdir($local_docroot . '/preserved', 0700, true);
+        file_put_contents($local_docroot . '/preserved/value.txt', 'local replacement');
+        file_put_contents($local_docroot . '/ordinary.txt', 'ordinary value');
+
+        $preserved_directory_identity = lstat($local_docroot . '/preserved');
+        $preserved_value_identity = lstat($local_docroot . '/preserved/value.txt');
+        $ordinary_identity = lstat($local_docroot . '/ordinary.txt');
+        $this->assertIsArray($preserved_directory_identity);
+        $this->assertIsArray($preserved_value_identity);
+        $this->assertIsArray($ordinary_identity);
+        $current_index = $this->root . '/excluded-current.jsonl';
+        $this->writeIndex($current_index, [
+            'ordinary.txt' => [ (int) $ordinary_identity['ctime'], (int) $ordinary_identity['size'], 'file'],
+            'preserved' => [ (int) $preserved_directory_identity['ctime'], (int) $preserved_directory_identity['size'], 'dir'],
+            'preserved/value.txt' => [ (int) $preserved_value_identity['ctime'], (int) $preserved_value_identity['size'], 'file'],
+        ]);
+
+        $baseline = $this->root . '/excluded-baseline.jsonl';
+        $this->writeIndex($baseline, [
+            'preserved' => [1, 1, 'dir'],
+            'preserved/deleted-locally.txt' => [1, 11, 'file'],
+            'preserved/value.txt' => [1, 4, 'file'],
+        ]);
+        $journal = new PushJournal($this->root . '/excluded-state', $this->base_url);
+        $journal->capture_local_files_baseline($baseline);
+
+        for ($step = 0; $step < 100; ++$step) {
+            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            if ($result['status'] !== 'continue') {
+                break;
+            }
+        }
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('ordinary value', file_get_contents($this->docroot . '/ordinary.txt'));
+        $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
+        $this->assertSame('remote-only', file_get_contents($this->docroot . '/preserved/deleted-locally.txt'));
+        $baseline_paths = [];
+        foreach (file($journal->local_files_baseline_path, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+            $record = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+            $baseline_paths[] = base64_decode($record['path'], true);
+        }
+        $this->assertSame([
+            'ordinary.txt',
+            'preserved',
+            'preserved/deleted-locally.txt',
+            'preserved/value.txt',
+        ], $baseline_paths);
+
+        $this->writeExcludedPaths([]);
+        for ($step = 0; $step < 100; ++$step) {
+            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            if ($result['status'] !== 'continue') {
+                break;
+            }
+        }
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('local replacement', file_get_contents($this->docroot . '/preserved/value.txt'));
+        $this->assertFileDoesNotExist($this->docroot . '/preserved/deleted-locally.txt');
+    }
+
+    /**
      * Restarts every source-drift class from an existing partial file.
      *
      * Growth, shrinkage past the receiver cursor, same-size replacement, and
@@ -1530,8 +1688,10 @@ final class PushEndpointsTest extends TestCase {
     /**
      * Removes the upload-only push session when its selected source vanishes.
      *
-     * The remove response is discarded to prove that a reconstructed sender
-     * repeats bounded removal before asking the caller for a fresh index.
+     * A separate process removes the source without clearing this process's
+     * stat cache. The remove response is then discarded to prove that a
+     * reconstructed sender repeats bounded removal before asking the caller
+     * for a fresh index.
      */
     public function testHighLevelSenderRemovesUploadOnlySessionWhenCurrentSourceDisappears(): void
     {
@@ -1558,8 +1718,16 @@ final class PushEndpointsTest extends TestCase {
         }
         $this->assertIsArray($state);
         $push_session_id = $state['push_session_id'];
-        unlink($source_path);
-        clearstatcache(true, $source_path);
+        $delete_process = proc_open(
+            [PHP_BINARY, '-r', 'unlink($argv[1]);', $source_path],
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $delete_pipes
+        );
+        $this->assertIsResource($delete_process);
+        foreach ($delete_pipes as $delete_pipe) {
+            fclose($delete_pipe);
+        }
+        $this->assertSame(0, proc_close($delete_process));
 
         $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
         $this->assertSame('continue', $result['status'], (string) json_encode($result));
@@ -1584,6 +1752,41 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNull($journal->read_sender_state());
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
         $this->assertFileDoesNotExist($this->docroot . '/' . $relative_path);
+    }
+
+    /**
+     * Observes an external source deletion instead of reusing cached identity.
+     */
+    public function testHighLevelSenderSourceTokenSeesExternalDeletion(): void
+    {
+        $local_docroot = $this->root . '/source-token-cache';
+        mkdir($local_docroot, 0700, true);
+        $relative_path = 'cached.txt';
+        $source_path = $local_docroot . '/' . $relative_path;
+        file_put_contents($source_path, 'cached');
+        $identity = lstat($source_path);
+        $this->assertIsArray($identity);
+        $current_index = $this->root . '/source-token-cache.jsonl';
+        $this->writeIndex($current_index, [
+            $relative_path => [ (int) $identity['ctime'], (int) $identity['size'], 'file'],
+        ]);
+        $journal = new PushJournal($this->root . '/source-token-cache-state', $this->base_url);
+        $sender = $this->newSender($local_docroot, $current_index, $journal);
+        $source_token = new ReflectionMethod(PushFilesSender::class, 'source_token');
+        $this->assertIsArray($source_token->invoke($sender, $relative_path));
+
+        $delete_process = proc_open(
+            [PHP_BINARY, '-r', 'unlink($argv[1]);', $source_path],
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $delete_pipes
+        );
+        $this->assertIsResource($delete_process);
+        foreach ($delete_pipes as $delete_pipe) {
+            fclose($delete_pipe);
+        }
+        $this->assertSame(0, proc_close($delete_process));
+
+        $this->assertNull($source_token->invoke($sender, $relative_path));
     }
 
     /**
@@ -1716,122 +1919,96 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Resumes from target-confirmed bytes after three interrupted requests.
-     *
-     * Raw chunked connections close before a part, within its declared body,
-     * and after a valid complete part without reading the response. The sender's
-     * durable checkpoint still names the same path with no optimistic cursor;
-     * status must recover zero until a complete MIME part was accepted, and
-     * the complete part's byte count afterward.
+     * Rejects malformed receiver exclusion policies before any upload begins.
      */
-    public function testHighLevelSenderReconcilesInterruptedUploadParts(): void
+    public function testHighLevelSenderRequiresCanonicalExcludedPathsFromCreate(): void
     {
-        $interruptions = [
-            'before-part' => ['', 0],
-            'within-part' => [str_repeat('I', 32), 0],
-            'after-part' => [str_repeat('I', 64), 64],
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('Malformed create-response coverage requires PHP curl and pcntl.');
+        }
+        $invalid_policies = [
+            'missing' => null,
+            'not-a-list' => ['path' => base64_encode('private')],
+            'non-string' => [123],
+            'bad-base64' => ['***'],
+            'unsafe' => [base64_encode('../private')],
+            'unsorted' => [base64_encode('z-private'), base64_encode('a-private')],
+            'duplicate' => [base64_encode('private'), base64_encode('private')],
         ];
-        $base_url = parse_url($this->base_url);
-        $this->assertIsArray($base_url);
-        $this->assertIsString($base_url['host'] ?? null);
-        $this->assertIsInt($base_url['port'] ?? null);
 
-        foreach ($interruptions as $name => [$interrupted_payload, $expected_cursor]) {
-            $local_docroot = $this->root . '/interrupted-' . $name;
+        foreach ($invalid_policies as $name => $invalid_policy) {
+            $listener = stream_socket_server('tcp://127.0.0.1:0', $error_number, $error_message);
+            $this->assertNotFalse($listener, $name . ': ' . $error_message);
+            $address = stream_socket_get_name($listener, false);
+            $this->assertIsString($address);
+            $child = pcntl_fork();
+            $this->assertNotSame(-1, $child);
+            if ($child === 0) {
+                $connection = stream_socket_accept($listener, 3);
+                if ($connection === false) {
+                    exit(2);
+                }
+                stream_set_timeout($connection, 3);
+                $request = '';
+                while (strpos($request, "\r\n\r\n") === false && !feof($connection)) {
+                    $piece = fread($connection, 64 * 1024);
+                    if (!is_string($piece) || $piece === '') {
+                        break;
+                    }
+                    $request .= $piece;
+                }
+                if (!preg_match('/[?&]push_session_id=([a-f0-9]{32})/', $request, $matches)) {
+                    fclose($connection);
+                    fclose($listener);
+                    exit(3);
+                }
+                $response = [
+                    'status' => 'created',
+                    'push_session_id' => $matches[1],
+                    'max_part_bytes' => 64,
+                    'post_max_bytes' => self::POST_MAX_BYTES,
+                ];
+                if ($invalid_policy !== null) {
+                    $response['excluded_paths_b64'] = $invalid_policy;
+                }
+                $body = json_encode($response, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+                fwrite(
+                    $connection,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($body)
+                        . "\r\nConnection: close\r\n\r\n" . $body
+                );
+                fclose($connection);
+                fclose($listener);
+                exit(0);
+            }
+
+            $local_docroot = $this->root . '/invalid-exclusions-' . $name;
             mkdir($local_docroot, 0700, true);
-            $relative_path = 'interrupted-' . $name . '.bin';
-            $source_path = $local_docroot . '/' . $relative_path;
-            file_put_contents($source_path, str_repeat('I', 2000));
-            $identity = lstat($source_path);
-            $this->assertIsArray($identity);
-            $current_index = $this->root . '/interrupted-' . $name . '.jsonl';
-            $this->writeIndex($current_index, [
-                $relative_path => [ (int) $identity['ctime'], (int) $identity['size'], 'file'],
+            $current_index = $this->root . '/invalid-exclusions-' . $name . '.jsonl';
+            $this->writeIndex($current_index, []);
+            $base_url = 'http://' . $address . '/?reprint-api=1';
+            $journal = new PushJournal($this->root . '/invalid-exclusions-state-' . $name, $base_url);
+            $sender = new PushFilesSender([
+                'docroot' => $local_docroot,
+                'current_index_file' => $current_index,
+                'journal' => $journal,
+                'base_url' => $base_url,
+                'allow_http' => true,
+                'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+                'connect_timeout' => 2,
+                'response_timeout' => 2,
             ]);
-            $journal = new PushJournal($this->root . '/interrupted-state-' . $name, $this->base_url);
-            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
-            $this->assertSame('continue', $result['status'], $name . ': ' . json_encode($result));
+            $result = $sender->send_next_request();
+            pcntl_waitpid($child, $status);
+            fclose($listener);
+
+            $this->assertSame('failed', $result['status'], $name . ': ' . json_encode($result));
+            $this->assertSame('unexpected_response', $result['reason'], $name . ': ' . json_encode($result));
             $state = $journal->read_sender_state();
-            $this->assertIsArray($state);
-
-            $url = $this->base_url . '&endpoint=push_upload&push_session_id=' . $state['push_session_id'];
-            $authentication_headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_envelope_auth_headers('POST', $url);
-            $boundary = 'reprint-interrupted-' . str_replace('-', '', $name);
-            $mime_headers = '--' . $boundary . "\r\n"
-                . "X-Chunk-Type: file\r\n"
-                . 'X-File-Path: ' . base64_encode($relative_path) . "\r\n"
-                . "X-File-Size: 2000\r\n"
-                . "X-Chunk-Offset: 0\r\n"
-                . "Content-Length: 64\r\n\r\n";
-            $request_body = $interrupted_payload === '' ? '' : $mime_headers . $interrupted_payload;
-            if ($interrupted_payload !== '') {
-                $request_body .= "\r\n";
-            }
-            $complete_request = $name === 'after-part';
-            if ($complete_request) {
-                $request_body .= '--' . $boundary . "--\r\n";
-            }
-            $connection = stream_socket_client(
-                'tcp://' . $base_url['host'] . ':' . $base_url['port'],
-                $error_number,
-                $error_message,
-                3
-            );
-            $this->assertIsResource($connection, $error_message);
-            $request_target = (string) $base_url['path'] . '?' . $base_url['query']
-                . '&endpoint=push_upload&push_session_id=' . $state['push_session_id'];
-            $request_headers = "POST " . $request_target . " HTTP/1.1\r\n"
-                . 'Host: ' . $base_url['host'] . ':' . $base_url['port'] . "\r\n"
-                . 'Content-Type: multipart/mixed; boundary=' . $boundary . "\r\n"
-                . "Transfer-Encoding: chunked\r\nConnection: close\r\n";
-            foreach ($authentication_headers as $header_name => $header_value) {
-                $request_headers .= $header_name . ': ' . $header_value . "\r\n";
-            }
-            $request_headers .= "\r\n";
-            if ($request_body !== '') {
-                $request_headers .= dechex(strlen($request_body)) . "\r\n" . $request_body . "\r\n";
-            }
-            if ($complete_request) {
-                $request_headers .= "0\r\n\r\n";
-            }
-            $this->assertSame(strlen($request_headers), fwrite($connection, $request_headers));
-            // The first two variants truncate the request. The third sends a
-            // complete body but discards the response immediately.
-            fclose($connection);
-
-            $state['phase'] = 'reconciling_work';
-            $state['current_path_b64'] = base64_encode($relative_path);
-            $state['next_paths_byte_offset'] = filesize($journal->local_paths_to_push);
-            $state['source_token'] = [
-                'type' => 'file',
-                'size' => (int) $identity['size'],
-                'ctime' => (int) $identity['ctime'],
-            ];
-            $state['confirmed_bytes'] = 0;
-            $journal->write_sender_state($state);
-
-            for ($attempt = 0; $attempt < 20; ++$attempt) {
-                $status = $this->newClient(self::SECRET)->control_request('GET', 'push_status', [
-                    'push_session_id' => $state['push_session_id'],
-                    'path_b64' => base64_encode($relative_path),
-                ], ['accepted']);
-                if ($status['status'] === 'complete') {
-                    break;
-                }
-                usleep(10000);
-            }
-            $this->assertSame('complete', $status['status'], $name . ': ' . json_encode($status));
-            $this->assertSame($expected_cursor, $status['response']['path']['accepted_bytes'], $name);
-
-            for ($step = 0; $step < 200; ++$step) {
-                $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
-                $this->assertNotSame('failed', $result['status'], $name . ': ' . json_encode($result));
-                if ($result['status'] !== 'continue') {
-                    break;
-                }
-            }
-            $this->assertSame('complete', $result['status'], $name . ': ' . json_encode($result));
-            $this->assertSame(str_repeat('I', 2000), file_get_contents($this->docroot . '/' . $relative_path));
+            $this->assertIsArray($state, $name);
+            $this->assertSame('creating', $state['phase'], $name);
+            $this->assertTrue(pcntl_wifexited($status), $name);
+            $this->assertSame(0, pcntl_wexitstatus($status), $name);
         }
     }
 
@@ -1917,8 +2094,9 @@ final class PushEndpointsTest extends TestCase {
         $this->assertFileDoesNotExist($this->docroot . '/delete-after-lost-response.txt');
         $this->assertNull($journal->read_sender_state());
     }
-
-
+    /**
+     * @return array{http_code:int,response:array<string,mixed>} Decoded raw HTTP response.
+     */
     private function sendChunkedUploadRequest(
         string $base_url,
         string $push_session_id,
@@ -2105,18 +2283,6 @@ final class PushEndpointsTest extends TestCase {
             'response_timeout' => 5,
         ]);
     }
-
-    /**
-     * Sends one complete signed POST request and discards its response.
-     *
-     * Closing the socket immediately after the terminating transfer chunk
-     * reproduces a sender that cannot know whether the target completed the
-     * operation. The caller must reconcile from target state afterward.
-     *
-     * @param string $url Exact push endpoint URL to authenticate and request.
-     * @param string|null $content_type Request Content-Type, or null when the
-     *     endpoint has no body format.
-     * @param string $body Decoded HTTP entity body.
 
     /**
      * @param resource|null $process PHP built-in server process.
