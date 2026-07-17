@@ -14,8 +14,8 @@ messages, or pull-request descriptions.
 - **Work files**, **in-flight work**, and **work deletes** are the only durable
   work owned by a push session. Work files are complete values. In-flight work
   is the one value currently being received or published.
-- **Commit** consumes work deletes and work files. It never names another
-  lifecycle operation.
+- **Commit** consumes work deletes and work files; it does not create or remove
+  a push session.
 - **Remove** deletes a push directory in bounded calls.
 
 ## PHP names
@@ -58,6 +58,11 @@ is the only path-shaped work tree. The shared `.reprint/push/` directory contain
 `push-create.lock`, `commit-state`, `commit-state.lock`, and bounded removal
 tombstones named `.removing-<push-session-id>/`.
 
+`push-create.lock` is the create/remove lock. Create and every bounded remove
+call acquire it non-blockingly. Remove holds it while inspecting and renaming
+the live push directory and while performing one tombstone cleanup step, so
+create cannot recreate the same push session until that cleanup finishes.
+
 `inflight.json` records the path and type of the one in-flight work value.
 File records use `preparing`, `receiving`, or `publishing` and also contain
 `total_bytes`. Directory and symlink records use `preparing` or `publishing`;
@@ -84,10 +89,11 @@ development. There are no compatibility aliases or migration paths.
 The work-upload endpoint is `push_upload` and its push-session parameter is
 `push_session_id`. Endpoint names and endpoint prefixes begin with `push_`.
 JSON responses use `push_session_id`, `receiving_work`, and
-`work_deletes_bytes`. The stable classified failures are
+`work_deletes_bytes`. Push-session failures are
 `lock_acquisition_failure`, `offset_gap`, `push_not_found`, `filesystem_error`,
 `commit_required`, `unexpected_docroot_mutation`, `corrupted_push_state`, and
-`same_device`.
+`same_device`. Authentication and request-boundary failures are `auth_failed`,
+`not_configured`, `invalid_request`, and `request_too_large`.
 
 The document-root `.maintenance` file identifies its owner with the push
 session ID. `commit.json` stores no separate maintenance value.

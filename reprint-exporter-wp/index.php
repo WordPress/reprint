@@ -19,7 +19,24 @@ require_once __DIR__ . '/lib.php';
 // compatibility with clients pinned to earlier plugin versions.
 // New integrations should use `?reprint-api`.
 if (isset($_GET['reprint-api']) || isset($_GET['site-export-api'])) {
-    _site_export_handle_api_request();
+    /**
+     * Filters the endpoint configuration supplied by the WordPress plugin.
+     *
+     * Platforms must register this filter before regular plugins load, for
+     * example from a must-use plugin.
+     *
+     * @param array $site_export_api_options Endpoint configuration overrides.
+     */
+    $site_export_api_options = apply_filters('site_export_api_options', []);
+    if (!is_array($site_export_api_options)) {
+        _site_export_push_error(
+            503,
+            'not_configured',
+            'The site_export_api_options filter must return an array; observed '
+            . gettype($site_export_api_options) . '.'
+        );
+    }
+    _site_export_handle_api_request($site_export_api_options);
     exit;
 }
 

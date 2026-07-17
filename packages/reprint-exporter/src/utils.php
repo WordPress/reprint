@@ -184,6 +184,54 @@ function normalize_path(string $path): string
 }
 
 /**
+ * Normalizes document-root-relative excluded paths.
+ *
+ * Rejects non-string, empty, absolute, NUL-containing, backslash-containing,
+ * and empty/dot/parent-component paths, then sorts and deduplicates them.
+ *
+ * @param string[] $excluded_paths Paths which a push must not change.
+ * @phpstan-param array<mixed> $excluded_paths
+ * @return list<string> Validated excluded paths in bytewise order.
+ */
+function normalize_excluded_paths(array $excluded_paths): array
+{
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These validation exceptions are never rendered, and arbitrary path bytes are represented as base64.
+    $normalized_excluded_paths = [];
+    foreach ($excluded_paths as $path) {
+        if (!is_string($path)) {
+            throw new InvalidArgumentException('Each excluded path must be a string; observed ' . gettype($path) . '.');
+        }
+        if ($path === '') {
+            throw new InvalidArgumentException('Excluded path must not be empty.');
+        }
+        if ($path[0] === '/') {
+            throw new InvalidArgumentException('Excluded path must be document-root-relative: ' . base64_encode($path) . '.');
+        }
+        if (strpos($path, "\0") !== false) {
+            throw new InvalidArgumentException('Excluded path must not contain a NUL byte: ' . base64_encode($path) . '.');
+        }
+        if (strpos($path, '\\') !== false) {
+            throw new InvalidArgumentException('Excluded path must not contain a backslash: ' . base64_encode($path) . '.');
+        }
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '') {
+                throw new InvalidArgumentException('Excluded path must not contain an empty component: ' . base64_encode($path) . '.');
+            }
+            if ($segment === '.') {
+                throw new InvalidArgumentException('Excluded path must not contain a dot component: ' . base64_encode($path) . '.');
+            }
+            if ($segment === '..') {
+                throw new InvalidArgumentException('Excluded path must not contain a parent component: ' . base64_encode($path) . '.');
+            }
+        }
+        $normalized_excluded_paths[] = $path;
+    }
+    sort($normalized_excluded_paths, SORT_STRING);
+    return array_values(array_unique($normalized_excluded_paths));
+}
+// phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
+/**
  * Returns true when $path is equal to $root or strictly under it.
  */
 function path_is_within_root(string $path, string $root): bool

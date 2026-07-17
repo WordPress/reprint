@@ -111,6 +111,93 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame(['from' => 'file_index'], $calls[0][1]);
     }
 
+    public function testClassifiesOnlyTheRegisteredPushEndpoints(): void
+    {
+        $server = new Site_Export_HTTP_Server();
+
+        $this->assertTrue(
+            is_callable([$server, 'is_push_endpoint']),
+            'The HTTP server must expose its push endpoint classification.'
+        );
+
+        foreach (['push_create', 'push_upload', 'push_status', 'push_commit', 'push_remove'] as $endpoint) {
+            $this->assertTrue($server->is_push_endpoint($endpoint), $endpoint);
+        }
+        foreach (['preflight', 'file_index', 'unknown'] as $endpoint) {
+            $this->assertFalse($server->is_push_endpoint($endpoint), $endpoint);
+        }
+    }
+
+    public function testDefaultHandlersMatchPushEndpointMethodRegistry(): void
+    {
+        $root = sys_get_temp_dir() . '/export-http-server-' . bin2hex(random_bytes(6));
+        $docroot = $root . '/docroot';
+        $reprint_directory = $root . '/reprint';
+        mkdir($docroot, 0700, true);
+        mkdir($reprint_directory, 0700);
+
+        try {
+            $server = new Site_Export_HTTP_Server([
+                'push' => [
+                    'reprint_directory' => $reprint_directory,
+                    'docroot' => $docroot,
+                    'excluded_paths' => [],
+                ],
+            ]);
+            $handlers_property = new ReflectionProperty(Site_Export_HTTP_Server::class, 'handlers');
+            $handlers_property->setAccessible(true);
+            $handlers = $handlers_property->getValue($server);
+            $registered_push_endpoint_methods = [];
+            foreach ($handlers as $endpoint => $handler) {
+                if (strpos($endpoint, 'push_') !== 0) {
+                    continue;
+                }
+                $this->assertIsArray($handler);
+                $this->assertInstanceOf(Site_Export_Push_Endpoints::class, $handler[0]);
+                $registered_push_endpoint_methods[$endpoint] = $handler[1];
+            }
+
+            $this->assertSame([
+                'push_create' => 'create',
+                'push_upload' => 'upload',
+                'push_status' => 'status',
+                'push_commit' => 'commit',
+                'push_remove' => 'remove',
+            ], $registered_push_endpoint_methods);
+        } finally {
+            rmdir($reprint_directory);
+            rmdir($docroot);
+            rmdir($root);
+        }
+    }
+
+    public function testDispatchRoutesEveryPushEndpointWithoutCreatingABudget(): void
+    {
+        $push_endpoints = ['push_create', 'push_upload', 'push_status', 'push_commit', 'push_remove'];
+        $calls = [];
+        $handlers = [];
+        foreach ($push_endpoints as $endpoint) {
+            $handlers[$endpoint] = static function (array $config) use (&$calls): void {
+                $calls[] = $config['endpoint'];
+            };
+        }
+        $budget_creations = 0;
+        $server = new Site_Export_HTTP_Server([
+            'handlers' => $handlers,
+            'budget_factory' => static function () use (&$budget_creations): array {
+                ++$budget_creations;
+                return [];
+            },
+        ]);
+
+        foreach ($push_endpoints as $endpoint) {
+            $server->dispatch(['endpoint' => $endpoint]);
+        }
+
+        $this->assertSame($push_endpoints, $calls);
+        $this->assertSame(0, $budget_creations);
+    }
+
     public function testDispatchRejectsUnknownEndpoints(): void
     {
         $server = new Site_Export_HTTP_Server([
@@ -144,5 +231,48 @@ final class ExportHttpServerTest extends TestCase
         ]);
 
         $this->assertSame([['endpoint' => 'preflight']], $calls);
+    }
+
+    public function testPushUploadNeverReadsAJsonRequestBody(): void
+    {
+        $body_reads = 0;
+        $calls = [];
+        $server = new Site_Export_HTTP_Server([
+            'body_reader' => static function () use (&$body_reads): string {
+                ++$body_reads;
+                return '{"body_parameter":"must-not-be-read"}';
+            },
+            'handlers' => [
+                'push_upload' => static function (array $config) use (&$calls): void {
+                    $calls[] = $config;
+                },
+            ],
+        ]);
+
+        $server->handle_request([
+            'get' => [
+                'endpoint' => 'push_upload',
+                'push_session_id' => str_repeat('a', 32),
+            ],
+            'post' => [],
+            'server' => [
+                'REQUEST_METHOD' => 'POST',
+                'CONTENT_TYPE' => 'application/json',
+            ],
+        ]);
+
+        $this->assertSame(0, $body_reads);
+        $this->assertSame([[
+            'endpoint' => 'push_upload',
+            'push_session_id' => str_repeat('a', 32),
+        ]], $calls);
+    }
+
+    public function testNonArrayPushOptionsThrowConfigurationException(): void
+    {
+        $this->expectException(Site_Export_Push_Configuration_Exception::class);
+        $this->expectExceptionMessage('The push HTTP server option must be an array.');
+
+        new Site_Export_HTTP_Server(['push' => null]);
     }
 }

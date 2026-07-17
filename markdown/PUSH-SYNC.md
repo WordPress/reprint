@@ -109,21 +109,78 @@ still being prepared or received, so it traverses completed work files only.
 more cleanup remains and must be retried. A push with a commit in progress is
 not removable; its next commit request resumes the durable cursor instead.
 
+## Push HTTP operations
+
+The production exporter router exposes five authenticated operations. Control
+and upload requests use the envelope signature described above, so
+`push_upload` passes `php://input` directly to the multipart processor instead
+of reading the complete request for authentication.
+
+- `POST push_create` creates or reopens the caller's 32-character lowercase
+  hexadecimal `push_session_id`. A successful response contains `status`,
+  `push_session_id`, `max_part_bytes`, `post_max_bytes`, and
+  `excluded_paths_b64`. The two limits describe different dimensions: one
+  multipart part and the complete decoded request body. The endpoint enforces
+  the request-body limit while reading bounded fragments, including chunked
+  requests without `Content-Length`. `excluded_paths_b64` is the normalized,
+  sorted, immutable server policy stored for the push session; base64 preserves
+  arbitrary path bytes which JSON cannot represent directly. A sender
+  consuming this field must omit indexed paths equal to, below, or ancestors
+  of any advertised exclusion.
+- `POST push_upload` accepts `multipart/mixed`. A successful response contains
+  `status`, `push_session_id`, `changes_accepted`, and `last_change`. The last
+  change is null for an empty request. Otherwise it contains `state`, `type`,
+  and `accepted_bytes`, plus `path_b64` for a file, directory, or symlink. A
+  delete-list change has no path. Only the latest change is retained for the
+  response; request memory does not grow with the number of parts.
+- `GET push_status` accepts an optional base64 `path_b64`. A successful
+  response contains `status`, `push_session_id`, `phase`,
+  `work_deletes_bytes`, `work_deletes_complete`, and `path`. The path is null
+  when none was requested. Otherwise it contains `path_b64`, `state`, and
+  `accepted_bytes`; a non-missing path also contains `type`.
+- `POST push_commit` performs one server-bounded commit call. A successful
+  response contains `status`, `push_session_id`, `phase`,
+  `send_next_request`, and `entries_processed`. The sender repeats it while
+  `send_next_request` is true.
+- `POST push_remove` performs one bounded remove step. A successful response
+  contains `status`, `push_session_id`, and `removed`. The sender repeats it
+  while `removed` is false.
+
+Push deployments must set `display_errors=Off` at PHP startup through
+`php.ini`, `.user.ini`, or the PHP-FPM pool configuration; changing it after
+the request starts is too late for PHP's own `post_max_size` warning.
+`log_errors=On` is recommended. When the endpoint code receives an oversized
+request it returns a classified push JSON failure, but PHP or the web server
+may reject a request before the exporter runs and that response need not use
+the push JSON protocol. The sender therefore also treats a bare HTTP 413 as
+`request_too_large` and learns a smaller request ceiling.
+
+The WordPress plugin passes the platform-supplied `docroot` to push endpoints,
+defaulting to the web server's `DOCUMENT_ROOT`. A platform supplies the complete
+trusted API-options array through the early `site_export_api_options` filter; a
+direct embedder passes the same array to `_site_export_handle_api_request()`.
+The document-root path must resolve to an existing directory. `ABSPATH` remains
+the default only for pull endpoints because it may point at a separate shared
+WordPress core tree. Push work lives in a document-root-specific private
+directory beside the canonical document root unless server configuration
+supplies `reprint_directory`.
+Configured reprint directories must remain outside the document root; the HTTP
+endpoints reject an inside path because they do not yet apply the indexing and
+web-access protections described below. The plugin always excludes its logical
+installed directory from push, including when that directory is a symlink to a
+physical target outside the document root. A platform hook or embedding router
+must choose its document root, reprint directory, and excluded paths as server
+configuration; request parameters cannot select any of them.
+
 ## Where reprint stores its own data on the remote
 
 The remote is configured with one storage path for everything reprint keeps:
-the private push directory and any commit bookkeeping. Preferably outside the document
-root. When the host only allows writing inside the document root:
-
-- the file indexer never lists anything under it. `storage_path` is the
-  server's own setting, so every index request knows it — including a
-   pulling peer's, which never scans this site's push work,
-- the deletion step refuses to touch anything under it,
-- an `.htaccess` (deny-all) and an empty `index.php` are written into
-  it. That is all that can be done from inside the directory: Apache
-  honors the deny rules, nginx ignores both files and loses nothing by
-  their presence. Do not keep this directory inside the document root
-  unless the host offers nowhere else to write.
+the private push directory and any commit bookkeeping. The current push HTTP
+endpoints require this path to be outside the document root. They do not yet
+exclude an inside path from every file index or write web-server access guards,
+so endpoint construction rejects that configuration instead of exposing private
+push work. A host which cannot write outside the document root is not supported
+until those protections exist.
 
 ## Commit
 

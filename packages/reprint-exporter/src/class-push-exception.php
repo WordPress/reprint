@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Reports a classified failure in the push and commit lifecycle.
+ * Reports a classified push-session failure.
  *
  * PHP reserves Throwable::getCode() for an integer. Push and commit failures use
  * stable, descriptive strings because the endpoint returns the same value in
@@ -10,8 +10,8 @@
  * native code from being presented as a recoverable protocol condition.
  *
  * Only failures which have a deliberate push or commit classification use this
- * exception. An ordinary RuntimeException remains unclassified and is exposed
- * by the endpoint as `session_rejected` rather than leaking an accidental code.
+ * exception. An ordinary RuntimeException remains unclassified and follows the
+ * endpoint's `invalid_request` handling rather than leaking an accidental code.
  */
 final class Site_Export_Push_Exception extends RuntimeException {
 
@@ -27,12 +27,12 @@ final class Site_Export_Push_Exception extends RuntimeException {
     private $error_code;
 
     /**
-     * Protocol fields which describe the observed failure.
+     * Structured observations which describe the failure.
      *
-     * These values are copied into the authenticated JSON response alongside
-     * the stable reason. They are deliberately separate from the message so
-     * callers can inspect structured details such as conflicting paths or
-     * observed filesystem identities without parsing prose.
+     * These values are deliberately separate from the message so commit can
+     * persist non-recoverable evidence and callers can inspect it without
+     * parsing prose. An HTTP endpoint must choose its public fields explicitly;
+     * exception context is not a response schema.
      *
      * @var array<string,mixed>
      */
@@ -47,10 +47,10 @@ final class Site_Export_Push_Exception extends RuntimeException {
      *
      * @param string $error_code Stable machine-readable push or commit reason.
      * @param string $message Human-readable statement of the violated condition.
-     * @param array<string,mixed> $context Additional authenticated response
-     *     fields. Common keys are operation, path_b64, conflict_path_b64,
+     * @param array<string,mixed> $context Structured observations. Common keys
+     *     are operation, path_b64, conflict_path_b64,
      *     expected_docroot_types, observed_docroot_identity, work_device,
-     *     document-root_device, work_type, and detail.
+     *     docroot_device, work_type, and observed_request_body_bytes.
      */
     public function __construct(string $error_code, string $message, array $context = []) {
         parent::__construct($message);
@@ -68,17 +68,17 @@ final class Site_Export_Push_Exception extends RuntimeException {
     }
 
     /**
-     * Returns structured details for the authenticated failure response.
+     * Returns structured observations recorded by the throw site.
      *
      * The array contains only values supplied by push or commit throw sites. It
      * may be empty for simple classified failures, but when present it names
      * the exact observed condition that made the request non-recoverable or
      * recoverable.
      *
-     * @return array<string,mixed> Structured fields safe to copy into JSON.
-     *     Common keys are operation, path_b64, conflict_path_b64,
-     *     expected_docroot_types, observed_docroot_identity, work_device,
-     *     document-root_device, work_type, and detail.
+     * @return array<string,mixed> Structured observations. Common keys are
+     *     operation, path_b64, conflict_path_b64, expected_docroot_types,
+     *     observed_docroot_identity, work_device, docroot_device, work_type,
+     *     and observed_request_body_bytes.
      */
     public function get_context(): array {
         return $this->context;

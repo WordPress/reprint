@@ -191,9 +191,8 @@ class PushRequestSizer
      *
      * The failed size caps the session ceiling so growth cannot retry it.
      * When the server reported its actual limit — the push_upload endpoint's
-     * 413 carries max_frame_bytes, which it derives from its request-size
-     * limits — the ceiling drops below that limit directly instead of
-     * probing downward.
+     * 413 carries post_max_bytes, the decoded request-body limit — the ceiling
+     * drops below that limit directly instead of probing downward.
      *
      * @param int|null $reported_max_bytes Server-reported request limit, if any.
      * @return array {

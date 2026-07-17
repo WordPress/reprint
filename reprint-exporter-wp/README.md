@@ -22,6 +22,40 @@ When a request arrives at `https://example.com/?reprint-api` (or the legacy `?si
 
 This gives us a clean execution environment while using WordPress's front controller as the entry point.
 
+### Platform configuration
+
+The bundled WordPress entry point passes the result of the
+`site_export_api_options` filter to the export handler. A platform must
+register this filter before the regular Reprint Exporter plugin file loads;
+registering it on `plugins_loaded` is too late. A must-use plugin is the usual
+place to register it:
+
+```php
+add_filter('site_export_api_options', static function (array $options): array {
+    $options['docroot'] = '/srv/www/public';
+    $options['reprint_directory'] = '/srv/www/.reprint';
+    return $options;
+});
+```
+
+The supported options are:
+
+- `authenticate` — a callback that authenticates every non-preflight API
+  request instead of the built-in HMAC verifier. For a push request, this
+  callback must authenticate from request metadata without reading or
+  buffering `php://input`; the endpoint streams that body after authentication.
+- `docroot` — the document root for push. It must resolve to an
+  existing directory and defaults to `$_SERVER['DOCUMENT_ROOT']`.
+- `reprint_directory` — the private push storage directory outside `docroot`.
+  It defaults to a document-root-specific sibling directory.
+- `excluded_paths` — document-root-relative paths that push must preserve. The
+  exporter plugin directory is also preserved automatically when it is below
+  `docroot`.
+- `maximum_part_bytes` — the maximum `Content-Length` accepted for one push
+  upload part. It defaults to 4 MiB.
+- `maximum_commit_entries` — the maximum number of bounded entries processed
+  by one `push_commit` request. It defaults to 256.
+
 ## Using as a library
 
 The export engine can be embedded in another PHP project without the WordPress plugin wrapper. Require `lib.php` instead of `index.php` — it defines constants and functions but does not handle any HTTP requests or check any URLs.
@@ -48,6 +82,10 @@ if ($myRouter->matches('/export')) {
     ]);
 }
 ```
+
+`_site_export_handle_api_request()` accepts the same options documented under
+Platform configuration. Direct `lib.php` embedders pass them as the function's
+array argument and do not use the WordPress filter.
 
 `lib.php` defines these constants (using WordPress's `plugin_dir_path`):
 

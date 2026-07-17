@@ -34,6 +34,10 @@ if (!class_exists('Site_Export_Push_Exception', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-push-exception.php';
 }
 
+if (!class_exists('Site_Export_Push_Endpoints', false)) {
+    require_once __DIR__ . '/../packages/reprint-exporter/src/class-push-endpoints.php';
+}
+
 if (!class_exists('Site_Export_Push_Session', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-push-session.php';
 }

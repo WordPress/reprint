@@ -288,11 +288,24 @@ final class PushSessionTest extends TestCase {
                     ],
                     'body' => 'x',
                 ]]);
-                $this->fail('Unsafe path was work: ' . base64_encode($path));
+                $this->fail('A reserved or excluded path was accepted as work: ' . base64_encode($path));
             } catch (InvalidArgumentException $exception) {
                 $this->assertNotSame('', $exception->getMessage());
             }
         }
+    }
+
+    public function testCommitTraversesAncestorsOfAnExcludedPathToInstallItsSibling(): void {
+        $excluded_directory = $this->docroot . '/wp-content/plugins/reprint';
+        mkdir($excluded_directory, 0700, true);
+        file_put_contents($excluded_directory . '/sentinel.php', 'preserved');
+        $push_session = $this->push_session('29292929292929292929292929292929');
+
+        $this->push_file($push_session, 'wp-content/plugins/other/file.php', 'installed');
+        $this->commit_all($push_session);
+
+        $this->assertSame('installed', file_get_contents($this->docroot . '/wp-content/plugins/other/file.php'));
+        $this->assertSame('preserved', file_get_contents($excluded_directory . '/sentinel.php'));
     }
 
     public function testReprintDirectoryBelowDocumentRootIsExcludedAndRootCanBeReopened(): void {
@@ -563,6 +576,90 @@ final class PushSessionTest extends TestCase {
         $this->assertNotSame('complete', $reopened->get_status('truncated.bin')['path']['state']);
     }
 
+    public function testMultipartCloseAtTheInputFragmentLimitReadsThroughEof(): void {
+        $push_session = $this->push_session('78787878787878787878787878787878');
+        [$boundary, $body] = $this->multipart_body_ending_at_input_fragment_limit();
+        $input = fopen('php://temp', 'w+b');
+        fwrite($input, $body);
+        rewind($input);
+
+        $push_session->accept_upload(
+            $input,
+            new Site_Export_Multipart_Processor($boundary),
+            PHP_INT_MAX,
+            Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES
+        );
+        try {
+            $this->assertTrue($push_session->next_change());
+            $this->assertFalse($push_session->next_change());
+        } finally {
+            $push_session->finish_upload();
+            fclose($input);
+        }
+    }
+
+    public function testByteAfterMultipartCloseExceedsTheRequestLimit(): void {
+        $push_session = $this->push_session('79797979797979797979797979797979');
+        [$boundary, $body] = $this->multipart_body_ending_at_input_fragment_limit();
+        $input = fopen('php://temp', 'w+b');
+        fwrite($input, $body . 'x');
+        rewind($input);
+
+        $push_session->accept_upload(
+            $input,
+            new Site_Export_Multipart_Processor($boundary),
+            PHP_INT_MAX,
+            Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES
+        );
+        try {
+            $this->assertTrue($push_session->next_change());
+            try {
+                $push_session->next_change();
+                $this->fail('A byte beyond the decoded request-body limit was ignored after the closing boundary.');
+            } catch (Site_Export_Push_Exception $exception) {
+                $this->assertSame('request_too_large', $exception->get_error_code());
+                $this->assertSame(
+                    ['observed_request_body_bytes' => Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES + 1],
+                    $exception->get_context()
+                );
+                $this->assertStringContainsString(
+                    (string) ( Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES + 1 ) . ' bytes',
+                    $exception->getMessage()
+                );
+            }
+        } finally {
+            $push_session->finish_upload();
+            fclose($input);
+        }
+    }
+
+    public function testByteAfterMultipartCloseIsInvalidWithinTheRequestLimit(): void {
+        $push_session = $this->push_session('7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a');
+        [$boundary, $body] = $this->multipart_body_ending_at_input_fragment_limit();
+        $input = fopen('php://temp', 'w+b');
+        fwrite($input, $body . 'x');
+        rewind($input);
+
+        $push_session->accept_upload(
+            $input,
+            new Site_Export_Multipart_Processor($boundary),
+            PHP_INT_MAX,
+            Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES + 1
+        );
+        try {
+            $this->assertTrue($push_session->next_change());
+            try {
+                $push_session->next_change();
+                $this->fail('A byte after the closing multipart boundary was accepted.');
+            } catch (InvalidArgumentException $exception) {
+                $this->assertStringContainsString('after the closing boundary', $exception->getMessage());
+            }
+        } finally {
+            $push_session->finish_upload();
+            fclose($input);
+        }
+    }
+
     public function testMalformedMultipartFieldsAreRejectedBeforeWork(): void {
         $cases = [
             [
@@ -766,6 +863,23 @@ final class PushSessionTest extends TestCase {
                 $this->assertSame('corrupted_push_state', $exception->get_error_code());
                 $this->assertStringContainsString('does not match', $exception->getMessage());
             }
+        }
+    }
+
+    public function testRepeatedCreateRejectsExcludedPathConfigurationDriftImmediately(): void {
+        $push_session = $this->push_session('45674567456745674567456745674568');
+
+        try {
+            Site_Export_Push_Session::create(
+                $this->reprint_directory,
+                $this->docroot,
+                ['wp-content/plugins/reprint', 'wp-config.php'],
+                $push_session->get_push_session_id()
+            );
+            $this->fail('Repeated create accepted different immutable excluded paths.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('corrupted_push_state', $exception->get_error_code());
+            $this->assertStringContainsString('does not match', $exception->getMessage());
         }
     }
 
@@ -1323,6 +1437,83 @@ final class PushSessionTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_session->get_push_directory());
     }
 
+    public function testCreateRemoveLockContentionLeavesTheLivePushDirectoryUntouched(): void {
+        $push_session = $this->push_session('cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd');
+        $push_directory = $push_session->get_push_directory();
+        $create_remove_lock_path = dirname($push_directory) . '/push-create.lock';
+        $lock_process = $this->start_lock_process($create_remove_lock_path);
+
+        $failure = null;
+        try {
+            $push_session->remove_push_directory();
+        } catch (Site_Export_Push_Exception $exception) {
+            $failure = $exception;
+        } finally {
+            $this->stop_lock_process($lock_process);
+        }
+
+        $this->assertInstanceOf(Site_Export_Push_Exception::class, $failure);
+        $this->assertSame('lock_acquisition_failure', $failure->get_error_code());
+        $this->assertDirectoryExists($push_directory);
+        $this->assertFileDoesNotExist(dirname($push_directory) . '/.removing-' . $push_session->get_push_session_id());
+    }
+
+    public function testRemovalTombstoneBlocksCreateAndConvergesUnderTheCreateRemoveLock(): void {
+        $push_session_id = 'dededededededededededededededede';
+        $push_session = $this->push_session($push_session_id);
+        $parts = [];
+        for ($index = 0; $index < 300; ++$index) {
+            $parts[] = [
+                'headers' => [
+                    'X-Chunk-Type' => 'directory',
+                    'X-Directory-Path' => base64_encode('remove-entry-' . $index),
+                ],
+                'body' => '',
+            ];
+        }
+        $this->push_parts($push_session, $parts);
+
+        $push_directory = $push_session->get_push_directory();
+        $push_sessions_directory = dirname($push_directory);
+        $tombstone = $push_sessions_directory . '/.removing-' . $push_session_id;
+        $this->assertFalse($push_session->remove_push_directory());
+        $this->assertDirectoryDoesNotExist($push_directory);
+        $this->assertDirectoryExists($tombstone);
+
+        try {
+            $this->push_session($push_session_id);
+            $this->fail('A push session was recreated while its removal tombstone remained.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('lock_acquisition_failure', $exception->get_error_code());
+        }
+        $this->assertDirectoryDoesNotExist($push_directory);
+
+        $lock_process = $this->start_lock_process($push_sessions_directory . '/push-create.lock');
+        $failure = null;
+        try {
+            $push_session->remove_push_directory();
+        } catch (Site_Export_Push_Exception $exception) {
+            $failure = $exception;
+        } finally {
+            $this->stop_lock_process($lock_process);
+        }
+        $this->assertInstanceOf(Site_Export_Push_Exception::class, $failure);
+        $this->assertSame('lock_acquisition_failure', $failure->get_error_code());
+        $this->assertDirectoryExists($tombstone);
+
+        $removal_calls = 0;
+        do {
+            $removed = $push_session->remove_push_directory();
+            ++$removal_calls;
+            $this->assertLessThan(10, $removal_calls, 'Bounded removal did not converge.');
+        } while (!$removed);
+        $this->assertTrue($push_session->remove_push_directory());
+        $this->assertDirectoryDoesNotExist($tombstone);
+
+        $recreated = $this->push_session($push_session_id);
+        $this->assertSame('receiving_work', $recreated->get_status()['phase']);
+    }
+
     /**
      * Runs an upload while one named filesystem call fails in production code.
      *
@@ -1434,6 +1625,61 @@ final class PushSessionTest extends TestCase {
             ['wp-content/plugins/reprint'],
             $id
         );
+    }
+
+    /** @return array{string,string} */
+    private function multipart_body_ending_at_input_fragment_limit(): array {
+        $boundary = 'fragment-limit-boundary';
+        $path = 'fragment-limit.bin';
+        $suffix = "\r\n--" . $boundary . "--\r\n";
+        $payload_bytes = Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES;
+        do {
+            $previous_payload_bytes = $payload_bytes;
+            $prefix = '--' . $boundary . "\r\n"
+                . "X-Chunk-Type: file\r\n"
+                . 'X-File-Path: ' . base64_encode($path) . "\r\n"
+                . 'X-File-Size: ' . $payload_bytes . "\r\n"
+                . "X-Chunk-Offset: 0\r\n"
+                . 'Content-Length: ' . $payload_bytes . "\r\n\r\n";
+            $payload_bytes = Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES
+                - strlen($prefix)
+                - strlen($suffix);
+        } while ($payload_bytes !== $previous_payload_bytes);
+
+        $body = $prefix . str_repeat('x', $payload_bytes) . $suffix;
+        $this->assertSame(Site_Export_Multipart_Processor::MAX_INPUT_FRAGMENT_BYTES, strlen($body));
+        return [$boundary, $body];
+    }
+
+    /** @return resource */
+    private function start_lock_process(string $lock_path) {
+        $ready_path = $this->root . '/lock-ready-' . bin2hex(random_bytes(4));
+        $script = '$lock = fopen($argv[1], "c+b");'
+            . 'if ($lock === false || !flock($lock, LOCK_EX | LOCK_NB)) { exit(2); }'
+            . 'file_put_contents($argv[2], "ready");'
+            . 'sleep(30);';
+        $process = proc_open(
+            [PHP_BINARY, '-r', $script, $lock_path, $ready_path],
+            [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+            $pipes
+        );
+        $this->assertIsResource($process);
+        foreach ($pipes as $pipe) {
+            fclose($pipe);
+        }
+        $deadline = microtime(true) + 10;
+        while (!is_file($ready_path) && microtime(true) < $deadline) {
+            usleep(1000);
+        }
+        $this->assertFileExists($ready_path);
+        unlink($ready_path);
+        return $process;
+    }
+
+    /** @param resource $process */
+    private function stop_lock_process($process): void {
+        @proc_terminate($process, 9);
+        proc_close($process);
     }
 
     private function push_file(Site_Export_Push_Session $push_session, string $path, string $contents): void {
