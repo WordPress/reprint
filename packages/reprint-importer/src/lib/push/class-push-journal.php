@@ -640,7 +640,8 @@ class PushJournal
      *
      * @return array{
      *     push_session_id:string,
-     *     phase:'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     phase:'creating'|'planning'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     planning_checkpoint:PlanningCheckpoint|null,
      *     paths_byte_offset:int,
      *     current_path_b64:?string,
      *     next_paths_byte_offset:int,
@@ -671,11 +672,12 @@ class PushJournal
     }
 
     /**
-     * Atomically records the sender's last receiver-reconcilable boundary.
+     * Atomically records the sender's last durable workflow boundary.
      *
      * @param array{
      *     push_session_id:string,
-     *     phase:'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     phase:'creating'|'planning'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     planning_checkpoint:PlanningCheckpoint|null,
      *     paths_byte_offset:int,
      *     current_path_b64:?string,
      *     next_paths_byte_offset:int,
@@ -715,9 +717,9 @@ class PushJournal
     /**
      * Acquires exclusive ownership of one target site's sender transition.
      *
-     * The lock stays held across the HTTP request and the following checkpoint
-     * write so two legitimate push processes cannot both advance fixed-name
-     * journal files from different snapshots.
+     * The lock stays held across the local planning step or HTTP request and
+     * the following checkpoint write so two legitimate push processes cannot
+     * both advance fixed-name journal files from different snapshots.
      *
      * @return resource|null Lock handle, or null while another process owns it.
      */

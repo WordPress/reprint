@@ -1326,7 +1326,7 @@ final class PushEndpointsTest extends TestCase {
      * cursor, forcing an offset-zero restart before repeated commit installs
      * the file, empty directory, symlink, replacement, and deletion.
      */
-    public function testHighLevelSenderRestartsChangedSourceAndResumesAfterEveryRequest(): void
+    public function testHighLevelSenderRestartsChangedSourceAndResumesAfterEveryAdvance(): void
     {
         $local_docroot = $this->root . '/local-docroot';
         mkdir($local_docroot . '/nested', 0700, true);
@@ -1368,20 +1368,25 @@ final class PushEndpointsTest extends TestCase {
         $observed_many_values = false;
         $commit_requests = 0;
         $removed_caller_index = false;
+        $observed_planning_checkpoint = false;
         for ($step = 0; $step < 200; ++$step) {
-            // A new object on every step proves that sender.json, target
-            // status, the source token, the learned request size, and the
-            // target part limit are sufficient after process restart.
+            // A new object on every advance proves that sender.json, local
+            // planning outputs, target status, source tokens, and learned
+            // transport limits are sufficient after process restart.
             $state_before_request = $journal->read_sender_state();
             $is_first_upload_request = is_array($state_before_request)
                 && $state_before_request['phase'] === 'uploading_work'
                 && $state_before_request['current_path_b64'] === null
                 && $state_before_request['paths_byte_offset'] === 0;
             $sender = $this->newSender($local_docroot, $current_index, $journal);
-            $result = $sender->send_next_request();
+            $result = $sender->advance();
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $journal->read_sender_state();
-            if (!$removed_caller_index && is_array($state)) {
+            if (is_array($state) && $state['phase'] === 'planning') {
+                $this->assertIsArray($state['planning_checkpoint']);
+                $observed_planning_checkpoint = true;
+            }
+            if (!$removed_caller_index && is_array($state) && $state['phase'] !== 'planning') {
                 unlink($current_index);
                 $removed_caller_index = true;
             }
@@ -1410,7 +1415,8 @@ final class PushEndpointsTest extends TestCase {
 
         $this->assertTrue($observed_many_chunks, 'One sender request must confirm more than one bounded file chunk.');
         $this->assertTrue($observed_many_values, 'That same sender request must publish multiple positive-work values before the partial file.');
-        $this->assertTrue($removed_caller_index, 'The active sender must resume from its stable journal index after the caller index disappears.');
+        $this->assertTrue($observed_planning_checkpoint, 'The reconstructed sender must resume the persisted local planning checkpoint.');
+        $this->assertTrue($removed_caller_index, 'After planning, the active sender must resume from immutable journal outputs when the caller index disappears.');
         $this->assertTrue($source_changed, 'The test must edit the source while the receiver has a partial file.');
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertGreaterThan(1, $commit_requests, 'The one-entry endpoint budget must require repeated high-level commit calls.');
@@ -1425,8 +1431,218 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(
             file_get_contents($journal->sender_index_path),
             file_get_contents($journal->local_files_baseline_path),
-            'The stable start-of-push index becomes the baseline; a mid-push source edit is sent but remains detectable on the next diff.'
+            'The completed enriched sender index becomes the baseline; a mid-push source edit is sent but remains detectable on the next diff.'
         );
+    }
+
+    /**
+     * Removes the real upload-only session when the current index changes.
+     *
+     * One reconstructed sender persists a full bounded batch. The index is
+     * then atomically replaced with the same bytes before the next process
+     * consumes its final record, so planning must keep the committed
+     * checkpoint, enter removal, and ask the caller for a newly generated
+     * index only after the target session is gone.
+     */
+    public function testHighLevelSenderRemovesSessionWhenCurrentIndexChangesDuringPlanning(): void
+    {
+        $local_docroot = $this->root . '/planning-drift-source';
+        mkdir($local_docroot, 0700, true);
+        $entries = [];
+        for ($index = 0; $index < 1000; ++$index) {
+            $relative_path = sprintf('file-%04d.txt', $index);
+            file_put_contents($local_docroot . '/' . $relative_path, 'x');
+            $identity = lstat($local_docroot . '/' . $relative_path);
+            $this->assertIsArray($identity);
+            $entries[$relative_path] = [ (int) $identity['ctime'], 1, 'file'];
+        }
+        $directory_path = 'z-planning-directory';
+        mkdir($local_docroot . '/' . $directory_path, 0700);
+        $directory_identity = lstat($local_docroot . '/' . $directory_path);
+        $this->assertIsArray($directory_identity);
+        $entries[$directory_path] = [
+            (int) $directory_identity['ctime'],
+            (int) $directory_identity['size'],
+            'dir',
+        ];
+        $current_index = $this->root . '/planning-drift-index.jsonl';
+        $this->writeIndex($current_index, $entries);
+        $journal = new PushJournal($this->root . '/planning-drift-state', $this->base_url);
+
+        $created = $this->newSender($local_docroot, $current_index, $journal)->advance();
+        $this->assertSame('continue', $created['status'], (string) json_encode($created));
+        $state = $journal->read_sender_state();
+        $this->assertIsArray($state);
+        $this->assertSame('planning', $state['phase']);
+        $this->assertSame(0, $state['planning_checkpoint']['current_index_byte_offset']);
+
+        // A real client pointed at a closed port proves that a planning
+        // advance performs no HTTP request.
+        $offline_sender = new PushFilesSender([
+            'docroot' => $local_docroot,
+            'current_index_file' => $current_index,
+            'journal' => $journal,
+            'base_url' => 'http://127.0.0.1:1/?reprint-api=1',
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'connect_timeout' => 1,
+            'stall_timeout' => 1,
+            'response_timeout' => 1,
+        ]);
+        $planned = $offline_sender->advance();
+        $this->assertSame('continue', $planned['status'], (string) json_encode($planned));
+        $state = $journal->read_sender_state();
+        $this->assertIsArray($state);
+        $this->assertSame('planning', $state['phase']);
+        $this->assertSame(1000, $state['planning_checkpoint']['changed']);
+        $this->assertGreaterThan(0, $state['planning_checkpoint']['current_index_byte_offset']);
+        $push_session_id = $state['push_session_id'];
+        $this->assertFileDoesNotExist(
+            $this->reprint_directory . '/.reprint/push/' . $push_session_id . '/work/files/file-0000.txt'
+        );
+
+        $replacement_index = $current_index . '.replacement';
+        $index_bytes = file_get_contents($current_index);
+        $this->assertIsString($index_bytes);
+        $this->assertSame(strlen($index_bytes), file_put_contents($replacement_index, $index_bytes));
+        $index_mtime = filemtime($current_index);
+        $this->assertIsInt($index_mtime);
+        $this->assertTrue(touch($replacement_index, $index_mtime + 1));
+        $this->assertTrue(rename($replacement_index, $current_index));
+        clearstatcache(true, $current_index);
+
+        $changed = $this->newSender($local_docroot, $current_index, $journal)->advance();
+        $this->assertSame('continue', $changed['status'], (string) json_encode($changed));
+        $this->assertSame('source_changed', $changed['reason']);
+        $state = $journal->read_sender_state();
+        $this->assertIsArray($state);
+        $this->assertSame('removing', $state['phase']);
+        $this->assertSame(1000, $state['planning_checkpoint']['changed']);
+        $this->assertSame(
+            $state['planning_checkpoint']['sender_index_bytes'],
+            filesize($journal->sender_index_path)
+        );
+        $this->assertSame(
+            $state['planning_checkpoint']['local_paths_to_push_bytes'],
+            filesize($journal->local_paths_to_push)
+        );
+        $this->assertSame(
+            $state['planning_checkpoint']['work_deletes_bytes'],
+            filesize($journal->work_deletes_path)
+        );
+
+        for ($step = 0; $step < 20; ++$step) {
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            if ($result['status'] !== 'continue') {
+                break;
+            }
+        }
+        $this->assertSame('restart', $result['status'], (string) json_encode($result));
+        $this->assertSame('source_changed', $result['reason']);
+        $this->assertNull($journal->read_sender_state());
+        $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
+    }
+
+    /**
+     * Removes a session created after the current index disappeared.
+     *
+     * Target create-lock contention leaves the production sender in `creating`.
+     * The source index is removed before the reconstructed process successfully
+     * creates the session, so beginning local planning must enter the same
+     * bounded remove-and-restart lifecycle instead of leaking that session.
+     */
+    public function testHighLevelSenderRemovesCreatedSessionWhenIndexDisappearsBeforePlanning(): void
+    {
+        $local_docroot = $this->root . '/missing-planning-index-source';
+        mkdir($local_docroot, 0700, true);
+        $current_index = $this->root . '/missing-planning-index.jsonl';
+        $this->writeIndex($current_index, []);
+        $journal = new PushJournal($this->root . '/missing-planning-index-state', $this->base_url);
+        $push_sessions_directory = $this->reprint_directory . '/.reprint/push';
+        mkdir($push_sessions_directory, 0700, true);
+        $create_lock_process = $this->startLockProcess($push_sessions_directory . '/push-create.lock');
+
+        try {
+            $contended = $this->newSender($local_docroot, $current_index, $journal)->advance();
+            $this->assertSame('continue', $contended['status'], (string) json_encode($contended));
+            $this->assertSame('lock_acquisition_failure', $contended['reason']);
+            $state = $journal->read_sender_state();
+            $this->assertIsArray($state);
+            $this->assertSame('creating', $state['phase']);
+            $push_session_id = $state['push_session_id'];
+        } finally {
+            $this->stopLockProcess($create_lock_process);
+        }
+
+        unlink($current_index);
+        $changed = $this->newSender($local_docroot, $current_index, $journal)->advance();
+        $this->assertSame('continue', $changed['status'], (string) json_encode($changed));
+        $this->assertSame('source_changed', $changed['reason']);
+        $state = $journal->read_sender_state();
+        $this->assertIsArray($state);
+        $this->assertSame('removing', $state['phase']);
+        $this->assertDirectoryExists($push_sessions_directory . '/' . $push_session_id);
+
+        for ($step = 0; $step < 20; ++$step) {
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            if ($result['status'] !== 'continue') {
+                break;
+            }
+        }
+        $this->assertSame('restart', $result['status'], (string) json_encode($result));
+        $this->assertSame('source_changed', $result['reason']);
+        $this->assertNull($journal->read_sender_state());
+        $this->assertDirectoryDoesNotExist($push_sessions_directory . '/' . $push_session_id);
+    }
+
+    /**
+     * Replaces a target directory with a file through the real endpoint.
+     *
+     * The completed baseline says the old value was a non-empty directory.
+     * Planning must emit the directory root as work delete before upload and
+     * commit can install the file at that same path.
+     */
+    public function testHighLevelSenderReplacesDirectoryWithFile(): void
+    {
+        $relative_path = 'replace-directory';
+        mkdir($this->docroot . '/' . $relative_path, 0700);
+        file_put_contents($this->docroot . '/' . $relative_path . '/old.txt', 'old');
+
+        $local_docroot = $this->root . '/directory-replacement-source';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/' . $relative_path, 'replacement file');
+        $source_identity = lstat($local_docroot . '/' . $relative_path);
+        $this->assertIsArray($source_identity);
+        $current_index = $this->root . '/directory-replacement-index.jsonl';
+        $this->writeIndex($current_index, [
+            $relative_path => [
+                (int) $source_identity['ctime'],
+                (int) $source_identity['size'],
+                'file',
+            ],
+        ]);
+        $baseline = $this->root . '/directory-replacement-baseline.jsonl';
+        $this->writeIndex($baseline, [
+            $relative_path => [1, 0, 'dir', false],
+            $relative_path . '/old.txt' => [1, 3, 'file'],
+        ]);
+        $journal = new PushJournal($this->root . '/directory-replacement-state', $this->base_url);
+        $journal->capture_local_files_baseline($baseline);
+
+        for ($step = 0; $step < 100; ++$step) {
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            if ($result['status'] !== 'continue') {
+                break;
+            }
+        }
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertFileExists($this->docroot . '/' . $relative_path);
+        $this->assertSame('replacement file', file_get_contents($this->docroot . '/' . $relative_path));
+        $this->assertNull($journal->read_sender_state());
     }
 
     /**
@@ -1449,7 +1665,7 @@ final class PushEndpointsTest extends TestCase {
 
         try {
             $sender = $this->newSender($local_docroot, $current_index, $journal);
-            $blocked = $sender->send_next_request();
+            $blocked = $sender->advance();
             $this->assertSame('continue', $blocked['status'], (string) json_encode($blocked));
             $this->assertSame('sender_busy', $blocked['reason'], (string) json_encode($blocked));
             $this->assertNull($blocked['push_session_id']);
@@ -1458,12 +1674,13 @@ final class PushEndpointsTest extends TestCase {
             $this->stopLockProcess($sender_lock_process);
         }
 
-        $resumed = $sender->send_next_request();
+        $resumed = $sender->advance();
         $this->assertSame('continue', $resumed['status'], (string) json_encode($resumed));
         $this->assertNull($resumed['reason'], (string) json_encode($resumed));
         $state = $journal->read_sender_state();
         $this->assertIsArray($state);
-        $this->assertSame('reconciling_work', $state['phase']);
+        $this->assertSame('planning', $state['phase']);
+        $this->assertIsArray($state['planning_checkpoint']);
     }
 
     /**
@@ -1499,12 +1716,18 @@ final class PushEndpointsTest extends TestCase {
             'response_timeout' => 5,
         ]);
 
-        $created = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+        $created = $this->newSender($local_docroot, $current_index, $journal)->advance();
         $this->assertSame('continue', $created['status'], (string) json_encode($created));
-        $reconciled = $stale_sender->send_next_request();
-        $this->assertSame('continue', $reconciled['status'], (string) json_encode($reconciled));
-        $uploaded = $stale_sender->send_next_request();
-        $this->assertSame('continue', $uploaded['status'], (string) json_encode($uploaded));
+        for ($step = 0; $step < 20; ++$step) {
+            $advanced = $stale_sender->advance();
+            $this->assertSame('continue', $advanced['status'], (string) json_encode($advanced));
+            $state = $journal->read_sender_state();
+            $this->assertIsArray($state);
+            $work_file = $this->reprint_directory . '/.reprint/push/' . $state['push_session_id'] . '/work/files/value.bin';
+            if (is_file($work_file) && filesize($work_file) === 256) {
+                break;
+            }
+        }
         $state = $journal->read_sender_state();
         $this->assertIsArray($state);
         $this->assertSame(64, $state['max_part_bytes']);
@@ -1546,7 +1769,7 @@ final class PushEndpointsTest extends TestCase {
 
         $baseline = $this->root . '/excluded-baseline.jsonl';
         $this->writeIndex($baseline, [
-            'preserved' => [1, 1, 'dir'],
+            'preserved' => [1, 1, 'dir', false],
             'preserved/deleted-locally.txt' => [1, 11, 'file'],
             'preserved/value.txt' => [1, 4, 'file'],
         ]);
@@ -1554,7 +1777,7 @@ final class PushEndpointsTest extends TestCase {
         $journal->capture_local_files_baseline($baseline);
 
         for ($step = 0; $step < 100; ++$step) {
-            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             if ($result['status'] !== 'continue') {
                 break;
@@ -1578,7 +1801,7 @@ final class PushEndpointsTest extends TestCase {
 
         $this->writeExcludedPaths([]);
         for ($step = 0; $step < 100; ++$step) {
-            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             if ($result['status'] !== 'continue') {
                 break;
@@ -1630,7 +1853,7 @@ final class PushEndpointsTest extends TestCase {
             $journal = new PushJournal($this->root . '/drift-state-' . $name, $this->base_url);
 
             for ($step = 0; $step < 100; ++$step) {
-                $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+                $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
                 $this->assertNotSame('failed', $result['status'], $name . ': ' . json_encode($result));
                 $state = $journal->read_sender_state();
                 if (
@@ -1648,7 +1871,7 @@ final class PushEndpointsTest extends TestCase {
             $change_source($source_path);
             clearstatcache(true, $source_path);
 
-            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
             $this->assertSame('continue', $result['status'], $name . ': ' . json_encode($result));
             $this->assertSame('source_changed', $result['reason'], $name);
             $restarted_state = $journal->read_sender_state();
@@ -1667,7 +1890,7 @@ final class PushEndpointsTest extends TestCase {
             }
 
             for (++$step; $step < 200; ++$step) {
-                $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+                $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
                 $this->assertNotSame('failed', $result['status'], $name . ': ' . json_encode($result));
                 if ($result['status'] !== 'continue') {
                     break;
@@ -1709,7 +1932,7 @@ final class PushEndpointsTest extends TestCase {
         $journal = new PushJournal($this->root . '/deleted-source-state', $this->base_url);
 
         for ($step = 0; $step < 100; ++$step) {
-            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $journal->read_sender_state();
             if (is_array($state) && $state['confirmed_bytes'] > 64 && $state['confirmed_bytes'] < 2000) {
@@ -1729,7 +1952,7 @@ final class PushEndpointsTest extends TestCase {
         }
         $this->assertSame(0, proc_close($delete_process));
 
-        $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+        $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
         $this->assertSame('continue', $result['status'], (string) json_encode($result));
         $state = $journal->read_sender_state();
         $this->assertIsArray($state);
@@ -1741,7 +1964,7 @@ final class PushEndpointsTest extends TestCase {
         );
 
         for (; $step < 200; ++$step) {
-            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             if ($result['status'] !== 'continue') {
                 break;
@@ -1809,10 +2032,15 @@ final class PushEndpointsTest extends TestCase {
         ]);
         $journal = new PushJournal($this->root . '/retry-state', $this->base_url);
 
-        $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
-        $this->assertSame('continue', $result['status'], (string) json_encode($result));
-        $state = $journal->read_sender_state();
-        $this->assertIsArray($state);
+        for ($step = 0; $step < 10; ++$step) {
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
+            $this->assertSame('continue', $result['status'], (string) json_encode($result));
+            $state = $journal->read_sender_state();
+            $this->assertIsArray($state);
+            if ($state['phase'] === 'reconciling_work') {
+                break;
+            }
+        }
         $this->assertSame('reconciling_work', $state['phase']);
         $push_lock = fopen(
             $this->reprint_directory . '/.reprint/push/' . $state['push_session_id'] . '/push.lock',
@@ -1822,7 +2050,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertTrue(flock($push_lock, LOCK_EX | LOCK_NB));
         try {
             for ($failure_number = 1; $failure_number <= 5; ++$failure_number) {
-                $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+                $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
                 $this->assertSame(
                     $failure_number === 5 ? 'failed' : 'continue',
                     $result['status'],
@@ -1904,7 +2132,7 @@ final class PushEndpointsTest extends TestCase {
             'connect_timeout' => 2,
             'response_timeout' => 2,
         ]);
-        $result = $sender->send_next_request();
+        $result = $sender->advance();
         pcntl_waitpid($child, $status);
         fclose($listener);
 
@@ -1998,7 +2226,7 @@ final class PushEndpointsTest extends TestCase {
                 'connect_timeout' => 2,
                 'response_timeout' => 2,
             ]);
-            $result = $sender->send_next_request();
+            $result = $sender->advance();
             pcntl_waitpid($child, $status);
             fclose($listener);
 
@@ -2035,7 +2263,7 @@ final class PushEndpointsTest extends TestCase {
         $journal->capture_local_files_baseline($baseline);
 
         for ($step = 0; $step < 20; ++$step) {
-            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $journal->read_sender_state();
             if (is_array($state) && $state['phase'] === 'reconciling_deletes') {
@@ -2067,7 +2295,7 @@ final class PushEndpointsTest extends TestCase {
         );
 
         for (; $step < 60; ++$step) {
-            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $journal->read_sender_state();
             if (is_array($state) && $state['phase'] === 'committing') {
@@ -2084,7 +2312,7 @@ final class PushEndpointsTest extends TestCase {
             ''
         );
         for (; $step < 120; ++$step) {
-            $result = $this->newSender($local_docroot, $current_index, $journal)->send_next_request();
+            $result = $this->newSender($local_docroot, $current_index, $journal)->advance();
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             if ($result['status'] !== 'continue') {
                 break;
@@ -2510,23 +2738,28 @@ final class PushEndpointsTest extends TestCase {
         @rmdir($path);
     }
     /**
-     * Writes a path-sorted local index in the production JSONL shape.
+     * Writes a path-sorted current index or enriched baseline JSONL.
      *
-     * @param array<string,array{0:int,1:int,2:'file'|'dir'|'link'}> $entries
-     *     Path to `[ctime, size, type]` records.
+     * @param array<string,array{0:int,1:int,2:'file'|'dir'|'link',3?:bool}> $entries
+     *     Path to `[ctime, size, type, optional directory emptiness]` records.
      */
     private function writeIndex(string $path, array $entries): void
     {
         uksort($entries, 'strcmp');
         $handle = fopen($path, 'wb');
         $this->assertIsResource($handle);
-        foreach ($entries as $entry_path => [$ctime, $size, $type]) {
-            $line = json_encode([
+        foreach ($entries as $entry_path => $index_entry) {
+            [$ctime, $size, $type] = $index_entry;
+            $record = [
                 'path' => base64_encode($entry_path),
                 'ctime' => $ctime,
                 'size' => $size,
                 'type' => $type,
-            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+            ];
+            if (array_key_exists(3, $index_entry)) {
+                $record['empty'] = $index_entry[3];
+            }
+            $line = json_encode($record, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
             $this->assertSame(strlen($line), fwrite($handle, $line));
         }
         fclose($handle);

@@ -85,9 +85,9 @@ after each successful commit:
     <state-dir>/push/<site>/last-sync-local-files.jsonl
     <state-dir>/push/<site>/last-sync-local-rows.jsonl   (phase two)
 
-Each file baseline is a copy of a local file index in the `.import-index.jsonl`
-format the pull path already reads and writes — one JSON object per line,
-sorted by path.
+Each file baseline uses the local `.import-index.jsonl` fields, sorted by path,
+and adds an `empty` boolean to directory entries. This records whether each
+directory was empty or non-empty for the next planning pass.
 
 The first push to a site has no baselines: every current local file counts as
 changed, and no local deletion can be detected yet.
@@ -199,35 +199,46 @@ configuration; request parameters cannot select any of them.
 active push keeps these files under `<state-dir>/push/<site>/`:
 
 ```text
-sender-index.jsonl          stable local index selected when the push began
+sender-index.jsonl          enriched current index built during planning
 local-paths-to-push.jsonl   positive-work paths from that index
-local-paths-to-delete.jsonl deleted paths from that index
-work-deletes                raw NUL-delimited work-delete stream
-sender.json                 atomic sender checkpoint
+work-deletes                raw NUL-delimited work-delete roots
+sender.json                 atomic sender and planning checkpoint
 ```
 
-The checkpoint names the push session, the next request phase, the selected
-positive-work path, the last source token confirmed by an upload response,
-receiver-confirmed file and work-delete cursors, bounded retry count, target
-part limit, receiver exclusion policy, and learned request-body sizing state.
-Before any positive-work request can become
-ambiguous, the durable phase tells a reopened sender to query `push_status` for
-that same path. Local counters never advance the checkpoint merely because
-bytes reached the network. A work-delete upload is likewise reconciled against
-`work_deletes_bytes`, and commit and remove requests are repeated until their
-durable target operation reports completion.
+`PushFilesSender::advance()` performs at most one real HTTP request and at most
+one bounded local planning step. `push_create` first supplies the receiver
+exclusion policy and that same advance pins the current-index identity without
+consuming a record. The sender then enters `planning`; each advance merges at
+most one bounded batch from the current index and prior baseline while writing
+all three planning outputs. It persists the two next-unconsumed input offsets,
+three committed output lengths, counts, active work-delete roots, and
+current-index identity in `sender.json`. The next process truncates any bytes
+beyond those lengths before resuming. No upload begins until planning is
+complete and those outputs are immutable.
+
+The same checkpoint names the push session, selected positive-work path, last
+source token confirmed by an upload response, receiver-confirmed file and
+work-delete cursors, bounded retry count, target part limit, receiver exclusion
+policy, and learned request-body sizing state. Before any positive-work request
+can become ambiguous, the durable phase tells a reopened sender to query
+`push_status` for that same path. Local counters never advance the checkpoint
+merely because bytes reached the network. A work-delete upload is likewise
+reconciled against `work_deletes_bytes`, and commit and remove requests are
+repeated until their durable target operation reports completion.
 
 The source token is its current type, size, and ctime. A changed token restarts
 the same in-flight work at offset zero, so new-version bytes are never appended
-behind an old-version prefix. A vanished selected path or a receiver work-delete
-cursor beyond the stable local stream abandons the upload-only push session by
-repeating bounded remove calls, then tells the caller to regenerate its local
-index. The caller must also regenerate that index before a later push. The
-stable `sender-index.jsonl` updates the local baseline only after commit
-completes. Current evidence under excluded paths is omitted because those bytes
-were not sent; any prior synchronized evidence there is retained. If the target
-later removes an exclusion, the next diff therefore selects local changes and
-deletions made while that path was protected.
+behind an old-version prefix. A changed planning index, changed indexed
+directory, vanished selected path, or receiver work-delete cursor beyond the
+stable local stream abandons the upload-only push session by repeating bounded
+remove calls, then tells the caller to regenerate its local index. The caller
+must also regenerate that index before a later push. The completed
+`sender-index.jsonl` updates the local baseline only after commit completes.
+Every current entry appears in that enriched index, but baseline publication
+omits current evidence under excluded paths because those bytes were not sent;
+any prior synchronized evidence there is retained. If the target later removes
+an exclusion, the next diff therefore selects local changes and deletions made
+while that path was protected.
 
 One upload request contains as many bounded chunks and work values as its
 decoded entity-body budget permits. The sender holds only one payload string,
@@ -237,10 +248,10 @@ current one is complete. Recoverable target contention, offset gaps, and
 ambiguous transport failures are retried at a fixed bounded count; exhaustion
 returns a terminal failure rather than a final retry.
 
-A nonblocking per-site sender lock covers each journal read, HTTP request, and
-following checkpoint write. A second local process returns `sender_busy` and
-resumes after the in-flight request releases that lock instead of advancing the
-same fixed-name journal files concurrently.
+A nonblocking per-site sender lock covers each journal read, bounded planning
+step or HTTP request, and following checkpoint write. A second local process
+returns `sender_busy` and resumes after the in-flight advance releases that lock
+instead of changing the same fixed-name journal files concurrently.
 
 The token has one honest timestamp-resolution gap: a same-size edit that keeps
 the same ctime second is not detected by the token, and remains invisible when

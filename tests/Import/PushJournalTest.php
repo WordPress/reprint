@@ -687,31 +687,34 @@ final class PushJournalTest extends TestCase
     public function testExcludedPathsFilterWorkAndPreservePriorBaselineEvidence(): void
     {
         $arbitrary_bytes_root = "private-\xff";
+        mkdir($this->docroot . '/private/owned', 0755, true);
+        file_put_contents($this->docroot . '/private/owned/value.txt', 'changed');
+        file_put_contents($this->docroot . '/private/sibling.txt', 'changed');
+
         $journal = $this->makeJournal();
         $journal->capture_local_files_baseline($this->writeIndex([
             'ordinary-deleted.txt' => [1, 1, 'file'],
-            'private/owned' => [1, 1, 'dir'],
+            'private/owned' => [1, 1, 'dir', false],
             'private/owned/deleted.txt' => [1, 1, 'file'],
             'private/owned/value.txt' => [1, 3, 'file'],
             $arbitrary_bytes_root . '/value.txt' => [1, 3, 'file'],
         ]));
         $current = $this->writeIndex([
-            'private' => [2, 2, 'dir'],
-            'private/owned' => [2, 2, 'dir'],
+            'private' => [$this->pathCtime('private'), 0, 'dir'],
+            'private/owned' => [$this->pathCtime('private/owned'), 0, 'dir'],
             'private/owned/value.txt' => [2, 7, 'file'],
             'private/sibling.txt' => [2, 7, 'file'],
             $arbitrary_bytes_root . '/value.txt' => [2, 7, 'file'],
         ]);
         $excluded_paths = ['private/owned', $arbitrary_bytes_root];
 
-        $this->assertSame(
-            ['changed' => 1, 'deleted' => 1],
-            $journal->diff_local_files($current, $excluded_paths)
-        );
-        $this->assertSame(['private/sibling.txt'], $this->listPaths($journal->local_paths_to_push));
-        $this->assertSame(['ordinary-deleted.txt'], $this->listPaths($journal->local_paths_to_delete));
+        $result = $this->planToCompletion($journal, $current, $excluded_paths);
 
-        $journal->capture_local_files_baseline($current, $excluded_paths);
+        $this->assertPlanningCounts(1, 1, $result);
+        $this->assertSame(['private/sibling.txt'], $this->listPaths($journal->local_paths_to_push));
+        $this->assertSame(['ordinary-deleted.txt'], $this->workDeletePaths($journal->work_deletes_path));
+
+        $journal->capture_local_files_baseline($journal->sender_index_path, $excluded_paths);
         $expected_baseline_paths = [
             'private/owned',
             'private/owned/deleted.txt',
@@ -721,38 +724,6 @@ final class PushJournalTest extends TestCase
         ];
         usort($expected_baseline_paths, 'strcmp');
         $this->assertSame($expected_baseline_paths, $this->listPaths($journal->local_files_baseline_path));
-    }
-
-    /**
-     * Keeps active path lists independent from later caller-index changes.
-     *
-     * The sender copy, positive-work list, and raw work-delete stream must all
-     * describe one index so their persisted byte offsets remain meaningful
-     * after the caller replaces or removes its original index file.
-     */
-    public function testActiveSenderIndexAndWorkDeletesStayStable(): void
-    {
-        $journal = $this->makeJournal();
-        $baseline = $this->writeIndex([
-            'delete-me.txt' => [100, 1, 'file'],
-            'keep.txt' => [100, 1, 'file'],
-        ]);
-        $journal->capture_local_files_baseline($baseline);
-        $current = $this->writeIndex([
-            'keep.txt' => [100, 1, 'file'],
-            'new.txt' => [200, 2, 'file'],
-        ]);
-
-        $journal->capture_sender_index($current);
-        $journal->diff_local_files($journal->sender_index_path);
-        $this->assertSame(strlen("delete-me.txt\0"), $journal->prepare_work_deletes());
-        $this->assertSame("delete-me.txt\0", file_get_contents($journal->work_deletes_path));
-
-        file_put_contents($current, $this->indexLine('later.txt', 300, 3, 'file') . "\n");
-        $this->assertSame(['new.txt'], $this->listPaths($journal->local_paths_to_push));
-        $this->assertSame(['delete-me.txt'], $this->listPaths($journal->local_paths_to_delete));
-        $this->assertStringContainsString(base64_encode('new.txt'), (string) file_get_contents($journal->sender_index_path));
-        $this->assertStringNotContainsString(base64_encode('later.txt'), (string) file_get_contents($journal->sender_index_path));
     }
 
     /**
@@ -767,6 +738,23 @@ final class PushJournalTest extends TestCase
         $state = [
             'push_session_id' => str_repeat('a', 32),
             'phase' => 'reconciling_work',
+            'planning_checkpoint' => [
+                'current_index_byte_offset' => 101,
+                'baseline_byte_offset' => 83,
+                'sender_index_bytes' => 111,
+                'local_paths_to_push_bytes' => 37,
+                'work_deletes_bytes' => 12,
+                'changed' => 3,
+                'deleted' => 1,
+                'active_work_delete_roots_b64' => [],
+                'current_index_identity' => [
+                    'device' => 1,
+                    'inode' => 2,
+                    'size' => 101,
+                    'ctime' => 123,
+                    'mtime' => 123,
+                ],
+            ],
             'paths_byte_offset' => 17,
             'current_path_b64' => base64_encode('file.txt'),
             'next_paths_byte_offset' => 41,

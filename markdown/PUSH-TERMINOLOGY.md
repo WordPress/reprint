@@ -92,21 +92,24 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Surface | Name |
 | --- | --- |
 | Active sender checkpoint | `sender.json`, `$sender_state_path` |
-| Stable index selected for the active push | `sender-index.jsonl`, `$sender_index_path` |
+| Enriched index selected for the active push | `sender-index.jsonl`, `$sender_index_path` |
 | Positive-work path list | `local-paths-to-push.jsonl`, `$local_paths_to_push` |
-| Deleted-path list | `local-paths-to-delete.jsonl`, `$local_paths_to_delete` |
 | Raw local work-delete stream | `work-deletes`, `$work_deletes_path` |
 | Local sender transition lock | `sender.lock` |
+| Local planning checkpoint key | `planning_checkpoint` |
 | Selected path-list cursor | `$paths_byte_offset` |
 | Selected positive-work path | `$current_path_b64` |
 | Receiver-confirmed file cursor | `$confirmed_bytes` |
 
 `sender.json` is unversioned development state. Its phases are `creating`,
-`reconciling_work`, `uploading_work`, `reconciling_deletes`,
+`planning`, `reconciling_work`, `uploading_work`, `reconciling_deletes`,
 `uploading_deletes`, `committing`, and `removing`. It also records the push
-session ID, selected path, last source token confirmed by an upload response,
-receiver-confirmed file and work-delete cursors, recoverable-failure count,
-target part limit, receiver exclusion policy, and request-sizing state.
+session ID, local planning input offsets and committed output lengths, selected
+path, last source token confirmed by an upload response, receiver-confirmed
+file and work-delete cursors, recoverable-failure count, target part limit,
+receiver exclusion policy, and request-sizing state.
+`planning_checkpoint` is local sender resume metadata. It is unrelated to the
+receiver commit checkpoint in `commit.json`, named `$commit_state` in PHP.
 `push.json` remains the receiver-owned
 push identity and policy; it does not store local source evidence or transport
 progress.

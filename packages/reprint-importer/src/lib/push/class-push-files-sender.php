@@ -7,11 +7,11 @@
 /**
  * Drives one resumable local-files push through real HTTP requests.
  *
- * Each send_next_request() call performs one create, status, upload, commit,
- * or remove request and persists the receiver-reconcilable boundary before it
- * returns. Upload requests contain as many bounded file chunks and work values
- * as the learned request-body budget permits. Only one payload string is held
- * at a time.
+ * Each advance() call performs at most one create, status, upload, commit, or
+ * remove request and at most one bounded local planning step, then persists the
+ * durable boundary before it returns. Upload requests contain as many bounded
+ * file chunks and work values as the learned request-body budget permits. Only
+ * one payload string is held at a time.
  *
  * The sender does not trust local byte counters after a restart or ambiguous
  * response. It asks push_status for the current path or work-delete cursor,
@@ -43,8 +43,8 @@ final class PushFilesSender
      *
      *     @type string $docroot Required local document-root directory.
      *     @type string $current_index_file Current local file index required
-     *         when no sender checkpoint is active. An active sender resumes
-     *         from its stable journal copy instead.
+     *         until bounded planning finishes. Later sender phases resume from
+     *         the completed journal outputs instead.
      *     @type PushJournal $journal Required per-target push journal.
      *     @type string $base_url Required exporter API URL.
      *     @type Site_Export_HMAC_Client $hmac_client Required envelope signer.
@@ -108,14 +108,15 @@ final class PushFilesSender
     }
 
     /**
-     * Runs requests until the push completes, fails, or needs a new index.
+     * Runs sender advances until the push completes, fails, or needs a new
+     * index.
      *
-     * Recoverable results pause for 100 milliseconds before the next request,
+     * Recoverable results pause for 100 milliseconds before the next advance,
      * so the convenience loop does not spin on target lock contention.
      *
      * @return array{
      *     status:'complete'|'restart'|'failed',
-     *     phase:'complete'|'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     phase:'complete'|'creating'|'planning'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
      *     push_session_id:?string,
      *     reason:?string,
      *     detail:?string
@@ -129,7 +130,7 @@ final class PushFilesSender
     public function push(): array
     {
         do {
-            $result = $this->send_next_request();
+            $result = $this->advance();
             if ($result['status'] === 'continue' && $result['reason'] !== null) {
                 usleep(self::RECOVERABLE_FAILURE_PAUSE_MICROSECONDS);
             }
@@ -138,31 +139,32 @@ final class PushFilesSender
     }
 
     /**
-     * Performs the next durable HTTP request in the local-files push.
+     * Performs the next durable step in the local-files push.
      *
-     * New work first produces journal path lists and a raw work-delete stream.
-     * Later calls create or reopen the push session, reconcile any current
-     * receiver cursor, fill one multipart request, close work deletes, repeat
-     * commit, or remove an abandoned upload-only push session.
+     * New work first creates the push session to learn its excluded paths, then
+     * produces journal path lists and a raw work-delete stream in bounded local
+     * planning calls. Later calls reconcile any current receiver cursor, fill
+     * one multipart request, close work deletes, repeat commit, or remove an
+     * abandoned upload-only push session.
      *
-     * Returning `continue` means the checkpoint names the request to perform
-     * next. `complete` means receiver commit and local baseline capture both
+     * Returning `continue` means the checkpoint names the next local step or
+     * request. `complete` means receiver commit and local baseline capture both
      * finished. `restart` means source selection changed incompatibly and the
      * old push session is gone. `failed` is terminal for this checkpoint.
      *
      * @return array{
      *     status:'continue'|'complete'|'restart'|'failed',
-     *     phase:'complete'|'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     phase:'complete'|'creating'|'planning'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
      *     push_session_id:?string,
      *     reason:?string,
      *     detail:?string
-     * } Result of one real request and its durable local transition.
+     * } Result of one bounded sender advance and its durable local transition.
      * @throws InvalidArgumentException If the stable index contains an unsafe
      *     document-root-relative path.
      * @throws RuntimeException If durable local sender state cannot be read or
      *     written.
      */
-    public function send_next_request(): array
+    public function advance(): array
     {
         $sender_lock = $this->journal->acquire_sender_lock();
         if ($sender_lock === null) {
@@ -171,11 +173,11 @@ final class PushFilesSender
                 'phase' => 'creating',
                 'push_session_id' => null,
                 'reason' => 'sender_busy',
-                'detail' => 'Another process is advancing this target site\'s local push sender. Retry after that request finishes.',
+                'detail' => 'Another process is advancing this target site\'s local push sender. Retry after that advance finishes.',
             ];
         }
         try {
-            return $this->send_next_request_under_lock();
+            return $this->advance_under_lock();
         } finally {
             $this->journal->release_sender_lock($sender_lock);
         }
@@ -184,9 +186,9 @@ final class PushFilesSender
     /**
      * Performs one sender transition while the site journal lock is held.
      *
-     * @return array<string,mixed> Result in send_next_request()'s documented shape.
+     * @return array<string,mixed> Result in advance()'s documented shape.
      */
-    private function send_next_request_under_lock(): array
+    private function advance_under_lock(): array
     {
         $state = $this->journal->read_sender_state();
         clearstatcache(true, $this->current_index_file);
@@ -202,10 +204,10 @@ final class PushFilesSender
             $this->client_state_fingerprint = $state_fingerprint;
         }
         if ($state === null) {
-            $this->journal->capture_sender_index($this->current_index_file);
             $state = [
                 'push_session_id' => bin2hex(random_bytes(16)),
                 'phase' => 'creating',
+                'planning_checkpoint' => null,
                 'paths_byte_offset' => 0,
                 'current_path_b64' => null,
                 'next_paths_byte_offset' => 0,
@@ -245,14 +247,71 @@ final class PushFilesSender
             ) {
                 return $this->step_result('failed', $state, 'unexpected_response', 'push_create did not return the matching push session ID, a positive part limit, a positive or unknown request-body limit, and a canonical excluded-path list.');
             }
-            $this->journal->diff_local_files($this->journal->sender_index_path, $excluded_paths);
-            $this->journal->prepare_work_deletes();
             $this->client->set_max_part_bytes($response['max_part_bytes']);
             $this->client->apply_reported_limits([$response['post_max_bytes'] ?? null]);
             $state['max_part_bytes'] = $response['max_part_bytes'];
             $state['excluded_paths_b64'] = $response['excluded_paths_b64'];
             $state['recoverable_failures'] = 0;
-            $state['phase'] = 'reconciling_work';
+            try {
+                $planning = $this->journal->diff_local_files(
+                    $this->current_index_file,
+                    $this->docroot,
+                    $excluded_paths,
+                    null
+                );
+            } catch (RuntimeException $exception) {
+                clearstatcache(true, $this->current_index_file);
+                if (is_file($this->current_index_file)) {
+                    throw $exception;
+                }
+                $state['phase'] = 'removing';
+                $this->persist_state($state);
+                return $this->step_result(
+                    'continue',
+                    $state,
+                    'source_changed',
+                    'The current index disappeared before local planning began; remove the upload-only push session before regenerating the index.'
+                );
+            }
+            $state['planning_checkpoint'] = $planning['checkpoint'];
+            if ($planning['status'] === 'source_changed') {
+                $state['phase'] = 'removing';
+                $this->persist_state($state);
+                return $this->step_result(
+                    'continue',
+                    $state,
+                    'source_changed',
+                    'The current index changed while local planning began; remove the upload-only push session before regenerating the index.'
+                );
+            }
+            $state['phase'] = $planning['status'] === 'complete' ? 'reconciling_work' : 'planning';
+            $this->persist_state($state);
+            return $this->step_result('continue', $state, null, null);
+        }
+
+        if ($state['phase'] === 'planning') {
+            $excluded_paths = $this->decode_excluded_paths_b64($state['excluded_paths_b64']);
+            if ($excluded_paths === null) {
+                return $this->step_result('failed', $state, 'invalid_sender_state', 'Sender state does not contain the receiver exclusion policy for local planning.');
+            }
+            $planning = $this->journal->diff_local_files(
+                $this->current_index_file,
+                $this->docroot,
+                $excluded_paths,
+                $state['planning_checkpoint']
+            );
+            $state['planning_checkpoint'] = $planning['checkpoint'];
+            if ($planning['status'] === 'source_changed') {
+                $state['phase'] = 'removing';
+                $this->persist_state($state);
+                return $this->step_result(
+                    'continue',
+                    $state,
+                    'source_changed',
+                    'The current index or an indexed directory changed during local planning; remove the upload-only push session before regenerating the index.'
+                );
+            }
+            $state['phase'] = $planning['status'] === 'complete' ? 'reconciling_work' : 'planning';
             $this->persist_state($state);
             return $this->step_result('continue', $state, null, null);
         }
@@ -1151,7 +1210,7 @@ final class PushFilesSender
      *     and persisted when sizing or retry evidence changes.
      * @return array{
      *     status:'continue'|'failed',
-     *     phase:'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     phase:'creating'|'planning'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
      *     push_session_id:string,
      *     reason:?string,
      *     detail:?string
@@ -1202,7 +1261,7 @@ final class PushFilesSender
      * @param string|null $detail Human-readable condition.
      * @return array{
      *     status:'continue'|'failed',
-     *     phase:'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
+     *     phase:'creating'|'planning'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
      *     push_session_id:string,
      *     reason:?string,
      *     detail:?string
