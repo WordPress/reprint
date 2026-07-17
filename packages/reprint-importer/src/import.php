@@ -16,6 +16,8 @@ use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FileChunkApplier;
 use Reprint\Importer\FileSync\FileFetchResponseHandler;
 use Reprint\Importer\FileSync\FileFetchResponseObserver;
+use Reprint\Importer\FileSync\FetchListBuilder;
+use Reprint\Importer\FileSync\FetchListBuildContext;
 use Reprint\Importer\FileSync\FilePlacementRules;
 use Reprint\Importer\FileSync\LocalFileApplyContext;
 use Reprint\Importer\FileSync\LocalFilesystemAuditLogger;
@@ -65,6 +67,7 @@ if (!class_exists('MultipartStreamParser', false)) {
 require_once __DIR__ . '/lib/file-sync/interface-local-file-apply-context.php';
 require_once __DIR__ . '/lib/file-sync/interface-local-filesystem-audit-logger.php';
 require_once __DIR__ . '/lib/file-sync/interface-file-fetch-response-observer.php';
+require_once __DIR__ . '/lib/file-sync/interface-fetch-list-build-context.php';
 require_once __DIR__ . '/lib/file-sync/class-download-list.php';
 require_once __DIR__ . '/lib/file-sync/class-file-placement-rules.php';
 require_once __DIR__ . '/lib/file-sync/class-local-filesystem-operator.php';
@@ -72,6 +75,7 @@ require_once __DIR__ . '/lib/file-sync/class-file-chunk-applier.php';
 require_once __DIR__ . '/lib/file-sync/class-directory-chunk-applier.php';
 require_once __DIR__ . '/lib/file-sync/class-symlink-chunk-applier.php';
 require_once __DIR__ . '/lib/file-sync/class-file-fetch-response-handler.php';
+require_once __DIR__ . '/lib/file-sync/class-fetch-list-builder.php';
 
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
@@ -695,7 +699,7 @@ class AdaptiveTuner
     }
 }
 
-class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, LocalFilesystemAuditLogger, FileFetchResponseObserver
+class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, LocalFilesystemAuditLogger, FileFetchResponseObserver, FetchListBuildContext
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
@@ -1238,6 +1242,68 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
     public function handleFileFetchCompletionProgress(array $progress): void
     {
         $this->output_progress($progress, true);
+    }
+
+    public function readFetchListLocalIndexLine($handle): ?array
+    {
+        return $this->read_index_line($handle);
+    }
+
+    public function beginFetchListIndexUpdates(): void
+    {
+        $this->begin_index_updates();
+    }
+
+    public function finalizeFetchListIndexUpdates(): void
+    {
+        $this->finalize_index_updates();
+    }
+
+    public function deleteFetchListIndexEntry(string $path): void
+    {
+        $this->delete_index_entry($path);
+    }
+
+    public function deleteFetchListLocalPath(string $path): void
+    {
+        $this->delete_local_file_path($path);
+    }
+
+    public function shouldDeleteFetchListLocalPath(string $path): bool
+    {
+        return $this->is_file_path_selected_by_pull_only_files($path);
+    }
+
+    public function shouldSkipFetchListRemotePath(string $path): ?string
+    {
+        return $this->should_skip_for_preserve_local($path);
+    }
+
+    public function emitFetchListSkip(string $path): void
+    {
+        $this->emit_skip_progress($path);
+    }
+
+    public function saveFetchListProgress(int $remoteOffset, ?string $localAfter): void
+    {
+        $this->import_state()->diff->remote_offset = $remoteOffset;
+        $this->import_state()->diff->local_after = $localAfter;
+        $this->save_state($this->state);
+    }
+
+    public function shouldStopFetchListBuild(): bool
+    {
+        return $this->shutdown_requested;
+    }
+
+    public function tickFetchListProgress(): void
+    {
+        $this->progress->tick_spinner();
+    }
+
+    public function recordFetchListAudit(string $message, bool $toConsole = true): void
+    {
+        $this->audit_log($message, $toConsole);
     }
 
     /**
@@ -6958,176 +7024,17 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
      */
     private function diff_indexes_and_build_fetch_list(): bool
     {
-        if (!file_exists($this->remote_index_file)) {
-            throw new RuntimeException("Remote index file not found");
-        }
-
         $diff = $this->import_state()->diff;
-        $remote_offset = $diff->remote_offset;
-        $local_after = $diff->local_after;
-        $download_mode = $remote_offset > 0 ? "a" : "w";
-        if ($download_mode === "w") {
-            $this->audit_log(
-                "FILE CREATE | {$this->download_list_file} | building download list",
-            );
-        } else {
-            $this->audit_log(
-                "FILE APPEND | {$this->download_list_file} | resuming download list build",
-            );
-        }
-        $download_handle = fopen($this->download_list_file, $download_mode);
-        if (!$download_handle) {
-            throw new RuntimeException("Failed to open download list file");
-        }
-
-        // When --filter=essential-files is active, uploads go to a separate
-        // "skipped" list so only essential files are fetched in this run.
-        $skipped_handle = null;
-        $uploads_basedir = null;
-        if ($this->filter === "essential-files") {
-            if ($download_mode === "w") {
-                $this->audit_log(
-                    "FILE CREATE | {$this->skipped_download_list_file} | building skipped download list (uploads)",
-                );
-            } else {
-                $this->audit_log(
-                    "FILE APPEND | {$this->skipped_download_list_file} | resuming skipped download list build",
-                );
-            }
-            $skipped_handle = fopen($this->skipped_download_list_file, $download_mode);
-            if (!$skipped_handle) {
-                fclose($download_handle);
-                throw new RuntimeException("Failed to open skipped download list file");
-            }
-            $uploads_basedir = $this->get_uploads_basedir();
-            $this->audit_log(
-                "FILTER | essential-files | uploads_basedir=" . ($uploads_basedir ?? "(fallback: wp-content/uploads/)"),
-            );
-        }
-
-        $remote_handle = fopen($this->remote_index_file, "r");
-        if (!$remote_handle) {
-            fclose($download_handle);
-            throw new RuntimeException("Failed to open remote index file");
-        }
-        if ($remote_offset > 0) {
-            fseek($remote_handle, $remote_offset);
-        }
-
-        $local_handle = file_exists($this->index_file)
-            ? fopen($this->index_file, "r")
-            : null;
-        $local = $this->read_index_line($local_handle);
-        if ($local_after) {
-            while (
-                $local !== null &&
-                strcmp($local["path"], $local_after) <= 0
-            ) {
-                $local = $this->read_index_line($local_handle);
-            }
-        }
-        $this->begin_index_updates();
-        $processed = 0;
-
-        while (($line = fgets($remote_handle)) !== false) {
-            if ($this->shutdown_requested) {
-                break;
-            }
-
-            if (function_exists("pcntl_signal_dispatch")) {
-                pcntl_signal_dispatch();
-            }
-
-            $remote_offset = ftell($remote_handle);
-            $remote = $this->parse_index_line($line);
-            if (!$remote) {
-                continue;
-            }
-
-            while (
-                $local !== null &&
-                strcmp($local["path"], $remote["path"]) < 0
-            ) {
-                // When --only file prefixes are active, only delete local files that fall under those prefixes.
-                // The local files index ends up being a union across files-pull --only runs.
-                if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                    $this->delete_local_file_path($local["path"]);
-                    $this->delete_index_entry($local["path"]);
-                }
-                $local_after = $local["path"];
-                $local = $this->read_index_line($local_handle);
-            }
-
-            if ($local !== null && $local["path"] === $remote["path"]) {
-                if (
-                    $local["ctime"] !== $remote["ctime"] ||
-                    $local["size"] !== $remote["size"] ||
-                    $local["type"] !== $remote["type"]
-                ) {
-                    // File is in both indexes but changed on the remote.
-                    // Always re-download — this file is in our local index,
-                    // meaning we synced it before; preserve-local does not
-                    // protect files we own.
-                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
-                        ? $skipped_handle
-                        : $download_handle;
-                    $this->append_download_list(
-                        $remote["path"],
-                        $target_handle,
-                    );
-                }
-                $local_after = $local["path"];
-                $local = $this->read_index_line($local_handle);
-            } elseif (
-                $local === null ||
-                strcmp($local["path"], $remote["path"]) > 0
-            ) {
-                $skip_reason = $this->should_skip_for_preserve_local($remote["path"]);
-                if ($skip_reason) {
-                    $this->audit_log($skip_reason, true);
-                    $this->emit_skip_progress($remote["path"]);
-                } else {
-                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
-                        ? $skipped_handle
-                        : $download_handle;
-                    $this->append_download_list($remote["path"], $target_handle);
-                }
-            }
-
-            $processed++;
-            if ($processed % 200 === 0) {
-                $this->import_state()->diff->remote_offset = $remote_offset;
-                $this->import_state()->diff->local_after = $local_after;
-                $this->save_state($this->state);
-                $this->progress->tick_spinner();
-            }
-        }
-
-        while ($local !== null) {
-            if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                $this->delete_local_file_path($local["path"]);
-                $this->delete_index_entry($local["path"]);
-            }
-            $local_after = $local["path"];
-            $local = $this->read_index_line($local_handle);
-        }
-
-        if ($local_handle) {
-            fclose($local_handle);
-        }
-        fclose($remote_handle);
-        fclose($download_handle);
-        if ($skipped_handle !== null) {
-            fclose($skipped_handle);
-        }
-
-        $this->import_state()->diff->remote_offset = $remote_offset;
-        $this->import_state()->diff->local_after = $local_after;
-        $this->save_state($this->state);
-
-        $this->finalize_index_updates();
-
-        return !$this->shutdown_requested;
+        return (new FetchListBuilder($this))->build(
+            $this->remote_index_file,
+            $this->index_file,
+            $this->download_list_file,
+            $this->skipped_download_list_file,
+            $this->filter,
+            $this->filter === "essential-files" ? $this->get_uploads_basedir() : null,
+            $diff->remote_offset,
+            $diff->local_after,
+        );
     }
 
     /**
