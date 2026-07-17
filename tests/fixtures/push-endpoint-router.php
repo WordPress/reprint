@@ -1,7 +1,8 @@
 <?php
 
-// This fixture supplies the WordPress values the production plugin router
-// reads; request authentication and endpoint dispatch remain production code.
+// This fixture supplies the WordPress functions and values the production
+// plugin entry point reads. API routing, authentication, and dispatch all run
+// through index.php and its site_export_api_options filter.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound
 
@@ -44,8 +45,6 @@ function get_option(string $name, $fallback = false) {
     return $fallback;
 }
 
-require_once dirname(__DIR__, 2) . '/reprint-exporter-wp/lib.php';
-
 $reprint_push_test_excluded_paths_b64 = json_decode(
     (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_EXCLUDED_PATHS_CONFIG') ),
     true
@@ -73,4 +72,14 @@ $reprint_push_test_directory = trim( (string) file_get_contents( (string) getenv
 if ($reprint_push_test_directory !== '') {
     $reprint_push_test_options['reprint_directory'] = $reprint_push_test_directory;
 }
-_site_export_handle_api_request($reprint_push_test_options);
+
+function apply_filters(string $hook_name, $value) {
+    global $reprint_push_test_options;
+
+    if ($hook_name === 'site_export_api_options') {
+        return $reprint_push_test_options;
+    }
+    return $value;
+}
+
+require_once dirname(__DIR__, 2) . '/reprint-exporter-wp/index.php';

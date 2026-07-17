@@ -44,7 +44,7 @@ function _site_export_error(int $code, string $message): void {
  * the push response discriminator here instead of the legacy export error
  * object.
  *
- * Emits `{status:"rejected",reason:string,detail:string}`.
+ * The response contains `status` (`rejected`), `reason`, and `detail`.
  *
  * @param int $http_code HTTP status code.
  * @param string $reason Machine-readable push failure reason.
@@ -213,21 +213,24 @@ function _site_export_default_authenticate(): void {
  * and the database layer (including the SQLite db.php drop-in when present)
  * are all available.
  *
+ * The bundled plugin passes the `site_export_api_options` filter result here.
+ * A direct library embedder supplies the same trusted options array itself.
+ *
  * @param array $options {
  *     Optional endpoint configuration overrides.
  *
  *     @type callable $authenticate Optional. Authenticates the request.
  *                                  Defaults to _site_export_default_authenticate().
- *     @type string $docroot Optional. Managed document root for push. Defaults
+ *     @type string $docroot Optional. Document root for push. Defaults
  *                           to the server's DOCUMENT_ROOT. The configured path
  *                           must resolve to an existing directory.
  *     @type string $reprint_directory Optional. Private push storage path
- *                                     outside the managed document root.
+ *                                     outside the document root.
  *                                     Defaults to a document-root-specific sibling.
  *     @type string[] $excluded_paths Optional. Document-root-relative paths
  *                                    push must preserve. The exporter plugin
  *                                    directory is always included when it is
- *                                    below the managed document root.
+ *                                    below the document root.
  *     @type int $maximum_part_bytes Optional. Maximum Content-Length for one
  *                                   push upload part. Defaults to 4 MiB.
  *     @type int $maximum_commit_entries Optional. Maximum bounded entries one
@@ -361,7 +364,7 @@ function _site_export_handle_api_request(array $options = []): void {
     try {
         $server_options = ['default_directory' => ABSPATH];
         if (Site_Export_HTTP_Server::is_push_endpoint($endpoint)) {
-            // Push manages the web server's document root. ABSPATH remains the
+            // Push changes the web server's document root. ABSPATH remains the
             // pull default because it may point at a separate shared core tree.
             if (array_key_exists('docroot', $options)) {
                 $configured_docroot = $options['docroot'];
@@ -414,7 +417,7 @@ function _site_export_handle_api_request(array $options = []): void {
                     $logical_plugin_relative_path = substr($logical_plugin_directory, $docroot_relative_offset);
                 } else {
                     // WP_PLUGIN_DIR may itself be a symlink alias into the
-                    // managed root. Resolve that parent, but keep the
+                    // document root. Resolve that parent, but keep the
                     // registered plugin subdirectory lexical so its installed
                     // path survives a final symlink to the outside target.
                     $canonical_wordpress_plugin_directory = realpath( (string) WP_PLUGIN_DIR );
@@ -438,7 +441,7 @@ function _site_export_handle_api_request(array $options = []): void {
                         || rtrim($resolved_logical_plugin_directory, '/\\') !== $plugin_directory
                     ) {
                         throw new Site_Export_Push_Configuration_Exception(
-                            'WordPress reports the Reprint Exporter plugin inside the managed document root at '
+                            'WordPress reports the Reprint Exporter plugin inside the document root at '
                             . json_encode($logical_plugin_directory_to_verify)
                             . ', but that path does not resolve to SITE_EXPORT_PLUGIN_DIR '
                             . json_encode(SITE_EXPORT_PLUGIN_DIR) . '.'

@@ -117,31 +117,34 @@ and upload requests use the envelope signature described above, so
 of reading the complete request for authentication.
 
 - `POST push_create` creates or reopens the caller's 32-character lowercase
-  hexadecimal `push_session_id`. It returns
-  `{status:"created",push_session_id:string,max_part_bytes:int,post_max_bytes:int|null,excluded_paths_b64:string[]}`.
-  The two limits describe different dimensions: one part and the complete
-  decoded request body. The endpoint enforces the request-body limit while
-  reading bounded fragments, including chunked requests without
-  `Content-Length`. `excluded_paths_b64` is the normalized, sorted, immutable
-  server policy stored for the push session; base64 preserves arbitrary path
-  bytes which JSON cannot represent directly. A sender consuming this field
-  must omit indexed paths equal to, below, or ancestors of any advertised
-  exclusion.
-- `POST push_upload` accepts `multipart/mixed`. It returns
-  `{status:"accepted",push_session_id:string,changes_accepted:int,last_change:change|null}`,
-  where `change` is exactly the `get_current_change()` file, directory,
-  symlink, or delete-list union. Only the latest change is retained for the
+  hexadecimal `push_session_id`. A successful response contains `status`,
+  `push_session_id`, `max_part_bytes`, `post_max_bytes`, and
+  `excluded_paths_b64`. The two limits describe different dimensions: one
+  multipart part and the complete decoded request body. The endpoint enforces
+  the request-body limit while reading bounded fragments, including chunked
+  requests without `Content-Length`. `excluded_paths_b64` is the normalized,
+  sorted, immutable server policy stored for the push session; base64 preserves
+  arbitrary path bytes which JSON cannot represent directly. A sender
+  consuming this field must omit indexed paths equal to, below, or ancestors
+  of any advertised exclusion.
+- `POST push_upload` accepts `multipart/mixed`. A successful response contains
+  `status`, `push_session_id`, `changes_accepted`, and `last_change`. The last
+  change is null for an empty request. Otherwise it contains `state`, `type`,
+  and `accepted_bytes`, plus `path_b64` for a file, directory, or symlink. A
+  delete-list change has no path. Only the latest change is retained for the
   response; request memory does not grow with the number of parts.
-- `GET push_status` accepts an optional base64 `path_b64`. It returns
-  `status:"accepted"` together with the exact `get_status()` object: push
-  session phase, `work_deletes_bytes`, `work_deletes_complete`, and the
-  requested path's missing, partial, or complete receiver-confirmed state.
-- `POST push_commit` performs a server-bounded call to `commit()`. It returns
-  `{status:"accepted",push_session_id:string,phase:"deleting_files"|"installing_files"|"complete",send_next_request:bool,entries_processed:int}`.
-  The sender repeats it while `send_next_request` is true.
-- `POST push_remove` performs one bounded remove step. It returns
-  `{status:"accepted",push_session_id:string,removed:bool}`. The sender repeats
-  it while `removed` is false.
+- `GET push_status` accepts an optional base64 `path_b64`. A successful
+  response contains `status`, `push_session_id`, `phase`,
+  `work_deletes_bytes`, `work_deletes_complete`, and `path`. The path is null
+  when none was requested. Otherwise it contains `path_b64`, `state`, and
+  `accepted_bytes`; a non-missing path also contains `type`.
+- `POST push_commit` performs one server-bounded commit call. A successful
+  response contains `status`, `push_session_id`, `phase`,
+  `send_next_request`, and `entries_processed`. The sender repeats it while
+  `send_next_request` is true.
+- `POST push_remove` performs one bounded remove step. A successful response
+  contains `status`, `push_session_id`, and `removed`. The sender repeats it
+  while `removed` is false.
 
 Push deployments must set `display_errors=Off` at PHP startup through
 `php.ini`, `.user.ini`, or the PHP-FPM pool configuration; changing it after
@@ -152,18 +155,21 @@ may reject a request before the exporter runs and that response need not use
 the push JSON protocol. The sender therefore also treats a bare HTTP 413 as
 `request_too_large` and learns a smaller request ceiling.
 
-The WordPress plugin manages the trusted `docroot` supplied by its embedder, or
-the web server's `DOCUMENT_ROOT` by default. The path must resolve to an existing
-directory. `ABSPATH` remains the default only for pull endpoints because it may
-point at a separate shared WordPress core tree. Push work lives in a
-document-root-specific private directory beside the canonical managed document
-root unless its embedder supplies `reprint_directory`.
+The WordPress plugin passes the platform-supplied `docroot` to push endpoints,
+defaulting to the web server's `DOCUMENT_ROOT`. A platform supplies the complete
+trusted API-options array through the early `site_export_api_options` filter; a
+direct embedder passes the same array to `_site_export_handle_api_request()`.
+The document-root path must resolve to an existing directory. `ABSPATH` remains
+the default only for pull endpoints because it may point at a separate shared
+WordPress core tree. Push work lives in a document-root-specific private
+directory beside the canonical document root unless server configuration
+supplies `reprint_directory`.
 Configured reprint directories must remain outside the document root; the HTTP
 endpoints reject an inside path because they do not yet apply the indexing and
 web-access protections described below. The plugin always excludes its logical
 installed directory from push, including when that directory is a symlink to a
-physical target outside the document root. An embedding router must likewise
-choose its document root, reprint directory, and excluded paths as server
+physical target outside the document root. A platform hook or embedding router
+must choose its document root, reprint directory, and excluded paths as server
 configuration; request parameters cannot select any of them.
 
 ## Where reprint stores its own data on the remote

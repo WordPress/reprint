@@ -116,8 +116,9 @@ final class Site_Export_Push_Session {
      *
      * Factory methods canonicalize the reprint directory and document root before they
      * reach this constructor. The constructor then establishes the invariant
-     * shared by every push-session handle: excluded paths are safe, sorted, and
-     * unique, and a reprint directory below the document root protects itself from push.
+     * shared by every push-session handle: excluded paths are valid
+     * document-root-relative paths in sorted, unique order, and a reprint
+     * directory below the document root protects itself from push.
      * No filesystem state is read or changed here.
      *
      * @param list<string> $excluded_paths Document-root-relative paths which a push
@@ -154,19 +155,19 @@ final class Site_Export_Push_Session {
      * Creates or idempotently reopens one private push session.
      *
      * The empty work tree is created before its device is compared with the
-     * managed root. A mismatch removes the new push session before any multipart
+     * document root. A mismatch removes the new push session before any multipart
      * bytes can be accepted. That device check necessarily stats the new tree;
      * successful creation and metadata writes are otherwise trusted instead
      * of being followed by a complete layout scan.
      *
-     * Replaying the same push session ID returns a handle to the existing push directory.
-     * Its durable layout and immutable metadata are validated under the push
-     * lock by the first upload, status, or commit operation. Keeping that check
-     * at the operation boundary avoids reading the same layout before and after
-     * its lock is acquired.
+     * Replaying the same push session ID validates the existing directory's
+     * durable layout, immutable metadata, and same-filesystem relationship
+     * under its push lock before returning the handle. The create/remove lock
+     * remains held during that validation, so remove cannot rename the directory
+     * between the existing-directory check and the push-lock acquisition.
      *
      * @param string $reprint_directory Durable private reprint directory on the document-root filesystem.
-     * @param string $docroot Managed document-root directory receiving committed values.
+     * @param string $docroot Document-root directory receiving committed values.
      * @param list<string> $excluded_paths Document-root-relative paths which a push must preserve.
      * @param string $push_session_id Stable lowercase hexadecimal push session ID.
      * @return self New or existing push-session handle.
@@ -176,10 +177,10 @@ final class Site_Export_Push_Session {
         $reprint_directory = self::require_directory($reprint_directory, 'reprint directory', true);
         $docroot = self::require_directory($docroot, 'document root', false);
         $push_session = new self($reprint_directory, $docroot, $push_session_id, $excluded_paths);
-        $push_parent_directory = self::require_push_parent_directory($reprint_directory);
-        $lifecycle_lock = self::acquire_lifecycle_lock($push_parent_directory, 'create');
+        $push_sessions_directory = self::create_push_sessions_directory($reprint_directory);
+        $create_remove_lock = self::acquire_create_remove_lock($push_sessions_directory, 'create');
         try {
-            $removing_push_directory = $push_parent_directory . '/.removing-' . $push_session_id;
+            $removing_push_directory = $push_sessions_directory . '/.removing-' . $push_session_id;
             if (file_exists($removing_push_directory) || is_link($removing_push_directory)) {
                 throw new Site_Export_Push_Exception(
                     self::ERROR_LOCK_ACQUISITION_FAILURE,
@@ -187,6 +188,9 @@ final class Site_Export_Push_Session {
                 );
             }
             if (file_exists($push_session->push_directory) || is_link($push_session->push_directory)) {
+                // Lock acquisition checks the durable layout; with_push_lock()
+                // then checks immutable configuration before this callback.
+                $push_session->with_push_lock(static function (): void {});
                 return $push_session;
             }
             if (!@mkdir($push_session->work_files_directory, 0700, true)) {
@@ -211,8 +215,8 @@ final class Site_Export_Push_Session {
             ]);
             return $push_session;
         } finally {
-            flock($lifecycle_lock, LOCK_UN);
-            fclose($lifecycle_lock);
+            flock($create_remove_lock, LOCK_UN);
+            fclose($create_remove_lock);
         }
     }
 
@@ -225,7 +229,7 @@ final class Site_Export_Push_Session {
      * and same-filesystem relationship exactly once for that operation.
      *
      * @param string $reprint_directory Durable private reprint directory.
-     * @param string $docroot Managed document-root directory.
+     * @param string $docroot Document-root directory.
      * @param string $push_session_id Lowercase hexadecimal push session ID.
      * @param list<string> $excluded_paths Document-root-relative paths which a push must preserve.
      * @return self Push-session handle; the push session may prove missing or invalid
@@ -247,7 +251,7 @@ final class Site_Export_Push_Session {
      * able to remove abandoned private work after configuration changes.
      *
      * @param string $reprint_directory Durable private reprint directory.
-     * @param string $docroot Currently configured managed document-root directory.
+     * @param string $docroot Currently configured document-root directory.
      * @param string $push_session_id Lowercase hexadecimal push session ID.
      * @param list<string> $excluded_paths Currently configured excluded paths.
      * @return bool True when the push directory and any remove tombstone are gone.
@@ -533,7 +537,8 @@ final class Site_Export_Push_Session {
      *     path:PathStatus|null
      * }
      *
-     * @throws InvalidArgumentException If the requested path is unsafe.
+     * @throws InvalidArgumentException If the requested path is reserved or
+     *     overlaps an excluded path.
      * @throws Site_Export_Push_Exception If the push session is busy,
      *     unavailable, corrupt, or no longer matches the document-root configuration.
      */
@@ -542,7 +547,7 @@ final class Site_Export_Push_Session {
             $this->finish_published_inflight();
             $reported_path = null;
             if ($path !== null) {
-                $this->validate_path($path);
+                $this->assert_path_does_not_overlap_excluded_paths($path);
                 $complete = $this->work_files_directory . '/' . $path;
                 $this->ensure_private_parent($complete, false);
                 $inflight = $this->read_inflight();
@@ -719,9 +724,9 @@ final class Site_Export_Push_Session {
      *              limit left tombstone work for another call.
      */
     public function remove_push_directory(): bool {
-        $push_parent_directory = self::require_push_parent_directory($this->reprint_directory);
-        $removing_push_directory = $push_parent_directory . '/.removing-' . $this->push_session_id;
-        $lifecycle_lock = self::acquire_lifecycle_lock($push_parent_directory, 'remove');
+        $push_sessions_directory = self::create_push_sessions_directory($this->reprint_directory);
+        $removing_push_directory = $push_sessions_directory . '/.removing-' . $this->push_session_id;
+        $create_remove_lock = self::acquire_create_remove_lock($push_sessions_directory, 'remove');
         try {
             if ($this->lstat_path($this->push_directory) === null) {
                 return $this->remove_tombstone($removing_push_directory);
@@ -744,8 +749,8 @@ final class Site_Export_Push_Session {
             }
             return $this->remove_tombstone($removing_push_directory);
         } finally {
-            flock($lifecycle_lock, LOCK_UN);
-            fclose($lifecycle_lock);
+            flock($create_remove_lock, LOCK_UN);
+            fclose($create_remove_lock);
         }
     }
 
@@ -1275,7 +1280,7 @@ final class Site_Export_Push_Session {
                             if ($trailing_path === '') {
                                 throw new InvalidArgumentException('Delete-list parts may not contain an empty delete record.');
                             }
-                            $this->validate_path($trailing_path);
+                            $this->assert_path_does_not_overlap_excluded_paths($trailing_path);
                             $trailing_path = '';
                             continue;
                         }
@@ -1369,7 +1374,7 @@ final class Site_Export_Push_Session {
                         if ($path === '') {
                             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The work delete stream contains an empty record at offset ' . $work_deletes_byte_offset . '.');
                         }
-                        $this->validate_path($path);
+                        $this->assert_path_does_not_overlap_excluded_paths($path);
                         $commit_state['current_delete_path'] = base64_encode($path);
                         $this->write_json($this->commit_json_path, $commit_state);
                         return;
@@ -1384,7 +1389,7 @@ final class Site_Export_Push_Session {
         }
 
         $path = $this->decode_commit_path($commit_state['current_delete_path'], 'current delete');
-        $this->validate_path($path);
+        $this->assert_path_does_not_overlap_excluded_paths($path);
         $parent_device = $this->require_docroot_ancestors($path, 'delete');
         if ($parent_device !== null) {
             $docroot_value_path = $this->docroot_path($path);
@@ -1452,9 +1457,9 @@ final class Site_Export_Push_Session {
      * Performs one bounded installing_files or commit-cursor step.
      *
      * The completed work tree is its own queue. This method walks it
-     * depth-first, creating structural document-root directories before their children,
-     * installing one leaf value per step, and consuming empty structural work
-     * directories after their descendants have been committed.
+     * depth-first, creating document-root ancestor directories before their
+     * children, installing one leaf value per step, and consuming empty work
+     * ancestor directories after their descendants have been committed.
      *
      * @param array $commit_state {
      *     Commit checkpoint, mutated in place.
@@ -1474,24 +1479,24 @@ final class Site_Export_Push_Session {
     private function advance_installing_files(array &$commit_state): void {
         if ($commit_state['current_work_files_descendant'] !== null) {
             /*
-             * A checkpoint may survive either side of a rename or structural
-             * cleanup. The work value may still be present and need retrying,
-             * or it may already be consumed and require verification in the
-             * document root. Resolve that evidence before selecting any new work.
+             * A checkpoint may survive either side of a rename or work ancestor
+             * directory cleanup. The work value may still be present and need
+             * retrying, or it may already be consumed and require verification
+             * in the document root. Resolve that evidence before selecting any new work.
              */
             $current_work_files_descendant = $commit_state['current_work_files_descendant'];
             $path = $this->decode_commit_path($current_work_files_descendant['path_b64'], 'current installing_files');
             $expected_type = $current_work_files_descendant['expected_type'];
             $stack_size = count($commit_state['commit_cursor']);
-            $structural_cleanup = false;
+            $work_ancestor_directory_cleanup = false;
             if ($stack_size > 0) {
-                $structural_cleanup = $this->commit_cursor_path($commit_state['commit_cursor']) === $path;
+                $work_ancestor_directory_cleanup = $this->commit_cursor_path($commit_state['commit_cursor']) === $path;
             }
             $work_path = $this->work_files_directory . '/' . $path;
             $work_identity = $this->lstat_path($work_path);
 
-            if ($structural_cleanup) {
-                $this->validate_structural_path($path);
+            if ($work_ancestor_directory_cleanup) {
+                $this->assert_path_is_not_excluded($path);
                 $this->require_docroot_ancestors($path, 'install', 'directory');
                 $docroot_identity = $this->lstat_path($this->docroot_path($path));
                 if ($work_identity !== null) {
@@ -1502,7 +1507,7 @@ final class Site_Export_Push_Session {
                         $this->throw_unexpected_docroot_mutation('install', $path, $path, 'directory', ['directory'], $docroot_identity);
                     }
                     if (!@rmdir($work_path)) {
-                        throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not finish structural work cleanup for ' . base64_encode($path) . '.');
+                        throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not finish work ancestor directory cleanup for ' . base64_encode($path) . '.');
                     }
                 } elseif ($docroot_identity === null || $docroot_identity['type'] !== 'directory') {
                     $this->throw_unexpected_docroot_mutation('install', $path, $path, 'directory', ['directory'], $docroot_identity);
@@ -1513,7 +1518,7 @@ final class Site_Export_Push_Session {
                 return;
             }
 
-            $this->validate_path($path);
+            $this->assert_path_does_not_overlap_excluded_paths($path);
             if ($work_identity !== null) {
                 $this->install_work_value($commit_state, $path, $expected_type, true);
                 return;
@@ -1575,7 +1580,7 @@ final class Site_Export_Push_Session {
             $commit_state['current_work_files_descendant'] = ['path_b64' => base64_encode($parent_path), 'expected_type' => 'directory'];
             $this->write_json($this->commit_json_path, $commit_state);
             if (!@rmdir($work_directory_path)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not consume empty structural work directory ' . base64_encode($parent_path) . '.');
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not consume empty work ancestor directory ' . base64_encode($parent_path) . '.');
             }
             $commit_state['current_work_files_descendant'] = null;
             array_pop($commit_state['commit_cursor']);
@@ -1584,14 +1589,14 @@ final class Site_Export_Push_Session {
         }
 
         $path = $parent_path === '' ? $entry : $parent_path . '/' . $entry;
-        $this->validate_path_syntax($path);
+        $this->assert_path_not_reserved($path);
         $work_path = $this->work_files_directory . '/' . $path;
         $identity = $this->lstat_path($work_path);
         if ($identity === null) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Selected work path disappeared before installing_files: ' . base64_encode($path) . '.');
         }
         if ($identity['type'] === 'directory' && $this->first_directory_entry($work_path) !== null) {
-            $this->validate_structural_path($path);
+            $this->assert_path_is_not_excluded($path);
             $commit_state['commit_cursor'][] = ['component_b64' => base64_encode($entry)];
             $this->write_json($this->commit_json_path, $commit_state);
             $requested_path = $this->first_work_files_descendant_path($work_path, $path);
@@ -1600,7 +1605,7 @@ final class Site_Export_Push_Session {
             $docroot_identity = $this->lstat_path($docroot_value_path);
             if ($docroot_identity === null) {
                 if (!@mkdir($docroot_value_path, 0777) && !is_dir($docroot_value_path)) {
-                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create structural document-root directory ' . base64_encode($path) . '.');
+                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create document-root ancestor directory ' . base64_encode($path) . '.');
                 }
                 $docroot_identity = $this->lstat_path($docroot_value_path);
             }
@@ -1612,7 +1617,7 @@ final class Site_Export_Push_Session {
             }
             return;
         }
-        $this->validate_path($path);
+        $this->assert_path_does_not_overlap_excluded_paths($path);
         if (!in_array($identity['type'], ['file', 'directory', 'symlink'], true)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Work path ' . base64_encode($path) . ' has unsupported type ' . $identity['type'] . '.');
         }
@@ -1697,7 +1702,7 @@ final class Site_Export_Push_Session {
     private function require_docroot_ancestors(string $path, string $operation, ?string $work_identity_type = null): ?int {
         $root = $this->lstat_path($this->docroot);
         if ($root === null || $root['type'] !== 'directory') {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The managed document root is no longer a real directory.');
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The document root is no longer a real directory.');
         }
         $work_device = $this->work_device();
         if ($root['dev'] !== $work_device) {
@@ -1758,7 +1763,6 @@ final class Site_Export_Push_Session {
             'conflict_path_b64' => base64_encode($conflict_path),
             'expected_docroot_types' => $expected_docroot_types,
             'observed_docroot_identity' => $observed_identity === null ? ['type' => 'absent'] : $observed_identity,
-            'detail' => $detail,
         ];
         if ($work_identity_type !== null) {
             $context['work_type'] = $work_identity_type;
@@ -1786,7 +1790,6 @@ final class Site_Export_Push_Session {
             'path_b64' => base64_encode($path),
             'work_device' => $work_device,
             'docroot_device' => $docroot_device,
-            'detail' => $detail,
         ]);
     }
 
@@ -1889,11 +1892,12 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Returns a work leaf path below a structural directory.
+     * Returns a work leaf path below a work ancestor directory.
      *
-     * When a document-root structural ancestor conflicts, reporting only the ancestor can
-     * hide which work value required it. This walks to one descendant so the
-     * error can name requested work rather than only the commit-cursor directory.
+     * When a document-root ancestor directory conflicts, reporting only the
+     * ancestor can hide which work value required it. This walks to one
+     * descendant so the error can name requested work rather than only the
+     * commit-cursor directory.
      *
      * @param string $directory Absolute work directory being traversed.
      * @param string $relative_path Document-root-relative path for that directory.
@@ -2057,7 +2061,7 @@ final class Site_Export_Push_Session {
      *
      * Remove deliberately omits this check: private work may need cleanup
      * after the document-root or excluded-path configuration has changed.
-     * Upload, status, and commit must agree with the immutable push metadata
+     * Create, upload, status, and commit must agree with the immutable push metadata
      * and retain the same-device guarantee under which the push was made.
      */
     private function assert_push_configuration(): void {
@@ -2215,8 +2219,8 @@ final class Site_Export_Push_Session {
      * Decodes and validates a base64 path stored in a commit checkpoint.
      *
      * Checkpoints store arbitrary filesystem bytes as base64 to remain valid
-     * JSON. This method rejects missing, malformed, or grammatically unsafe
-     * paths. Its caller applies the requested-value or structural-directory
+     * JSON. This method rejects missing, malformed, or receiver-reserved path
+     * forms. Its caller applies the requested-value or work-ancestor-directory
      * excluded-path policy before any document-root mutation.
      *
      * @param mixed $encoded Candidate base64 value from metadata.
@@ -2231,7 +2235,7 @@ final class Site_Export_Push_Session {
         if (!is_string($path)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Commit ' . $description . ' path is not valid base64.');
         }
-        $this->validate_path_syntax($path);
+        $this->assert_path_not_reserved($path);
         return $path;
     }
 
@@ -2240,7 +2244,7 @@ final class Site_Export_Push_Session {
      *
      * Each frame stores exactly one base64 path component. The method validates
      * each component independently, rebuilds the slash-separated path, and then
-     * applies the implicit structural-directory path rules to the result.
+     * applies the implicit work-ancestor-directory path rules to the result.
      *
      * @param array $stack {
      *     Commit cursor frames.
@@ -2264,7 +2268,7 @@ final class Site_Export_Push_Session {
             }
         }
         if ($path !== '') {
-            $this->validate_structural_path($path);
+            $this->assert_path_is_not_excluded($path);
         }
         return $path;
     }
@@ -2287,62 +2291,100 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Validates one document-root-relative path accepted by a push.
+     * Rejects a requested value which would overlap an excluded path.
      *
-     * Paths are byte strings carried through base64 on the wire. They must be
-     * relative, bounded, free of NUL/backslash and dot segments, outside the
-     * WordPress maintenance marker, and not equal to or an ancestor/descendant
-     * of an excluded path.
+     * Requested files, directories, symlinks, and delete roots may not equal,
+     * descend from, or contain an excluded path. Work ancestor directories use
+     * assert_path_is_not_excluded() because an unrelated sibling may still need
+     * to traverse an ancestor of an excluded path.
      *
      * @param string $path Document-root-relative raw path bytes.
      */
-    private function validate_path(string $path): void {
-        $this->validate_path_syntax($path);
-        if ($path === '.maintenance' || strpos($path, '.maintenance/') === 0) {
-            throw new InvalidArgumentException('Excluded document-root-relative path cannot be changed: ' . base64_encode($path) . '.');
-        }
+    private function assert_path_does_not_overlap_excluded_paths(string $path): void {
+        $this->assert_path_is_not_excluded($path);
         foreach ($this->excluded_paths as $excluded_path) {
-            if ($path === $excluded_path || strpos($path, $excluded_path . '/') === 0 || strpos($excluded_path, $path . '/') === 0) {
-                throw new InvalidArgumentException('Excluded document-root-relative path cannot be changed: ' . base64_encode($path) . '.');
+            if (strpos($excluded_path, $path . '/') === 0) {
+                throw new InvalidArgumentException(
+                    'Excluded document-root-relative path ' . base64_encode($excluded_path)
+                    . ' is contained by the requested path, which cannot be changed: '
+                    . base64_encode($path) . '.'
+                );
             }
         }
     }
 
     /**
-     * Validates one implicit structural work-tree directory.
+     * Rejects a path equal to or below an excluded path.
      *
-     * A structural directory is traversed only to reach requested descendant
-     * work. It may therefore be an ancestor of an excluded path when the work
-     * lies in an unrelated sibling, but it must never equal or descend from an
-     * excluded path itself.
+     * A work ancestor directory is traversed only to reach requested descendant
+     * work. It may be an ancestor of an excluded path when the work lies in an
+     * unrelated sibling, but it must never equal or descend from an excluded
+     * path itself.
      *
-     * @param string $path Document-root-relative structural directory path.
+     * @param string $path Document-root-relative path.
      */
-    private function validate_structural_path(string $path): void {
-        $this->validate_path_syntax($path);
-        if ($path === '.maintenance' || strpos($path, '.maintenance/') === 0) {
-            throw new InvalidArgumentException('Excluded document-root-relative path cannot be changed: ' . base64_encode($path) . '.');
-        }
+    private function assert_path_is_not_excluded(string $path): void {
+        $this->assert_path_not_reserved($path);
         foreach ($this->excluded_paths as $excluded_path) {
-            if ($path === $excluded_path || strpos($path, $excluded_path . '/') === 0) {
-                throw new InvalidArgumentException('Excluded document-root-relative path cannot be changed: ' . base64_encode($path) . '.');
+            if ($path === $excluded_path) {
+                throw new InvalidArgumentException(
+                    'Excluded document-root-relative path cannot be changed: '
+                    . base64_encode($path) . '.'
+                );
+            }
+            if (strpos($path, $excluded_path . '/') === 0) {
+                throw new InvalidArgumentException(
+                    'Excluded document-root-relative path ' . base64_encode($excluded_path)
+                    . ' contains the requested descendant, which cannot be changed: '
+                    . base64_encode($path) . '.'
+                );
             }
         }
     }
 
     /**
-     * Validates path grammar without applying the excluded-path policy.
+     * Rejects path forms reserved by the receiver.
+     *
+     * Paths are arbitrary byte strings carried as base64 on the wire, but the
+     * receiver reserves forms which are empty, exceed the bounded path length,
+     * are absolute, contain NUL or backslash bytes, contain empty or dot path
+     * components, or address the WordPress maintenance marker.
      *
      * @param string $path Document-root-relative raw path bytes.
      */
-    private function validate_path_syntax(string $path): void {
-        if ($path === '' || strlen($path) > self::MAX_PATH_BYTES || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
-            throw new InvalidArgumentException('Document-root-relative path must contain between 1 and ' . self::MAX_PATH_BYTES . ' safe bytes; observed ' . base64_encode($path) . '.');
+    private function assert_path_not_reserved(string $path): void {
+        if ($path === '') {
+            throw new InvalidArgumentException('Document-root-relative path must not be empty.');
+        }
+        $path_bytes = strlen($path);
+        if ($path_bytes > self::MAX_PATH_BYTES) {
+            throw new InvalidArgumentException(
+                'Document-root-relative path exceeds the maximum of '
+                . self::MAX_PATH_BYTES . ' bytes; observed ' . $path_bytes . '.'
+            );
+        }
+        if ($path[0] === '/') {
+            throw new InvalidArgumentException('Document-root-relative path must not be absolute: ' . base64_encode($path) . '.');
+        }
+        if (strpos($path, "\0") !== false) {
+            throw new InvalidArgumentException('Document-root-relative path must not contain a NUL byte: ' . base64_encode($path) . '.');
+        }
+        if (strpos($path, '\\') !== false) {
+            throw new InvalidArgumentException('Document-root-relative path must not contain a backslash: ' . base64_encode($path) . '.');
         }
         foreach (explode('/', $path) as $segment) {
-            if ($segment === '' || $segment === '.' || $segment === '..') {
-                throw new InvalidArgumentException('Document-root-relative path contains an empty, dot, or parent segment: ' . base64_encode($path) . '.');
+            if ($segment === '') {
+                throw new InvalidArgumentException('Document-root-relative path must not contain an empty component: ' . base64_encode($path) . '.');
             }
+            if ($segment === '.') {
+                throw new InvalidArgumentException('Document-root-relative path must not contain a dot component: ' . base64_encode($path) . '.');
+            }
+            if ($segment === '..') {
+                throw new InvalidArgumentException('Document-root-relative path must not contain a parent component: ' . base64_encode($path) . '.');
+            }
+        }
+        if ($path === '.maintenance' || strpos($path, '.maintenance/') === 0) {
+            throw new InvalidArgumentException('The WordPress maintenance marker path is reserved: ' . base64_encode($path) . '.');
         }
     }
 
@@ -2369,7 +2411,7 @@ final class Site_Export_Push_Session {
             throw new InvalidArgumentException('Multipart header ' . $header . ' is not valid base64.');
         }
         if ($is_docroot_path) {
-            $this->validate_path($decoded);
+            $this->assert_path_does_not_overlap_excluded_paths($decoded);
         }
         return $decoded;
     }
@@ -2419,9 +2461,9 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Joins the managed document root with one validated relative path.
+     * Joins the document root with one document-root-relative path.
      *
-     * The caller applies the appropriate requested-value or structural-path
+     * The caller applies the appropriate requested-value or work-ancestor-path
      * validation where the value originates. This method only preserves correct
      * slash handling for both `/` and normal directory roots.
      *
@@ -2433,7 +2475,7 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Creates or validates private structural parents for a work path.
+     * Creates or validates private work ancestor directories for a work path.
      *
      * Only work/files paths are accepted. Missing parents are
      * created when requested; existing parents must be real directories so a
@@ -2468,7 +2510,7 @@ final class Site_Export_Push_Session {
                     return;
                 }
                 if (!@mkdir($current, 0700)) {
-                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create private structural work directory ' . $current . '.');
+                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create private work ancestor directory ' . $current . '.');
                 }
                 continue;
             }
@@ -2525,9 +2567,9 @@ final class Site_Export_Push_Session {
     /**
      * Removes one work private leaf or empty directory.
      *
-     * A directory with descendants represents structural state for other work
-     * paths and cannot be replaced by a different logical value. Files,
-     * symlinks, and other leaf-like entries are unlinked without following them.
+     * A directory with descendants is a work ancestor directory for other paths
+     * and cannot be replaced by a different logical value. Files, symlinks, and
+     * other leaf-like entries are unlinked without following them.
      *
      * @param string $path Absolute private work path.
      */
@@ -2571,19 +2613,19 @@ final class Site_Export_Push_Session {
     /**
      * Creates or validates the directory shared by every push session.
      *
-     * Create and remove both establish this directory before acquiring the
-     * lifecycle lock. This lets an idempotent remove coordinate with a create
-     * even when no push session or tombstone currently exists.
+     * Create and remove both establish this directory before acquiring their
+     * shared lock. This lets an idempotent remove coordinate with a create even
+     * when no push session or tombstone currently exists.
      *
      * @param string $reprint_directory Canonical private reprint directory.
-     * @return string Canonical push parent directory.
+     * @return string Canonical push sessions directory.
      */
-    private static function require_push_parent_directory(string $reprint_directory): string {
-        $push_parent_directory = $reprint_directory . '/.reprint/push';
-        if (!@mkdir($push_parent_directory, 0700, true) && !is_dir($push_parent_directory)) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create push sessions directory ' . $push_parent_directory . '.');
+    private static function create_push_sessions_directory(string $reprint_directory): string {
+        $push_sessions_directory = $reprint_directory . '/.reprint/push';
+        if (!@mkdir($push_sessions_directory, 0700, true) && !is_dir($push_sessions_directory)) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create push sessions directory ' . $push_sessions_directory . '.');
         }
-        return self::require_directory($push_parent_directory, 'push sessions', false);
+        return self::require_directory($push_sessions_directory, 'push sessions', false);
     }
 
     /**
@@ -2593,23 +2635,23 @@ final class Site_Export_Push_Session {
      * creation and every bounded removal step so create cannot race a
      * live-directory rename or an unfinished removal tombstone.
      *
-     * @param string $push_parent_directory Canonical push parent directory.
+     * @param string $push_sessions_directory Canonical push sessions directory.
      * @param string $operation Current `create` or `remove` operation.
-     * @return resource Exclusively locked lifecycle handle.
+     * @return resource Exclusively locked create/remove handle.
      */
-    private static function acquire_lifecycle_lock(string $push_parent_directory, string $operation) {
-        $lifecycle_lock = @fopen($push_parent_directory . '/push-create.lock', 'c+b');
-        if ($lifecycle_lock === false) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open the push lifecycle lock for ' . $operation . '.');
+    private static function acquire_create_remove_lock(string $push_sessions_directory, string $operation) {
+        $create_remove_lock = @fopen($push_sessions_directory . '/push-create.lock', 'c+b');
+        if ($create_remove_lock === false) {
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open push-create.lock for the ' . $operation . ' request.');
         }
-        if (!flock($lifecycle_lock, LOCK_EX | LOCK_NB)) {
-            fclose($lifecycle_lock);
+        if (!flock($create_remove_lock, LOCK_EX | LOCK_NB)) {
+            fclose($create_remove_lock);
             throw new Site_Export_Push_Exception(
                 self::ERROR_LOCK_ACQUISITION_FAILURE,
-                'Push session lifecycle is busy. Retry the ' . $operation . ' request.'
+                'Another create or remove request holds push-create.lock. Retry the ' . $operation . ' request.'
             );
         }
-        return $lifecycle_lock;
+        return $create_remove_lock;
     }
 
     /**

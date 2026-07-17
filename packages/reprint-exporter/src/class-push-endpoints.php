@@ -1,7 +1,7 @@
 <?php
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped,WordPress.Security.EscapeOutput.OutputNotEscaped -- Authenticated protocol responses are JSON, never HTML output.
-// phpcs:disable WordPress.Security.ValidatedSanitizedInput -- HTTP grammar and receiver validation require the exact request bytes.
+// phpcs:disable WordPress.Security.ValidatedSanitizedInput -- Multipart parsing and request-body byte accounting require the request bytes unchanged.
 
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_excluded_paths;
@@ -46,7 +46,7 @@ final class Site_Export_Push_Endpoints {
     private $post_max_bytes;
 
     /**
-     * Configures the server-owned push roots and request limits.
+     * Stores the server-supplied push directories, path policy, and limits.
      *
      * Missing numeric options use bounded defaults. Present numeric options
      * must be positive so a malformed server configuration cannot silently
@@ -56,7 +56,7 @@ final class Site_Export_Push_Endpoints {
      *     Trusted endpoint configuration.
      *
      *     @type string $reprint_directory Required private reprint directory.
-     *     @type string $docroot Required managed document-root directory.
+     *     @type string $docroot Required document-root directory.
      *     @type list<string> $excluded_paths Required document-root-relative
      *         paths which push must preserve.
      *     @type int|float|string $maximum_part_bytes Maximum Content-Length
@@ -162,13 +162,15 @@ final class Site_Export_Push_Endpoints {
      * This operation is idempotent for the same push session ID and immutable
      * server configuration. A successful response reports the independent
      * multipart-part and decoded request-body limits the sender must apply,
-     * plus the normalized server-owned excluded paths stored for the session.
+     * plus the normalized excluded paths stored in push metadata.
      *
-     * Emits HTTP 200 with:
+     * The HTTP 200 response has these fields:
      *
-     *     {status:"created", push_session_id:string,
-     *      max_part_bytes:int, post_max_bytes:int|null,
-     *      excluded_paths_b64:string[]}
+     * - `status`: `created`.
+     * - `push_session_id`: the caller-supplied ID.
+     * - `max_part_bytes`: the maximum multipart-part Content-Length.
+     * - `post_max_bytes`: the decoded request-body limit, or null.
+     * - `excluded_paths_b64`: the stored excluded paths in base64.
      *
      * @param array $config {
      *     Create request parameters.
@@ -179,18 +181,14 @@ final class Site_Export_Push_Endpoints {
      */
     public function create(array $config): void {
         try {
-            $this->require_method('POST');
-            $push_session_id = $this->require_push_session_id($config);
-            $push_session = Site_Export_Push_Session::create(
+            $this->assert_request_method('POST');
+            $push_session_id = $this->read_push_session_id($config);
+            Site_Export_Push_Session::create(
                 $this->reprint_directory,
                 $this->docroot,
                 $this->excluded_paths,
                 $push_session_id
             );
-            // create() deliberately defers validation when the directory
-            // already exists. An endpoint success must not bless stale or
-            // incompatible durable state, so validate it under the push lock.
-            $push_session->get_status();
             $this->respond(200, [
                 'status' => 'created',
                 'push_session_id' => $push_session_id,
@@ -211,15 +209,16 @@ final class Site_Export_Push_Endpoints {
      * the latest receiver-confirmed change, so response memory does not grow
      * with the number of parts in the request.
      *
-     * Emits HTTP 200 with one of these `last_change` branches, or null for an
-     * empty request:
+     * The HTTP 200 response has `status`, `push_session_id`,
+     * `changes_accepted`, and `last_change`. An empty request reports null for
+     * `last_change`. Otherwise `last_change` contains:
      *
-     *     {status:"accepted", push_session_id:string, changes_accepted:int,
-     *      last_change:
-     *        {path_b64:string,state:"partial"|"complete",type:"file",accepted_bytes:int}
-     *        | {path_b64:string,state:"complete",type:"directory"|"symlink",accepted_bytes:0}
-     *        | {state:"partial"|"complete",type:"delete-list",accepted_bytes:int}
-     *        | null}
+     * - `state`: `partial` or `complete`.
+     * - `type`: `file`, `directory`, `symlink`, or `delete-list`.
+     * - `accepted_bytes`: receiver-confirmed bytes; zero for directories and
+     *   symlinks.
+     * - `path_b64`: the base64 path for files, directories, and symlinks. A
+     *   delete-list change has no path.
      *
      * @param array $config {
      *     Upload request parameters.
@@ -233,8 +232,8 @@ final class Site_Export_Push_Endpoints {
         $push_session = null;
         $upload_open = false;
         try {
-            $this->require_method('POST');
-            $push_session_id = $this->require_push_session_id($config);
+            $this->assert_request_method('POST');
+            $push_session_id = $this->read_push_session_id($config);
             $content_type = (string) ( $_SERVER['CONTENT_TYPE'] ?? '' );
             $boundary = Site_Export_Multipart_Processor::boundary_from_content_type($content_type);
             $declared_request_bytes = $_SERVER['CONTENT_LENGTH'] ?? null;
@@ -276,7 +275,17 @@ final class Site_Export_Push_Endpoints {
             $last_change = null;
             while ($push_session->next_change()) {
                 ++$changes_accepted;
-                $last_change = $push_session->get_current_change();
+                $current_change = $push_session->get_current_change();
+                if ($current_change === null) {
+                    throw new LogicException('An accepted multipart part did not publish its receiver-confirmed change.');
+                }
+                $last_change = [];
+                if (array_key_exists('path_b64', $current_change)) {
+                    $last_change['path_b64'] = $current_change['path_b64'];
+                }
+                $last_change['state'] = $current_change['state'];
+                $last_change['type'] = $current_change['type'];
+                $last_change['accepted_bytes'] = $current_change['accepted_bytes'];
             }
             $push_session->finish_upload();
             $upload_open = false;
@@ -306,18 +315,17 @@ final class Site_Export_Push_Endpoints {
      * relative path. The receiver reads actual work state under the push lock;
      * it never echoes a sender-supplied cursor.
      *
-     * Emits HTTP 200 with the exact Site_Export_Push_Session::get_status()
-     * object plus `status:"accepted"`:
+     * The HTTP 200 response has these fields:
      *
-     *     {status:"accepted",push_session_id:string,
-     *      phase:"receiving_work"|"deleting_files"|"installing_files"|"complete",
-     *      work_deletes_bytes:int,work_deletes_complete:bool,
-     *      path:null
-     *        | {path_b64:string,state:"missing",accepted_bytes:0}
-     *        | {path_b64:string,state:"partial",type:"file",accepted_bytes:int}
-     *        | {path_b64:string,state:"partial",type:"directory"|"symlink",accepted_bytes:0}
-     *        | {path_b64:string,state:"complete",type:"file",accepted_bytes:int}
-     *        | {path_b64:string,state:"complete",type:"directory"|"symlink",accepted_bytes:0}}
+     * - `status`: `accepted`.
+     * - `push_session_id`: the requested push session.
+     * - `phase`: `receiving_work`, `deleting_files`, `installing_files`, or
+     *   `complete`.
+     * - `work_deletes_bytes`: receiver-confirmed delete-list bytes.
+     * - `work_deletes_complete`: whether the sender closed the delete list.
+     * - `path`: null when no path was requested. Otherwise it contains
+     *   `path_b64`, `state`, and `accepted_bytes`; non-missing paths also have
+     *   `type`.
      *
      * @param array $config {
      *     Status request parameters.
@@ -330,8 +338,8 @@ final class Site_Export_Push_Endpoints {
      */
     public function status(array $config): void {
         try {
-            $this->require_method('GET');
-            $push_session_id = $this->require_push_session_id($config);
+            $this->assert_request_method('GET');
+            $push_session_id = $this->read_push_session_id($config);
             $path = null;
             if (array_key_exists('path_b64', $config)) {
                 if (!is_string($config['path_b64'])) {
@@ -348,10 +356,26 @@ final class Site_Export_Push_Endpoints {
                 $push_session_id,
                 $this->excluded_paths
             );
-            $this->respond(200, array_merge(
-                ['status' => 'accepted'],
-                $push_session->get_status($path)
-            ));
+            $push_status = $push_session->get_status($path);
+            $path_status = null;
+            if ($push_status['path'] !== null) {
+                $path_status = [
+                    'path_b64' => $push_status['path']['path_b64'],
+                    'state' => $push_status['path']['state'],
+                ];
+                if (array_key_exists('type', $push_status['path'])) {
+                    $path_status['type'] = $push_status['path']['type'];
+                }
+                $path_status['accepted_bytes'] = $push_status['path']['accepted_bytes'];
+            }
+            $this->respond(200, [
+                'status' => 'accepted',
+                'push_session_id' => $push_session_id,
+                'phase' => $push_status['phase'],
+                'work_deletes_bytes' => $push_status['work_deletes_bytes'],
+                'work_deletes_complete' => $push_status['work_deletes_complete'],
+                'path' => $path_status,
+            ]);
         } catch (Throwable $exception) {
             $this->respond_to_failure($exception);
         }
@@ -360,15 +384,13 @@ final class Site_Export_Push_Endpoints {
     /**
      * Advances bounded commit work for one push session.
      *
-     * The server-owned entry limit controls each call. Senders repeat this
+     * The configured maximum commit-entry count bounds each call. Senders repeat this
      * operation while `send_next_request` is true; a repeated request after an
      * indeterminate response resumes the receiver's durable commit checkpoint.
      *
-     * Emits HTTP 200 with:
-     *
-     *     {status:"accepted",push_session_id:string,
-     *      phase:"deleting_files"|"installing_files"|"complete",
-     *      send_next_request:bool,entries_processed:int}
+     * The HTTP 200 response has `status`, `push_session_id`, `phase`,
+     * `send_next_request`, and `entries_processed`. `phase` is
+     * `deleting_files`, `installing_files`, or `complete`.
      *
      * @param array $config {
      *     Commit request parameters.
@@ -379,8 +401,8 @@ final class Site_Export_Push_Endpoints {
      */
     public function commit(array $config): void {
         try {
-            $this->require_method('POST');
-            $push_session_id = $this->require_push_session_id($config);
+            $this->assert_request_method('POST');
+            $push_session_id = $this->read_push_session_id($config);
             $push_session = Site_Export_Push_Session::open(
                 $this->reprint_directory,
                 $this->docroot,
@@ -388,10 +410,13 @@ final class Site_Export_Push_Endpoints {
                 $this->excluded_paths
             );
             $commit = $push_session->commit($this->maximum_commit_entries);
-            $this->respond(200, array_merge([
+            $this->respond(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
-            ], $commit));
+                'phase' => $commit['phase'],
+                'send_next_request' => $commit['send_next_request'],
+                'entries_processed' => $commit['entries_processed'],
+            ]);
         } catch (Throwable $exception) {
             $this->respond_to_failure($exception);
         }
@@ -404,9 +429,7 @@ final class Site_Export_Push_Endpoints {
      * Repeating the operation after a lost response is safe: a missing push
      * directory and completed removal tombstone report true.
      *
-     * Emits HTTP 200 with:
-     *
-     *     {status:"accepted",push_session_id:string,removed:bool}
+     * The HTTP 200 response has `status`, `push_session_id`, and `removed`.
      *
      * @param array $config {
      *     Remove request parameters.
@@ -417,9 +440,9 @@ final class Site_Export_Push_Endpoints {
      */
     public function remove(array $config): void {
         try {
-            $this->require_method('POST');
-            $push_session_id = $this->require_push_session_id($config);
-            $removed = Site_Export_Push_Session::remove(
+            $this->assert_request_method('POST');
+            $push_session_id = $this->read_push_session_id($config);
+            $remove_complete = Site_Export_Push_Session::remove(
                 $this->reprint_directory,
                 $this->docroot,
                 $push_session_id,
@@ -428,7 +451,7 @@ final class Site_Export_Push_Endpoints {
             $this->respond(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
-                'removed' => $removed,
+                'removed' => $remove_complete,
             ]);
         } catch (Throwable $exception) {
             $this->respond_to_failure($exception);
@@ -436,13 +459,13 @@ final class Site_Export_Push_Endpoints {
     }
 
     /**
-     * Requires the exact HTTP method assigned to an endpoint.
+     * Rejects a request whose HTTP method does not match the endpoint.
      *
      * @param string $expected_method Uppercase protocol method.
      *
      * @throws InvalidArgumentException If the current request uses another method.
      */
-    private function require_method(string $expected_method): void {
+    private function assert_request_method(string $expected_method): void {
         $observed_method = strtoupper( (string) ( $_SERVER['REQUEST_METHOD'] ?? '' ));
         if ($observed_method !== $expected_method) {
             throw new InvalidArgumentException(
@@ -455,7 +478,7 @@ final class Site_Export_Push_Endpoints {
      * Reads the required push session identity from request parameters.
      *
      * Site_Export_Push_Session performs the canonical 32-character lowercase
-     * hexadecimal validation. This method only rejects missing or non-string
+     * hexadecimal grammar check. This method only rejects missing or non-string
      * values before a factory method is selected.
      *
      * @param array $config {
@@ -468,7 +491,7 @@ final class Site_Export_Push_Endpoints {
      *
      * @throws InvalidArgumentException If `push_session_id` is not a string.
      */
-    private function require_push_session_id(array $config): string {
+    private function read_push_session_id(array $config): string {
         $push_session_id = $config['push_session_id'] ?? null;
         if (!is_string($push_session_id)) {
             throw new InvalidArgumentException('push_session_id must be a string.');
@@ -479,9 +502,11 @@ final class Site_Export_Push_Endpoints {
     /**
      * Maps a push exception onto its stable protocol reason and HTTP status.
      *
-     * Classified context is copied without rewriting its keys. Invalid or
-     * malformed request data receives `invalid_request`; unexpected failures
-     * receive `filesystem_error` without exposing a PHP trace.
+     * The response owns its public fields instead of copying an exception's
+     * internal context. A streamed request-size rejection deliberately exposes
+     * its observed decoded byte count. Invalid or malformed request data
+     * receives `invalid_request`; unexpected failures receive
+     * `filesystem_error` without exposing a PHP trace.
      *
      * @param Throwable $exception Failure raised while handling an endpoint.
      */
@@ -501,12 +526,16 @@ final class Site_Export_Push_Endpoints {
             ) {
                 $http_code = 500;
             }
-            $response = array_merge([
+            $response = [
                 'status' => 'rejected',
                 'reason' => $reason,
                 'detail' => $exception->getMessage(),
-            ], $exception->get_context());
+            ];
             if ($reason === Site_Export_Push_Session::ERROR_REQUEST_TOO_LARGE) {
+                $context = $exception->get_context();
+                if (is_int($context['observed_request_body_bytes'] ?? null)) {
+                    $response['observed_request_body_bytes'] = $context['observed_request_body_bytes'];
+                }
                 $response['post_max_bytes'] = $this->post_max_bytes;
             }
             $this->respond($http_code, $response);

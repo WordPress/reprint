@@ -128,7 +128,7 @@ final class ExportHttpServerTest extends TestCase
         }
     }
 
-    public function testDefaultPushHandlersUseTheCorrespondingMethods(): void
+    public function testDefaultHandlersMatchPushEndpointMethodRegistry(): void
     {
         $root = sys_get_temp_dir() . '/export-http-server-' . bin2hex(random_bytes(6));
         $docroot = $root . '/docroot';
@@ -268,7 +268,7 @@ final class ExportHttpServerTest extends TestCase
         ]], $calls);
     }
 
-    public function testInvalidPushOptionsUseTheConfigurationException(): void
+    public function testNonArrayPushOptionsThrowConfigurationException(): void
     {
         $this->expectException(Site_Export_Push_Configuration_Exception::class);
         $this->expectExceptionMessage('The push HTTP server option must be an array.');

@@ -335,7 +335,7 @@ final class PushCommitTest extends TestCase {
         $this->assertSame('safe', file_get_contents($this->docroot . '/outside-sentinel'));
     }
 
-    public function testExplicitEmptyAndStructuralDirectoriesRemainDistinctPendingValues(): void {
+    public function testExplicitEmptyAndWorkAncestorDirectoriesRemainDistinctPendingValues(): void {
         $push_session = $this->push_session('00550055005500550055005500550055');
         $this->push_parts($push_session, [
             [
@@ -348,7 +348,7 @@ final class PushCommitTest extends TestCase {
             [
                 'headers' => [
                     'X-Chunk-Type' => 'file',
-                    'X-File-Path' => base64_encode('structural/child.txt'),
+                    'X-File-Path' => base64_encode('work-ancestor/child.txt'),
                     'X-File-Size' => '5',
                     'X-Chunk-Offset' => '0',
                 ],
@@ -359,7 +359,7 @@ final class PushCommitTest extends TestCase {
 
         $this->assertDirectoryExists($this->docroot . '/empty');
         $this->assertSame([], $this->directory_entries($this->docroot . '/empty'));
-        $this->assertSame('child', file_get_contents($this->docroot . '/structural/child.txt'));
+        $this->assertSame('child', file_get_contents($this->docroot . '/work-ancestor/child.txt'));
     }
 
     public function testExplicitEmptyDirectoryUsesTheDocumentRootProcessUmask(): void {
@@ -564,7 +564,7 @@ final class PushCommitTest extends TestCase {
         $this->assertFileExists($this->docroot . '/.maintenance');
     }
 
-    public function testStructuralDirectoryResumesAfterDocumentRootCreation(): void {
+    public function testInstallingFilesResumesAfterCreatingADocumentRootAncestorDirectory(): void {
         $push_session = $this->push_session('dddddddddddddddddddddddddddddddd');
         $this->push_file($push_session, 'tree/child.txt', 'child');
         $this->complete_work_deletes($push_session);
@@ -579,7 +579,7 @@ final class PushCommitTest extends TestCase {
         $this->assertSame('child', file_get_contents($this->docroot . '/tree/child.txt'));
     }
 
-    public function testStructuralCleanupResumesAfterWorkDirectoryWasRemoved(): void {
+    public function testWorkAncestorDirectoryCleanupResumesAfterTheDirectoryWasRemoved(): void {
         $push_session = $this->push_session('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee');
         $this->push_file($push_session, 'tree/child.txt', 'child');
         $this->complete_work_deletes($push_session);

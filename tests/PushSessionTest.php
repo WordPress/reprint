@@ -288,7 +288,7 @@ final class PushSessionTest extends TestCase {
                     ],
                     'body' => 'x',
                 ]]);
-                $this->fail('Unsafe path was work: ' . base64_encode($path));
+                $this->fail('A reserved or excluded path was accepted as work: ' . base64_encode($path));
             } catch (InvalidArgumentException $exception) {
                 $this->assertNotSame('', $exception->getMessage());
             }
@@ -866,6 +866,23 @@ final class PushSessionTest extends TestCase {
         }
     }
 
+    public function testRepeatedCreateRejectsExcludedPathConfigurationDriftImmediately(): void {
+        $push_session = $this->push_session('45674567456745674567456745674568');
+
+        try {
+            Site_Export_Push_Session::create(
+                $this->reprint_directory,
+                $this->docroot,
+                ['wp-content/plugins/reprint', 'wp-config.php'],
+                $push_session->get_push_session_id()
+            );
+            $this->fail('Repeated create accepted different immutable excluded paths.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('corrupted_push_state', $exception->get_error_code());
+            $this->assertStringContainsString('does not match', $exception->getMessage());
+        }
+    }
+
     public function testCompletedTypeChangeDiscardsInFlightFileDataAtTheSamePath(): void {
         foreach (['directory', 'symlink'] as $index => $type) {
             $push_session = $this->push_session(sprintf('%032x', 500 + $index));
@@ -1374,11 +1391,11 @@ final class PushSessionTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_session->get_push_directory());
     }
 
-    public function testLifecycleLockContentionLeavesTheLivePushDirectoryUntouched(): void {
+    public function testCreateRemoveLockContentionLeavesTheLivePushDirectoryUntouched(): void {
         $push_session = $this->push_session('cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd');
         $push_directory = $push_session->get_push_directory();
-        $lifecycle_lock_path = dirname($push_directory) . '/push-create.lock';
-        $lock_process = $this->start_lock_process($lifecycle_lock_path);
+        $create_remove_lock_path = dirname($push_directory) . '/push-create.lock';
+        $lock_process = $this->start_lock_process($create_remove_lock_path);
 
         $failure = null;
         try {
@@ -1395,7 +1412,7 @@ final class PushSessionTest extends TestCase {
         $this->assertFileDoesNotExist(dirname($push_directory) . '/.removing-' . $push_session->get_push_session_id());
     }
 
-    public function testRemovalTombstoneBlocksCreateAndConvergesUnderTheLifecycleLock(): void {
+    public function testRemovalTombstoneBlocksCreateAndConvergesUnderTheCreateRemoveLock(): void {
         $push_session_id = 'dededededededededededededededede';
         $push_session = $this->push_session($push_session_id);
         $parts = [];
@@ -1411,8 +1428,8 @@ final class PushSessionTest extends TestCase {
         $this->push_parts($push_session, $parts);
 
         $push_directory = $push_session->get_push_directory();
-        $push_parent_directory = dirname($push_directory);
-        $tombstone = $push_parent_directory . '/.removing-' . $push_session_id;
+        $push_sessions_directory = dirname($push_directory);
+        $tombstone = $push_sessions_directory . '/.removing-' . $push_session_id;
         $this->assertFalse($push_session->remove_push_directory());
         $this->assertDirectoryDoesNotExist($push_directory);
         $this->assertDirectoryExists($tombstone);
@@ -1425,7 +1442,7 @@ final class PushSessionTest extends TestCase {
         }
         $this->assertDirectoryDoesNotExist($push_directory);
 
-        $lock_process = $this->start_lock_process($push_parent_directory . '/push-create.lock');
+        $lock_process = $this->start_lock_process($push_sessions_directory . '/push-create.lock');
         $failure = null;
         try {
             $push_session->remove_push_directory();
