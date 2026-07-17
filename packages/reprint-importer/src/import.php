@@ -11,8 +11,14 @@
  */
 
 use function WordPress\Filesystem\wp_join_unix_paths;
+use Reprint\Importer\FileSync\DirectoryChunkApplier;
 use Reprint\Importer\FileSync\DownloadList;
+use Reprint\Importer\FileSync\FileChunkApplier;
 use Reprint\Importer\FileSync\FilePlacementRules;
+use Reprint\Importer\FileSync\LocalFileApplyContext;
+use Reprint\Importer\FileSync\LocalFilesystemAuditLogger;
+use Reprint\Importer\FileSync\LocalFilesystemOperator;
+use Reprint\Importer\FileSync\SymlinkChunkApplier;
 use Reprint\Importer\Index\IndexFileSorter;
 use Reprint\Importer\Index\IndexLineParser;
 use Reprint\Importer\Index\IndexPathPrefixMatcher;
@@ -53,15 +59,15 @@ if (!class_exists('MultipartStreamParser', false)) {
     class_alias(\Reprint\Importer\Protocol\MultipartStreamParser::class, 'MultipartStreamParser');
 }
 
-// Adaptive request sizing and pacing.
-require_once __DIR__ . '/lib/tuning/class-adaptive-tuner.php';
-if (!class_exists('AdaptiveTuner', false)) {
-    class_alias(\Reprint\Importer\Tuning\AdaptiveTuner::class, 'AdaptiveTuner');
-}
-
 // File placement, remap, --only, and symlink bundle rules.
+require_once __DIR__ . '/lib/file-sync/interface-local-file-apply-context.php';
+require_once __DIR__ . '/lib/file-sync/interface-local-filesystem-audit-logger.php';
 require_once __DIR__ . '/lib/file-sync/class-download-list.php';
 require_once __DIR__ . '/lib/file-sync/class-file-placement-rules.php';
+require_once __DIR__ . '/lib/file-sync/class-local-filesystem-operator.php';
+require_once __DIR__ . '/lib/file-sync/class-file-chunk-applier.php';
+require_once __DIR__ . '/lib/file-sync/class-directory-chunk-applier.php';
+require_once __DIR__ . '/lib/file-sync/class-symlink-chunk-applier.php';
 
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
@@ -685,7 +691,7 @@ class AdaptiveTuner
     }
 }
 
-class ImportClient implements SqlDomainAuditLogger
+class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, LocalFilesystemAuditLogger
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
@@ -1064,6 +1070,108 @@ class ImportClient implements SqlDomainAuditLogger
         }
 
         return $this->sql_domain_scanner;
+    }
+
+    private function local_filesystem_operator(): LocalFilesystemOperator
+    {
+        return new LocalFilesystemOperator(
+            $this->get_filesystem_root_path(),
+            $this->fs_root_nonempty_behavior,
+            $this,
+        );
+    }
+
+    public function localPathForRemotePath(string $path): string
+    {
+        return $this->remote_path_to_local_path_within_import_root($path);
+    }
+
+    public function removeLocalPathWithoutFollowingSymlinks(string $localPath): bool
+    {
+        return $this->local_filesystem_operator()->removePathWithoutFollowingSymlinks($localPath);
+    }
+
+    public function ensureDirectoryPath(string $dir): void
+    {
+        $this->local_filesystem_operator()->ensureDirectoryPath($dir);
+    }
+
+    public function pathTraversesSymlink(string $path): bool
+    {
+        return $this->local_filesystem_operator()->pathTraversesSymlink($path);
+    }
+
+    public function filesystemRootPath(): string
+    {
+        return $this->get_filesystem_root_path();
+    }
+
+    public function mapSymlinkTargetForLocalMirror(
+        string $path,
+        string $localPath,
+        string $target
+    ): string {
+        return $this->map_symlink_target_for_local_mirror($path, $localPath, $target);
+    }
+
+    public function recordFileSyncAudit(string $message, bool $toConsole = true): void
+    {
+        $this->audit_log($message, $toConsole);
+    }
+
+    public function logLocalFilesystemEvent(string $message, bool $toConsole = true): void
+    {
+        $this->audit_log($message, $toConsole);
+    }
+
+    public function showFileFetchProgress(string $path, int $fileSize): void
+    {
+        $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
+        $files_total = $this->download_list_total;
+        $file_fraction = ($files_total !== null && $files_total > 0)
+            ? $files_done / $files_total
+            : null;
+        $file_progress_message = $files_total !== null
+            ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
+            : sprintf("Downloading — %s files", number_format($files_done));
+        $this->progress->show_progress_line($file_progress_message, $file_fraction);
+        $progress_record = [
+            "type" => "file_progress",
+            "files_done" => $files_done,
+            "path" => $path,
+            "size" => $fileSize,
+            "message" => $file_progress_message,
+        ];
+        if ($this->download_list_total !== null) {
+            $progress_record["files_total"] = $this->download_list_total;
+        }
+        $this->output_progress($progress_record);
+    }
+
+    public function emitSkipProgress(string $path): void
+    {
+        $this->emit_skip_progress($path);
+    }
+
+    public function upsertFileIndexEntry(string $path, int $ctime, int $size, string $type): void
+    {
+        $this->upsert_index_entry($path, $ctime, $size, $type);
+    }
+
+    public function clearVolatileFile(string $path): void
+    {
+        $this->clear_volatile_file($path);
+    }
+
+    public function setCurrentFileCheckpoint(?string $path, ?int $bytes): void
+    {
+        $this->import_state()->current_file = $path;
+        $this->import_state()->current_file_bytes = $bytes;
+    }
+
+    public function outputFileSyncProgress(array $progress, bool $force = false): void
+    {
+        $this->output_progress($progress, $force);
     }
 
     /**
@@ -7314,35 +7422,7 @@ class ImportClient implements SqlDomainAuditLogger
     private function remove_local_path_without_following_symlinks(
         string $local_path
     ): bool {
-        if (!file_exists($local_path) && !is_link($local_path)) {
-            return true;
-        }
-
-        if (is_link($local_path) || is_file($local_path)) {
-            return true === @unlink($local_path);
-        }
-
-        if (is_dir($local_path)) {
-            $entries = @scandir($local_path);
-            if ($entries === false) {
-                return false;
-            }
-            foreach ($entries as $entry) {
-                if ($entry === "." || $entry === "..") {
-                    continue;
-                }
-                if (
-                    !$this->remove_local_path_without_following_symlinks(
-                        $local_path . "/" . $entry
-                    )
-                ) {
-                    return false;
-                }
-            }
-            return true === @rmdir($local_path);
-        }
-
-        return true === @unlink($local_path);
+        return $this->removeLocalPathWithoutFollowingSymlinks($local_path);
     }
 
     /**
@@ -8777,193 +8857,11 @@ class ImportClient implements SqlDomainAuditLogger
         array $chunk,
         StreamingContext $context
     ): void {
-        $headers = $chunk["headers"];
-        $raw_header = $headers["x-file-path"] ?? "";
-        $path = base64_decode($raw_header, true);
-        $is_first = ($headers["x-first-chunk"] ?? "0") === "1";
-        $is_last = ($headers["x-last-chunk"] ?? "0") === "1";
-
-        if ($path === false || $path === "") {
-            if ($raw_header !== "") {
-                $this->audit_log(
-                    "Warning: base64_decode failed for x-file-path header: " .
-                        substr($raw_header, 0, 100),
-                    true,
-                );
-            }
-            return;
-        }
-
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
-
-        // Open file on first chunk
-        if ($is_first) {
-            // Reset skip flag for each new file
-            $context->skip_current_file = false;
-
-            if (
-                (file_exists($local_path) || is_link($local_path)) &&
-                (!is_file($local_path) || is_link($local_path))
-            ) {
-                if (
-                    !$this->remove_local_path_without_following_symlinks(
-                        $local_path
-                    )
-                ) {
-                    throw new RuntimeException(
-                        "Failed to replace path with file: {$path}",
-                    );
-                }
-            }
-
-            // Check if file exists locally
-            $exists_locally = file_exists($local_path);
-            $local_size = $exists_locally ? filesize($local_path) : 0;
-            $file_size = (int) ($headers["x-file-size"] ?? 0);
-
-            // Log file import with useful context
-            $this->audit_log(
-                sprintf(
-                    "File: %s (remote_size=%d, ctime=%d, local_exists=%s, local_size=%d)",
-                    $path,
-                    $file_size,
-                    (int) ($headers["x-file-ctime"] ?? 0),
-                    $exists_locally ? "yes" : "no",
-                    $local_size,
-                ),
-                false,
-            );
-
-            $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
-            $files_total = $this->download_list_total;
-            $file_fraction = ($files_total !== null && $files_total > 0)
-                ? $files_done / $files_total
-                : null;
-            $file_progress_message = $files_total !== null
-                ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
-                : sprintf("Downloading — %s files", number_format($files_done));
-            $this->progress->show_progress_line($file_progress_message, $file_fraction);
-            $progress_record = [
-                "type" => "file_progress",
-                "files_done" => $files_done,
-                "path" => $path,
-                "size" => $file_size,
-                "message" => $file_progress_message,
-            ];
-            if ($this->download_list_total !== null) {
-                $progress_record["files_total"] = $this->download_list_total;
-            }
-            $this->output_progress($progress_record);
-        }
-
-        // Skip body/close for files being preserved
-        if ($context->skip_current_file) {
-            return;
-        }
-
-        // Open file handle on first chunk
-        if ($is_first) {
-            // Close previous file if any
-            if ($context->file_handle) {
-                fclose($context->file_handle);
-                if ($context->file_ctime && $context->file_path) {
-                    touch($context->file_path, $context->file_ctime);
-                }
-            }
-
-            // Create parent directory if needed
-            $dir = dirname($local_path);
-            if (!is_dir($dir)) {
-                // Check if any component of the path exists as a file and remove it
-                try {
-                    $this->ensure_directory_path($dir);
-                } catch (PreserveLocalSkipException $e) {
-                    $context->skip_current_file = true;
-                    $this->audit_log($e->getMessage(), true);
-                    $this->emit_skip_progress($path);
-                    return;
-                }
-            }
-
-            // Open new file
-            $context->file_handle = fopen($local_path, "wb");
-            if (!$context->file_handle) {
-                $error = error_get_last();
-                throw new RuntimeException(
-                    "Failed to open file for writing: {$local_path}\n" .
-                        "Parent directory: {$dir}\n" .
-                        "Directory exists: " .
-                        (is_dir($dir) ? "yes" : "no") .
-                        "\n" .
-                        "Error: " .
-                        ($error["message"] ?? "unknown"),
-                );
-            }
-            $context->file_path = $local_path;
-            $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
-            $context->file_bytes_written = 0;  // Reset byte counter for new file
-        }
-
-        // Write body data if present
-        if (isset($chunk["body"]) && $chunk["body"] !== "") {
-            if ($context->file_handle) {
-                $data = $chunk["body"];
-                $bytes = fwrite($context->file_handle, $data);
-                if ($bytes === false || $bytes !== strlen($data)) {
-                    throw new RuntimeException(
-                        "Write failed for {$context->file_path}: wrote " .
-                        ($bytes === false ? "0" : $bytes) . "/" . strlen($data) .
-                        " bytes (disk full?)"
-                    );
-                }
-                $context->file_bytes_written += $bytes;
-            }
-        }
-
-        // Close on last chunk
-        if ($is_last && $context->file_handle) {
-            fclose($context->file_handle);
-
-            // Set file modification time
-            if ($context->file_ctime && $context->file_path) {
-                touch($context->file_path, $context->file_ctime);
-            }
-
-            // Index update (JSON lines)
-            $file_size = (int) ($headers["x-file-size"] ?? 0);
-            $final_size = file_exists($context->file_path)
-                ? filesize($context->file_path)
-                : 0;
-
-            $file_changed = ($headers["x-file-changed"] ?? "0") === "1";
-
-            if ($context->file_ctime && !$file_changed) {
-                $this->upsert_index_entry(
-                    $path,
-                    $context->file_ctime,
-                    $file_size,
-                    "file",
-                );
-                $this->files_imported++; // Count completed files only
-                $this->clear_volatile_file($path);
-                $this->audit_log(
-                    sprintf("  Indexed (wrote %d bytes)", $final_size),
-                    false,
-                );
-            } elseif ($file_changed) {
-                $this->audit_log(
-                    "  File changed during stream; index not updated",
-                    true,
-                );
-            }
-
-            $context->file_handle = null;
-            $context->file_path = null;
-            $context->file_ctime = null;
-            $context->file_bytes_written = 0;
-            // Clear crash recovery tracking - file is complete
-            $this->import_state()->current_file = null;
-            $this->import_state()->current_file_bytes = null;
+        $applier = new FileChunkApplier($this->files_imported, $this);
+        try {
+            $applier->handle($chunk, $context);
+        } finally {
+            $this->files_imported = $applier->filesImported();
         }
     }
 
@@ -9020,26 +8918,7 @@ class ImportClient implements SqlDomainAuditLogger
 
     private function path_traverses_symlink(string $path): bool
     {
-        $root = $this->get_filesystem_root_path();
-        $relative = ltrim(substr($path, strlen($root)), "/");
-        if ($relative === "") {
-            return false;
-        }
-
-        $current = $root;
-        foreach (explode("/", $relative) as $part) {
-            if ($part === "") {
-                continue;
-            }
-            $current .= "/" . $part;
-            if (is_link($current)) {
-                return true;
-            }
-            if (!file_exists($current)) {
-                break;
-            }
-        }
-        return false;
+        return $this->pathTraversesSymlink($path);
     }
 
     /**
@@ -9050,133 +8929,7 @@ class ImportClient implements SqlDomainAuditLogger
      */
     private function ensure_directory_path(string $dir): void
     {
-        // Security: Ensure path is under the fs root
-        $real_filesystem_root = $this->get_filesystem_root_path();
-
-        // Resolve the target path (or what it would be)
-        // For non-existent paths, resolve the parent and append the final component
-        $check_path = $dir;
-        while (
-            !file_exists($check_path) &&
-            $check_path !== dirname($check_path)
-        ) {
-            $check_path = dirname($check_path);
-        }
-
-        if (file_exists($check_path)) {
-            $real_check = realpath($check_path);
-            if (
-                $real_check === false ||
-                !path_is_within_root($real_check, $real_filesystem_root)
-            ) {
-                // In preserve-local mode, a path that resolves outside the
-                // fs root is expected when a directory like wp-content/plugins
-                // is symlinked to a shared hosting location.  Skip gracefully
-                // instead of treating it as a security violation.
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: path resolves outside fs root via symlink: {$dir}",
-                    );
-                }
-                throw new RuntimeException(
-                    "Security: Refusing to create directory outside fs root: {$dir}",
-                );
-            }
-        }
-
-        if (is_dir($dir) && !is_link($dir)) {
-            if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($dir)) {
-                throw new PreserveLocalSkipException(
-                    "PRESERVE-LOCAL: directory not writable: {$dir}",
-                );
-            }
-            return;
-        }
-
-        if (
-            $dir !== $real_filesystem_root &&
-            !str_starts_with($dir, $real_filesystem_root . "/")
-        ) {
-            throw new RuntimeException(
-                "Security: Refusing to create directory outside fs root: {$dir}",
-            );
-        }
-
-        $relative = ltrim(substr($dir, strlen($real_filesystem_root)), "/");
-        if ($relative === "") {
-            return;
-        }
-
-        $current = $real_filesystem_root;
-        foreach (explode("/", $relative) as $part) {
-            if ($part === "") {
-                continue;
-            }
-            $current .= "/" . $part;
-
-            if (is_link($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    // Never create directories through symlinks — the symlink
-                    // and its target contents are shared hosting infrastructure
-                    // that must not be modified.
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: symlink in directory path: {$current}",
-                    );
-                }
-                $this->audit_log(
-                    "Removing symlink blocking directory: {$current}",
-                    true,
-                );
-                if (!unlink($current)) {
-                    throw new RuntimeException(
-                        "Failed to remove symlink blocking directory: {$current}",
-                    );
-                }
-                // Clear cached realpath so the subsequent realpath() check
-                // sees the new directory instead of the removed symlink.
-                clearstatcache(true, $current);
-            }
-
-            // Remove file if blocking directory creation
-            if (is_file($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: file blocks directory creation: {$current}",
-                    );
-                }
-                $this->audit_log(
-                    "Removing file blocking directory: {$current}",
-                    true,
-                );
-                if (!unlink($current)) {
-                    throw new RuntimeException(
-                        "Failed to remove file blocking directory: {$current}",
-                    );
-                }
-            }
-
-            // Create directory if it doesn't exist
-            if (is_dir($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($current)) {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: directory not writable: {$current}",
-                    );
-                }
-            } elseif (!mkdir($current, 0755) && !is_dir($current)) {
-                throw new RuntimeException(
-                    "Failed to create directory: {$current}\n" .
-                        "Error: " .
-                        (error_get_last()["message"] ?? "unknown"),
-                );
-            }
-
-            $resolved = realpath($current);
-            if ($resolved === false || !path_is_within_root($resolved, $real_filesystem_root)) {
-                throw new RuntimeException(
-                    "Security: Refusing to create directory outside fs root: {$current}",
-                );
-            }
-        }
+        $this->ensureDirectoryPath($dir);
     }
 
     /**
@@ -9184,74 +8937,10 @@ class ImportClient implements SqlDomainAuditLogger
      */
     private function handle_directory_chunk(array $chunk): void
     {
-        $headers = $chunk["headers"];
-        $raw_header = $headers["x-directory-path"] ?? "";
-        $path = base64_decode($raw_header, true);
-        $ctime = (int) ($headers["x-directory-ctime"] ?? 0);
-
-        if ($path === false || $path === "") {
-            if ($raw_header !== "") {
-                $this->audit_log(
-                    "Warning: base64_decode failed for x-directory-path header: " .
-                        substr($raw_header, 0, 100),
-                    true,
-                );
-            }
-            return;
-        }
-
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
-
-        // In preserve-local mode, if the directory already exists (as a real
-        // directory or via a symlink to a directory), keep it as-is.
-        // Also skip if any parent component is a symlink — we never create
-        // new directories through symlinked paths.
-        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (is_dir($local_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$path}", true);
-                $this->emit_skip_progress($path);
-                if ($ctime > 0) {
-                    $this->upsert_index_entry($path, $ctime, 0, "dir");
-                }
-                return;
-            }
-            if ($this->path_traverses_symlink($local_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$path}", true);
-                $this->emit_skip_progress($path);
-                if ($ctime > 0) {
-                    $this->upsert_index_entry($path, $ctime, 0, "dir");
-                }
-                return;
-            }
-        }
-
-        if (
-            (file_exists($local_path) || is_link($local_path)) &&
-            (!is_dir($local_path) || is_link($local_path))
-        ) {
-            if (
-                !$this->remove_local_path_without_following_symlinks($local_path)
-            ) {
-                throw new RuntimeException(
-                    "Failed to replace path with directory: {$path}",
-                );
-            }
-        }
-
-        // Create directory, removing any files that block the path
-        try {
-            $this->ensure_directory_path($local_path);
-        } catch (PreserveLocalSkipException $e) {
-            $this->audit_log($e->getMessage(), true);
-            $this->emit_skip_progress($path);
-            return;
-        }
-
-        $this->audit_log("Directory: {$path}", false);
-
-        if ($ctime > 0) {
-            $this->upsert_index_entry($path, $ctime, 0, "dir");
-        }
+        (new DirectoryChunkApplier(
+            $this->fs_root_nonempty_behavior === 'preserve-local',
+            $this,
+        ))->handle($chunk);
     }
 
     /**
@@ -9268,149 +8957,10 @@ class ImportClient implements SqlDomainAuditLogger
      */
     private function handle_symlink_chunk(array $chunk): void
     {
-        $headers = $chunk["headers"];
-        $raw_path = $headers["x-symlink-path"] ?? "";
-        $path = base64_decode($raw_path, true);
-        $target = base64_decode($headers["x-symlink-target"] ?? "", true);
-        $ctime = (int) ($headers["x-symlink-ctime"] ?? 0);
-
-        // Skip if path or target is missing/empty
-        if ($path === false || $path === "" || $target === false || $target === "") {
-            if ($raw_path !== "" && ($path === false || $path === "")) {
-                $this->audit_log(
-                    "Warning: base64_decode failed for x-symlink-path header: " .
-                        substr($raw_path, 0, 100),
-                    true,
-                );
-            }
-            return;
-        }
-
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
-        $target_for_local = $this->map_symlink_target_for_local_mirror(
-            $path,
-            $local_path,
-            $target,
-        );
-
-        // In preserve-local mode, if something already exists at the symlink
-        // path, keep it — whether it's a file, directory, or another symlink.
-        // Also skip if any parent component is a symlink — we never create
-        // new content through symlinked directories.
-        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (file_exists($local_path) || is_link($local_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
-            if ($this->path_traverses_symlink(dirname($local_path))) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
-        }
-
-        // Validate that the symlink target doesn't escape the filesystem root.
-        $root = $this->get_filesystem_root_path();
-        try {
-            $this->assert_symlink_target_within_root(
-                dirname($local_path),
-                $target_for_local,
-                $root
-            );
-        } catch (RuntimeException $e) {
-            $this->audit_log($e->getMessage(), true);
-            $this->output_progress([
-                "type" => "symlink_error",
-                "path" => $path,
-                "target" => $target_for_local,
-                "error" => $e->getMessage(),
-                "message" => "Symlink error: {$path} -> {$target}",
-            ]);
-            return;
-        }
-
-        // Remove existing file/symlink if present
-        if (file_exists($local_path) || is_link($local_path)) {
-            if (
-                !$this->remove_local_path_without_following_symlinks($local_path)
-            ) {
-                $this->audit_log(
-                    "Failed to remove existing path for symlink: {$local_path}",
-                    true,
-                );
-                $this->output_progress([
-                    "type" => "symlink_error",
-                    "path" => $path,
-                    "target" => $target_for_local,
-                    "error" => "Failed to replace existing path",
-                    "message" => "Symlink error: {$path} -> {$target}",
-                ]);
-                return;
-            }
-        }
-
-        // Create parent directory
-        $dir = dirname($local_path);
-        if (!is_dir($dir)) {
-            try {
-                $this->ensure_directory_path($dir);
-            } catch (PreserveLocalSkipException $e) {
-                $this->audit_log($e->getMessage(), true);
-                $this->emit_skip_progress($path);
-                return;
-            } catch (RuntimeException $e) {
-                // Log error and skip this symlink
-                $this->audit_log(
-                    "Failed to create directory for symlink: {$dir}",
-                    true,
-                );
-                $this->output_progress([
-                    "type" => "symlink_error",
-                    "path" => $path,
-                    "target" => $target_for_local,
-                    "error" => "Failed to create parent directory",
-                    "message" => "Symlink error: {$path} -> {$target}",
-                ]);
-                return;
-            }
-        }
-
-        // Create symlink
-        $symlink_result = symlink($target_for_local, $local_path);
-        if (true !== $symlink_result || !is_link($local_path)) {
-            // Log error and skip this symlink
-            $this->audit_log(
-                "Failed to create symlink: {$local_path} -> {$target_for_local}",
-                true,
-            );
-            $this->output_progress([
-                "type" => "symlink_error",
-                "path" => $path,
-                "target" => $target_for_local,
-                "error" => "Failed to create symlink",
-                "message" => "Symlink error: {$path} -> {$target}",
-            ]);
-            return;
-        }
-
-        // Try to set the ctime (may not work on all systems)
-        if ($ctime > 0) {
-            @touch($local_path, $ctime);
-        }
-
-        $this->audit_log("Symlink: {$path} -> {$target_for_local}", false);
-
-        if ($ctime > 0) {
-            $this->upsert_index_entry($path, $ctime, 0, "link");
-        }
-
-        $this->output_progress([
-            "type" => "symlink",
-            "path" => $path,
-            "target" => $target_for_local,
-            "message" => "Symlink: {$path} -> {$target}",
-        ]);
+        (new SymlinkChunkApplier(
+            $this->fs_root_nonempty_behavior === 'preserve-local',
+            $this,
+        ))->handle($chunk);
     }
 
     /**
