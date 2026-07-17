@@ -25,6 +25,18 @@ class Site_Export_Plugin {
 
     private function __construct() {
         add_action('init', [$this, 'register_settings']);
+        add_action(
+            'update_option_' . SITE_EXPORT_SECRET_OPTION,
+            [$this, 'revoke_push_authorization_after_connection_token_change'],
+            10,
+            2
+        );
+        add_action(
+            'add_option_' . SITE_EXPORT_SECRET_OPTION,
+            [$this, 'revoke_push_authorization_after_connection_token_added'],
+            10,
+            0
+        );
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'handle_settings_save']);
         add_filter('plugin_action_links_' . plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'), [$this, 'add_settings_link']);
@@ -43,6 +55,40 @@ class Site_Export_Plugin {
                 'show_in_rest' => true,
             ]
         );
+    }
+
+    /**
+     * Revoke local push authorization when the effective connection token changes.
+     *
+     * The secret.php override keeps the option from becoming the effective token.
+     *
+     * @param mixed $old_value Previous option value.
+     * @param mixed $new_value New option value.
+     */
+    public function revoke_push_authorization_after_connection_token_change($old_value, $new_value) {
+        if (_site_export_has_secret_file()) {
+            return;
+        }
+
+        $old_connection_token = is_string($old_value) && $old_value !== '' ? $old_value : null;
+        $new_connection_token = is_string($new_value) && $new_value !== '' ? $new_value : null;
+        if ($old_connection_token !== $new_connection_token) {
+            _site_export_update_push_authorization(false);
+        }
+    }
+
+    /**
+     * Revoke stale local push authorization when the connection-token option is added.
+     *
+     * WordPress uses add_option() when update_option() receives a missing option,
+     * so that path does not emit the update hook above. A secret.php override
+     * still keeps the option from becoming the effective token.
+     *
+     */
+    public function revoke_push_authorization_after_connection_token_added() {
+        if (!_site_export_has_secret_file()) {
+            _site_export_update_push_authorization(false);
+        }
     }
 
     /**
@@ -88,7 +134,9 @@ class Site_Export_Plugin {
      * Handle settings form submission.
      */
     public function handle_settings_save() {
-        if (!isset($_POST['site_export_save_settings'])) {
+        $saving_connection_token = isset($_POST['site_export_save_settings']);
+        $saving_push_access = isset($_POST['site_export_save_push_access']);
+        if (!$saving_connection_token && !$saving_push_access) {
             return;
         }
 
@@ -98,20 +146,44 @@ class Site_Export_Plugin {
 
         check_admin_referer('site_export_settings');
 
-        $secret = isset($_POST['site_export_secret']) ? sanitize_text_field($_POST['site_export_secret']) : '';
+        if ($saving_connection_token) {
+            $secret = isset($_POST['site_export_secret'])
+                ? sanitize_text_field(wp_unslash($_POST['site_export_secret']))
+                : '';
+            $updated = _site_export_update_shared_secret($secret);
+            $saved = $updated || _site_export_get_option_secret() === $secret;
 
-        $updated = _site_export_update_shared_secret($secret);
+            if (!$saved) {
+                add_settings_error('site_export', 'save_failed', 'Failed to save secret.', 'error');
+                return;
+            }
 
-        if (!$updated && _site_export_get_option_secret() !== $secret) {
-            add_settings_error('site_export', 'save_failed', 'Failed to save secret.', 'error');
-        } else {
             add_settings_error(
                 'site_export',
                 'save_success',
                 'Settings saved successfully.',
                 'success'
             );
+            return;
         }
+
+        if (_site_export_get_managed_push_enabled() !== null) {
+            add_settings_error(
+                'site_export',
+                'push_access_managed',
+                'Push access is managed by your hosting provider.',
+                'info'
+            );
+            return;
+        }
+
+        $push_enabled = isset($_POST['site_export_push_enabled']);
+        if (!_site_export_update_push_authorization($push_enabled)) {
+            add_settings_error('site_export', 'push_access_save_failed', 'Failed to save push access.', 'error');
+            return;
+        }
+
+        add_settings_error('site_export', 'push_access_saved', 'Push access updated.', 'success');
     }
 
     /**
@@ -127,6 +199,8 @@ class Site_Export_Plugin {
         $api_url = home_url('?reprint-api');
         $is_configured = $effective_secret !== '';
         $has_file_override = _site_export_has_secret_file();
+        $managed_push_enabled = _site_export_get_managed_push_enabled();
+        $push_enabled = _site_export_is_push_authorized();
 
         ?>
         <style>
@@ -161,6 +235,27 @@ class Site_Export_Plugin {
             .site-export-card .card-desc {
                 color: #646970;
                 margin: 0 0 20px;
+            }
+            .site-export-push-access {
+                padding: 20px 24px;
+            }
+            .site-export-push-access label {
+                display: flex;
+                gap: 8px;
+                align-items: flex-start;
+                font-weight: 600;
+            }
+            .site-export-push-access input[type="checkbox"] {
+                margin-top: 1px;
+            }
+            .site-export-push-disclosure {
+                color: #646970;
+                font-size: 13px;
+                margin: 10px 0 16px 24px;
+            }
+            .site-export-managed-copy {
+                color: #646970;
+                margin: 12px 0 0 24px;
             }
             .site-export-secret-field {
                 display: flex;
@@ -266,7 +361,11 @@ class Site_Export_Plugin {
             <?php if ($is_configured): ?>
             <div class="site-export-status is-ready">
                 <span class="dashicons dashicons-yes-alt"></span>
-                <span><strong>Connected.</strong> The export API is ready to accept requests.</span>
+                <?php if ($push_enabled): ?>
+                <span><strong>Connected for downloads and push.</strong> The current connection token can change files on this site.</span>
+                <?php else: ?>
+                <span><strong>Connected for downloads.</strong> The connection token cannot change files on this site.</span>
+                <?php endif; ?>
             </div>
             <?php else: ?>
             <div class="site-export-status is-pending">
@@ -301,6 +400,35 @@ class Site_Export_Plugin {
                     </div>
                 </form>
             </div>
+
+            <?php if ($is_configured): ?>
+            <div class="site-export-card site-export-push-access">
+                <h2>Push access</h2>
+                <p class="card-desc">You do not need push access when moving this site to another host.</p>
+
+                <?php if ($managed_push_enabled !== null): ?>
+                <label>
+                    <input type="checkbox" name="site_export_push_enabled" value="1"<?php echo $push_enabled ? ' checked' : ''; ?> disabled />
+                    <span>Allow push to change files on this site</span>
+                </label>
+                <p class="site-export-push-disclosure">While enabled, anyone with the connection token can upload, replace, and delete files in this site's document root, except excluded paths.</p>
+                <p class="site-export-managed-copy">Push access is managed by your hosting provider.</p>
+                <?php else: ?>
+                <form method="post" action="">
+                    <?php wp_nonce_field('site_export_settings'); ?>
+                    <label>
+                        <input type="checkbox" name="site_export_push_enabled" value="1"<?php echo $push_enabled ? ' checked' : ''; ?> />
+                        <span>Allow push to change files on this site</span>
+                    </label>
+                    <p class="site-export-push-disclosure">While enabled, anyone with the connection token can upload, replace, and delete files in this site's document root, except excluded paths.</p>
+                    <input type="submit"
+                           name="site_export_save_push_access"
+                           class="button button-secondary"
+                           value="Save push access" />
+                </form>
+                <?php endif; ?>
+            </div>
+            <?php endif; ?>
 
             <?php if ($is_configured): ?>
             <div class="site-export-card">

@@ -24,6 +24,11 @@ if (is_string($reprint_push_test_docroot_configuration['wp_plugin_dir'] ?? null)
     define('WP_PLUGIN_DIR', $reprint_push_test_docroot_configuration['wp_plugin_dir']);
 }
 
+$reprint_push_test_managed_state = trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_MANAGED_PUSH_CONFIG') ) );
+if ($reprint_push_test_managed_state !== '') {
+    define('SITE_EXPORT_PUSH_ENABLED', $reprint_push_test_managed_state === 'true');
+}
+
 function plugin_dir_path(string $file): string {
     return $file === '' ? '' : dirname(__DIR__, 2) . '/reprint-exporter-wp/';
 }
@@ -40,7 +45,10 @@ function plugin_basename(string $file): string {
 
 function get_option(string $name, $fallback = false) {
     if ($name === 'site_export_secret') {
-        return (string) getenv('REPRINT_PUSH_TEST_SECRET');
+        return trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_SECRET_CONFIG') ) );
+    }
+    if ($name === 'site_export_push_authorized_token_fingerprint') {
+        return trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_AUTHORIZATION_CONFIG') ) );
     }
     return $fallback;
 }
@@ -67,6 +75,10 @@ if (is_string($reprint_push_test_docroot)) {
 }
 if (isset($reprint_push_test_docroot_configuration['maximum_part_bytes'])) {
     $reprint_push_test_options['maximum_part_bytes'] = $reprint_push_test_docroot_configuration['maximum_part_bytes'];
+}
+if (trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_CUSTOM_AUTH_CONFIG') ) ) === 'enabled') {
+    $reprint_push_test_options['authenticate'] = function (): void {
+    };
 }
 $reprint_push_test_directory = trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_DIRECTORY_CONFIG') ) );
 if ($reprint_push_test_directory !== '') {

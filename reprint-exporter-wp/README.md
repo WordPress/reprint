@@ -56,6 +56,30 @@ The supported options are:
 - `maximum_commit_entries` — the maximum number of bounded entries processed
   by one `push_commit` request. It defaults to 256.
 
+## Push access
+
+Connection tokens authorize downloads only by default. This also applies to
+tokens that already existed when the plugin was upgraded; no migration enables
+push access. A site administrator can grant push access from the plugin settings
+page. The grant stores a fingerprint of the current connection token, so rotating
+that token revokes the grant and requires fresh consent.
+
+Hosts can manage push access before active plugins load with an immutable boolean:
+
+```php
+define('SITE_EXPORT_PUSH_ENABLED', true);
+```
+
+The `SITE_EXPORT_PUSH_ENABLED` environment variable accepts the same boolean
+policy. The constant wins when both are present. `true` enables push without a
+local grant; `false` hard-disables push even when a local grant exists. The sole
+recovery exception lets an authenticated caller finish a commit which already
+has a durable checkpoint, so revocation cannot strand a partially changed
+document root. It cannot start commit or use any other push operation until
+push is authorized again. Managed sites show the effective state as read-only
+in WordPress admin. Custom authentication does not bypass this authorization
+gate.
+
 ## Using as a library
 
 The export engine can be embedded in another PHP project without the WordPress plugin wrapper. Require `lib.php` instead of `index.php` — it defines constants and functions but does not handle any HTTP requests or check any URLs.
@@ -93,4 +117,5 @@ array argument and do not use the WordPress filter.
 - `SITE_EXPORT_PLUGIN_DIR` — absolute path to the plugin directory
 - `SITE_EXPORT_SECRET_FILE` — optional path to a PHP file that overrides the stored HMAC shared secret
 - `SITE_EXPORT_SECRET_OPTION` — WordPress site option name used for the stored HMAC shared secret
+- `SITE_EXPORT_PUSH_AUTHORIZATION_OPTION` — WordPress site option containing the token fingerprint granted personal push access
 - `SITE_EXPORT_TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)

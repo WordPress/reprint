@@ -233,37 +233,74 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame([['endpoint' => 'preflight']], $calls);
     }
 
-    public function testPushUploadNeverReadsAJsonRequestBody(): void
+    public function testPushEndpointsNeverReadAJsonRequestBody(): void
     {
-        $body_reads = 0;
+        foreach (['push_create', 'push_upload', 'push_status', 'push_commit', 'push_remove', 'push_future_operation'] as $endpoint) {
+            $body_reads = 0;
+            $calls = [];
+            $server = new Site_Export_HTTP_Server([
+                'budget_factory' => static function (): stdClass {
+                    return new stdClass();
+                },
+                'body_reader' => static function () use (&$body_reads): string {
+                    ++$body_reads;
+                    return '{"body_parameter":"must-not-be-read"}';
+                },
+                'handlers' => [
+                    $endpoint => static function (array $config) use (&$calls): void {
+                        $calls[] = $config;
+                    },
+                ],
+            ]);
+
+            $server->handle_request([
+                'get' => [
+                    'endpoint' => $endpoint,
+                    'push_session_id' => str_repeat('a', 32),
+                ],
+                'post' => [],
+                'server' => [
+                    'REQUEST_METHOD' => 'POST',
+                    'CONTENT_TYPE' => 'application/json',
+                ],
+            ]);
+
+            $this->assertSame(0, $body_reads);
+            $this->assertSame([[
+                'endpoint' => $endpoint,
+                'push_session_id' => str_repeat('a', 32),
+            ]], $calls);
+        }
+    }
+
+    public function testPushQueryParametersCannotBeOverriddenByPostData(): void
+    {
         $calls = [];
         $server = new Site_Export_HTTP_Server([
-            'body_reader' => static function () use (&$body_reads): string {
-                ++$body_reads;
-                return '{"body_parameter":"must-not-be-read"}';
-            },
             'handlers' => [
-                'push_upload' => static function (array $config) use (&$calls): void {
+                'push_commit' => static function (array $config) use (&$calls): void {
                     $calls[] = $config;
+                },
+                'push_create' => static function (): void {
+                    throw new RuntimeException('POST data changed the dispatched push endpoint.');
                 },
             ],
         ]);
 
         $server->handle_request([
             'get' => [
-                'endpoint' => 'push_upload',
+                'endpoint' => 'push_commit',
                 'push_session_id' => str_repeat('a', 32),
             ],
-            'post' => [],
-            'server' => [
-                'REQUEST_METHOD' => 'POST',
-                'CONTENT_TYPE' => 'application/json',
+            'post' => [
+                'endpoint' => 'push_create',
+                'push_session_id' => str_repeat('b', 32),
             ],
+            'server' => ['REQUEST_METHOD' => 'POST'],
         ]);
 
-        $this->assertSame(0, $body_reads);
         $this->assertSame([[
-            'endpoint' => 'push_upload',
+            'endpoint' => 'push_commit',
             'push_session_id' => str_repeat('a', 32),
         ]], $calls);
     }

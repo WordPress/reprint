@@ -22,6 +22,10 @@ final class PushEndpointsTest extends TestCase {
     private string $docroot;
     private string $wordpress_root;
     private string $reprint_directory;
+    private string $secret_configuration_path;
+    private string $push_authorization_configuration_path;
+    private string $managed_push_configuration_path;
+    private string $custom_auth_configuration_path;
     private string $reprint_configuration_path;
     private string $docroot_configuration_path;
     private string $excluded_paths_configuration_path;
@@ -37,11 +41,19 @@ final class PushEndpointsTest extends TestCase {
         $this->docroot = $this->root . '/site';
         $this->wordpress_root = $this->docroot . '/__wp__';
         $this->reprint_directory = $this->root . '/reprint';
+        $this->secret_configuration_path = $this->root . '/secret';
+        $this->push_authorization_configuration_path = $this->root . '/push-authorization';
+        $this->managed_push_configuration_path = $this->root . '/managed-push';
+        $this->custom_auth_configuration_path = $this->root . '/custom-auth';
         $this->reprint_configuration_path = $this->root . '/reprint-directory';
         $this->docroot_configuration_path = $this->root . '/docroot-configuration.json';
         $this->excluded_paths_configuration_path = $this->root . '/excluded-paths.json';
         mkdir($this->wordpress_root, 0700, true);
         mkdir($this->reprint_directory, 0700, true);
+        file_put_contents($this->secret_configuration_path, self::SECRET);
+        file_put_contents($this->push_authorization_configuration_path, hash('sha256', self::SECRET));
+        file_put_contents($this->managed_push_configuration_path, '');
+        file_put_contents($this->custom_auth_configuration_path, '');
         file_put_contents($this->reprint_configuration_path, $this->reprint_directory);
         $this->writeDocrootConfiguration([
             'document_root' => $this->docroot,
@@ -62,7 +74,254 @@ final class PushEndpointsTest extends TestCase {
         parent::tearDown();
     }
 
-    public function testSignedEndpointsReceiveManyChangesCommitAndRemove(): void
+    public function testExistingTokenCannotUsePushEndpointsWithoutAuthorization(): void
+    {
+        file_put_contents($this->push_authorization_configuration_path, '');
+        $push_session_id = str_repeat('0', 32);
+
+        $authentication = $this->requestPushEndpoint(
+            'not-the-server-secret',
+            'POST',
+            'push_create',
+            $push_session_id
+        );
+        $this->assertSame(403, $authentication['http_code']);
+        $this->assertSame('auth_failed', $authentication['response']['reason']);
+
+        $requests = [
+            ['POST', 'push_create', null, null],
+            ['POST', 'push_upload', 'not a multipart body', 'application/octet-stream'],
+            ['GET', 'push_status', null, null],
+            ['POST', 'push_commit', null, null],
+            ['POST', 'push_remove', null, null],
+        ];
+        foreach ($requests as [$method, $endpoint, $body, $content_type]) {
+            $response = $this->requestPushEndpoint(
+                self::SECRET,
+                $method,
+                $endpoint,
+                $push_session_id,
+                $body,
+                $content_type
+            );
+            $this->assertSame(403, $response['http_code'], $endpoint . ': ' . $response['body']);
+            $this->assertSame('rejected', $response['response']['status']);
+            $this->assertSame('push_disabled', $response['response']['reason']);
+        }
+
+        $future_endpoint = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_future_operation',
+            $push_session_id
+        );
+        $this->assertSame(403, $future_endpoint['http_code']);
+        $this->assertSame('push_disabled', $future_endpoint['response']['reason']);
+
+        $overridden_commit = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_commit',
+            $push_session_id,
+            'endpoint=push_create&push_session_id=' . str_repeat('1', 32),
+            'application/x-www-form-urlencoded'
+        );
+        $this->assertSame(403, $overridden_commit['http_code'], $overridden_commit['body']);
+        $this->assertSame('push_disabled', $overridden_commit['response']['reason']);
+        $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push');
+        $this->assertSame('old', file_get_contents($this->docroot . '/remove.txt'));
+        $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
+    }
+
+    public function testAuthorizedFuturePushEndpointUsesPushErrorContract(): void
+    {
+        $response = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_future_operation',
+            str_repeat('f', 32)
+        );
+
+        $this->assertSame(400, $response['http_code'], $response['body']);
+        $this->assertSame('rejected', $response['response']['status']);
+        $this->assertSame('invalid_request', $response['response']['reason']);
+        $this->assertStringContainsString('Invalid endpoint', $response['response']['detail']);
+        $this->assertArrayNotHasKey('error', $response['response']);
+        $this->assertArrayNotHasKey('trace', $response['response']);
+    }
+
+    public function testCustomAuthenticationCannotBypassPushAuthorization(): void
+    {
+        file_put_contents($this->push_authorization_configuration_path, '');
+        file_put_contents($this->custom_auth_configuration_path, 'enabled');
+
+        $response = $this->requestPushEndpoint(
+            null,
+            'POST',
+            'push_create',
+            str_repeat('1', 32)
+        );
+
+        $this->assertSame(403, $response['http_code'], $response['body']);
+        $this->assertSame('push_disabled', $response['response']['reason']);
+        $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push');
+    }
+
+    public function testPersonalConsentDoesNotSurviveTokenRotation(): void
+    {
+        $first_push_session_id = str_repeat('2', 32);
+        $first = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_create',
+            $first_push_session_id
+        );
+        $this->assertSame(200, $first['http_code'], $first['body']);
+
+        $rotated_secret = 'rotated-push-endpoint-test-secret';
+        file_put_contents($this->secret_configuration_path, $rotated_secret);
+        $second_push_session_id = str_repeat('3', 32);
+        $second = $this->requestPushEndpoint(
+            $rotated_secret,
+            'POST',
+            'push_create',
+            $second_push_session_id
+        );
+
+        $this->assertSame(403, $second['http_code'], $second['body']);
+        $this->assertSame('push_disabled', $second['response']['reason']);
+        $this->assertDirectoryDoesNotExist(
+            $this->reprint_directory . '/.reprint/push/' . $second_push_session_id
+        );
+    }
+
+    public function testManagedStateOverridesPersonalConsent(): void
+    {
+        file_put_contents($this->push_authorization_configuration_path, '');
+        file_put_contents($this->managed_push_configuration_path, 'true');
+        $managed_enabled = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_create',
+            str_repeat('4', 32)
+        );
+        $this->assertSame(200, $managed_enabled['http_code'], $managed_enabled['body']);
+
+        file_put_contents($this->push_authorization_configuration_path, hash('sha256', self::SECRET));
+        file_put_contents($this->managed_push_configuration_path, 'false');
+        $managed_disabled = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_create',
+            str_repeat('5', 32)
+        );
+        $this->assertSame(403, $managed_disabled['http_code'], $managed_disabled['body']);
+        $this->assertSame('push_disabled', $managed_disabled['response']['reason']);
+        $this->assertSame(
+            'Push access is disabled by the hosting provider through SITE_EXPORT_PUSH_ENABLED.',
+            $managed_disabled['response']['detail']
+        );
+    }
+
+    public function testRevokedAuthorizationCannotStartCommit(): void
+    {
+        $client = $this->newClient(self::SECRET);
+        $push_session_id = str_repeat('6', 32);
+        $create = $client->control_request('POST', 'push_create', [
+            'push_session_id' => $push_session_id,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+
+        $upload = $this->sendUploadRequest($client, $push_session_id, [
+            [
+                'type' => 'file',
+                'path' => 'must-not-install.txt',
+                'total_bytes' => 4,
+                'offset' => 0,
+                'payload' => 'deny',
+            ],
+            [
+                'type' => 'delete-list',
+                'offset' => 0,
+                'complete' => true,
+                'payload' => '',
+            ],
+        ]);
+        $this->assertSame('complete', $upload['status'], (string) json_encode($upload));
+
+        file_put_contents($this->push_authorization_configuration_path, '');
+        $commit = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_commit',
+            $push_session_id
+        );
+
+        $this->assertSame(403, $commit['http_code'], $commit['body']);
+        $this->assertSame('push_disabled', $commit['response']['reason']);
+        $push_directory = $this->reprint_directory . '/.reprint/push/' . $push_session_id;
+        $this->assertFileDoesNotExist($push_directory . '/commit.json');
+        $this->assertFileDoesNotExist($this->reprint_directory . '/.reprint/push/commit-state');
+        $this->assertFileDoesNotExist($this->docroot . '/.maintenance');
+        $this->assertFileDoesNotExist($this->docroot . '/must-not-install.txt');
+        $this->assertSame('old', file_get_contents($this->docroot . '/remove.txt'));
+    }
+
+    public function testRevokedAuthorizationAllowsDurableCommitRecovery(): void
+    {
+        $client = $this->newClient(self::SECRET);
+        $push_session_id = str_repeat('7', 32);
+        $create = $client->control_request('POST', 'push_create', [
+            'push_session_id' => $push_session_id,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+
+        $upload = $this->sendUploadRequest($client, $push_session_id, [
+            [
+                'type' => 'file',
+                'path' => 'installed.txt',
+                'total_bytes' => 4,
+                'offset' => 0,
+                'payload' => 'new!',
+            ],
+            [
+                'type' => 'delete-list',
+                'offset' => 0,
+                'complete' => true,
+                'payload' => '',
+            ],
+        ]);
+        $this->assertSame('complete', $upload['status'], (string) json_encode($upload));
+
+        $commit_before_revocation = null;
+        for ($request = 0; $request < 10; ++$request) {
+            $commit_before_revocation = $client->control_request('POST', 'push_commit', [
+                'push_session_id' => $push_session_id,
+            ], ['accepted']);
+            $this->assertSame('complete', $commit_before_revocation['status'], (string) json_encode($commit_before_revocation));
+            if (is_file($this->docroot . '/installed.txt')) {
+                break;
+            }
+        }
+        $this->assertIsArray($commit_before_revocation);
+        $this->assertTrue($commit_before_revocation['response']['send_next_request']);
+        $this->assertSame('new!', file_get_contents($this->docroot . '/installed.txt'));
+        $this->assertFileExists($this->docroot . '/.maintenance');
+
+        file_put_contents($this->push_authorization_configuration_path, '');
+        do {
+            $commit = $client->control_request('POST', 'push_commit', [
+                'push_session_id' => $push_session_id,
+            ], ['accepted']);
+            $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
+        } while ($commit['response']['send_next_request']);
+
+        $this->assertSame('complete', $commit['response']['phase']);
+        $this->assertFileDoesNotExist($this->docroot . '/.maintenance');
+        $this->assertFileDoesNotExist($this->reprint_directory . '/.reprint/push/commit-state');
+    }
+
+    public function testPersonalOptInEnablesSignedEndpointsReceiveManyChangesCommitAndRemove(): void
     {
         $client = $this->newClient(self::SECRET);
         $push_session_id = str_repeat('a', 32);
@@ -919,6 +1178,7 @@ final class PushEndpointsTest extends TestCase {
 
     public function testPreflightDoesNotConstructPushEndpoints(): void
     {
+        file_put_contents($this->push_authorization_configuration_path, '');
         file_put_contents($this->reprint_configuration_path, $this->docroot . '/invalid-push-directory');
         $url = $this->base_url . '&endpoint=preflight';
         $headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_curl_headers();
@@ -1173,7 +1433,10 @@ final class PushEndpointsTest extends TestCase {
         $router = realpath(__DIR__ . '/fixtures/push-endpoint-router.php');
         $this->assertNotFalse($router);
         $environment = array_merge($_ENV, [
-            'REPRINT_PUSH_TEST_SECRET' => self::SECRET,
+            'REPRINT_PUSH_TEST_SECRET_CONFIG' => $this->secret_configuration_path,
+            'REPRINT_PUSH_TEST_AUTHORIZATION_CONFIG' => $this->push_authorization_configuration_path,
+            'REPRINT_PUSH_TEST_MANAGED_PUSH_CONFIG' => $this->managed_push_configuration_path,
+            'REPRINT_PUSH_TEST_CUSTOM_AUTH_CONFIG' => $this->custom_auth_configuration_path,
             'REPRINT_PUSH_TEST_ABSPATH' => $this->wordpress_root,
             'REPRINT_PUSH_TEST_DOCROOT_CONFIG' => $this->docroot_configuration_path,
             'REPRINT_PUSH_TEST_DIRECTORY_CONFIG' => $this->reprint_configuration_path,
@@ -1331,6 +1594,53 @@ final class PushEndpointsTest extends TestCase {
         );
         $this->assertSame(['no-cache'], $headers['pragma'] ?? []);
         $this->assertSame(['0'], $headers['expires'] ?? []);
+    }
+
+    /**
+     * @return array{http_code:int,body:string,response:array<string,mixed>}
+     */
+    private function requestPushEndpoint(
+        ?string $secret,
+        string $method,
+        string $endpoint,
+        string $push_session_id,
+        ?string $body = null,
+        ?string $content_type = null
+    ): array {
+        $url = $this->base_url
+            . '&endpoint=' . rawurlencode($endpoint)
+            . '&push_session_id=' . rawurlencode($push_session_id);
+        $curl_headers = [];
+        if ($content_type !== null) {
+            $curl_headers[] = 'Content-Type: ' . $content_type;
+        }
+        if ($secret !== null) {
+            $headers = ( new Site_Export_HMAC_Client($secret) )->get_envelope_auth_headers($method, $url);
+            foreach ($headers as $name => $value) {
+                $curl_headers[] = $name . ': ' . $value;
+            }
+        }
+
+        $handle = curl_init($url);
+        $options = [
+            CURLOPT_CUSTOMREQUEST => $method,
+            CURLOPT_HTTPHEADER => $curl_headers,
+            CURLOPT_RETURNTRANSFER => true,
+        ];
+        if ($body !== null) {
+            $options[CURLOPT_POSTFIELDS] = $body;
+        }
+        curl_setopt_array($handle, $options);
+        $response_body = curl_exec($handle);
+        $this->assertIsString($response_body);
+        $http_code = curl_getinfo($handle, CURLINFO_HTTP_CODE);
+        curl_close($handle);
+
+        return [
+            'http_code' => $http_code,
+            'body' => $response_body,
+            'response' => json_decode($response_body, true, 512, JSON_THROW_ON_ERROR),
+        ];
     }
 
     private function removeTree(string $path): void

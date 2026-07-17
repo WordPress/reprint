@@ -22,6 +22,9 @@ if (!defined('SITE_EXPORT_SECRET_FILE')) {
 if (!defined('SITE_EXPORT_SECRET_OPTION')) {
     define('SITE_EXPORT_SECRET_OPTION', 'site_export_secret');
 }
+if (!defined('SITE_EXPORT_PUSH_AUTHORIZATION_OPTION')) {
+    define('SITE_EXPORT_PUSH_AUTHORIZATION_OPTION', 'site_export_push_authorized_token_fingerprint');
+}
 
 /**
  * Maximum age of a request timestamp in seconds.
@@ -62,6 +65,17 @@ function _site_export_push_error(int $http_code, string $reason, string $detail)
         'detail' => $detail,
     ]);
     exit;
+}
+
+/**
+ * Returns whether an endpoint uses the push authentication, authorization,
+ * and error contract.
+ *
+ * @param string $endpoint Exact endpoint query value.
+ * @return bool Whether this is in the push endpoint namespace.
+ */
+function _site_export_is_push_endpoint(string $endpoint): bool {
+    return strpos($endpoint, 'push_') === 0;
 }
 
 /**
@@ -150,6 +164,79 @@ function _site_export_update_shared_secret(string $secret): bool {
     }
 
     return (bool) update_option(SITE_EXPORT_SECRET_OPTION, $secret, false);
+}
+
+/**
+ * Returns the hosting provider's push policy, or null when the site controls it.
+ *
+ * An early boolean SITE_EXPORT_PUSH_ENABLED constant takes precedence over the
+ * environment variable of the same name. Any unrecognized value fails closed.
+ */
+function _site_export_get_managed_push_enabled(): ?bool {
+    if (defined('SITE_EXPORT_PUSH_ENABLED')) {
+        return SITE_EXPORT_PUSH_ENABLED === true;
+    }
+
+    $environment_value = getenv('SITE_EXPORT_PUSH_ENABLED');
+    if ($environment_value === false) {
+        return null;
+    }
+
+    $enabled = filter_var($environment_value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+    return $enabled === true;
+}
+
+/** Returns whether the current connection token is authorized for push. */
+function _site_export_is_push_authorized(): bool {
+    return _site_export_get_push_authorization_error() === null;
+}
+
+/** Returns the exact push authorization failure, or null when push may start new work. */
+function _site_export_get_push_authorization_error(): ?string {
+    $managed_enabled = _site_export_get_managed_push_enabled();
+    if ($managed_enabled !== null) {
+        return $managed_enabled
+            ? null
+            : 'Push access is disabled by the hosting provider through SITE_EXPORT_PUSH_ENABLED.';
+    }
+
+    $secret = _site_export_get_shared_secret();
+    if ($secret === null || !function_exists('get_option')) {
+        return 'Push access is disabled for the current connection token.';
+    }
+
+    $authorized_fingerprint = get_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, '');
+    $authorized = is_string($authorized_fingerprint)
+        && $authorized_fingerprint !== ''
+        && hash_equals(hash('sha256', $secret), $authorized_fingerprint);
+    return $authorized ? null : 'Push access is disabled for the current connection token.';
+}
+
+/**
+ * Grants or revokes personal push authorization for the current token.
+ *
+ * The stored fingerprint is the only local authorization state. A different
+ * current token therefore cannot inherit the prior token's write authority.
+ */
+function _site_export_update_push_authorization(bool $enabled): bool {
+    if (!function_exists('update_option')) {
+        return false;
+    }
+
+    $secret = _site_export_get_shared_secret();
+    if ($enabled && $secret === null) {
+        return false;
+    }
+
+    $fingerprint = '';
+    if ($enabled) {
+        $fingerprint = hash('sha256', $secret);
+    }
+    if (function_exists('get_option') && get_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, '') === $fingerprint) {
+        return true;
+    }
+
+    return (bool) update_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, $fingerprint, false);
 }
 
 /**
@@ -317,7 +404,7 @@ function _site_export_handle_api_request(array $options = []): void {
     $authenticate = $options['authenticate'] ?? null;
     if ($authenticate !== null) {
         $authenticate();
-    } elseif (Site_Export_HTTP_Server::is_push_endpoint($endpoint)) {
+    } elseif (_site_export_is_push_endpoint($endpoint)) {
         if (_site_export_has_secret_file()) {
             $secret = _site_export_get_file_secret();
             if (empty($secret)) {
@@ -348,6 +435,26 @@ function _site_export_handle_api_request(array $options = []): void {
         }
     } else {
         _site_export_default_authenticate();
+    }
+
+    // Authentication completes first. Every push operation requires current
+    // authorization except resuming commit from its durable checkpoint, which
+    // must remain available so revocation cannot strand document-root changes.
+    // Push endpoint parameters travel in the query string, so the dispatcher
+    // does not need to read php://input after this gate.
+    $push_authorization_error = null;
+    if (_site_export_is_push_endpoint($endpoint)) {
+        $push_authorization_error = _site_export_get_push_authorization_error();
+    }
+    if (
+        $push_authorization_error !== null
+        && $endpoint !== 'push_commit'
+    ) {
+        _site_export_push_error(
+            403,
+            'push_disabled',
+            $push_authorization_error
+        );
     }
 
     // Ensure the Composer autoloader is loaded so Site_Export_HTTP_Server
@@ -469,11 +576,14 @@ function _site_export_handle_api_request(array $options = []): void {
             if (array_key_exists('maximum_commit_entries', $options)) {
                 $push_options['maximum_commit_entries'] = $options['maximum_commit_entries'];
             }
+            if ($push_authorization_error !== null) {
+                $push_options['commit_start_denial_detail'] = $push_authorization_error;
+            }
             $server_options['push'] = $push_options;
         }
         Site_Export_HTTP_Server::serve($server_options);
     } catch (Exception $e) {
-        if (Site_Export_HTTP_Server::is_push_endpoint($endpoint)) {
+        if (_site_export_is_push_endpoint($endpoint)) {
             if ($e instanceof Site_Export_Push_Configuration_Exception) {
                 _site_export_push_error(503, 'not_configured', $e->getMessage());
             }

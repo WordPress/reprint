@@ -72,12 +72,21 @@ final class Site_Export_HTTP_Server {
         $server = $request['server'] ?? $_SERVER;
         $get = $request['get'] ?? $_GET;
         $post = $request['post'] ?? $_POST;
-        // push_upload validates Content-Type itself and streams php://input.
-        // Reading a mislabeled JSON body here would buffer the complete upload.
-        $is_push_upload = ( $get['endpoint'] ?? null ) === 'push_upload';
-        $body = array_key_exists('body', $request)
-            ? (string) $request['body']
-            : ( !$is_push_upload && $this->is_json_content_type($server) ? call_user_func($this->body_reader) : '' );
+        // Push parameters travel in the signed query string. push_upload streams
+        // php://input itself; reading JSON for any push endpoint would either
+        // buffer an upload or let a control request buffer an unused body.
+        $endpoint = $get['endpoint'] ?? null;
+        $uses_push_request_contract = is_string($endpoint) && strpos($endpoint, 'push_') === 0;
+        $body = '';
+        if ($uses_push_request_contract) {
+            // $_POST must not override the signed query endpoint after the
+            // router has applied push authorization to that query endpoint.
+            $post = [];
+        } else {
+            $body = array_key_exists('body', $request)
+                ? (string) $request['body']
+                : ( $this->is_json_content_type($server) ? call_user_func($this->body_reader) : '' );
+        }
         $config = $request['config'] ?? $this->parse_http_config(
             $get,
             $post,
