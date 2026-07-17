@@ -16,7 +16,8 @@ use Reprint\Importer\Index\IndexFileSorter;
 use Reprint\Importer\Index\IndexLineParser;
 use Reprint\Importer\Index\IndexPathPrefixMatcher;
 use Reprint\Importer\Index\IndexStore;
-use Reprint\Importer\Tuning\AdaptiveTuner;
+use Reprint\Importer\Sql\SqlDomainAuditLogger;
+use Reprint\Importer\Sql\SqlDomainScanner;
 use Reprint\Importer\Transport\HttpErrorDiagnoser;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
@@ -53,6 +54,9 @@ if (!class_exists('MultipartStreamParser', false)) {
 
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
+
+// SQL statement inspection and domain discovery.
+require_once __DIR__ . '/lib/sql/load.php';
 
 // Load host analyzers (produce a runtime manifest from preflight data)
 require_once __DIR__ . '/lib/host/load.php';
@@ -670,7 +674,7 @@ class AdaptiveTuner
     }
 }
 
-class ImportClient
+class ImportClient implements SqlDomainAuditLogger
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
@@ -897,6 +901,9 @@ class ImportClient
     /** @var IndexPathPrefixMatcher|null Memoized remote index prefix matcher. */
     private $remote_index_prefix_matcher = null;
 
+    /** @var SqlDomainScanner|null Scans SQL statements for source domains. */
+    private $sql_domain_scanner = null;
+
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
 
@@ -1004,6 +1011,11 @@ class ImportClient
         return $this->index_store()->count();
     }
 
+    public function log_sql_domain_event(string $message): void
+    {
+        $this->audit_log($message, false);
+    }
+
     private function index_store(): IndexStore
     {
         if ($this->index_store === null) {
@@ -1032,6 +1044,15 @@ class ImportClient
             [$this, "audit_log"],
             [$this->progress, "tick_spinner"],
         );
+    }
+
+    private function sql_domain_scanner(): SqlDomainScanner
+    {
+        if ($this->sql_domain_scanner === null) {
+            $this->sql_domain_scanner = new SqlDomainScanner($this);
+        }
+
+        return $this->sql_domain_scanner;
     }
 
     /**
@@ -8045,217 +8066,11 @@ class ImportClient
         \DomainCollector $domain_collector,
         ?int &$statements_counted = null
     ) {
-        while ($query_stream->next_query()) {
-            $query = $query_stream->get_query();
-            if ($statements_counted !== null) {
-                $statements_counted++;
-            }
-            // Only scan INSERT statements (they contain data values).
-            if (!self::sql_starts_with_token($query, \WP_MySQL_Lexer::INSERT_SYMBOL)) {
-                continue;
-            }
-            // Only scan statements with base64 values
-            if (strpos($query, "FROM_BASE64(") === false) {
-                continue;
-            }
-
-            $table = self::extract_insert_table($query);
-            $is_options_table = substr($table, -8) === '_options';
-
-            $scanner = new \Base64ValueScanner($query);
-            while ($scanner->next_value()) {
-                // For _options tables, extract the option_name (second column)
-                // and skip transients — they contain ephemeral cached data
-                // that would pollute the domain list.
-                $option_name = null;
-                $match_offset = $scanner->get_match_offset();
-                if ($is_options_table) {
-                    $option_name = self::extract_option_name($query, $match_offset);
-                    if ($option_name !== null && (
-                        strpos($option_name, '_transient') === 0 ||
-                        strpos($option_name, '_site_transient') === 0
-                    )) {
-                        continue;
-                    }
-                }
-
-                $new_domains = $domain_collector->scan($scanner->get_value());
-                if (!empty($new_domains)) {
-                    $row_id = self::extract_row_identifier($query, $match_offset);
-
-                    $option_ctx = '';
-                    if ($option_name !== null) {
-                        $option_ctx = ' option=' . $option_name;
-                    }
-
-                    foreach ($new_domains as $domain) {
-                        $this->audit_log(
-                            sprintf(
-                                "NEW DOMAIN | %s | table=%s %s%s",
-                                $domain,
-                                $table,
-                                $row_id,
-                                $option_ctx,
-                            ),
-                            false,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Extract the table name from an INSERT INTO statement.
-     */
-    private static function extract_insert_table(string $query): string
-    {
-        if (preg_match('/INSERT\s+INTO\s+`([^`]+)`/i', $query, $m)) {
-            return $m[1];
-        }
-        return '?';
-    }
-
-    /**
-     * Extract a row identifier (PK value or offset) from the INSERT row
-     * containing the base64 expression at $offset.
-     *
-     * Scans backwards from $offset to find the row-opening parenthesis,
-     * then reads the first column value — typically the primary key.
-     */
-    private static function extract_row_identifier(string $query, int $offset): string
-    {
-        // Walk backwards from the match to find the row-opening '('.
-        // Track parenthesis depth so we skip inner '(' from FROM_BASE64()
-        // and CONVERT() wrappers.
-        $depth = 0;
-        $row_start = -1;
-        for ($i = $offset - 1; $i >= 0; $i--) {
-            $ch = $query[$i];
-            if ($ch === ')') {
-                $depth++;
-            } elseif ($ch === '(') {
-                if ($depth === 0) {
-                    $row_start = $i + 1;
-                    break;
-                }
-                $depth--;
-            }
-        }
-
-        if ($row_start < 0) {
-            return 'offset=?';
-        }
-
-        // Read the first value after the row-opening '('.
-        // Numeric PKs: (123, ...  or (-5, ...
-        $after = substr($query, $row_start, 40);
-        if (preg_match('/^(-?\d+)/', $after, $m)) {
-            return 'pk=' . $m[1];
-        }
-        // String PKs: ('some-uuid', ...
-        if (preg_match("/^'([^']{0,30})'/", $after, $m)) {
-            return "pk=" . $m[1];
-        }
-        if (preg_match('/^NULL/i', $after)) {
-            return 'pk=NULL';
-        }
-
-        return 'offset=?';
-    }
-
-    /**
-     * Extract the option_name (second column) from a wp_options INSERT row.
-     *
-     * WordPress options tables have columns: option_id, option_name, option_value, autoload.
-     * Given an offset inside the row, this finds the row-opening '(' and reads
-     * past the first column (option_id) to extract the second column (option_name).
-     */
-    private static function extract_option_name(string $query, int $offset): ?string
-    {
-        // Find the row-opening '(' by walking backwards, same as extract_row_identifier.
-        $depth = 0;
-        $row_start = -1;
-        for ($i = $offset - 1; $i >= 0; $i--) {
-            $ch = $query[$i];
-            if ($ch === ')') {
-                $depth++;
-            } elseif ($ch === '(') {
-                if ($depth === 0) {
-                    $row_start = $i + 1;
-                    break;
-                }
-                $depth--;
-            }
-        }
-
-        if ($row_start < 0) {
-            return null;
-        }
-
-        // Skip the first column value (option_id) and the comma separator,
-        // then read the second column value (option_name) which is a quoted string.
-        $after = substr($query, $row_start, 200);
-        // First column is typically a number: "123," or could be FROM_BASE64(...)
-        // Skip to the first comma that's outside parentheses.
-        $len = strlen($after);
-        $d = 0;
-        $comma_pos = -1;
-        for ($j = 0; $j < $len; $j++) {
-            $c = $after[$j];
-            if ($c === '(') { $d++; }
-            elseif ($c === ')') { $d--; }
-            elseif ($c === ',' && $d === 0) {
-                $comma_pos = $j;
-                break;
-            }
-        }
-
-        if ($comma_pos < 0) {
-            return null;
-        }
-
-        // After the comma, skip whitespace and read a quoted string or FROM_BASE64(...)
-        $rest = ltrim(substr($after, $comma_pos + 1));
-        // Simple quoted string: 'option_name'
-        if (isset($rest[0]) && $rest[0] === "'") {
-            if (preg_match("/^'([^']{0,80})'/", $rest, $m)) {
-                return $m[1];
-            }
-        }
-        // FROM_BASE64('...') wrapped value — decode it
-        if (strpos($rest, 'FROM_BASE64(') === 0) {
-            if (preg_match("/^FROM_BASE64\\('([A-Za-z0-9+\\/=]+)'\\)/", $rest, $m)) {
-                $decoded = base64_decode($m[1], true);
-                if ($decoded !== false) {
-                    return substr($decoded, 0, 80);
-                }
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Check whether a SQL statement's first keyword token matches a given token ID.
-     * Skips leading whitespace and comments, so "/* ... *​/ INSERT INTO ..." is handled.
-     */
-    private static function sql_starts_with_token(string $sql, int $expected_token_id): bool
-    {
-        $lexer = new \WP_MySQL_Lexer($sql);
-        while ($lexer->next_token()) {
-            $token = $lexer->get_token();
-            if (
-                $token->id === \WP_MySQL_Lexer::WHITESPACE
-                || $token->id === \WP_MySQL_Lexer::COMMENT
-                || $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_START
-                || $token->id === \WP_MySQL_Lexer::MYSQL_COMMENT_END
-            ) {
-                continue;
-            }
-            return $token->id === $expected_token_id;
-        }
-        return false;
+        $this->sql_domain_scanner()->drainQueryStream(
+            $query_stream,
+            $domain_collector,
+            $statements_counted,
+        );
     }
 
     /**
