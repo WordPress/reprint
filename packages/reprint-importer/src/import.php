@@ -14,6 +14,8 @@ use function WordPress\Filesystem\wp_join_unix_paths;
 use Reprint\Importer\FileSync\DirectoryChunkApplier;
 use Reprint\Importer\FileSync\DownloadList;
 use Reprint\Importer\FileSync\FileChunkApplier;
+use Reprint\Importer\FileSync\FileFetchResponseHandler;
+use Reprint\Importer\FileSync\FileFetchResponseObserver;
 use Reprint\Importer\FileSync\FilePlacementRules;
 use Reprint\Importer\FileSync\LocalFileApplyContext;
 use Reprint\Importer\FileSync\LocalFilesystemAuditLogger;
@@ -62,12 +64,14 @@ if (!class_exists('MultipartStreamParser', false)) {
 // File placement, remap, --only, and symlink bundle rules.
 require_once __DIR__ . '/lib/file-sync/interface-local-file-apply-context.php';
 require_once __DIR__ . '/lib/file-sync/interface-local-filesystem-audit-logger.php';
+require_once __DIR__ . '/lib/file-sync/interface-file-fetch-response-observer.php';
 require_once __DIR__ . '/lib/file-sync/class-download-list.php';
 require_once __DIR__ . '/lib/file-sync/class-file-placement-rules.php';
 require_once __DIR__ . '/lib/file-sync/class-local-filesystem-operator.php';
 require_once __DIR__ . '/lib/file-sync/class-file-chunk-applier.php';
 require_once __DIR__ . '/lib/file-sync/class-directory-chunk-applier.php';
 require_once __DIR__ . '/lib/file-sync/class-symlink-chunk-applier.php';
+require_once __DIR__ . '/lib/file-sync/class-file-fetch-response-handler.php';
 
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
@@ -691,7 +695,7 @@ class AdaptiveTuner
     }
 }
 
-class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, LocalFilesystemAuditLogger
+class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, LocalFilesystemAuditLogger, FileFetchResponseObserver
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
@@ -1172,6 +1176,68 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
     public function outputFileSyncProgress(array $progress, bool $force = false): void
     {
         $this->output_progress($progress, $force);
+    }
+
+    public function shouldStopFileFetch(): bool
+    {
+        return $this->shutdown_requested;
+    }
+
+    public function saveFileFetchCheckpoint(
+        string $stateKey,
+        ?string $cursor,
+        StreamingContext $context
+    ): void {
+        $this->get_download_list_fetch_state($stateKey)->cursor = $cursor;
+        if ($context->file_handle && $context->file_path) {
+            fflush($context->file_handle);
+            $this->import_state()->current_file = $context->file_path;
+            $this->import_state()->current_file_bytes = $context->file_bytes_written;
+        } else {
+            $this->import_state()->current_file = null;
+            $this->import_state()->current_file_bytes = null;
+        }
+        $this->save_state($this->state);
+    }
+
+    public function handleFileFetchMetadata(array $chunk, StreamingContext $context): void
+    {
+        $this->handle_metadata_chunk($chunk, $context);
+    }
+
+    public function handleFileFetchFile(array $chunk, StreamingContext $context): void
+    {
+        $this->handle_file_chunk($chunk, $context);
+    }
+
+    public function handleFileFetchDirectory(array $chunk): void
+    {
+        $this->handle_directory_chunk($chunk);
+    }
+
+    public function handleFileFetchSymlink(array $chunk): void
+    {
+        $this->handle_symlink_chunk($chunk);
+    }
+
+    public function handleFileFetchMissingPath(string $path): void
+    {
+        $this->audit_log("Missing on server: {$path}", true);
+    }
+
+    public function handleFileFetchError(array $chunk, string $phase, StreamingContext $context): void
+    {
+        $this->handle_error_chunk($chunk, $phase, $context);
+    }
+
+    public function handleFileFetchProgress(array $chunk, string $phase): void
+    {
+        $this->handle_progress($chunk, $phase);
+    }
+
+    public function handleFileFetchCompletionProgress(array $progress): void
+    {
+        $this->output_progress($progress, true);
     }
 
     /**
@@ -6523,8 +6589,6 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
     ): bool {
         $fetch_state = $this->get_download_list_fetch_state($state_key);
         $cursor = $cursor ?? $fetch_state->cursor;
-        $complete = false;
-        $chunks_since_save = 0;
 
         // Crash recovery: if we have a tracked file that's larger than expected,
         // truncate it. This happens if we crashed after writing but before saving
@@ -6586,108 +6650,14 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
             }
         }
 
-        $context->on_chunk = function ($chunk) use (
-            &$cursor,
-            &$complete,
-            &$chunks_since_save,
+        $response_handler = new FileFetchResponseHandler(
+            $cursor,
+            $state_key,
             $context,
-            $state_key
-        ) {
-            if ($this->shutdown_requested) {
-                throw new RuntimeException("Shutdown requested");
-            }
-
-            if (function_exists("pcntl_signal_dispatch")) {
-                pcntl_signal_dispatch();
-            }
-
-            // Streamed file bodies can arrive in multiple parser callbacks
-            // for one exporter file part. Save only at the part boundary:
-            // mid-body, the cursor already points to the end of the part
-            // while file_bytes_written may still lag; at is_streaming_close
-            // the bytes are on disk and we force a per-part checkpoint.
-            $is_streaming_body = !empty($chunk["is_streaming_body"]);
-            $is_streaming_close = !empty($chunk["is_streaming_close"]);
-            if (!$is_streaming_body) {
-                $chunks_since_save++;
-                $force_save = $is_streaming_close;
-                if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                    $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-                    // Track current file for crash recovery
-                    if ($context->file_handle && $context->file_path) {
-                        // Flush to ensure bytes are on disk before saving state
-                        fflush($context->file_handle);
-                        $this->import_state()->current_file = $context->file_path;
-                        $this->import_state()->current_file_bytes = $context->file_bytes_written;
-                    } else {
-                        $this->import_state()->current_file = null;
-                        $this->import_state()->current_file_bytes = null;
-                    }
-                    $this->save_state($this->state);
-                    $chunks_since_save = 0;
-                }
-            }
-
-            if (isset($chunk["headers"]["x-cursor"])) {
-                $cursor = $chunk["headers"]["x-cursor"];
-            }
-
-            $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-
-            if ($chunk_type === "metadata") {
-                $this->handle_metadata_chunk($chunk, $context);
-            } elseif ($chunk_type === "file") {
-                $this->handle_file_chunk($chunk, $context);
-            } elseif ($chunk_type === "directory") {
-                $this->handle_directory_chunk($chunk);
-            } elseif ($chunk_type === "symlink") {
-                $this->handle_symlink_chunk($chunk);
-            } elseif ($chunk_type === "missing") {
-                $path = base64_decode($chunk["headers"]["x-file-path"] ?? "");
-                if ($path) {
-                    $this->audit_log("Missing on server: {$path}", true);
-                }
-                // @TODO: Cleanup the local file that we may have started downloading.
-            } elseif ($chunk_type === "error") {
-                $this->handle_error_chunk($chunk, "files", $context);
-            } elseif ($chunk_type === "progress") {
-                $this->handle_progress($chunk, "files");
-            } elseif ($chunk_type === "completion") {
-                $complete =
-                    ($chunk["headers"]["x-status"] ?? "") === "complete";
-                $context->saw_completion = true;
-                $context->response_stats = [
-                    "status" => $chunk["headers"]["x-status"] ?? null,
-                    "bytes_processed" =>
-                        isset($chunk["headers"]["x-bytes-processed"])
-                            ? (int) $chunk["headers"]["x-bytes-processed"]
-                            : null,
-                    "server_time" =>
-                        isset($chunk["headers"]["x-time-elapsed"])
-                            ? (float) $chunk["headers"]["x-time-elapsed"]
-                            : null,
-                    "memory_used" =>
-                        isset($chunk["headers"]["x-memory-used"])
-                            ? (int) $chunk["headers"]["x-memory-used"]
-                            : null,
-                    "memory_limit" =>
-                        isset($chunk["headers"]["x-memory-limit"])
-                            ? (int) $chunk["headers"]["x-memory-limit"]
-                            : null,
-                ];
-                $this->output_progress(
-                    [
-                        "phase" => "files",
-                        "status" => $chunk["headers"]["x-status"] ?? "unknown",
-                        "files_completed" =>
-                            (int) ($chunk["headers"]["x-files-completed"] ?? 0),
-                        "bytes_processed" =>
-                            (int) ($chunk["headers"]["x-bytes-processed"] ?? 0),
-                    ],
-                    true,
-                );
-            }
-        };
+            self::SAVE_STATE_EVERY_N_CHUNKS,
+            $this,
+        );
+        $context->on_chunk = $response_handler;
 
         $cursor_before = $cursor;
         $request_start = microtime(true);
@@ -6700,6 +6670,7 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
                 "file_fetch",
             );
         } catch (CurlTimeoutException $e) {
+            $cursor = $response_handler->cursor();
             // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
             // with no progress, so we don't retry forever.
             $this->assert_can_retry_consecutive_timeout("file_fetch", $cursor_before, $cursor);
@@ -6716,6 +6687,7 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
             $this->save_state($this->state);
             return false;
         }
+        $cursor = $response_handler->cursor();
         $this->import_state()->consecutive_timeouts = 0;
         $wall_time = microtime(true) - $request_start;
 
@@ -6737,7 +6709,7 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
         }
         $this->save_state($this->state);
 
-        return $complete;
+        return $response_handler->complete();
     }
 
     /**
