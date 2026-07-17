@@ -11,6 +11,11 @@
  */
 
 use function WordPress\Filesystem\wp_join_unix_paths;
+use Reprint\Importer\FileSync\FilePlacementRules;
+use Reprint\Importer\Index\IndexFileSorter;
+use Reprint\Importer\Index\IndexLineParser;
+use Reprint\Importer\Index\IndexPathPrefixMatcher;
+use Reprint\Importer\Index\IndexStore;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
@@ -55,6 +60,9 @@ require_once __DIR__ . '/lib/target-runtime/load.php';
 
 // External merge sort for large index files when exec() is unavailable
 require_once __DIR__ . '/lib/external-merge-sort.php';
+
+// Sorted JSONL file indexes for local and remote file manifests.
+require_once __DIR__ . '/lib/index/load.php';
 
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
@@ -706,31 +714,8 @@ class ImportClient
      */
     private $index_updates_file;
 
-    /** @var resource|null Open file handle for $index_updates_file while writing. */
-    private $index_updates_handle;
-
-    /** @var int Number of entries written to $index_updates_file this run. */
-    private $index_updates_count = 0;
-
-    /**
-     * Deduplication state for index updates. Consecutive upsert_index_entry() or
-     * delete_index_entry() calls for the same path are collapsed into one write.
-     *
-     * @var string|null Last path written to the index updates file.
-     */
-    private $last_update_path = null;
-
-    /** @var bool|null Whether the last index update was a deletion (true) or upsert (false). */
-    private $last_update_delete = null;
-
-    /** @var int|null ctime of the last upserted index entry. */
-    private $last_update_ctime = null;
-
-    /** @var int|null Size in bytes of the last upserted index entry. */
-    private $last_update_size = null;
-
-    /** @var string|null Type ("file", "link", "dir") of the last upserted index entry. */
-    private $last_update_type = null;
+    /** @var IndexStore|null Buffered, sorted local file index store. */
+    private $index_store = null;
 
     /**
      * @var string Path to .import-remote-index.jsonl — latest file index received
@@ -897,12 +882,15 @@ class ImportClient
     private $index_entries_counted = 0;
 
     /**
-     * Memoized lookups for "does remote index contain this path or any descendant path?"
-     * keyed by normalized absolute path.
+     * Compatibility cache for tests and internal setup that seed prefix checks
+     * directly; cache misses delegate to IndexPathPrefixMatcher.
      *
      * @var array<string,bool>
      */
     private $remote_index_prefix_cache = [];
+
+    /** @var IndexPathPrefixMatcher|null Memoized remote index prefix matcher. */
+    private $remote_index_prefix_matcher = null;
 
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
@@ -1008,19 +996,37 @@ class ImportClient
      */
     public function index_count(): int
     {
-        if (!is_file($this->index_file)) {
-            return 0;
+        return $this->index_store()->count();
+    }
+
+    private function index_store(): IndexStore
+    {
+        if ($this->index_store === null) {
+            $this->index_store = new IndexStore(
+                $this->index_file,
+                $this->index_updates_file,
+                [$this, "audit_log"],
+            );
         }
-        $handle = fopen($this->index_file, "r");
-        if (!$handle) {
-            return 0;
+
+        return $this->index_store;
+    }
+
+    private function remote_index_prefix_matcher(): IndexPathPrefixMatcher
+    {
+        if ($this->remote_index_prefix_matcher === null) {
+            $this->remote_index_prefix_matcher = new IndexPathPrefixMatcher($this->remote_index_file);
         }
-        $count = 0;
-        while (fgets($handle) !== false) {
-            $count++;
-        }
-        fclose($handle);
-        return $count;
+
+        return $this->remote_index_prefix_matcher;
+    }
+
+    private function index_file_sorter(): IndexFileSorter
+    {
+        return new IndexFileSorter(
+            [$this, "audit_log"],
+            [$this->progress, "tick_spinner"],
+        );
     }
 
     /**
@@ -1032,7 +1038,7 @@ class ImportClient
         int $size,
         string $type
     ): void {
-        $this->record_index_update_file($path, $ctime, $size, $type);
+        $this->index_store()->upsert($path, $ctime, $size, $type);
     }
 
     /**
@@ -1040,7 +1046,7 @@ class ImportClient
      */
     private function delete_index_entry(string $path): void
     {
-        $this->record_index_update_deletion($path);
+        $this->index_store()->delete($path);
     }
 
     /**
@@ -1048,12 +1054,7 @@ class ImportClient
      */
     private function recover_index_updates(): void
     {
-        if (
-            $this->index_updates_file &&
-            file_exists($this->index_updates_file)
-        ) {
-            $this->finalize_index_updates();
-        }
+        $this->index_store()->recover();
     }
 
     /**
@@ -2403,16 +2404,9 @@ class ImportClient
                 // Merge any pending index updates into the main index before
                 // clearing transient state so we don't lose work.
                 $this->recover_index_updates();
-                if (
-                    $this->index_updates_file &&
-                    file_exists($this->index_updates_file)
-                ) {
-                    @unlink($this->index_updates_file);
-                    $this->audit_log("FILE DELETE | {$this->index_updates_file}");
-                }
-                $this->index_updates_file = null;
-                $this->index_updates_handle = null;
-                $this->index_updates_count = 0;
+                $this->index_store()->deleteUpdatesFile();
+                $this->index_store()->clearUpdatesState();
+                $this->index_updates_file = $this->index_store()->updatesFile();
 
                 if (file_exists($this->remote_index_file)) {
                     @unlink($this->remote_index_file);
@@ -7458,29 +7452,7 @@ class ImportClient
      */
     private function parse_index_line(string $line): ?array
     {
-        $line = trim($line);
-        if ($line === "") {
-            return null;
-        }
-        $data = json_decode($line, true);
-        if (!is_array($data)) {
-            throw new RuntimeException("Invalid index line format");
-        }
-        $path_encoded = $data["path"] ?? "";
-        if (!is_string($path_encoded) || $path_encoded === "") {
-            throw new RuntimeException("Invalid index path");
-        }
-        $path = base64_decode($path_encoded, true);
-        if ($path === "" || $path === false) {
-            throw new RuntimeException("Invalid index path (base64 decode failed)");
-        }
-        assert_valid_path($path, "index path");
-        return [
-            "path" => $path,
-            "ctime" => (int) ($data["ctime"] ?? 0),
-            "size" => (int) ($data["size"] ?? 0),
-            "type" => (string) ($data["type"] ?? "file"),
-        ];
+        return IndexLineParser::parse($line);
     }
 
     /**
@@ -7488,123 +7460,8 @@ class ImportClient
      */
     private function begin_index_updates(): void
     {
-        if ($this->index_updates_handle) {
-            return;
-        }
-        $is_new = false;
-        if ($this->index_updates_file === null) {
-            $tmp = tempnam(sys_get_temp_dir(), "index-updates-");
-            if ($tmp === false) {
-                throw new RuntimeException(
-                    "Failed to create temp index updates file",
-                );
-            }
-            $this->index_updates_file = $tmp;
-            $is_new = true;
-        } elseif (!file_exists($this->index_updates_file)) {
-            $dir = dirname($this->index_updates_file);
-            if (!is_dir($dir)) {
-                mkdir($dir, 0755, true);
-            }
-            $is_new = true;
-        }
-        $this->index_updates_handle = fopen($this->index_updates_file, "a");
-        if (!$this->index_updates_handle) {
-            throw new RuntimeException(
-                "Failed to open temp index updates file",
-            );
-        }
-        if ($is_new) {
-            $this->audit_log(
-                "FILE CREATE | {$this->index_updates_file} | index updates buffer",
-            );
-        }
-        $this->index_updates_count = 0;
-        $this->last_update_path = null;
-        $this->last_update_delete = null;
-        $this->last_update_ctime = null;
-        $this->last_update_size = null;
-        $this->last_update_type = null;
-    }
-
-    /**
-     * Record a file upsert into the index updates stream.
-     */
-    private function record_index_update_file(
-        string $path,
-        int $ctime,
-        int $size,
-        string $type
-    ): void {
-        if (!$this->index_updates_handle) {
-            $this->begin_index_updates();
-        }
-        if (
-            $this->last_update_path === $path &&
-            $this->last_update_delete === false &&
-            $this->last_update_ctime === $ctime &&
-            $this->last_update_size === $size &&
-            $this->last_update_type === $type
-        ) {
-            return;
-        }
-        $line = json_encode(
-            [
-                "op" => "F",
-                "path" => base64_encode($path),
-                "ctime" => $ctime,
-                "size" => $size,
-                "type" => $type,
-            ],
-            JSON_UNESCAPED_SLASHES,
-        );
-        if ($line !== false) {
-            $bytes = fwrite($this->index_updates_handle, $line . "\n");
-            if ($bytes === false) {
-                throw new RuntimeException("Failed to write to index updates file (disk full?)");
-            }
-        }
-        $this->index_updates_count++;
-        $this->last_update_path = $path;
-        $this->last_update_delete = false;
-        $this->last_update_ctime = $ctime;
-        $this->last_update_size = $size;
-        $this->last_update_type = $type;
-    }
-
-    /**
-     * Record a deletion into the index updates stream.
-     */
-    private function record_index_update_deletion(string $path): void
-    {
-        if (!$this->index_updates_handle) {
-            $this->begin_index_updates();
-        }
-        if (
-            $this->last_update_path === $path &&
-            $this->last_update_delete === true
-        ) {
-            return;
-        }
-        $line = json_encode(
-            [
-                "op" => "D",
-                "path" => base64_encode($path),
-            ],
-            JSON_UNESCAPED_SLASHES,
-        );
-        if ($line !== false) {
-            $bytes = fwrite($this->index_updates_handle, $line . "\n");
-            if ($bytes === false) {
-                throw new RuntimeException("Failed to write to index updates file (disk full?)");
-            }
-        }
-        $this->index_updates_count++;
-        $this->last_update_path = $path;
-        $this->last_update_delete = true;
-        $this->last_update_ctime = null;
-        $this->last_update_size = null;
-        $this->last_update_type = null;
+        $this->index_store()->beginUpdates();
+        $this->index_updates_file = $this->index_store()->updatesFile();
     }
 
     /**
@@ -7612,129 +7469,8 @@ class ImportClient
      */
     private function finalize_index_updates(): void
     {
-        if ($this->index_updates_handle) {
-            fclose($this->index_updates_handle);
-            $this->index_updates_handle = null;
-        }
-        $this->last_update_path = null;
-        $this->last_update_delete = null;
-        $this->last_update_ctime = null;
-        $this->last_update_size = null;
-        $this->last_update_type = null;
-
-        $has_updates =
-            $this->index_updates_count > 0 ||
-            ($this->index_updates_file &&
-                file_exists($this->index_updates_file) &&
-                filesize($this->index_updates_file) > 0);
-
-        if (!$has_updates) {
-            if (
-                $this->index_updates_file &&
-                file_exists($this->index_updates_file)
-            ) {
-                @unlink($this->index_updates_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->index_updates_file} | no updates to merge",
-                );
-            }
-            $this->index_updates_count = 0;
-            return;
-        }
-
-        $updates_path = $this->index_updates_file;
-        $new_index = $this->index_file . ".new";
-
-        $this->audit_log(
-            "INDEX MERGE START | merging updates into {$this->index_file}",
-        );
-
-        $old_handle = file_exists($this->index_file)
-            ? fopen($this->index_file, "r")
-            : null;
-        $upd_handle = fopen($updates_path, "r");
-        $new_handle = fopen($new_index, "w");
-
-        if (!$upd_handle || !$new_handle) {
-            throw new RuntimeException("Failed to merge index updates");
-        }
-
-        $write_line = function ($handle, array $entry): void {
-            $line = json_encode(
-                [
-                    "path" => base64_encode($entry["path"]),
-                    "ctime" => (int) $entry["ctime"],
-                    "size" => (int) $entry["size"],
-                    "type" => (string) $entry["type"],
-                ],
-                JSON_UNESCAPED_SLASHES,
-            );
-            if ($line !== false) {
-                fwrite($handle, $line . "\n");
-            }
-        };
-
-        $old = $this->read_index_line($old_handle);
-        $carry = null;
-        $upd = $this->read_update_line($upd_handle, $carry);
-        $last_written_path = null;
-
-        while ($old !== null || $upd !== null) {
-            if ($upd === null) {
-                if ($last_written_path !== $old["path"]) {
-                    $write_line($new_handle, $old);
-                    $last_written_path = $old["path"];
-                }
-                $old = $this->read_index_line($old_handle);
-                continue;
-            }
-
-            if ($old === null) {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
-                }
-                $upd = $this->read_update_line($upd_handle, $carry);
-                continue;
-            }
-
-            $cmp = strcmp($old["path"], $upd["path"]);
-            if ($cmp === 0) {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
-                }
-                $old = $this->read_index_line($old_handle);
-                $upd = $this->read_update_line($upd_handle, $carry);
-            } elseif ($cmp < 0) {
-                if ($last_written_path !== $old["path"]) {
-                    $write_line($new_handle, $old);
-                    $last_written_path = $old["path"];
-                }
-                $old = $this->read_index_line($old_handle);
-            } else {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
-                }
-                $upd = $this->read_update_line($upd_handle, $carry);
-            }
-        }
-
-        if ($old_handle) {
-            fclose($old_handle);
-        }
-        fclose($upd_handle);
-        fclose($new_handle);
-
-        if (!rename($new_index, $this->index_file)) {
-            throw new RuntimeException("Failed to replace index file");
-        }
-        $this->audit_log("INDEX MERGE COMPLETE | {$this->index_file} updated");
-
-        @unlink($updates_path);
-        $this->audit_log("FILE DELETE | {$updates_path} | updates merged");
-        $this->index_updates_count = 0;
+        $this->index_store()->finalizeUpdates();
+        $this->index_updates_file = $this->index_store()->updatesFile();
     }
 
     /**
@@ -7742,96 +7478,9 @@ class ImportClient
      */
     private function read_index_line($handle): ?array
     {
-        if (!$handle) {
-            return null;
-        }
-        while (($line = fgets($handle)) !== false) {
-            $parsed = $this->parse_index_line($line);
-            if ($parsed !== null) {
-                return $parsed;
-            }
-        }
-        return null;
+        return $this->index_store()->readIndexLine($handle);
     }
 
-    /**
-     * Read one raw update record (F/D) from the updates file.
-     */
-    private function read_update_line_raw($handle): ?array
-    {
-        if (!$handle) {
-            return null;
-        }
-        while (($line = fgets($handle)) !== false) {
-            $line = trim($line);
-            if ($line === "") {
-                continue;
-            }
-            $data = json_decode($line, true);
-            if (!is_array($data)) {
-                throw new RuntimeException("Invalid index update line format");
-            }
-            $op = $data["op"] ?? null;
-            $path_encoded = $data["path"] ?? null;
-            if (!is_string($path_encoded) || $path_encoded === "") {
-                throw new RuntimeException("Invalid index update path");
-            }
-            $path = base64_decode($path_encoded);
-            if ($path === false || $path === "") {
-                throw new RuntimeException("Invalid index update path (base64 decode failed)");
-            }
-            if ($op === "D") {
-                return [
-                    "path" => $path,
-                    "delete" => true,
-                    "ctime" => 0,
-                    "size" => 0,
-                    "type" => null,
-                ];
-            }
-            if ($op === "F") {
-                return [
-                    "path" => $path,
-                    "delete" => false,
-                    "ctime" => (int) ($data["ctime"] ?? 0),
-                    "size" => (int) ($data["size"] ?? 0),
-                    "type" => (string) ($data["type"] ?? "file"),
-                ];
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Read one update record, coalescing consecutive updates to the same path.
-     *
-     * @param mixed $handle Update file handle
-     * @param array|null $carry Read-ahead buffer for the next record
-     */
-    private function read_update_line($handle, ?array &$carry = null): ?array
-    {
-        if (!$handle) {
-            return null;
-        }
-        $current = $carry ?? $this->read_update_line_raw($handle);
-        $carry = null;
-        if ($current === null) {
-            return null;
-        }
-
-        while (true) {
-            $next = $this->read_update_line_raw($handle);
-            if ($next === null) {
-                return $current;
-            }
-            if ($next["path"] !== $current["path"]) {
-                $carry = $next;
-                return $current;
-            }
-            // Same path: keep the latest update.
-            $current = $next;
-        }
-    }
     /**
      * Download SQL from remote.
      */
@@ -8893,46 +8542,18 @@ class ImportClient
      */
     private function remote_index_contains_path_prefix(string $path): bool
     {
-        $path = rtrim(normalize_path($path), "/");
-        if ($path === "") {
+        $normalized = rtrim(normalize_path($path), "/");
+        if ($normalized === "") {
             return false;
         }
 
-        if (isset($this->remote_index_prefix_cache[$path])) {
-            return $this->remote_index_prefix_cache[$path];
+        if (isset($this->remote_index_prefix_cache[$normalized])) {
+            return $this->remote_index_prefix_cache[$normalized];
         }
 
-        if (!file_exists($this->remote_index_file)) {
-            $this->remote_index_prefix_cache[$path] = false;
-            return false;
-        }
+        $found = $this->remote_index_prefix_matcher()->contains($normalized);
+        $this->remote_index_prefix_cache[$normalized] = $found;
 
-        $h = fopen($this->remote_index_file, "r");
-        if (!$h) {
-            $this->remote_index_prefix_cache[$path] = false;
-            return false;
-        }
-
-        $prefix = $path . "/";
-        $found = false;
-        while (($line = fgets($h)) !== false) {
-            try {
-                $entry = $this->parse_index_line($line);
-            } catch (RuntimeException $e) {
-                continue;
-            }
-            if ($entry === null) {
-                continue;
-            }
-            $entry_path = $entry["path"];
-            if ($entry_path === $path || str_starts_with($entry_path, $prefix)) {
-                $found = true;
-                break;
-            }
-        }
-        fclose($h);
-
-        $this->remote_index_prefix_cache[$path] = $found;
         return $found;
     }
 
@@ -10342,136 +9963,6 @@ class ImportClient
     }
 
     /**
-     * Check if a function is available (not disabled).
-     */
-    private function function_available(string $name): bool
-    {
-        if (!function_exists($name)) {
-            return false;
-        }
-        $disabled = ini_get("disable_functions");
-        if ($disabled === false || trim($disabled) === "") {
-            return true;
-        }
-        $list = array_map("trim", explode(",", $disabled));
-        return !in_array($name, $list, true);
-    }
-
-
-    /**
-     * Fast-path index sort via shell exec.
-     *
-     * Prepends a hex-encoded sort key to each line, shells out to `sort(1)`,
-     * strips the keys, and deduplicates.  This handles arbitrarily large
-     * files with no PHP memory pressure.
-     *
-     * @param string $path         The JSONL index file to sort.
-     * @param string $tmp          Temporary output path for the sorted result.
-     * @return bool True if the exec-based sort succeeded (and $path was replaced).
-     */
-    private function try_exec_sort(string $path, string $tmp): bool
-    {
-        if (!$this->function_available("exec")) {
-            return false;
-        }
-
-        $keyed = $path . ".keyed";
-        $sorted_keyed = $path . ".keyed.sorted";
-        $in = fopen($path, "r");
-        $out = fopen($keyed, "w");
-        if (!$in || !$out) {
-            if ($in) {
-                fclose($in);
-            }
-            if ($out) {
-                fclose($out);
-            }
-            $this->audit_log("Failed to prepare keyed index file, falling back to PHP sort");
-            return false;
-        }
-        $lines_read = 0;
-        while (($line = fgets($in)) !== false) {
-            $line = rtrim($line, "\r\n");
-            if ($line === "") {
-                continue;
-            }
-            $entry = $this->parse_index_line($line);
-            if ($entry === null) {
-                continue;
-            }
-            $key = bin2hex($entry["path"]);
-            fwrite($out, $key . "\t" . $line . "\n");
-            if (++$lines_read % 500 === 0) {
-                $this->progress->tick_spinner();
-            }
-        }
-        fclose($in);
-        fclose($out);
-
-        $cmd =
-            "LC_ALL=C sort -t '\t' -k1,1 " .
-            escapeshellarg($keyed) .
-            " > " .
-            escapeshellarg($sorted_keyed);
-        $output = [];
-        $code = 0;
-        exec($cmd, $output, $code);
-        if ($code !== 0) {
-            @unlink($keyed);
-            @unlink($sorted_keyed);
-            $this->audit_log("exec() sort failed (exit code {$code}), falling back to PHP sort");
-            return false;
-        }
-
-        $sorted_in = fopen($sorted_keyed, "r");
-        $sorted_out = fopen($tmp, "w");
-        if (!$sorted_in || !$sorted_out) {
-            if ($sorted_in) {
-                fclose($sorted_in);
-            }
-            if ($sorted_out) {
-                fclose($sorted_out);
-            }
-            @unlink($keyed);
-            @unlink($sorted_keyed);
-            $this->audit_log("Failed to open sorted index files, falling back to PHP sort");
-            return false;
-        }
-
-        $prev_key = null;
-        $lines_stripped = 0;
-        while (($line = fgets($sorted_in)) !== false) {
-            $pos = strpos($line, "\t");
-            if ($pos === false) {
-                continue;
-            }
-            $key = substr($line, 0, $pos);
-            $data = substr($line, $pos + 1);
-            if ($data === "") {
-                continue;
-            }
-            // Deduplicate: skip entries with the same path as the previous one.
-            // This handles overlapping symlink targets that index the same files.
-            if ($key === $prev_key) {
-                continue;
-            }
-            $prev_key = $key;
-            fwrite($sorted_out, $data);
-            if (++$lines_stripped % 500 === 0) {
-                $this->progress->tick_spinner();
-            }
-        }
-        fclose($sorted_in);
-        fclose($sorted_out);
-        @unlink($keyed);
-        @unlink($sorted_keyed);
-        if (!rename($tmp, $path)) {
-            throw new RuntimeException("Failed to replace sorted index file");
-        }
-        return true;
-    }
-
-    /**
      * Sorts an index file by path and removes duplicate entries.
      *
      * Tries the fast path first: prepends a hex-encoded sort key to each line,
@@ -10487,45 +9978,7 @@ class ImportClient
      */
     private function sort_index_file(string $path): void
     {
-        if (!file_exists($path)) {
-            return;
-        }
-        if (filesize($path) === 0) {
-            return;
-        }
-
-        $tmp = $path . ".sorted";
-
-        // Fast path: shell out to `sort` for O(n log n) with no memory
-        // pressure.  If anything goes wrong, fall through to the pure-PHP
-        // external merge sort below.
-        if ($this->try_exec_sort($path, $tmp)) {
-            return;
-        }
-
-        // Pure-PHP fallback: external merge sort.  Splits the file into
-        // memory-sized chunks, sorts each in memory, then streams a k-way
-        // merge.  Handles files of any size without exec().
-        $mem_limit_raw = ini_get("memory_limit");
-        $mem_limit = ($mem_limit_raw === "-1" || $mem_limit_raw === "" || $mem_limit_raw === "0")
-            ? 0
-            : parse_size($mem_limit_raw);
-        $mem_used = memory_get_usage(true);
-        $available = $mem_limit > 0
-            ? (int) (($mem_limit - $mem_used) * 0.6)
-            : 256 * 1024 * 1024;
-
-        $key_extractor = function (string $line): ?string {
-            $entry = $this->parse_index_line($line);
-            return $entry !== null ? $entry['path'] : null;
-        };
-        $sorter = new ExternalMergeSort(
-            $key_extractor,
-            max(1024, (int) ($available * 0.8)),
-            true,
-            dirname($path),
-        );
-        $sorter->sort($path);
+        $this->index_file_sorter()->sort($path);
     }
 
     /**
