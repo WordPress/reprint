@@ -9,9 +9,8 @@ use PHPUnit\Framework\TestCase;
  * PHP 7.4 — the push client's PHP 8.1 requirement is enforced at runtime in
  * its constructor, not at parse time. This scan fails when 8.x-only syntax
  * sneaks into the upload or push lib and would fatal 7.4 pull users at require time.
- * The repo-wide lint:php:compat covers the same files but currently fails on
- * unrelated pre-existing findings, so this narrow scan is the enforced
- * regression check.
+ * The repo-wide lint:php:compat covers the same files; this narrow scan keeps
+ * PHP 7.4 parseability tied directly to the push regression suite.
  */
 class PushClientPhpCompatibilityTest extends TestCase
 {

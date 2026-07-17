@@ -30,6 +30,10 @@ final class PushFilesSender
     private string $current_index_file;
     private PushJournal $journal;
     private MultipartPushStreamClient $client;
+    private array $request_sizer_config;
+    private array $client_options;
+    private bool $client_has_authoritative_state = false;
+    private ?string $client_state_fingerprint = null;
 
     /**
      * Configures one sender and restores its learned request size when present.
@@ -64,8 +68,7 @@ final class PushFilesSender
      * }
      *
      * @throws InvalidArgumentException If source or transport options are invalid.
-     * @throws RuntimeException If the journal cannot be read or contains an
-     *     unsupported sender-state version.
+     * @throws RuntimeException If the journal cannot be read.
      */
     public function __construct(array $options)
     {
@@ -81,30 +84,14 @@ final class PushFilesSender
         if (!$journal instanceof PushJournal) {
             throw new InvalidArgumentException('PushFilesSender requires a PushJournal.');
         }
-        $state = $journal->read_sender_state();
-        if ($state === null && !is_file($current_index_file)) {
-            throw new InvalidArgumentException('PushFilesSender requires an existing current_index_file when no sender checkpoint is active.');
-        }
-        if (is_array($state) && ( $state['version'] ?? null ) !== 1) {
-            throw new RuntimeException(
-                'Sender state has an unsupported version: '
-                . json_encode($state['version'] ?? null, JSON_UNESCAPED_SLASHES)
-                . '.'
-            );
-        }
         $request_sizer_config = $options['request_sizer_config'] ?? [];
         if (!is_array($request_sizer_config)) {
             throw new InvalidArgumentException('request_sizer_config must be an array.');
         }
-        $request_sizer = new PushRequestSizer(
-            $request_sizer_config,
-            is_array($state) ? $state['request_sizer_state'] : []
-        );
         $client_options = [
             'base_url' => $options['base_url'] ?? null,
             'hmac_client' => $options['hmac_client'] ?? null,
             'allow_http' => $options['allow_http'] ?? false,
-            'request_sizer' => $request_sizer,
         ];
         foreach (['chunk_bytes', 'connect_timeout', 'stall_timeout', 'response_timeout'] as $option_name) {
             if (array_key_exists($option_name, $options)) {
@@ -115,10 +102,9 @@ final class PushFilesSender
         $this->docroot = rtrim($docroot, '/');
         $this->current_index_file = $current_index_file;
         $this->journal = $journal;
-        $this->client = new MultipartPushStreamClient($client_options);
-        if ($state !== null && $state['max_part_bytes'] !== null) {
-            $this->client->set_max_part_bytes($state['max_part_bytes']);
-        }
+        $this->request_sizer_config = $request_sizer_config;
+        $this->client_options = $client_options;
+        $this->client = $this->create_client(null);
     }
 
     /**
@@ -178,13 +164,46 @@ final class PushFilesSender
      */
     public function send_next_request(): array
     {
+        $sender_lock = $this->journal->acquire_sender_lock();
+        if ($sender_lock === null) {
+            return [
+                'status' => 'continue',
+                'phase' => 'creating',
+                'push_session_id' => null,
+                'reason' => 'sender_busy',
+                'detail' => 'Another process is advancing this target site\'s local push sender. Retry after that request finishes.',
+            ];
+        }
+        try {
+            return $this->send_next_request_under_lock();
+        } finally {
+            $this->journal->release_sender_lock($sender_lock);
+        }
+    }
+
+    /**
+     * Performs one sender transition while the site journal lock is held.
+     *
+     * @return array<string,mixed> Result in send_next_request()'s documented shape.
+     */
+    private function send_next_request_under_lock(): array
+    {
         $state = $this->journal->read_sender_state();
+        clearstatcache(true, $this->current_index_file);
+        if ($state === null && !is_file($this->current_index_file)) {
+            throw new InvalidArgumentException('PushFilesSender requires an existing current_index_file when no sender checkpoint is active.');
+        }
+        $state_fingerprint = $state === null
+            ? null
+            : json_encode($state, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        if (!$this->client_has_authoritative_state || $this->client_state_fingerprint !== $state_fingerprint) {
+            $this->client = $this->create_client($state);
+            $this->client_has_authoritative_state = true;
+            $this->client_state_fingerprint = $state_fingerprint;
+        }
         if ($state === null) {
             $this->journal->capture_sender_index($this->current_index_file);
-            $this->journal->diff_local_files($this->journal->sender_index_path);
-            $this->journal->prepare_work_deletes();
             $state = [
-                'version' => 1,
                 'push_session_id' => bin2hex(random_bytes(16)),
                 'phase' => 'creating',
                 'paths_byte_offset' => 0,
@@ -195,9 +214,11 @@ final class PushFilesSender
                 'work_deletes_byte_offset' => 0,
                 'recoverable_failures' => 0,
                 'max_part_bytes' => null,
+                'excluded_paths_b64' => null,
                 'request_sizer_state' => $this->client->get_request_sizer_state(),
             ];
             $this->journal->write_sender_state($state);
+            $this->client_state_fingerprint = json_encode($state, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         }
 
         if ($state['phase'] === 'creating') {
@@ -209,6 +230,9 @@ final class PushFilesSender
                 return $failure;
             }
             $response = $request['response'];
+            $excluded_paths = is_array($response)
+                ? $this->decode_excluded_paths_b64($response['excluded_paths_b64'] ?? null)
+                : null;
             if (
                 !is_array($response)
                 || ( $response['push_session_id'] ?? null ) !== $state['push_session_id']
@@ -217,12 +241,16 @@ final class PushFilesSender
                 || !array_key_exists('post_max_bytes', $response)
                 || ( $response['post_max_bytes'] !== null
                     && ( !is_int($response['post_max_bytes']) || $response['post_max_bytes'] <= 0 ) )
+                || $excluded_paths === null
             ) {
-                return $this->step_result('failed', $state, 'unexpected_response', 'push_create did not return the matching push session ID, a positive part limit, and a positive or unknown request-body limit.');
+                return $this->step_result('failed', $state, 'unexpected_response', 'push_create did not return the matching push session ID, a positive part limit, a positive or unknown request-body limit, and a canonical excluded-path list.');
             }
+            $this->journal->diff_local_files($this->journal->sender_index_path, $excluded_paths);
+            $this->journal->prepare_work_deletes();
             $this->client->set_max_part_bytes($response['max_part_bytes']);
             $this->client->apply_reported_limits([$response['post_max_bytes'] ?? null]);
             $state['max_part_bytes'] = $response['max_part_bytes'];
+            $state['excluded_paths_b64'] = $response['excluded_paths_b64'];
             $state['recoverable_failures'] = 0;
             $state['phase'] = 'reconciling_work';
             $this->persist_state($state);
@@ -778,8 +806,13 @@ final class PushFilesSender
                 return $this->step_result('continue', $state, null, null);
             }
             $push_session_id = $state['push_session_id'];
-            $this->journal->capture_local_files_baseline($this->journal->sender_index_path);
+            $excluded_paths = $this->decode_excluded_paths_b64($state['excluded_paths_b64'] ?? null);
+            if ($excluded_paths === null) {
+                return $this->step_result('failed', $state, 'invalid_sender_state', 'Sender state does not contain the receiver exclusion policy for this push session.');
+            }
+            $this->journal->capture_local_files_baseline($this->journal->sender_index_path, $excluded_paths);
             $this->journal->clear_sender_state();
+            $this->client_state_fingerprint = null;
             return [
                 'status' => 'complete',
                 'phase' => 'complete',
@@ -812,6 +845,7 @@ final class PushFilesSender
             }
             $push_session_id = $state['push_session_id'];
             $this->journal->clear_sender_state();
+            $this->client_state_fingerprint = null;
             return [
                 'status' => 'restart',
                 'phase' => 'complete',
@@ -822,6 +856,75 @@ final class PushFilesSender
         }
 
         return $this->step_result('failed', $state, 'invalid_sender_state', 'Sender state contains an unsupported phase.');
+    }
+
+    /**
+     * Restores transport limits from the checkpoint read under the sender lock.
+     *
+     * @param array<string,mixed>|null $state Authoritative sender checkpoint.
+     */
+    private function create_client(?array $state): MultipartPushStreamClient
+    {
+        $request_sizer = new PushRequestSizer(
+            $this->request_sizer_config,
+            $state === null ? [] : $state['request_sizer_state']
+        );
+        $client_options = $this->client_options;
+        $client_options['request_sizer'] = $request_sizer;
+        $client = new MultipartPushStreamClient($client_options);
+        if ($state !== null && $state['max_part_bytes'] !== null) {
+            $client->set_max_part_bytes($state['max_part_bytes']);
+        }
+        return $client;
+    }
+
+    /**
+     * Decodes the receiver's normalized excluded-path policy.
+     *
+     * @param mixed $encoded_paths Candidate list from push_create or sender state.
+     * @return list<string>|null Raw paths, or null when the policy is not the
+     *     canonical sorted, deduplicated server shape.
+     */
+    private function decode_excluded_paths_b64($encoded_paths): ?array
+    {
+        if (!is_array($encoded_paths) || array_values($encoded_paths) !== $encoded_paths) {
+            return null;
+        }
+        $decoded_paths = [];
+        foreach ($encoded_paths as $encoded_path) {
+            if (!is_string($encoded_path)) {
+                return null;
+            }
+            $path = base64_decode($encoded_path, true);
+            if (
+                !is_string($path)
+                || base64_encode($path) !== $encoded_path
+                || !$this->is_safe_document_root_relative_path($path)
+            ) {
+                return null;
+            }
+            $decoded_paths[] = $path;
+        }
+        $normalized_paths = $decoded_paths;
+        sort($normalized_paths, SORT_STRING);
+        $normalized_paths = array_values(array_unique($normalized_paths));
+        return $normalized_paths === $decoded_paths ? $decoded_paths : null;
+    }
+
+    /**
+     * Reports whether raw path bytes name one safe document-root-relative path.
+     */
+    private function is_safe_document_root_relative_path(string $path): bool
+    {
+        if ($path === '' || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
+            return false;
+        }
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -1007,15 +1110,12 @@ final class PushFilesSender
      */
     private function source_token(string $path): ?array
     {
-        if ($path === '' || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
+        if (!$this->is_safe_document_root_relative_path($path)) {
             throw new InvalidArgumentException('A selected push path is not a safe document-root-relative path: ' . base64_encode($path) . '.');
         }
-        foreach (explode('/', $path) as $segment) {
-            if ($segment === '' || $segment === '.' || $segment === '..') {
-                throw new InvalidArgumentException('A selected push path contains an empty, dot, or parent segment: ' . base64_encode($path) . '.');
-            }
-        }
-        $identity = @lstat($this->docroot . '/' . $path);
+        $absolute_path = $this->docroot . '/' . $path;
+        clearstatcache(true, $absolute_path);
+        $identity = @lstat($absolute_path);
         if (!is_array($identity)) {
             return null;
         }
@@ -1089,6 +1189,8 @@ final class PushFilesSender
     {
         $state['request_sizer_state'] = $this->client->get_request_sizer_state();
         $this->journal->write_sender_state($state);
+        $this->client_has_authoritative_state = true;
+        $this->client_state_fingerprint = json_encode($state, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
     }
 
     /**

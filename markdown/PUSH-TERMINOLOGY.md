@@ -96,15 +96,17 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Positive-work path list | `local-paths-to-push.jsonl`, `$local_paths_to_push` |
 | Deleted-path list | `local-paths-to-delete.jsonl`, `$local_paths_to_delete` |
 | Raw local work-delete stream | `work-deletes`, `$work_deletes_path` |
+| Local sender transition lock | `sender.lock` |
 | Selected path-list cursor | `$paths_byte_offset` |
 | Selected positive-work path | `$current_path_b64` |
 | Receiver-confirmed file cursor | `$confirmed_bytes` |
 
-`sender.json` is version 1. Its phases are `creating`, `reconciling_work`,
-`uploading_work`, `reconciling_deletes`, `uploading_deletes`, `committing`,
-and `removing`. It also records the push session ID, selected path, last source
-token confirmed by an upload response, receiver-confirmed file and work-delete
-cursors, recoverable-failure count, target part limit, and request-sizing state.
+`sender.json` is unversioned development state. Its phases are `creating`,
+`reconciling_work`, `uploading_work`, `reconciling_deletes`,
+`uploading_deletes`, `committing`, and `removing`. It also records the push
+session ID, selected path, last source token confirmed by an upload response,
+receiver-confirmed file and work-delete cursors, recoverable-failure count,
+target part limit, receiver exclusion policy, and request-sizing state.
 `push.json` remains the receiver-owned
 push identity and policy; it does not store local source evidence or transport
 progress.

@@ -209,8 +209,8 @@ sender.json                 atomic sender checkpoint
 The checkpoint names the push session, the next request phase, the selected
 positive-work path, the last source token confirmed by an upload response,
 receiver-confirmed file and work-delete cursors, bounded retry count, target
-part limit, and learned request-body
-sizing state. Before any positive-work request can become
+part limit, receiver exclusion policy, and learned request-body sizing state.
+Before any positive-work request can become
 ambiguous, the durable phase tells a reopened sender to query `push_status` for
 that same path. Local counters never advance the checkpoint merely because
 bytes reached the network. A work-delete upload is likewise reconciled against
@@ -223,9 +223,11 @@ behind an old-version prefix. A vanished selected path or a receiver work-delete
 cursor beyond the stable local stream abandons the upload-only push session by
 repeating bounded remove calls, then tells the caller to regenerate its local
 index. The caller must also regenerate that index before a later push. The
-stable `sender-index.jsonl` becomes the local baseline only after commit
-completes. A freshly generated later index selects any path whose size, ctime,
-or type now differs from that stable evidence.
+stable `sender-index.jsonl` updates the local baseline only after commit
+completes. Current evidence under excluded paths is omitted because those bytes
+were not sent; any prior synchronized evidence there is retained. If the target
+later removes an exclusion, the next diff therefore selects local changes and
+deletions made while that path was protected.
 
 One upload request contains as many bounded chunks and work values as its
 decoded entity-body budget permits. The sender holds only one payload string,
@@ -234,6 +236,11 @@ deletes explicitly, and never selects another positive-work path until the
 current one is complete. Recoverable target contention, offset gaps, and
 ambiguous transport failures are retried at a fixed bounded count; exhaustion
 returns a terminal failure rather than a final retry.
+
+A nonblocking per-site sender lock covers each journal read, HTTP request, and
+following checkpoint write. A second local process returns `sender_busy` and
+resumes after the in-flight request releases that lock instead of advancing the
+same fixed-name journal files concurrently.
 
 The token has one honest timestamp-resolution gap: a same-size edit that keeps
 the same ctime second is not detected by the token, and remains invisible when

@@ -12,10 +12,11 @@
  *     <state-dir>/push/<site>/last-sync-local-files.jsonl
  *
  * The baseline is the sender index from the last completed push. It uses the
- * .import-index.jsonl fields and adds an `empty` boolean to directory entries.
- * That fact distinguishes an empty directory from a non-empty directory after
- * the source may have changed. The push driver captures the sender index only
- * after the receiver commits successfully.
+ * .import-index.jsonl fields and adds an `empty` boolean to directory entries,
+ * which distinguishes an empty directory from a non-empty directory after the
+ * source may have changed. After the receiver commits, the baseline takes
+ * current evidence for paths the receiver allowed this push to change and
+ * retains prior evidence under excluded paths.
  *
  * diff_local_files() performs one bounded planning step. It merges the
  * path-sorted current index and baseline while writing three durable files:
@@ -112,17 +113,139 @@ class PushJournal
     }
 
     /**
-     * Store an enriched sender index as the new local baseline.
+     * Stores receiver-confirmed local index evidence as the new baseline.
      *
      * The push driver calls this at the end of a successful push; from then
      * on "changed locally" means "different from this index". The copy is
      * atomic (temp file + rename) and the source file is left untouched. A
      * killed process therefore leaves the previous complete baseline in
      * effect rather than publishing a truncated replacement.
+     *
+     * @param string $index_file Enriched current index selected for the push.
+     * @param string[] $excluded_paths Receiver-owned paths. Their prior
+     *     baseline evidence is retained because this push did not change them.
+     * @phpstan-param list<string> $excluded_paths
      */
-    public function capture_local_files_baseline(string $index_file): void
+    public function capture_local_files_baseline(string $index_file, array $excluded_paths = []): void
     {
-        $this->replace_file($this->local_files_baseline_path, $index_file);
+        if ($excluded_paths === []) {
+            $this->replace_file($this->local_files_baseline_path, $index_file);
+            return;
+        }
+        if (!is_file($index_file)) {
+            throw new RuntimeException("Cannot replace a journal file, the source index file is missing: {$index_file}");
+        }
+        $this->ensure_site_dir();
+
+        $current_handle = fopen($index_file, "rb");
+        if (!$current_handle) {
+            throw new RuntimeException("Failed to open the current index: {$index_file}");
+        }
+        $baseline_handle = null;
+        if (is_file($this->local_files_baseline_path)) {
+            $baseline_handle = fopen($this->local_files_baseline_path, "rb");
+            if (!$baseline_handle) {
+                fclose($current_handle);
+                throw new RuntimeException("Failed to open the local baseline: {$this->local_files_baseline_path}");
+            }
+        }
+        $temporary = $this->local_files_baseline_path . ".tmp";
+        $output = fopen($temporary, "wb");
+        if (!$output) {
+            fclose($current_handle);
+            if ($baseline_handle) {
+                fclose($baseline_handle);
+            }
+            throw new RuntimeException("Failed to open the local baseline for writing: {$temporary}");
+        }
+
+        try {
+            $this->read_line(
+                $current_handle,
+                $current_entry,
+                $current_path,
+                $current_base64_path,
+                $next_current_index_byte_offset
+            );
+            $this->read_line(
+                $baseline_handle,
+                $baseline_entry,
+                $baseline_path,
+                $baseline_base64_path,
+                $next_baseline_byte_offset
+            );
+            while ($current_entry !== null || $baseline_entry !== null) {
+                while (
+                    $current_entry !== null
+                    && $this->path_conflicts_with_excluded_paths($current_path, $excluded_paths)
+                ) {
+                    $this->read_line(
+                        $current_handle,
+                        $current_entry,
+                        $current_path,
+                        $current_base64_path,
+                        $next_current_index_byte_offset
+                    );
+                }
+                while (
+                    $baseline_entry !== null
+                    && !$this->path_conflicts_with_excluded_paths($baseline_path, $excluded_paths)
+                ) {
+                    $this->read_line(
+                        $baseline_handle,
+                        $baseline_entry,
+                        $baseline_path,
+                        $baseline_base64_path,
+                        $next_baseline_byte_offset
+                    );
+                }
+                if ($current_entry === null && $baseline_entry === null) {
+                    break;
+                }
+                if (
+                    $baseline_entry === null
+                    || ( $current_entry !== null && strcmp($current_path, $baseline_path) < 0 )
+                ) {
+                    $entry = $current_entry;
+                    $this->read_line(
+                        $current_handle,
+                        $current_entry,
+                        $current_path,
+                        $current_base64_path,
+                        $next_current_index_byte_offset
+                    );
+                } else {
+                    $entry = $baseline_entry;
+                    $this->read_line(
+                        $baseline_handle,
+                        $baseline_entry,
+                        $baseline_path,
+                        $baseline_base64_path,
+                        $next_baseline_byte_offset
+                    );
+                }
+                $line = json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                if (fwrite($output, $line) !== strlen($line)) {
+                    throw new RuntimeException("Short write on the local baseline, is the disk full?");
+                }
+            }
+            if (!fclose($output)) {
+                $output = null;
+                throw new RuntimeException("Failed to close the local baseline: {$temporary}");
+            }
+            $output = null;
+            if (!rename($temporary, $this->local_files_baseline_path)) {
+                throw new RuntimeException("Failed to move the local baseline into place: {$this->local_files_baseline_path}");
+            }
+        } finally {
+            fclose($current_handle);
+            if ($baseline_handle) {
+                fclose($baseline_handle);
+            }
+            if (is_resource($output)) {
+                fclose($output);
+            }
+        }
     }
 
     /**
@@ -516,7 +639,6 @@ class PushJournal
      * an upload response, not bytes merely handed to the network.
      *
      * @return array{
-     *     version:1,
      *     push_session_id:string,
      *     phase:'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
      *     paths_byte_offset:int,
@@ -527,11 +649,13 @@ class PushJournal
      *     work_deletes_byte_offset:int,
      *     recoverable_failures:int,
      *     max_part_bytes:?int,
+     *     excluded_paths_b64:?list<string>,
      *     request_sizer_state:array{request_body_bytes:int,ceiling_bytes:?int,growth_holdoff_remaining:int}
      * }|null Durable sender state, or null when no push is active.
      */
     public function read_sender_state(): ?array
     {
+        clearstatcache(true, $this->sender_state_path);
         if (!is_file($this->sender_state_path)) {
             return null;
         }
@@ -550,7 +674,6 @@ class PushJournal
      * Atomically records the sender's last receiver-reconcilable boundary.
      *
      * @param array{
-     *     version:1,
      *     push_session_id:string,
      *     phase:'creating'|'reconciling_work'|'uploading_work'|'reconciling_deletes'|'uploading_deletes'|'committing'|'removing',
      *     paths_byte_offset:int,
@@ -561,6 +684,7 @@ class PushJournal
      *     work_deletes_byte_offset:int,
      *     recoverable_failures:int,
      *     max_part_bytes:?int,
+     *     excluded_paths_b64:?list<string>,
      *     request_sizer_state:array{request_body_bytes:int,ceiling_bytes:?int,growth_holdoff_remaining:int}
      * } $state Complete sender checkpoint.
      */
@@ -582,9 +706,41 @@ class PushJournal
      */
     public function clear_sender_state(): void
     {
+        clearstatcache(true, $this->sender_state_path);
         if (is_file($this->sender_state_path) && !unlink($this->sender_state_path)) {
             throw new RuntimeException("Failed to remove sender state: {$this->sender_state_path}");
         }
+    }
+
+    /**
+     * Acquires exclusive ownership of one target site's sender transition.
+     *
+     * The lock stays held across the HTTP request and the following checkpoint
+     * write so two legitimate push processes cannot both advance fixed-name
+     * journal files from different snapshots.
+     *
+     * @return resource|null Lock handle, or null while another process owns it.
+     */
+    public function acquire_sender_lock()
+    {
+        $this->ensure_site_dir();
+        $lock_path = $this->site_dir . "/sender.lock";
+        $lock = fopen($lock_path, "c+b");
+        if (!$lock) {
+            throw new RuntimeException("Failed to open the sender lock: {$lock_path}");
+        }
+        if (!flock($lock, LOCK_EX | LOCK_NB)) {
+            fclose($lock);
+            return null;
+        }
+        return $lock;
+    }
+
+    /** @param resource $lock Lock returned by acquire_sender_lock(). */
+    public function release_sender_lock($lock): void
+    {
+        flock($lock, LOCK_UN);
+        fclose($lock);
     }
 
     /**
