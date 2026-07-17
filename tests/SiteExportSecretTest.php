@@ -19,6 +19,7 @@ if (!defined('SITE_EXPORT_SECRET_FILE')) {
 $GLOBALS['site_export_test_options'] = [];
 $GLOBALS['site_export_registered_settings'] = [];
 $GLOBALS['site_export_settings_errors'] = [];
+$GLOBALS['site_export_test_actions'] = [];
 
 if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path(string $file): string {
@@ -36,7 +37,25 @@ if (!function_exists('get_option')) {
 
 if (!function_exists('update_option')) {
     function update_option(string $name, $value, $autoload = null): bool {
+        if (!array_key_exists($name, $GLOBALS['site_export_test_options'])) {
+            $GLOBALS['site_export_test_options'][$name] = $value;
+            foreach ($GLOBALS['site_export_test_actions']['add_option_' . $name] ?? [] as $action) {
+                $args = array_slice([$name, $value], 0, $action['accepted_args']);
+                call_user_func_array($action['callback'], $args);
+            }
+            return true;
+        }
+
+        $old_value = get_option($name);
         $GLOBALS['site_export_test_options'][$name] = $value;
+
+        if ($old_value !== $value) {
+            foreach ($GLOBALS['site_export_test_actions']['update_option_' . $name] ?? [] as $action) {
+                $args = array_slice([$old_value, $value, $name], 0, $action['accepted_args']);
+                call_user_func_array($action['callback'], $args);
+            }
+        }
+
         return true;
     }
 }
@@ -51,7 +70,12 @@ if (!function_exists('register_setting')) {
 }
 
 if (!function_exists('add_action')) {
-    function add_action(...$args): void {}
+    function add_action(string $hook_name, $callback, int $priority = 10, int $accepted_args = 1): void {
+        $GLOBALS['site_export_test_actions'][$hook_name][] = [
+            'callback' => $callback,
+            'accepted_args' => $accepted_args,
+        ];
+    }
 }
 
 if (!function_exists('add_filter')) {
@@ -302,6 +326,21 @@ final class SiteExportSecretTest extends TestCase
         $this->assertFalse(_site_export_is_push_authorized());
     }
 
+    public function testPresentEmptyManagedEnvironmentFailsClosed(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $this->assertTrue(_site_export_update_push_authorization(true));
+
+        putenv('SITE_EXPORT_PUSH_ENABLED=');
+
+        $this->assertFalse(_site_export_get_managed_push_enabled());
+        $this->assertFalse(_site_export_is_push_authorized());
+        $this->assertSame(
+            'Push access is disabled by the hosting provider through SITE_EXPORT_PUSH_ENABLED.',
+            _site_export_get_push_authorization_error()
+        );
+    }
+
     public function testSavingRotatedConnectionTokenRevokesPriorConsent(): void
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
@@ -315,6 +354,49 @@ final class SiteExportSecretTest extends TestCase
 
         $this->assertSame('', $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]);
         $this->assertFalse(_site_export_is_push_authorized());
+    }
+
+    public function testRestSettingsTokenRotationPermanentlyRevokesPushAuthorization(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'token-a';
+        $this->assertTrue(_site_export_update_push_authorization(true));
+        Site_Export_Plugin::get_instance()->register_settings();
+
+        update_option(SITE_EXPORT_SECRET_OPTION, 'token-b');
+        update_option(SITE_EXPORT_SECRET_OPTION, 'token-a');
+
+        $this->assertSame('', $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]);
+        $this->assertFalse(_site_export_is_push_authorized());
+    }
+
+    public function testAddingAFormerSecretFileTokenCannotRestorePushAuthorization(): void
+    {
+        file_put_contents(SITE_EXPORT_SECRET_FILE, "<?php return 'token-a';\n");
+        $this->assertTrue(_site_export_update_push_authorization(true));
+        Site_Export_Plugin::get_instance()->register_settings();
+
+        unlink(SITE_EXPORT_SECRET_FILE);
+        $this->assertFalse(_site_export_is_push_authorized());
+        update_option(SITE_EXPORT_SECRET_OPTION, 'token-a');
+
+        $this->assertSame('', $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]);
+        $this->assertFalse(_site_export_is_push_authorized());
+    }
+
+    public function testRestSettingsOptionChangePreservesAuthorizationForSecretFileToken(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'option-token-a';
+        file_put_contents(SITE_EXPORT_SECRET_FILE, "<?php return 'file-token';\n");
+        $this->assertTrue(_site_export_update_push_authorization(true));
+        Site_Export_Plugin::get_instance()->register_settings();
+
+        update_option(SITE_EXPORT_SECRET_OPTION, 'option-token-b');
+
+        $this->assertSame(
+            hash('sha256', 'file-token'),
+            $GLOBALS['site_export_test_options'][SITE_EXPORT_PUSH_AUTHORIZATION_OPTION]
+        );
+        $this->assertTrue(_site_export_is_push_authorized());
     }
 
     public function testPushAccessFormAuthorizesTheCurrentConnectionToken(): void

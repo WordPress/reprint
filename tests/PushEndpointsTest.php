@@ -74,7 +74,7 @@ final class PushEndpointsTest extends TestCase {
         parent::tearDown();
     }
 
-    public function testExistingTokenCannotUseAnyPushEndpointWithoutAuthorization(): void
+    public function testExistingTokenCannotUsePushEndpointsWithoutAuthorization(): void
     {
         file_put_contents($this->push_authorization_configuration_path, '');
         $push_session_id = str_repeat('0', 32);
@@ -117,9 +117,37 @@ final class PushEndpointsTest extends TestCase {
         );
         $this->assertSame(403, $future_endpoint['http_code']);
         $this->assertSame('push_disabled', $future_endpoint['response']['reason']);
+
+        $overridden_commit = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_commit',
+            $push_session_id,
+            'endpoint=push_create&push_session_id=' . str_repeat('1', 32),
+            'application/x-www-form-urlencoded'
+        );
+        $this->assertSame(403, $overridden_commit['http_code'], $overridden_commit['body']);
+        $this->assertSame('push_disabled', $overridden_commit['response']['reason']);
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push');
         $this->assertSame('old', file_get_contents($this->docroot . '/remove.txt'));
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
+    }
+
+    public function testAuthorizedFuturePushEndpointUsesPushErrorContract(): void
+    {
+        $response = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_future_operation',
+            str_repeat('f', 32)
+        );
+
+        $this->assertSame(400, $response['http_code'], $response['body']);
+        $this->assertSame('rejected', $response['response']['status']);
+        $this->assertSame('invalid_request', $response['response']['reason']);
+        $this->assertStringContainsString('Invalid endpoint', $response['response']['detail']);
+        $this->assertArrayNotHasKey('error', $response['response']);
+        $this->assertArrayNotHasKey('trace', $response['response']);
     }
 
     public function testCustomAuthenticationCannotBypassPushAuthorization(): void
@@ -189,6 +217,108 @@ final class PushEndpointsTest extends TestCase {
         );
         $this->assertSame(403, $managed_disabled['http_code'], $managed_disabled['body']);
         $this->assertSame('push_disabled', $managed_disabled['response']['reason']);
+        $this->assertSame(
+            'Push access is disabled by the hosting provider through SITE_EXPORT_PUSH_ENABLED.',
+            $managed_disabled['response']['detail']
+        );
+    }
+
+    public function testRevokedAuthorizationCannotStartCommit(): void
+    {
+        $client = $this->newClient(self::SECRET);
+        $push_session_id = str_repeat('6', 32);
+        $create = $client->control_request('POST', 'push_create', [
+            'push_session_id' => $push_session_id,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+
+        $upload = $this->sendUploadRequest($client, $push_session_id, [
+            [
+                'type' => 'file',
+                'path' => 'must-not-install.txt',
+                'total_bytes' => 4,
+                'offset' => 0,
+                'payload' => 'deny',
+            ],
+            [
+                'type' => 'delete-list',
+                'offset' => 0,
+                'complete' => true,
+                'payload' => '',
+            ],
+        ]);
+        $this->assertSame('complete', $upload['status'], (string) json_encode($upload));
+
+        file_put_contents($this->push_authorization_configuration_path, '');
+        $commit = $this->requestPushEndpoint(
+            self::SECRET,
+            'POST',
+            'push_commit',
+            $push_session_id
+        );
+
+        $this->assertSame(403, $commit['http_code'], $commit['body']);
+        $this->assertSame('push_disabled', $commit['response']['reason']);
+        $push_directory = $this->reprint_directory . '/.reprint/push/' . $push_session_id;
+        $this->assertFileDoesNotExist($push_directory . '/commit.json');
+        $this->assertFileDoesNotExist($this->reprint_directory . '/.reprint/push/commit-state');
+        $this->assertFileDoesNotExist($this->docroot . '/.maintenance');
+        $this->assertFileDoesNotExist($this->docroot . '/must-not-install.txt');
+        $this->assertSame('old', file_get_contents($this->docroot . '/remove.txt'));
+    }
+
+    public function testRevokedAuthorizationAllowsDurableCommitRecovery(): void
+    {
+        $client = $this->newClient(self::SECRET);
+        $push_session_id = str_repeat('7', 32);
+        $create = $client->control_request('POST', 'push_create', [
+            'push_session_id' => $push_session_id,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+
+        $upload = $this->sendUploadRequest($client, $push_session_id, [
+            [
+                'type' => 'file',
+                'path' => 'installed.txt',
+                'total_bytes' => 4,
+                'offset' => 0,
+                'payload' => 'new!',
+            ],
+            [
+                'type' => 'delete-list',
+                'offset' => 0,
+                'complete' => true,
+                'payload' => '',
+            ],
+        ]);
+        $this->assertSame('complete', $upload['status'], (string) json_encode($upload));
+
+        $commit_before_revocation = null;
+        for ($request = 0; $request < 10; ++$request) {
+            $commit_before_revocation = $client->control_request('POST', 'push_commit', [
+                'push_session_id' => $push_session_id,
+            ], ['accepted']);
+            $this->assertSame('complete', $commit_before_revocation['status'], (string) json_encode($commit_before_revocation));
+            if (is_file($this->docroot . '/installed.txt')) {
+                break;
+            }
+        }
+        $this->assertIsArray($commit_before_revocation);
+        $this->assertTrue($commit_before_revocation['response']['send_next_request']);
+        $this->assertSame('new!', file_get_contents($this->docroot . '/installed.txt'));
+        $this->assertFileExists($this->docroot . '/.maintenance');
+
+        file_put_contents($this->push_authorization_configuration_path, '');
+        do {
+            $commit = $client->control_request('POST', 'push_commit', [
+                'push_session_id' => $push_session_id,
+            ], ['accepted']);
+            $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
+        } while ($commit['response']['send_next_request']);
+
+        $this->assertSame('complete', $commit['response']['phase']);
+        $this->assertFileDoesNotExist($this->docroot . '/.maintenance');
+        $this->assertFileDoesNotExist($this->reprint_directory . '/.reprint/push/commit-state');
     }
 
     public function testPersonalOptInEnablesSignedEndpointsReceiveManyChangesCommitAndRemove(): void

@@ -178,7 +178,7 @@ function _site_export_get_managed_push_enabled(): ?bool {
     }
 
     $environment_value = getenv('SITE_EXPORT_PUSH_ENABLED');
-    if ($environment_value === false || $environment_value === '') {
+    if ($environment_value === false) {
         return null;
     }
 
@@ -188,20 +188,28 @@ function _site_export_get_managed_push_enabled(): ?bool {
 
 /** Returns whether the current connection token is authorized for push. */
 function _site_export_is_push_authorized(): bool {
+    return _site_export_get_push_authorization_error() === null;
+}
+
+/** Returns the exact push authorization failure, or null when push may start new work. */
+function _site_export_get_push_authorization_error(): ?string {
     $managed_enabled = _site_export_get_managed_push_enabled();
     if ($managed_enabled !== null) {
-        return $managed_enabled;
+        return $managed_enabled
+            ? null
+            : 'Push access is disabled by the hosting provider through SITE_EXPORT_PUSH_ENABLED.';
     }
 
     $secret = _site_export_get_shared_secret();
     if ($secret === null || !function_exists('get_option')) {
-        return false;
+        return 'Push access is disabled for the current connection token.';
     }
 
     $authorized_fingerprint = get_option(SITE_EXPORT_PUSH_AUTHORIZATION_OPTION, '');
-    return is_string($authorized_fingerprint)
+    $authorized = is_string($authorized_fingerprint)
         && $authorized_fingerprint !== ''
         && hash_equals(hash('sha256', $secret), $authorized_fingerprint);
+    return $authorized ? null : 'Push access is disabled for the current connection token.';
 }
 
 /**
@@ -429,15 +437,23 @@ function _site_export_handle_api_request(array $options = []): void {
         _site_export_default_authenticate();
     }
 
-    // Authentication completes first. This separate gate prevents custom
-    // authentication or a future push_* operation from inheriting write
-    // access. It runs before endpoint setup can read php://input, create a
-    // push directory, or change the document root.
-    if (_site_export_is_push_endpoint($endpoint) && !_site_export_is_push_authorized()) {
+    // Authentication completes first. Every push operation requires current
+    // authorization except resuming commit from its durable checkpoint, which
+    // must remain available so revocation cannot strand document-root changes.
+    // Push endpoint parameters travel in the query string, so the dispatcher
+    // does not need to read php://input after this gate.
+    $push_authorization_error = null;
+    if (_site_export_is_push_endpoint($endpoint)) {
+        $push_authorization_error = _site_export_get_push_authorization_error();
+    }
+    if (
+        $push_authorization_error !== null
+        && $endpoint !== 'push_commit'
+    ) {
         _site_export_push_error(
             403,
             'push_disabled',
-            'Push access is disabled for the current connection token.'
+            $push_authorization_error
         );
     }
 
@@ -560,11 +576,14 @@ function _site_export_handle_api_request(array $options = []): void {
             if (array_key_exists('maximum_commit_entries', $options)) {
                 $push_options['maximum_commit_entries'] = $options['maximum_commit_entries'];
             }
+            if ($push_authorization_error !== null) {
+                $push_options['commit_start_denial_detail'] = $push_authorization_error;
+            }
             $server_options['push'] = $push_options;
         }
         Site_Export_HTTP_Server::serve($server_options);
     } catch (Exception $e) {
-        if (Site_Export_HTTP_Server::is_push_endpoint($endpoint)) {
+        if (_site_export_is_push_endpoint($endpoint)) {
             if ($e instanceof Site_Export_Push_Configuration_Exception) {
                 _site_export_push_error(503, 'not_configured', $e->getMessage());
             }

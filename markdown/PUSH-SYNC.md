@@ -53,18 +53,25 @@ size. The secret travels in no URL and no body, so it never lands in an
 access log.
 
 Authentication does not grant write authority. Connection tokens are
-download-only by default, including tokens that predate push endpoints. After
-authentication, every `push_*` operation passes one authorization gate before
-the endpoint reads upload data, creates a push directory, or changes the
-document root. Missing authorization returns HTTP 403 with
-`reason: "push_disabled"`; custom authentication uses the same gate.
+download-only by default, including tokens that predate push endpoints. Except
+for the bounded recovery case below, every `push_*` operation requires current
+push authorization before upload data is read, a push directory is created, or
+the document root changes; custom authentication uses the same gate.
+
+Revocation does not abandon durable recovery state. An authenticated caller
+may keep calling `push_commit` only when that push session already has a durable
+commit checkpoint. Those requests converge the already-started document-root
+mutation; they cannot upload more work, inspect or remove private work, or
+start commit for another push session. Other push operations return HTTP 403
+with `reason: "push_disabled"`. This keeps token rotation or a managed policy
+change from stranding a partial commit and its maintenance marker.
 
 Personal consent stores only the current connection token's SHA-256
 fingerprint. Rotating the token therefore revokes push access. A hosting
 provider may override local consent by defining the boolean
 `SITE_EXPORT_PUSH_ENABLED` constant before active plugins load or by setting
 the environment variable of the same name. Managed `true` enables push and
-managed `false` hard-disables it.
+managed `false` hard-disables push without abandoning durable commit recovery.
 
 ## Change detection: local machine compared against itself
 

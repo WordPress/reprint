@@ -25,6 +25,18 @@ class Site_Export_Plugin {
 
     private function __construct() {
         add_action('init', [$this, 'register_settings']);
+        add_action(
+            'update_option_' . SITE_EXPORT_SECRET_OPTION,
+            [$this, 'revoke_push_authorization_after_connection_token_change'],
+            10,
+            2
+        );
+        add_action(
+            'add_option_' . SITE_EXPORT_SECRET_OPTION,
+            [$this, 'revoke_push_authorization_after_connection_token_added'],
+            10,
+            0
+        );
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'handle_settings_save']);
         add_filter('plugin_action_links_' . plugin_basename(SITE_EXPORT_PLUGIN_DIR . 'index.php'), [$this, 'add_settings_link']);
@@ -43,6 +55,40 @@ class Site_Export_Plugin {
                 'show_in_rest' => true,
             ]
         );
+    }
+
+    /**
+     * Revoke local push authorization when the effective connection token changes.
+     *
+     * The secret.php override keeps the option from becoming the effective token.
+     *
+     * @param mixed $old_value Previous option value.
+     * @param mixed $new_value New option value.
+     */
+    public function revoke_push_authorization_after_connection_token_change($old_value, $new_value) {
+        if (_site_export_has_secret_file()) {
+            return;
+        }
+
+        $old_connection_token = is_string($old_value) && $old_value !== '' ? $old_value : null;
+        $new_connection_token = is_string($new_value) && $new_value !== '' ? $new_value : null;
+        if ($old_connection_token !== $new_connection_token) {
+            _site_export_update_push_authorization(false);
+        }
+    }
+
+    /**
+     * Revoke stale local push authorization when the connection-token option is added.
+     *
+     * WordPress uses add_option() when update_option() receives a missing option,
+     * so that path does not emit the update hook above. A secret.php override
+     * still keeps the option from becoming the effective token.
+     *
+     */
+    public function revoke_push_authorization_after_connection_token_added() {
+        if (!_site_export_has_secret_file()) {
+            _site_export_update_push_authorization(false);
+        }
     }
 
     /**
@@ -101,7 +147,6 @@ class Site_Export_Plugin {
         check_admin_referer('site_export_settings');
 
         if ($saving_connection_token) {
-            $previous_effective_secret = _site_export_get_shared_secret();
             $secret = isset($_POST['site_export_secret'])
                 ? sanitize_text_field(wp_unslash($_POST['site_export_secret']))
                 : '';
@@ -113,9 +158,6 @@ class Site_Export_Plugin {
                 return;
             }
 
-            if (_site_export_get_shared_secret() !== $previous_effective_secret) {
-                _site_export_update_push_authorization(false);
-            }
             add_settings_error(
                 'site_export',
                 'save_success',

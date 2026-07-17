@@ -42,6 +42,9 @@ final class Site_Export_Push_Endpoints {
     /** @var int */
     private $maximum_commit_entries;
 
+    /** @var string|null */
+    private $commit_start_denial_detail;
+
     /** @var int|null */
     private $post_max_bytes;
 
@@ -63,6 +66,9 @@ final class Site_Export_Push_Endpoints {
      *         accepted for one multipart part. Default 4 MiB.
      *     @type int|float|string $maximum_commit_entries Maximum entries one
      *         commit request may process. Default 256.
+     *     @type string $commit_start_denial_detail When present, starting commit
+     *         returns `push_disabled` with this detail. A commit with a durable
+     *         checkpoint remains recoverable.
      *     @type int|float|string|null $post_max_bytes Decoded request-body
      *         limit enforced and reported to senders. Defaults to PHP's
      *         post_max_size; null means PHP reports no positive limit.
@@ -73,11 +79,13 @@ final class Site_Export_Push_Endpoints {
      *     excluded_paths?:mixed,
      *     maximum_part_bytes?:mixed,
      *     maximum_commit_entries?:mixed,
+     *     commit_start_denial_detail?:mixed,
      *     post_max_bytes?:mixed
      * } $options
      *
-     * @throws InvalidArgumentException If required configuration is absent or
-     *     a present numeric limit is not positive.
+     * @throws InvalidArgumentException If required configuration is absent, a
+     *     present numeric limit is not positive, or a commit-start denial detail
+     *     is not a non-empty string.
      */
     public function __construct(array $options) {
         $reprint_directory = $options['reprint_directory'] ?? null;
@@ -154,6 +162,13 @@ final class Site_Export_Push_Endpoints {
         $this->excluded_paths = $excluded_paths;
         $this->maximum_part_bytes = (int) $maximum_part_bytes;
         $this->maximum_commit_entries = (int) $maximum_commit_entries;
+        $this->commit_start_denial_detail = null;
+        if (array_key_exists('commit_start_denial_detail', $options)) {
+            if (!is_string($options['commit_start_denial_detail']) || $options['commit_start_denial_detail'] === '') {
+                throw new InvalidArgumentException('commit_start_denial_detail must be a non-empty string.');
+            }
+            $this->commit_start_denial_detail = $options['commit_start_denial_detail'];
+        }
     }
 
     /**
@@ -409,7 +424,10 @@ final class Site_Export_Push_Endpoints {
                 $push_session_id,
                 $this->excluded_paths
             );
-            $commit = $push_session->commit($this->maximum_commit_entries);
+            $commit = $push_session->commit(
+                $this->maximum_commit_entries,
+                $this->commit_start_denial_detail
+            );
             $this->respond(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
@@ -418,6 +436,18 @@ final class Site_Export_Push_Endpoints {
                 'entries_processed' => $commit['entries_processed'],
             ]);
         } catch (Throwable $exception) {
+            if (
+                $this->commit_start_denial_detail !== null
+                && $exception instanceof Site_Export_Push_Exception
+                && $exception->get_error_code() === Site_Export_Push_Session::ERROR_PUSH_NOT_FOUND
+            ) {
+                $this->respond(403, [
+                    'status' => 'rejected',
+                    'reason' => Site_Export_Push_Session::ERROR_PUSH_DISABLED,
+                    'detail' => $this->commit_start_denial_detail,
+                ]);
+                return;
+            }
             $this->respond_to_failure($exception);
         }
     }
@@ -516,6 +546,8 @@ final class Site_Export_Push_Endpoints {
             $http_code = 409;
             if ($reason === Site_Export_Push_Session::ERROR_PUSH_NOT_FOUND) {
                 $http_code = 404;
+            } elseif ($reason === Site_Export_Push_Session::ERROR_PUSH_DISABLED) {
+                $http_code = 403;
             } elseif ($reason === Site_Export_Push_Session::ERROR_LOCK_ACQUISITION_FAILURE) {
                 $http_code = 423;
             } elseif ($reason === Site_Export_Push_Session::ERROR_REQUEST_TOO_LARGE) {

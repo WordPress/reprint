@@ -60,6 +60,7 @@ final class Site_Export_Push_Session {
     public const ERROR_CORRUPTED_PUSH_STATE = 'corrupted_push_state';
     public const ERROR_SAME_DEVICE = 'same_device';
     public const ERROR_REQUEST_TOO_LARGE = 'request_too_large';
+    public const ERROR_PUSH_DISABLED = 'push_disabled';
 
     private const MAX_PATH_BYTES = 4096;
     private const MAX_METADATA_BYTES = 1048576;
@@ -596,6 +597,9 @@ final class Site_Export_Push_Session {
      * retry the same bounded step from the durable state.
      *
      * @param int $maximum_entries Maximum bounded commit entries to process in this call.
+     * @param string|null $commit_start_denial_detail When present, commit may
+     *     resume a durable checkpoint but may not create one. The string
+     *     describes why starting commit is denied.
      * @return array {
      *     Current bounded commit result.
      *
@@ -606,13 +610,25 @@ final class Site_Export_Push_Session {
      * }
      * @phpstan-return array{phase:'deleting_files'|'installing_files'|'complete',send_next_request:bool,entries_processed:int}
      */
-    public function commit(int $maximum_entries = 1): array {
+    public function commit(int $maximum_entries = 1, ?string $commit_start_denial_detail = null): array {
         if ($maximum_entries <= 0) {
             throw new InvalidArgumentException('The commit entry limit must be greater than zero.');
         }
-        return $this->with_push_lock(function () use ($maximum_entries): array {
+        if ($commit_start_denial_detail === '') {
+            throw new InvalidArgumentException('The commit start denial detail must be a non-empty string.');
+        }
+        return $this->with_push_lock(function () use ($maximum_entries, $commit_start_denial_detail): array {
             $commit_state = $this->read_json($this->commit_json_path);
             if ($commit_state === null) {
+                // The authorization decision and checkpoint creation share the
+                // push lock so a denied request cannot race another lifecycle
+                // operation into starting a new commit.
+                if ($commit_start_denial_detail !== null) {
+                    throw new Site_Export_Push_Exception(
+                        self::ERROR_PUSH_DISABLED,
+                        $commit_start_denial_detail
+                    );
+                }
                 if (!$this->work_deletes_are_complete()) {
                     throw new InvalidArgumentException('Commit requires an explicit completed delete upload declaration.');
                 }
