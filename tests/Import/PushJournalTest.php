@@ -7,24 +7,25 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push-journal.php';
 
 /**
- * Coverage for PushJournal: per-remote-site baselines and the local diff.
+ * Coverage for PushJournal's per-target baseline and bounded local planner.
  *
- * The diff drives real uploads and deletions later in a push, so the tests
- * pin the classification exactly: new, ctime-changed, size-changed,
- * type-changed, deleted, unchanged — plus the two boundary situations
- * (no baseline yet; stale lists from an earlier run), the encoding
- * round-trip for paths that need base64 in the first place, and the JSON
- * parsing behavior that keeps the diff independent from field order.
+ * Planning enriches the stable sender index with directory emptiness while it
+ * merges that index with the last successful baseline. The tests pin the
+ * resulting positive-work JSONL, raw NUL-delimited work deletes, checkpoint
+ * replay, and every transition among files, symlinks, empty directories, and
+ * non-empty directories.
  */
 final class PushJournalTest extends TestCase
 {
     private string $tempDir;
+    private string $docroot;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/push-journal-test-' . uniqid();
-        mkdir($this->tempDir, 0755, true);
+        $this->docroot = $this->tempDir . '/docroot';
+        mkdir($this->docroot, 0755, true);
     }
 
     protected function tearDown(): void
@@ -78,14 +79,12 @@ final class PushJournalTest extends TestCase
         $this->assertFileExists($journal->local_files_baseline_path);
         $this->assertFileDoesNotExist($journal->local_files_baseline_path . '.tmp');
 
-        // A second capture replaces the first: diffing an index identical
-        // to the second capture reports no changes.
+        // A second capture replaces the first: planning from an identical
+        // second capture produces no work.
         $second = $this->writeIndex(['b.txt' => [200, 9, 'file']]);
         $journal->capture_local_files_baseline($second);
-        $this->assertSame(
-            ['changed' => 0, 'deleted' => 0],
-            $journal->diff_local_files($second)
-        );
+        $result = $this->planToCompletion($journal, $second);
+        $this->assertPlanningCounts(0, 0, $result);
     }
 
     public function testCaptureRequiresTheIndexFileToExist(): void
@@ -96,32 +95,79 @@ final class PushJournalTest extends TestCase
     }
 
     // ------------------------------------------------------------------
-    //  Local diff
+    //  Local planning
     // ------------------------------------------------------------------
 
-    public function testFirstPushTreatsEveryEntryAsChanged(): void
+    public function testFirstPushTreatsOnlyInstallableEntriesAsChanged(): void
     {
-        $journal = $this->makeJournal();
-        $counts = $journal->diff_local_files($this->writeIndex([
-            'index.php' => [100, 10, 'file'],
-            'wp-content' => [100, 0, 'dir'],
-            'wp-content/themes/foo/style.css' => [150, 20, 'file'],
-        ]));
+        file_put_contents($this->docroot . '/index.php', 'index');
+        mkdir($this->docroot . '/wp-content/themes/foo', 0755, true);
+        file_put_contents($this->docroot . '/wp-content/themes/foo/style.css', 'style');
+        $index = $this->writeIndex([
+            'index.php' => [100, 5, 'file'],
+            'wp-content' => [$this->pathCtime('wp-content'), 0, 'dir'],
+            'wp-content/themes/foo/style.css' => [150, 5, 'file'],
+        ]);
 
-        $this->assertSame(['changed' => 3, 'deleted' => 0], $counts);
+        $journal = $this->makeJournal();
+        $result = $this->planToCompletion($journal, $index);
+
+        $this->assertPlanningCounts(2, 0, $result);
         $this->assertSame(
-            ['index.php', 'wp-content', 'wp-content/themes/foo/style.css'],
+            ['index.php', 'wp-content/themes/foo/style.css'],
             $this->listPaths($journal->local_paths_to_push)
         );
-        $this->assertSame([], $this->listPaths($journal->local_paths_to_delete));
+        $this->assertSame('', file_get_contents($journal->work_deletes_path));
 
-        // Pin the exact bytes: one {"path": <base64>} object per line, the
-        // .import-download-list.jsonl shape.
-        $firstLine = strtok((string) file_get_contents($journal->local_paths_to_push), "\n");
+        // Pin the positive-work representation: it remains base64-path JSONL.
+        $pathsToPush = file_get_contents($journal->local_paths_to_push);
+        $this->assertIsString($pathsToPush);
+        $firstLine = strtok($pathsToPush, "\n");
         $this->assertSame('{"path":"' . base64_encode('index.php') . '"}', $firstLine);
     }
 
-    public function testUnchangedIndexProducesEmptyLists(): void
+    public function testPlanningEnrichesEverySenderIndexEntryAndExcludesOnlyWork(): void
+    {
+        mkdir($this->docroot . '/empty');
+        mkdir($this->docroot . '/full');
+        file_put_contents($this->docroot . '/full/child.txt', 'child');
+        mkdir($this->docroot . '/private');
+        file_put_contents($this->docroot . '/private/current.txt', 'private');
+        file_put_contents($this->docroot . '/public.txt', 'public');
+
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'gone.txt' => [1, 1, 'file'],
+            'private' => [1, 0, 'dir', false],
+            'private/gone.txt' => [1, 1, 'file'],
+        ]));
+        $current = $this->writeIndex([
+            'empty' => [$this->pathCtime('empty'), 0, 'dir'],
+            'full' => [$this->pathCtime('full'), 0, 'dir'],
+            'full/child.txt' => [2, 5, 'file'],
+            'private' => [$this->pathCtime('private'), 0, 'dir'],
+            'private/current.txt' => [2, 7, 'file'],
+            'public.txt' => [2, 6, 'file'],
+        ]);
+
+        $result = $this->planToCompletion($journal, $current, ['private']);
+
+        $this->assertPlanningCounts(3, 1, $result);
+        $this->assertSame(['empty', 'full/child.txt', 'public.txt'], $this->listPaths($journal->local_paths_to_push));
+        $this->assertSame("gone.txt\0", file_get_contents($journal->work_deletes_path));
+
+        $senderEntries = $this->indexEntries($journal->sender_index_path);
+        $this->assertSame(
+            ['empty', 'full', 'full/child.txt', 'private', 'private/current.txt', 'public.txt'],
+            array_keys($senderEntries)
+        );
+        $this->assertTrue($senderEntries['empty']['empty']);
+        $this->assertFalse($senderEntries['full']['empty']);
+        $this->assertFalse($senderEntries['private']['empty']);
+        $this->assertArrayNotHasKey('empty', $senderEntries['public.txt']);
+    }
+
+    public function testUnchangedIndexProducesEmptyPlans(): void
     {
         $journal = $this->makeJournal();
         $index = $this->writeIndex([
@@ -130,12 +176,14 @@ final class PushJournalTest extends TestCase
         ]);
         $journal->capture_local_files_baseline($index);
 
-        $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($index));
+        $result = $this->planToCompletion($journal, $index);
+
+        $this->assertPlanningCounts(0, 0, $result);
         $this->assertSame([], $this->listPaths($journal->local_paths_to_push));
-        $this->assertSame([], $this->listPaths($journal->local_paths_to_delete));
+        $this->assertSame('', file_get_contents($journal->work_deletes_path));
     }
 
-    public function testCtimeSizeOrTypeChangeEachMarkThePathChanged(): void
+    public function testCtimeSizeOrTypeChangeEachMarksThePathChanged(): void
     {
         $journal = $this->makeJournal();
         $journal->capture_local_files_baseline($this->writeIndex([
@@ -144,22 +192,134 @@ final class PushJournalTest extends TestCase
             'type-swap' => [100, 5, 'file'],
             'same.txt' => [100, 5, 'file'],
         ]));
-
-        $counts = $journal->diff_local_files($this->writeIndex([
+        $current = $this->writeIndex([
             'ctime-bump.txt' => [101, 5, 'file'],
             'size-bump.txt' => [100, 6, 'file'],
             'type-swap' => [100, 5, 'link'],
             'same.txt' => [100, 5, 'file'],
-        ]));
+        ]);
 
-        $this->assertSame(['changed' => 3, 'deleted' => 0], $counts);
+        $result = $this->planToCompletion($journal, $current);
+
+        $this->assertPlanningCounts(3, 0, $result);
         $this->assertSame(
             ['ctime-bump.txt', 'size-bump.txt', 'type-swap'],
             $this->listPaths($journal->local_paths_to_push)
         );
     }
 
-    public function testNewChangedDeletedAndUnchangedTogether(): void
+    public function testEveryLogicalTypeTransitionEmitsOnlyTheRequiredDeleteAndInstallWork(): void
+    {
+        $matrix = [
+            'file' => [
+                'file' => [['value'], []],
+                'symlink' => [['value'], []],
+                'empty_directory' => [['value'], ['value']],
+                'non_empty_directory' => [['value/child.txt'], ['value']],
+            ],
+            'symlink' => [
+                'file' => [['value'], []],
+                'symlink' => [['value'], []],
+                'empty_directory' => [['value'], ['value']],
+                'non_empty_directory' => [['value/child.txt'], ['value']],
+            ],
+            'empty_directory' => [
+                'file' => [['value'], ['value']],
+                'symlink' => [['value'], ['value']],
+                'empty_directory' => [[], []],
+                'non_empty_directory' => [['value/child.txt'], []],
+            ],
+            'non_empty_directory' => [
+                'file' => [['value'], ['value']],
+                'symlink' => [['value'], ['value']],
+                'empty_directory' => [['value'], ['value']],
+                'non_empty_directory' => [['value/child.txt'], []],
+            ],
+        ];
+
+        foreach ($matrix as $previousType => $transitions) {
+            foreach ($transitions as $currentType => [$expectedPushes, $expectedDeletes]) {
+                $journal = $this->makeJournal();
+                $journal->capture_local_files_baseline($this->writeLogicalBaselineIndex($previousType, 1));
+                $current = $this->writeCurrentLogicalIndex($currentType, 2);
+
+                $result = $this->planToCompletion($journal, $current);
+                $message = $previousType . ' to ' . $currentType;
+
+                $this->assertSame($expectedPushes, $this->listPaths($journal->local_paths_to_push), $message);
+                $this->assertSame($expectedDeletes, $this->workDeletePaths($journal->work_deletes_path), $message);
+                $this->assertPlanningCounts(count($expectedPushes), count($expectedDeletes), $result, $message);
+            }
+        }
+    }
+
+    public function testDeletedSubtreeEmitsOnlyItsRootAsRawWorkDeletes(): void
+    {
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'gone' => [1, 0, 'dir', false],
+            'gone/child.txt' => [1, 1, 'file'],
+            'gone/nested' => [1, 0, 'dir', false],
+            'gone/nested/leaf.txt' => [1, 1, 'file'],
+            'stays.txt' => [1, 1, 'file'],
+        ]));
+        $current = $this->writeIndex(['stays.txt' => [1, 1, 'file']]);
+
+        $result = $this->planToCompletion($journal, $current);
+
+        $this->assertPlanningCounts(0, 1, $result);
+        $this->assertSame([], $this->listPaths($journal->local_paths_to_push));
+        $this->assertSame("gone\0", file_get_contents($journal->work_deletes_path));
+    }
+
+    public function testActiveWorkDeleteRootSurvivesAnInterleavedSiblingCheckpoint(): void
+    {
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'a' => [1, 0, 'dir', false],
+            'a/child.txt' => [1, 1, 'file'],
+        ]));
+        $entries = [];
+        for ($index = 0; $index < 1000; ++$index) {
+            // `-` sorts before `/`, placing these siblings between a and a/child.txt.
+            $entries[sprintf('a-%04d.txt', $index)] = [2, 1, 'file'];
+        }
+        $current = $this->writeIndex($entries);
+
+        $initial = $journal->diff_local_files($current, $this->docroot);
+        $this->assertInitialPlanningCheckpoint($initial);
+        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+
+        $this->assertSame('planning', $first['status']);
+        $this->assertSame([base64_encode('a')], $first['checkpoint']['active_work_delete_roots_b64']);
+        $result = $this->planToCompletion($journal, $current, [], $first['checkpoint']);
+
+        $this->assertPlanningCounts(1000, 1, $result);
+        $this->assertSame("a\0", file_get_contents($journal->work_deletes_path));
+        $this->assertCount(1000, $this->listPaths($journal->local_paths_to_push));
+    }
+
+    public function testReplacementRootSurvivesLexicallyInterleavedSiblingPaths(): void
+    {
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'a' => [1, 0, 'dir', false],
+            'a/child.txt' => [1, 1, 'file'],
+        ]));
+        $current = $this->writeIndex([
+            'a' => [2, 1, 'file'],
+            // `-` sorts before `/`, so this sibling appears before a/child.txt.
+            'a-other' => [2, 1, 'file'],
+        ]);
+
+        $result = $this->planToCompletion($journal, $current);
+
+        $this->assertPlanningCounts(2, 1, $result);
+        $this->assertSame(['a', 'a-other'], $this->listPaths($journal->local_paths_to_push));
+        $this->assertSame("a\0", file_get_contents($journal->work_deletes_path));
+    }
+
+    public function testNewChangedDeletedAndUnchangedPathsArePlannedTogether(): void
     {
         $journal = $this->makeJournal();
         $journal->capture_local_files_baseline($this->writeIndex([
@@ -167,57 +327,57 @@ final class PushJournalTest extends TestCase
             'deleted.txt' => [100, 5, 'file'],
             'unchanged.txt' => [100, 5, 'file'],
         ]));
-
-        $counts = $journal->diff_local_files($this->writeIndex([
+        $current = $this->writeIndex([
             'added.txt' => [300, 3, 'file'],
             'changed.txt' => [200, 5, 'file'],
             'unchanged.txt' => [100, 5, 'file'],
-        ]));
+        ]);
 
-        $this->assertSame(['changed' => 2, 'deleted' => 1], $counts);
-        // Output order follows the sorted index order.
+        $result = $this->planToCompletion($journal, $current);
+
+        $this->assertPlanningCounts(2, 1, $result);
+        // Output order follows decoded path order from the indexes.
         $this->assertSame(['added.txt', 'changed.txt'], $this->listPaths($journal->local_paths_to_push));
-        $this->assertSame(['deleted.txt'], $this->listPaths($journal->local_paths_to_delete));
+        $this->assertSame("deleted.txt\0", file_get_contents($journal->work_deletes_path));
     }
 
-    public function testDiffReplacesListsFromAnEarlierRun(): void
+    public function testAPlanningRunWithoutACheckpointReplacesEarlierOutput(): void
     {
         $journal = $this->makeJournal();
         $index = $this->writeIndex(['a.txt' => [100, 5, 'file']]);
 
-        // First run, no baseline: a.txt lands in local_paths_to_push.
-        $journal->diff_local_files($index);
+        $this->planToCompletion($journal, $index);
         $this->assertSame(['a.txt'], $this->listPaths($journal->local_paths_to_push));
 
-        // Capture and rerun: the old list must be replaced, not appended to.
         $journal->capture_local_files_baseline($index);
-        $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($index));
+        $result = $this->planToCompletion($journal, $index);
+
+        $this->assertPlanningCounts(0, 0, $result);
         $this->assertSame([], $this->listPaths($journal->local_paths_to_push));
-        $this->assertFileDoesNotExist($journal->local_paths_to_push . '.tmp');
-        $this->assertFileDoesNotExist($journal->local_paths_to_delete . '.tmp');
+        $this->assertSame('', file_get_contents($journal->work_deletes_path));
     }
 
-    public function testPathsThatNeedBase64SurviveTheRoundTrip(): void
+    public function testPathsThatNeedBase64SurvivePositiveAndDeletePlans(): void
     {
-        // A newline in a filename is the reason the index encodes paths at
-        // all; the non-ASCII name checks the bytes pass through untouched.
-        $weird = "wp-content/uploads/line\nbreak.png";
-        $utf8 = 'wp-content/uploads/naïve-café.jpg';
-
+        // Newlines and non-ASCII bytes are why JSONL indexes encode paths.
+        $newPath = "wp-content/uploads/line\nbreak.png";
+        $deletedPath = 'wp-content/uploads/naïve-café.jpg';
         $journal = $this->makeJournal();
-        $counts = $journal->diff_local_files($this->writeIndex([
-            $weird => [100, 5, 'file'],
-            $utf8 => [100, 6, 'file'],
+        $journal->capture_local_files_baseline($this->writeIndex([
+            $deletedPath => [100, 6, 'file'],
         ]));
+        $current = $this->writeIndex([
+            $newPath => [100, 5, 'file'],
+        ]);
 
-        $this->assertSame(['changed' => 2, 'deleted' => 0], $counts);
-        $this->assertEqualsCanonicalizing(
-            [$weird, $utf8],
-            $this->listPaths($journal->local_paths_to_push)
-        );
+        $result = $this->planToCompletion($journal, $current);
+
+        $this->assertPlanningCounts(1, 1, $result);
+        $this->assertSame([$newPath], $this->listPaths($journal->local_paths_to_push));
+        $this->assertSame($deletedPath . "\0", file_get_contents($journal->work_deletes_path));
     }
 
-    public function testDiffParsesJsonWithoutDependingOnFieldOrderOrEscaping(): void
+    public function testPlanningParsesJsonWithoutDependingOnFieldOrderOrEscaping(): void
     {
         $journal = $this->makeJournal();
         $path = 'wp-content/???';
@@ -233,19 +393,245 @@ final class PushJournalTest extends TestCase
             $current,
             json_encode(['type' => 'file', 'size' => 5, 'ctime' => 100, 'path' => $base64Path], JSON_THROW_ON_ERROR) . "\n"
         );
-
         $journal->capture_local_files_baseline($baseline);
 
-        $this->assertSame(['changed' => 0, 'deleted' => 0], $journal->diff_local_files($current));
+        $result = $this->planToCompletion($journal, $current);
+
+        $this->assertPlanningCounts(0, 0, $result);
         $this->assertSame([], $this->listPaths($journal->local_paths_to_push));
-        $this->assertSame([], $this->listPaths($journal->local_paths_to_delete));
+        $this->assertSame('', file_get_contents($journal->work_deletes_path));
     }
 
-    public function testDiffRejectsLinesTheIndexWritersDoNotProduce(): void
+    // ------------------------------------------------------------------
+    //  Bounded progress and restart
+    // ------------------------------------------------------------------
+
+    public function testInitializationPinsTheIndexWithoutConsumingAndClearsOldOutput(): void
     {
-        // A blank line means the file is not a JSONL index and the diff
-        // stops instead of silently skipping a possibly-corrupt entry.
         $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'gone.txt' => [1, 1, 'file'],
+        ]));
+        $oldIndex = $this->writeIndex(['old.txt' => [1, 1, 'file']]);
+        $this->planToCompletion($journal, $oldIndex);
+        $this->assertGreaterThan(0, filesize($journal->sender_index_path));
+        $this->assertGreaterThan(0, filesize($journal->local_paths_to_push));
+        $this->assertGreaterThan(0, filesize($journal->work_deletes_path));
+
+        $current = $this->writeIndex($this->manyFileEntries(1001));
+        $initial = $journal->diff_local_files($current, $this->docroot);
+
+        $this->assertInitialPlanningCheckpoint($initial);
+        $this->assertSame(filesize($current), $initial['checkpoint']['current_index_identity']['size']);
+        $this->assertSame(0, filesize($journal->sender_index_path));
+        $this->assertSame(0, filesize($journal->local_paths_to_push));
+        $this->assertSame(0, filesize($journal->work_deletes_path));
+    }
+
+    public function testInitializationRejectsAReplacementBeforeTheFirstBatch(): void
+    {
+        $current = $this->tempDir . '/current-index.jsonl';
+        copy($this->writeIndex(['value.txt' => [1, 1, 'file']]), $current);
+        $journal = $this->makeJournal();
+        $initial = $journal->diff_local_files($current, $this->docroot);
+        $this->assertInitialPlanningCheckpoint($initial);
+
+        // Simulate a process dying after it persisted the empty checkpoint.
+        // Even identical replacement bytes belong to a different generation.
+        $replacement = $this->tempDir . '/replacement-index.jsonl';
+        copy($current, $replacement);
+        rename($replacement, $current);
+        clearstatcache(true, $current);
+
+        $changed = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+
+        $this->assertSame('source_changed', $changed['status']);
+        $this->assertSame($initial['checkpoint'], $changed['checkpoint']);
+        $this->assertSame(0, filesize($journal->sender_index_path));
+        $this->assertSame(0, filesize($journal->local_paths_to_push));
+        $this->assertSame(0, filesize($journal->work_deletes_path));
+    }
+
+    public function testPlanningStopsAfterItsFixedRecordBudgetAndResumes(): void
+    {
+        $entries = $this->manyFileEntries(1001);
+        $current = $this->writeIndex($entries);
+        $journal = $this->makeJournal();
+
+        $initial = $journal->diff_local_files($current, $this->docroot);
+        $this->assertInitialPlanningCheckpoint($initial);
+        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+
+        $this->assertSame('planning', $first['status']);
+        $checkpoint = $first['checkpoint'];
+        $this->assertSame(1000, $checkpoint['changed']);
+        $this->assertGreaterThan(0, $checkpoint['current_index_byte_offset']);
+        $this->assertLessThan(filesize($current), $checkpoint['current_index_byte_offset']);
+        $this->assertSame(0, $checkpoint['baseline_byte_offset']);
+        $this->assertSame([], $checkpoint['active_work_delete_roots_b64']);
+        $this->assertEqualsCanonicalizing(
+            ['device', 'inode', 'size', 'ctime', 'mtime'],
+            array_keys($checkpoint['current_index_identity'])
+        );
+        $this->assertSame(filesize($journal->sender_index_path), $checkpoint['sender_index_bytes']);
+        $this->assertSame(filesize($journal->local_paths_to_push), $checkpoint['local_paths_to_push_bytes']);
+        $this->assertSame(filesize($journal->work_deletes_path), $checkpoint['work_deletes_bytes']);
+
+        $result = $this->planToCompletion($journal, $current, [], $checkpoint);
+
+        $this->assertPlanningCounts(1001, 0, $result);
+        $this->assertCount(1001, $this->listPaths($journal->local_paths_to_push));
+        $this->assertCount(1001, $this->indexEntries($journal->sender_index_path));
+    }
+
+    public function testRestartTruncatesAndReplaysOutputWhoseCheckpointWasDiscarded(): void
+    {
+        $currentEntries = [];
+        $baselineEntries = [];
+        for ($index = 0; $index < 2001; ++$index) {
+            // The current and deleted names alternate in decoded sort order,
+            // so every batch appends to all three planning outputs.
+            $currentEntries[sprintf('item-%04d-current.txt', $index)] = [$index + 1, 1, 'file'];
+            $baselineEntries[sprintf('item-%04d-deleted.txt', $index)] = [$index + 1, 1, 'file'];
+        }
+        $current = $this->writeIndex($currentEntries);
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex($baselineEntries));
+
+        $initial = $journal->diff_local_files($current, $this->docroot);
+        $this->assertInitialPlanningCheckpoint($initial);
+        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+        $this->assertSame('planning', $first['status']);
+        $durableCheckpoint = $first['checkpoint'];
+
+        // These writes reached disk, but the caller dies before persisting the
+        // returned checkpoint. A new process must discard and replay this tail.
+        $discarded = $journal->diff_local_files($current, $this->docroot, [], $durableCheckpoint);
+        $this->assertSame('planning', $discarded['status']);
+        $this->assertGreaterThan(
+            $durableCheckpoint['sender_index_bytes'],
+            filesize($journal->sender_index_path)
+        );
+        $this->assertGreaterThan(
+            $durableCheckpoint['local_paths_to_push_bytes'],
+            filesize($journal->local_paths_to_push)
+        );
+        $this->assertGreaterThan(
+            $durableCheckpoint['work_deletes_bytes'],
+            filesize($journal->work_deletes_path)
+        );
+
+        $reopened = $this->makeJournal();
+        $replayed = $reopened->diff_local_files($current, $this->docroot, [], $durableCheckpoint);
+        $this->assertSame($discarded, $replayed);
+        $result = $this->planToCompletion($reopened, $current, [], $replayed['checkpoint']);
+
+        $this->assertPlanningCounts(2001, 2001, $result);
+        $this->assertSame(array_keys($currentEntries), $this->listPaths($reopened->local_paths_to_push));
+        $this->assertSame(array_keys($baselineEntries), $this->workDeletePaths($reopened->work_deletes_path));
+        $this->assertCount(2001, $this->indexEntries($reopened->sender_index_path));
+    }
+
+    public function testCheckpointedProgressAndCompletedEofAreIdempotentAfterRestart(): void
+    {
+        $current = $this->writeIndex($this->manyFileEntries(1001));
+        $journal = $this->makeJournal();
+        $initial = $journal->diff_local_files($current, $this->docroot);
+        $this->assertInitialPlanningCheckpoint($initial);
+        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+        $this->assertSame('planning', $first['status']);
+
+        $reopened = $this->makeJournal();
+        $complete = $reopened->diff_local_files($current, $this->docroot, [], $first['checkpoint']);
+        $this->assertSame('complete', $complete['status']);
+        $senderIndex = file_get_contents($reopened->sender_index_path);
+        $pathsToPush = file_get_contents($reopened->local_paths_to_push);
+        $workDeletes = file_get_contents($reopened->work_deletes_path);
+
+        $replayedEof = $this->makeJournal()->diff_local_files(
+            $current,
+            $this->docroot,
+            [],
+            $complete['checkpoint']
+        );
+
+        $this->assertSame($complete, $replayedEof);
+        $this->assertSame($senderIndex, file_get_contents($reopened->sender_index_path));
+        $this->assertSame($pathsToPush, file_get_contents($reopened->local_paths_to_push));
+        $this->assertSame($workDeletes, file_get_contents($reopened->work_deletes_path));
+    }
+
+    public function testReplacingTheCurrentIndexBetweenCheckpointsReturnsSourceChanged(): void
+    {
+        $current = $this->tempDir . '/current-index.jsonl';
+        $source = $this->writeIndex($this->manyFileEntries(1001));
+        copy($source, $current);
+        $journal = $this->makeJournal();
+        $initial = $journal->diff_local_files($current, $this->docroot);
+        $this->assertInitialPlanningCheckpoint($initial);
+        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+        $this->assertSame('planning', $first['status']);
+
+        // Keep the same bytes so device/inode identity, rather than content or
+        // length, proves that a different index generation was installed.
+        $replacement = $this->tempDir . '/replacement-index.jsonl';
+        copy($current, $replacement);
+        rename($replacement, $current);
+        clearstatcache(true, $current);
+
+        $changed = $journal->diff_local_files($current, $this->docroot, [], $first['checkpoint']);
+
+        $this->assertSame('source_changed', $changed['status']);
+        $this->assertSame($first['checkpoint'], $changed['checkpoint']);
+    }
+
+    public function testDirectoryTypeDriftAfterACheckpointReturnsSourceChanged(): void
+    {
+        mkdir($this->docroot . '/value');
+        $entries = $this->manyFileEntries(1000);
+        $entries['value'] = [$this->pathCtime('value'), 0, 'dir'];
+        $current = $this->writeIndex($entries);
+        $journal = $this->makeJournal();
+        $initial = $journal->diff_local_files($current, $this->docroot);
+        $this->assertInitialPlanningCheckpoint($initial);
+        $first = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+        $this->assertSame('planning', $first['status']);
+
+        rmdir($this->docroot . '/value');
+        file_put_contents($this->docroot . '/value', 'now a file');
+        clearstatcache(true, $this->docroot . '/value');
+
+        $changed = $journal->diff_local_files($current, $this->docroot, [], $first['checkpoint']);
+
+        $this->assertSame('source_changed', $changed['status']);
+        $this->assertSame($first['checkpoint'], $changed['checkpoint']);
+    }
+
+    public function testDirectoryCtimeDriftReturnsSourceChanged(): void
+    {
+        mkdir($this->docroot . '/value');
+        $current = $this->writeIndex([
+            'value' => [$this->pathCtime('value') + 10, 0, 'dir'],
+        ]);
+
+        $journal = $this->makeJournal();
+        $initial = $journal->diff_local_files($current, $this->docroot);
+        $this->assertInitialPlanningCheckpoint($initial);
+        $changed = $journal->diff_local_files($current, $this->docroot, [], $initial['checkpoint']);
+
+        $this->assertSame('source_changed', $changed['status']);
+        $this->assertSame(0, $changed['checkpoint']['changed']);
+        $this->assertSame(0, $changed['checkpoint']['current_index_byte_offset']);
+    }
+
+    // ------------------------------------------------------------------
+    //  Invalid input
+    // ------------------------------------------------------------------
+
+    public function testPlanningRejectsLinesTheIndexWritersDoNotProduce(): void
+    {
+        // A blank line means the file is not a JSONL index and planning stops
+        // instead of silently skipping a possibly corrupt entry.
         $garbage = $this->tempDir . '/garbage.jsonl';
         file_put_contents(
             $garbage,
@@ -254,25 +640,40 @@ final class PushJournalTest extends TestCase
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('not valid JSON');
-        $journal->diff_local_files($garbage);
+        $this->planToCompletion($this->makeJournal(), $garbage);
     }
 
-    public function testDiffRejectsAnUndecodablePath(): void
+    public function testPlanningRejectsAnUndecodablePath(): void
     {
-        $journal = $this->makeJournal();
         $bad = $this->tempDir . '/bad-path.jsonl';
         file_put_contents($bad, '{"path":"%%%not-base64%%%","ctime":1,"size":1,"type":"file"}' . "\n");
 
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('Invalid index path');
-        $journal->diff_local_files($bad);
+        $this->planToCompletion($this->makeJournal(), $bad);
     }
 
-    public function testDiffRequiresTheCurrentIndexToExist(): void
+    public function testPlanningRejectsABaselineDirectoryWithoutEmptyState(): void
+    {
+        mkdir($this->docroot . '/value');
+        $journal = $this->makeJournal();
+        $journal->capture_local_files_baseline($this->writeIndex([
+            'value' => [1, 0, 'dir'],
+        ]));
+        $current = $this->writeIndex([
+            'value' => [$this->pathCtime('value'), 0, 'dir'],
+        ]);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('empty');
+        $this->planToCompletion($journal, $current);
+    }
+
+    public function testPlanningRequiresTheCurrentIndexToExist(): void
     {
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('current index file is missing');
-        $this->makeJournal()->diff_local_files($this->tempDir . '/no-such-index.jsonl');
+        $this->makeJournal()->diff_local_files($this->tempDir . '/no-such-index.jsonl', $this->docroot);
     }
 
     // ------------------------------------------------------------------
@@ -285,52 +686,242 @@ final class PushJournalTest extends TestCase
     }
 
     /**
-     * Write a sorted index file. Entries map path => [ctime, size, type];
-     * the helper sorts by path bytes, matching how real index files are
-     * stored.
+     * Continue planning until the journal reports that all input was consumed.
      *
-     * @param array<string, array{0: int, 1: int, 2: string}> $entries
+     * @param list<string> $excludedPaths Raw document-root-relative paths.
+     * @param array<string,mixed>|null $checkpoint Last durable planning boundary.
+     * @return array{status:string,checkpoint:array<string,mixed>}
+     */
+    private function planToCompletion(
+        PushJournal $journal,
+        string $currentIndex,
+        array $excludedPaths = [],
+        ?array $checkpoint = null
+    ): array {
+        for ($step = 0; $step < 100; ++$step) {
+            $result = $journal->diff_local_files($currentIndex, $this->docroot, $excludedPaths, $checkpoint);
+            if ($result['status'] === 'complete') {
+                return $result;
+            }
+            $this->assertSame('planning', $result['status']);
+            $checkpoint = $result['checkpoint'];
+        }
+        $this->fail('Planning did not complete within 100 bounded steps.');
+    }
+
+    private function assertPlanningCounts(
+        int $changed,
+        int $deleted,
+        array $result,
+        string $message = ''
+    ): void {
+        $this->assertSame($changed, $result['checkpoint']['changed'], $message);
+        $this->assertSame($deleted, $result['checkpoint']['deleted'], $message);
+    }
+
+    private function assertInitialPlanningCheckpoint(array $result): void
+    {
+        $this->assertSame('planning', $result['status']);
+        $checkpoint = $result['checkpoint'];
+        foreach (
+            [
+                'current_index_byte_offset',
+                'baseline_byte_offset',
+                'sender_index_bytes',
+                'local_paths_to_push_bytes',
+                'work_deletes_bytes',
+                'changed',
+                'deleted',
+            ] as $zeroValue
+        ) {
+            $this->assertSame(0, $checkpoint[$zeroValue], $zeroValue);
+        }
+        $this->assertSame([], $checkpoint['active_work_delete_roots_b64']);
+        $this->assertEqualsCanonicalizing(
+            ['device', 'inode', 'size', 'ctime', 'mtime'],
+            array_keys($checkpoint['current_index_identity'])
+        );
+    }
+
+    private function writeLogicalBaselineIndex(string $logicalType, int $version): string
+    {
+        if ($logicalType === 'file') {
+            return $this->writeIndex(['value' => [$version, $version, 'file']]);
+        }
+        if ($logicalType === 'symlink') {
+            return $this->writeIndex(['value' => [$version, 0, 'link']]);
+        }
+        if ($logicalType === 'empty_directory') {
+            return $this->writeIndex(['value' => [$version, 0, 'dir', true]]);
+        }
+        return $this->writeIndex([
+            'value' => [$version, 0, 'dir', false],
+            'value/child.txt' => [$version, $version, 'file'],
+        ]);
+    }
+
+    private function writeCurrentLogicalIndex(string $logicalType, int $version): string
+    {
+        $this->clearDocroot();
+        if ($logicalType === 'file') {
+            file_put_contents($this->docroot . '/value', 'file-' . $version);
+            return $this->writeIndex([
+                'value' => [$this->pathCtime('value'), filesize($this->docroot . '/value'), 'file'],
+            ]);
+        }
+        if ($logicalType === 'symlink') {
+            symlink('target-' . $version, $this->docroot . '/value');
+            return $this->writeIndex([
+                'value' => [$this->pathCtime('value'), 0, 'link'],
+            ]);
+        }
+        if ($logicalType === 'empty_directory') {
+            mkdir($this->docroot . '/value');
+            return $this->writeIndex([
+                'value' => [$this->pathCtime('value'), 0, 'dir'],
+            ]);
+        }
+        mkdir($this->docroot . '/value');
+        file_put_contents($this->docroot . '/value/child.txt', 'child-' . $version);
+        return $this->writeIndex([
+            'value' => [$this->pathCtime('value'), 0, 'dir'],
+            'value/child.txt' => [
+                $this->pathCtime('value/child.txt'),
+                filesize($this->docroot . '/value/child.txt'),
+                'file',
+            ],
+        ]);
+    }
+
+    /** @return array<string,array{0:int,1:int,2:string}> */
+    private function manyFileEntries(int $count): array
+    {
+        $entries = [];
+        for ($index = 0; $index < $count; ++$index) {
+            $entries[sprintf('file-%04d.txt', $index)] = [$index + 1, 1, 'file'];
+        }
+        return $entries;
+    }
+
+    /**
+     * Write a sorted index. Entries map path to ctime, size, type, and the
+     * optional empty flag carried only by enriched baseline directories.
+     *
+     * @param array<string,array{0:int,1:int,2:string,3?:bool}> $entries
      */
     private function writeIndex(array $entries): string
     {
         uksort($entries, 'strcmp');
         $lines = '';
-        foreach ($entries as $path => [$ctime, $size, $type]) {
-            $lines .= $this->indexLine($path, $ctime, $size, $type) . "\n";
+        foreach ($entries as $path => $entry) {
+            $lines .= $this->indexLine(
+                $path,
+                $entry[0],
+                $entry[1],
+                $entry[2],
+                $entry[3] ?? null
+            ) . "\n";
         }
         $file = $this->tempDir . '/index-' . uniqid() . '.jsonl';
         file_put_contents($file, $lines);
         return $file;
     }
 
-    private function indexLine(string $path, int $ctime, int $size, string $type): string
-    {
-        // Match the real index writers so fixtures use production-shaped JSON.
-        return json_encode(
-            ['path' => base64_encode($path), 'ctime' => $ctime, 'size' => $size, 'type' => $type],
-            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-        );
+    private function indexLine(
+        string $path,
+        int $ctime,
+        int $size,
+        string $type,
+        ?bool $directoryIsEmpty = null
+    ): string {
+        // Match production index fields; only the sender index adds `empty`.
+        $entry = ['path' => base64_encode($path), 'ctime' => $ctime, 'size' => $size, 'type' => $type];
+        if ($directoryIsEmpty !== null) {
+            $entry['empty'] = $directoryIsEmpty;
+        }
+        return json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
     }
 
     /**
-     * Decode a {"path": <base64>} JSONL list.
+     * Decode a positive-work JSONL list.
      *
      * @return list<string>
      */
     private function listPaths(string $file): array
     {
         $this->assertFileExists($file);
+        $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $this->assertIsArray($lines);
         $paths = [];
-        foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        foreach ($lines as $line) {
             $data = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-            $paths[] = base64_decode($data['path'], true);
+            $path = base64_decode($data['path'], true);
+            $this->assertIsString($path);
+            $paths[] = $path;
         }
         return $paths;
     }
 
+    /** @return list<string> */
+    private function workDeletePaths(string $file): array
+    {
+        $this->assertFileExists($file);
+        $bytes = file_get_contents($file);
+        $this->assertIsString($bytes);
+        if ($bytes === '') {
+            return [];
+        }
+        $paths = explode("\0", $bytes);
+        $this->assertSame('', array_pop($paths), 'The work-delete stream must end at a NUL record boundary.');
+        return $paths;
+    }
+
+    /** @return array<string,array<string,mixed>> Entries keyed by decoded path. */
+    private function indexEntries(string $file): array
+    {
+        $this->assertFileExists($file);
+        $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $this->assertIsArray($lines);
+        $entries = [];
+        foreach ($lines as $line) {
+            $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+            $path = base64_decode($entry['path'], true);
+            $this->assertIsString($path);
+            $entries[$path] = $entry;
+        }
+        return $entries;
+    }
+
+    private function pathCtime(string $relativePath): int
+    {
+        $path = $this->docroot . '/' . $relativePath;
+        clearstatcache(true, $path);
+        $stat = lstat($path);
+        $this->assertIsArray($stat);
+        return (int) $stat['ctime'];
+    }
+
+    private function clearDocroot(): void
+    {
+        foreach (scandir($this->docroot) as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            $path = $this->docroot . '/' . $item;
+            if (is_dir($path) && !is_link($path)) {
+                $this->recursiveDelete($path);
+                continue;
+            }
+            unlink($path);
+        }
+    }
+
     private function recursiveDelete(string $dir): void
     {
-        if (!is_dir($dir)) {
+        if (!is_dir($dir) || is_link($dir)) {
+            if (is_link($dir) || is_file($dir)) {
+                unlink($dir);
+            }
             return;
         }
         foreach (scandir($dir) as $item) {
