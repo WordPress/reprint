@@ -19,6 +19,8 @@ use Reprint\Importer\FileSync\FileFetchResponseObserver;
 use Reprint\Importer\FileSync\FetchListBuilder;
 use Reprint\Importer\FileSync\FetchListBuildContext;
 use Reprint\Importer\FileSync\FilePlacementRules;
+use Reprint\Importer\FileSync\IndexResponseHandler;
+use Reprint\Importer\FileSync\IndexResponseObserver;
 use Reprint\Importer\FileSync\LocalFileApplyContext;
 use Reprint\Importer\FileSync\LocalFilesystemAuditLogger;
 use Reprint\Importer\FileSync\LocalFilesystemOperator;
@@ -68,6 +70,7 @@ require_once __DIR__ . '/lib/file-sync/interface-local-file-apply-context.php';
 require_once __DIR__ . '/lib/file-sync/interface-local-filesystem-audit-logger.php';
 require_once __DIR__ . '/lib/file-sync/interface-file-fetch-response-observer.php';
 require_once __DIR__ . '/lib/file-sync/interface-fetch-list-build-context.php';
+require_once __DIR__ . '/lib/file-sync/interface-index-response-observer.php';
 require_once __DIR__ . '/lib/file-sync/class-download-list.php';
 require_once __DIR__ . '/lib/file-sync/class-file-placement-rules.php';
 require_once __DIR__ . '/lib/file-sync/class-local-filesystem-operator.php';
@@ -76,6 +79,7 @@ require_once __DIR__ . '/lib/file-sync/class-directory-chunk-applier.php';
 require_once __DIR__ . '/lib/file-sync/class-symlink-chunk-applier.php';
 require_once __DIR__ . '/lib/file-sync/class-file-fetch-response-handler.php';
 require_once __DIR__ . '/lib/file-sync/class-fetch-list-builder.php';
+require_once __DIR__ . '/lib/file-sync/class-index-response-handler.php';
 
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
@@ -699,7 +703,7 @@ class AdaptiveTuner
     }
 }
 
-class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, LocalFilesystemAuditLogger, FileFetchResponseObserver, FetchListBuildContext
+class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, LocalFilesystemAuditLogger, FileFetchResponseObserver, FetchListBuildContext, IndexResponseObserver
 {
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
@@ -1304,6 +1308,45 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
     public function recordFetchListAudit(string $message, bool $toConsole = true): void
     {
         $this->audit_log($message, $toConsole);
+    }
+
+    public function shouldStopIndexDownload(): bool
+    {
+        return $this->shutdown_requested;
+    }
+
+    public function saveIndexDownloadCursor(?string $cursor): void
+    {
+        $this->import_state()->index->cursor = $cursor;
+        $this->save_state($this->state);
+    }
+
+    public function handleIndexMetadata(array $chunk, StreamingContext $context): void
+    {
+        $this->handle_metadata_chunk($chunk, $context);
+    }
+
+    public function handleIndexError(array $chunk, string $phase, StreamingContext $context): void
+    {
+        $this->handle_error_chunk($chunk, $phase, $context);
+    }
+
+    public function handleIndexProgress(array $chunk, string $phase): void
+    {
+        $this->handle_progress($chunk, $phase);
+    }
+
+    public function showIndexScanProgress(int $entriesCounted): void
+    {
+        if ($entriesCounted > 0) {
+            $this->progress->show_progress_line(
+                "Scanning remote files — " .
+                number_format($entriesCounted) . " scanned"
+            );
+            return;
+        }
+
+        $this->progress->show_progress_line("Scanning remote files");
     }
 
     /**
@@ -6813,9 +6856,6 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
             throw new RuntimeException("Failed to open remote index file");
         }
 
-        $complete = false;
-        $chunks_since_save = 0;
-
         $export_dirs = $this->get_export_directories();
         $params = $this->get_tuned_params("file_index");
 
@@ -6853,148 +6893,23 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
         $url = $this->build_url("file_index", $cursor, $params);
         $context = new StreamingContext();
 
-        $context->on_chunk = function ($chunk) use (
-            &$cursor,
-            &$complete,
-            &$chunks_since_save,
+        $response_handler = new IndexResponseHandler(
             $handle,
-            $context
-        ) {
-            if ($this->shutdown_requested) {
-                throw new RuntimeException("Shutdown requested");
-            }
-
-            if (function_exists("pcntl_signal_dispatch")) {
-                pcntl_signal_dispatch();
-            }
-
-            $chunks_since_save++;
-            if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                $this->import_state()->index->cursor = $cursor;
-                $this->save_state($this->state);
-                $chunks_since_save = 0;
-            }
-
-            if (isset($chunk["headers"]["x-cursor"])) {
-                $cursor = $chunk["headers"]["x-cursor"];
-            }
-
-            $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
-
-            if ($chunk_type === "index_batch") {
-                $body = $chunk["body"] ?? "";
-                if ($body === "") {
-                    return;
-                }
-                $items = json_decode($body, true);
-                if (!is_array($items)) {
-                    throw new RuntimeException(
-                        "Invalid index batch JSON received from server",
-                    );
-                }
-                foreach ($items as $item) {
-                    if (!is_array($item)) {
-                        continue;
-                    }
-                    $path_encoded = $item["path"] ?? "";
-                    if (!is_string($path_encoded) || $path_encoded === "") {
-                        throw new RuntimeException(
-                            "Invalid index batch item: missing path",
-                        );
-                    }
-                    $path = base64_decode($path_encoded, true);
-                    if ($path === "" || $path === false) {
-                        throw new RuntimeException(
-                            "Invalid index batch item: path base64 decode failed",
-                        );
-                    }
-                    assert_valid_path(
-                        $path,
-                        "index batch path",
-                    );
-                    $ctime = (int) ($item["ctime"] ?? 0);
-                    $size = (int) ($item["size"] ?? 0);
-                    $type = (string) ($item["type"] ?? "file");
-
-                    $entry = [
-                        "path" => base64_encode($path),
-                        "ctime" => $ctime,
-                        "size" => $size,
-                        "type" => $type,
-                    ];
-                    if (isset($item["target"]) && is_string($item["target"]) && $item["target"] !== "") {
-                        $entry["target"] = $item["target"]; // already base64-encoded
-                    }
-                    if (!empty($item["intermediate"])) {
-                        $entry["intermediate"] = true;
-                    }
-                    if (array_key_exists("empty", $item) && !is_bool($item["empty"])) {
-                        throw new RuntimeException(
-                            "Invalid index batch item: empty must be a boolean, received "
-                            . json_encode($item["empty"]),
-                        );
-                    }
-                    if (isset($item["empty"])) {
-                        $entry["empty"] = $item["empty"];
-                    }
-                    $line = json_encode(
-                        $entry,
-                        JSON_UNESCAPED_SLASHES,
-                    );
-                    if ($line === false) {
-                        continue;
-                    }
-                    $bytes = fwrite($handle, $line . "\n");
-                    if ($bytes === false) {
-                        throw new RuntimeException("Failed to write to remote index file (disk full?)");
-                    }
-                    $this->index_entries_counted++;
-                }
-                if ($this->index_entries_counted > 0) {
-                    $this->progress->show_progress_line(
-                        "Scanning remote files — " .
-                        number_format($this->index_entries_counted) . " scanned"
-                    );
-                } else {
-                    $this->progress->show_progress_line("Scanning remote files");
-                }
-            } elseif ($chunk_type === "progress") {
-                $this->handle_progress($chunk, "index");
-            } elseif ($chunk_type === "metadata") {
-                $this->handle_metadata_chunk($chunk, $context);
-            } elseif ($chunk_type === "completion") {
-                $complete =
-                    ($chunk["headers"]["x-status"] ?? "") === "complete";
-                $context->saw_completion = true;
-                $context->response_stats = [
-                    "status" => $chunk["headers"]["x-status"] ?? null,
-                    "entries_processed" =>
-                        isset($chunk["headers"]["x-total-entries"])
-                            ? (int) $chunk["headers"]["x-total-entries"]
-                            : null,
-                    "server_time" =>
-                        isset($chunk["headers"]["x-time-elapsed"])
-                            ? (float) $chunk["headers"]["x-time-elapsed"]
-                            : null,
-                    "memory_used" =>
-                        isset($chunk["headers"]["x-memory-used"])
-                            ? (int) $chunk["headers"]["x-memory-used"]
-                            : null,
-                    "memory_limit" =>
-                        isset($chunk["headers"]["x-memory-limit"])
-                            ? (int) $chunk["headers"]["x-memory-limit"]
-                            : null,
-                ];
-            } elseif ($chunk_type === "error") {
-                $this->handle_error_chunk($chunk, "index", $context);
-            }
-        };
+            $cursor,
+            $context,
+            $this->index_entries_counted,
+            self::SAVE_STATE_EVERY_N_CHUNKS,
+            $this,
+        );
+        $context->on_chunk = $response_handler;
 
         $cursor_before = $cursor;
         $request_start = microtime(true);
         try {
             $this->fetch_streaming($url, $cursor, $context, null, "file_index");
         } catch (CurlTimeoutException $e) {
+            $cursor = $response_handler->cursor();
+            $this->index_entries_counted = $response_handler->entriesCounted();
             // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
             // with no progress, so we don't retry forever.
             $this->assert_can_retry_consecutive_timeout("file_index", $cursor_before, $cursor);
@@ -7004,6 +6919,9 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
             $this->save_state($this->state);
             return false;
         }
+        $cursor = $response_handler->cursor();
+        $complete = $response_handler->complete();
+        $this->index_entries_counted = $response_handler->entriesCounted();
         $this->import_state()->consecutive_timeouts = 0;
         $wall_time = microtime(true) - $request_start;
         $this->finalize_tuned_request(
@@ -7237,30 +7155,6 @@ class ImportClient implements SqlDomainAuditLogger, LocalFileApplyContext, Local
             return null;
         }
         return rtrim($basedir, "/") . "/";
-    }
-
-    /**
-     * Check whether a remote path belongs to the uploads directory.
-     *
-     * Uses the preflight-reported uploads basedir when available, otherwise
-     * falls back to matching "wp-content/uploads/" anywhere in the path.
-     */
-    private function is_uploads_path(string $path, ?string $uploads_basedir): bool
-    {
-        if ($uploads_basedir !== null) {
-            return strpos($path, $uploads_basedir) !== false;
-        }
-        // Fallback: match the conventional WordPress uploads path
-        return strpos($path, "wp-content/uploads/") !== false;
-    }
-
-    /**
-     * Append a path to the download list file.
-     */
-    private function append_download_list(string $path, $handle): void
-    {
-        DownloadList::appendPath($path, $handle);
-        $this->audit_log("Added to the download list: {$path}", false);
     }
 
     /**
