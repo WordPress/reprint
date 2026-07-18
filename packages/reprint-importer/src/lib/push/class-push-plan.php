@@ -42,8 +42,8 @@
  * ## Durability and memory
  *
  * The sender copies the fresh local index into plan-owned state before
- * `start()`. Each step merges one path, flushes both path lists, and atomically
- * publishes the next cursor.
+ * `start()`. Each step merges one path, flushes the plan output changed by that
+ * step, and atomically publishes the next cursor.
  * `resume()` discards bytes written beyond the saved output offsets and
  * continues from the saved index offsets, so an interrupted step cannot leave
  * duplicate durable entries.
@@ -391,6 +391,9 @@ class PushPlan
         $local_paths_to_push_count = $this->cursor["local_paths_to_push_count"];
         $local_paths_to_delete_count = $this->cursor["local_paths_to_delete_count"];
         $deleted_directory_stack_top_byte_offset = $this->cursor["deleted_directory_stack_top_byte_offset"];
+        $local_paths_to_push_changed = false;
+        $local_paths_to_delete_changed = false;
+        $deleted_directories_stack_changed = false;
 
         if (!$this->fresh_local_index_entry_loaded) {
             $this->fresh_local_index_entry = $this->parse_next_index_entry($this->fresh_local_index_handle);
@@ -453,6 +456,7 @@ class PushPlan
                     && !$this->path_conflicts_with_excluded_paths($entry_fresh_index["path"])
                 ) {
                     $this->append_local_path_to_push($entry_fresh_index);
+                    $local_paths_to_push_changed = true;
                     ++$local_paths_to_push_count;
                 }
             } elseif ($path_comparison > 0) {
@@ -466,12 +470,14 @@ class PushPlan
                     )
                 ) {
                     $this->append_local_path_to_delete($entry_previous_index["path"]);
+                    $local_paths_to_delete_changed = true;
                     ++$local_paths_to_delete_count;
                     if ($local_index_at_previous_push_shape === "non_empty_directory") {
                         $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
                             $entry_previous_index["path"],
                             $deleted_directory_stack_top_byte_offset
                         );
+                        $deleted_directories_stack_changed = true;
                     }
                 }
             } else {
@@ -504,16 +510,19 @@ class PushPlan
                     )
                 ) {
                     $this->append_local_path_to_delete($entry_previous_index["path"]);
+                    $local_paths_to_delete_changed = true;
                     ++$local_paths_to_delete_count;
                     if ($local_index_at_previous_push_shape === "non_empty_directory") {
                         $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
                             $entry_previous_index["path"],
                             $deleted_directory_stack_top_byte_offset
                         );
+                        $deleted_directories_stack_changed = true;
                     }
                 }
                 if ($needs_push && !$path_is_excluded) {
                     $this->append_local_path_to_push($entry_fresh_index);
+                    $local_paths_to_push_changed = true;
                     ++$local_paths_to_push_count;
                 }
             }
@@ -531,9 +540,9 @@ class PushPlan
         }
 
         if (
-            !fflush($this->local_paths_to_push_handle)
-            || !fflush($this->local_paths_to_delete_handle)
-            || !fflush($this->deleted_directories_stack_handle)
+            ( $local_paths_to_push_changed && !fflush($this->local_paths_to_push_handle) )
+            || ( $local_paths_to_delete_changed && !fflush($this->local_paths_to_delete_handle) )
+            || ( $deleted_directories_stack_changed && !fflush($this->deleted_directories_stack_handle) )
         ) {
             throw new RuntimeException("Failed to flush a push-plan output.");
         }
