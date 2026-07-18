@@ -69,7 +69,7 @@
  *
  * ## Streaming and durability
  *
- * Each positive-work or deletion step sends at most one multipart part and
+ * Each local-path upload or deletion step sends at most one multipart part and
  * holds at most one bounded payload string. Multipart bytes leave for the
  * network before `send_part()` returns. Sender state and PushPlan's cursor are
  * written atomically, and a per-site lock permits only one open sender at a
@@ -296,7 +296,7 @@ final class PushFilesSender
                 $result = $this->next_plan_step($this->state);
                 break;
             case 'pushing_paths':
-                $result = $this->next_positive_work_upload_part($this->state);
+                $result = $this->next_local_path_upload_part($this->state);
                 break;
             case 'pushing_deletes':
                 $result = $this->next_delete_list_upload_part($this->state);
@@ -421,7 +421,7 @@ final class PushFilesSender
     }
 
     /**
-     * Reconciles one selected path and sends at most one positive-work part.
+     * Reconciles one selected local path and sends at most one upload part.
      *
      * A file part contains one bounded local file chunk. A directory or symlink
      * part contains that one complete value. The selected path-list cursor
@@ -430,7 +430,7 @@ final class PushFilesSender
      * @param State $state Active state.
      * @return array<string,mixed> Result of one reconciliation or upload part.
      */
-    private function next_positive_work_upload_part(array &$state): array
+    private function next_local_path_upload_part(array &$state): array
     {
         $local_paths_to_push_path = PushPlan::local_paths_to_push_path($this->site_dir);
         $local_paths_to_push_handle = fopen($local_paths_to_push_path, 'rb');
@@ -658,7 +658,7 @@ final class PushFilesSender
             if ($local_failure_detail !== null) {
                 return $this->step_result('failed', $state, 'local_io_error', $local_failure_detail);
             }
-            return $this->step_result('failed', $state, 'request_size_exhausted', $request_size_failure_detail ?? 'The current request-body budget cannot fit one positive-work MIME part.');
+            return $this->step_result('failed', $state, 'request_size_exhausted', $request_size_failure_detail ?? 'The current request-body budget cannot fit one MIME part for a local path.');
         }
         if ($logical_value_complete) {
             $state['local_paths_to_push_byte_offset'] = $selected_local_path['next_local_paths_to_push_byte_offset'];

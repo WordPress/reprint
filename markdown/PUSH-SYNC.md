@@ -147,9 +147,9 @@ and validated against the current schema.
 record identifies the value currently being received or published, and
 `work/inflight.data` contains in-flight file bytes. Its actual size is the
 receiver-confirmed cursor. A file replayed from byte zero restarts the same
-path; a continuation must begin at that confirmed cursor. Another positive-work
-path is rejected until the in-flight work is complete. `work/deletes` is the
-corresponding durable delete queue.
+path; a continuation must begin at that confirmed cursor. An upload for another
+local path is rejected until the in-flight work is complete. `work/deletes` is
+the corresponding durable delete queue.
 
 Publication records its phase before it creates work-file parents or replaces
 the completed value. A status, upload, or commit request can therefore finish
@@ -232,7 +232,7 @@ An active push keeps these files under `<state-dir>/push/<site>/`:
 ```text
 fresh_local_index.jsonl             plan-owned fresh local index
 local_index_at_previous_push.jsonl  index published after the previous commit
-local_paths_to_push.jsonl           positive-work paths
+local_paths_to_push.jsonl           local paths to push
 local_paths_to_delete               raw NUL-delimited local paths to delete
 cursor.json                         PushPlan cursor
 sender.json                         remote sender phase and resume state
@@ -263,7 +263,7 @@ the bounded recoverable-failure count, the target part limit, and learned
 request-body sizing state. Its phases are `creating`, `planning`,
 `pushing_paths`, `pushing_deletes`, `committing`, and `removing`.
 
-Before sending the selected positive-work path, the sender asks `push_status`
+Before sending the selected local path, the sender asks `push_status`
 what the receiver has accepted for that path. A partial file resumes only when
 its current type, size, and ctime equal the local path change fields saved after
 the prior accepted part. Otherwise the sender starts that path at offset zero,
@@ -271,9 +271,10 @@ so bytes from different local file versions cannot be joined. A lost upload
 response leaves the earlier local path-list boundary in place; the next process
 checks the receiver and either advances past complete work or safely replays it.
 
-After positive work, each deletion step reads `work_deletes_bytes` and
-`work_deletes_complete` from `push_status`. Those receiver-owned values are the
-only work-delete cursor; `sender.json` does not duplicate it.
+After all local paths are pushed, each deletion step reads
+`work_deletes_bytes` and `work_deletes_complete` from `push_status`. Those
+receiver-owned values are the only work-delete cursor; `sender.json` does not
+duplicate it.
 
 The local path change fields are its current type, size, and ctime. Changed
 fields restart the same in-flight work at offset zero, so new-version bytes are
@@ -288,11 +289,11 @@ Repeated `push_commit` calls drive the receiver to `complete`. Only then does
 index; exclusions suppress remote work rather than creating a second retained
 index representation.
 
-Each positive-work or deletion step sends at most one multipart part. A file
+Each local-path upload or deletion step sends at most one multipart part. A file
 or deletion-list part contains one bounded chunk; a directory or symlink part
 contains one complete value. The sender derives Content-Length from the
 bytes actually read, closes work deletes explicitly, and never selects another
-positive-work path until the current one is complete. Recoverable target
+local path until the current one is complete. Recoverable target
 contention, offset gaps, and ambiguous transport failures are retried at a fixed
 bounded count; exhaustion returns a terminal failure rather than a final retry.
 

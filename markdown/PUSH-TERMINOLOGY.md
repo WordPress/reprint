@@ -93,7 +93,7 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | --- | --- |
 | Plan-owned fresh local index | `fresh_local_index.jsonl`, `$fresh_local_index` |
 | Local index at the previous push | `local_index_at_previous_push.jsonl`, `$local_index_at_previous_push` |
-| Positive-work path list | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
+| Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
 | PushPlan cursor | `cursor.json`, `$cursor_file` |
 | Active state | `sender.json`, `$state_path` |
