@@ -339,22 +339,22 @@ final class PushFilesSender
 
         switch ($this->state['phase']) {
             case 'creating':
-                $result = $this->create_push_session($this->state);
+                $result = $this->create_push_session();
                 break;
             case 'planning':
-                $result = $this->next_plan_step($this->state);
+                $result = $this->next_plan_step();
                 break;
             case 'pushing_paths':
-                $result = $this->upload_next_file_chunk($this->state);
+                $result = $this->upload_next_file_chunk();
                 break;
             case 'pushing_deletes':
-                $result = $this->upload_next_chunk_of_deleted_paths($this->state);
+                $result = $this->upload_next_chunk_of_deleted_paths();
                 break;
             case 'committing':
-                $result = $this->commit_push($this->state);
+                $result = $this->commit_push();
                 break;
             case 'removing':
-                $result = $this->remove_push_session($this->state);
+                $result = $this->remove_push_session();
                 break;
         }
 
@@ -375,7 +375,7 @@ final class PushFilesSender
         $close_failure = null;
         if ($this->state_before_upload_request !== null && $this->state !== null) {
             try {
-                $failure_result = $this->finish_upload_request($this->state);
+                $failure_result = $this->finish_upload_request();
                 if ($failure_result !== null) {
                     $close_failure = new RuntimeException($failure_result['detail'] ?? 'The multipart upload request failed while closing the sender.');
                 }
@@ -405,15 +405,16 @@ final class PushFilesSender
     /**
      * Creates the push session and starts PushPlan with its exclusion policy.
      *
-     * @param State $state Active state.
      * @return array<string,mixed> Durable result after the create request.
      */
-    private function create_push_session(array &$state): array
+    private function create_push_session(): array
     {
+        /** @var State $state */
+        $state =& $this->state;
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_create', [
             'push_session_id' => $state['push_session_id'],
         ], ['created']);
-        $failure_result = $this->handle_request_failure($request_result, $state);
+        $failure_result = $this->handle_request_failure($request_result);
         if ($failure_result !== null) {
             return $failure_result;
         }
@@ -462,11 +463,12 @@ final class PushFilesSender
     /**
      * Performs one PushPlan step and moves to local paths to push at plan completion.
      *
-     * @param State $state Active state.
      * @return array<string,mixed> Durable result after one bounded plan step.
      */
-    private function next_plan_step(array &$state): array
+    private function next_plan_step(): array
     {
+        /** @var State $state */
+        $state =& $this->state;
         $plan_result = $this->plan->next_step();
         if ($plan_result['status'] === 'complete') {
             $this->plan->close();
@@ -483,13 +485,14 @@ final class PushFilesSender
      * part contains that one complete value. The durable local-path-list cursor
      * advances only after the containing request is confirmed.
      *
-     * @param State $state Active state.
      * @return array<string,mixed> Result of one status check or upload part.
      */
-    private function upload_next_file_chunk(array &$state): array
+    private function upload_next_file_chunk(): array
     {
+        /** @var State $state */
+        $state =& $this->state;
         if ($this->upload_request_should_finish) {
-            $failure_result = $this->finish_upload_request($state);
+            $failure_result = $this->finish_upload_request();
             return $failure_result ?? $this->step_result('continue', $state, null, null);
         }
 
@@ -520,7 +523,7 @@ final class PushFilesSender
         $local_path_to_push = $this->local_path_to_push;
         if ($local_path_to_push === null) {
             if ($this->state_before_upload_request !== null) {
-                $failure_result = $this->finish_upload_request($state);
+                $failure_result = $this->finish_upload_request();
                 return $failure_result ?? $this->step_result('continue', $state, null, null);
             }
             $this->close_local_file_handle();
@@ -561,7 +564,7 @@ final class PushFilesSender
                 'push_session_id' => $state['push_session_id'],
                 'path_b64' => $local_path_to_push['path_b64'],
             ], ['accepted']);
-            $failure_result = $this->handle_request_failure($request_result, $state);
+            $failure_result = $this->handle_request_failure($request_result);
             if ($failure_result !== null) {
                 return $failure_result;
             }
@@ -752,7 +755,7 @@ final class PushFilesSender
                 $this->upload_request_should_finish = true;
                 return $this->step_result('continue', $state, null, null);
             }
-            $failure_result = $this->finish_upload_request($state);
+            $failure_result = $this->finish_upload_request();
             if ($failure_result !== null) {
                 return $failure_result;
             }
@@ -779,13 +782,14 @@ final class PushFilesSender
     /**
      * Reads the receiver's deletion cursor and sends at most one list part.
      *
-     * @param State $state Active state.
      * @return array<string,mixed> Result of one status check or deletion-list part.
      */
-    private function upload_next_chunk_of_deleted_paths(array &$state): array
+    private function upload_next_chunk_of_deleted_paths(): array
     {
+        /** @var State $state */
+        $state =& $this->state;
         if ($this->upload_request_should_finish) {
-            $failure_result = $this->finish_upload_request($state);
+            $failure_result = $this->finish_upload_request();
             return $failure_result ?? $this->step_result('continue', $state, null, null);
         }
 
@@ -795,7 +799,7 @@ final class PushFilesSender
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
                 'push_session_id' => $state['push_session_id'],
             ], ['accepted']);
-            $failure_result = $this->handle_request_failure($request_result, $state);
+            $failure_result = $this->handle_request_failure($request_result);
             if ($failure_result !== null) {
                 return $failure_result;
             }
@@ -900,7 +904,7 @@ final class PushFilesSender
                 $this->upload_request_should_finish = true;
                 return $this->step_result('continue', $state, null, null);
             }
-            $failure_result = $this->finish_upload_request($state);
+            $failure_result = $this->finish_upload_request();
             if ($failure_result !== null) {
                 return $failure_result;
             }
@@ -916,13 +920,14 @@ final class PushFilesSender
     /**
      * Finishes the retained upload request and publishes its local boundary.
      *
-     * @param State $state Current in-memory state after the sent parts.
      * @return array<string,mixed>|null Failure result, or null after confirmation.
      */
-    private function finish_upload_request(array &$state): ?array
+    private function finish_upload_request(): ?array
     {
+        /** @var State $state */
+        $state =& $this->state;
         $request_result = $this->push_stream_client->finish_request();
-        $failure_result = $this->handle_request_failure($request_result, $state);
+        $failure_result = $this->handle_request_failure($request_result);
         $this->upload_request_should_finish = false;
         $this->upload_request_has_parts = false;
         $this->next_file_byte_offset = null;
@@ -986,15 +991,16 @@ final class PushFilesSender
     /**
      * Requests one bounded receiver commit step and publishes a completed plan.
      *
-     * @param State $state Active state.
      * @return array<string,mixed> Commit continuation or terminal completion.
      */
-    private function commit_push(array &$state): array
+    private function commit_push(): array
     {
+        /** @var State $state */
+        $state =& $this->state;
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_commit', [
             'push_session_id' => $state['push_session_id'],
         ], ['accepted']);
-        $failure_result = $this->handle_request_failure($request_result, $state);
+        $failure_result = $this->handle_request_failure($request_result);
         if ($failure_result !== null) {
             return $failure_result;
         }
@@ -1027,15 +1033,16 @@ final class PushFilesSender
     /**
      * Removes an upload-only push session and discards its local PushPlan.
      *
-     * @param State $state Active state.
      * @return array<string,mixed> Removal continuation or terminal restart.
      */
-    private function remove_push_session(array &$state): array
+    private function remove_push_session(): array
     {
+        /** @var State $state */
+        $state =& $this->state;
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_remove', [
             'push_session_id' => $state['push_session_id'],
         ], ['accepted']);
-        $failure_result = $this->handle_request_failure($request_result, $state);
+        $failure_result = $this->handle_request_failure($request_result);
         if ($failure_result !== null) {
             return $failure_result;
         }
@@ -1257,11 +1264,12 @@ final class PushFilesSender
      * Stops the current sender run after a request failure.
      *
      * @param array{status:'complete'|'retry'|'failed',reason:string|null,detail:string|null,response:array<string,mixed>|null,parts_sent:int,body_bytes_sent:int} $request_result Classified request result.
-     * @param State $state Active state, persisted when request sizing changes.
      * @return array<string,mixed>|null Null when the request completed successfully.
      */
-    private function handle_request_failure(array $request_result, array &$state): ?array
+    private function handle_request_failure(array $request_result): ?array
     {
+        /** @var State $state */
+        $state =& $this->state;
         if ($request_result['status'] === 'complete') {
             return null;
         }
@@ -1304,7 +1312,6 @@ final class PushFilesSender
     /**
      * Atomically stores the complete active state.
      *
-     * @param State $state Active state.
      */
     private function store_state(array $state): void
     {
@@ -1369,7 +1376,6 @@ final class PushFilesSender
      * Builds one workflow result without changing durable state.
      *
      * @param 'continue'|'failed' $status Step disposition.
-     * @param State $state Active state.
      * @param string|null $reason Machine-readable classification.
      * @param string|null $detail Human-readable condition.
      * @return array{status:'continue'|'failed',phase:string,push_session_id:string,reason:string|null,detail:string|null}
