@@ -157,7 +157,8 @@ final class PushFilesSender
         $sender = new self($options);
         $sender->lock_handle = $sender->acquire_lock();
         try {
-            if ($sender->load_state() !== null) {
+            clearstatcache(true, $sender->state_path);
+            if (is_file($sender->state_path)) {
                 throw new LogicException(
                     'Cannot start a push files sender while unfinished active state exists: '
                     . $sender->state_path
