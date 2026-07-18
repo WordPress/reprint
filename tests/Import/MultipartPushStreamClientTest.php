@@ -192,6 +192,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'max_part_bytes' => 7,
             'connect_timeout' => 2,
         ]);
+        $this->assertSame(7, $client->next_file_body_bytes('bounded.bin', 100, 0));
         $this->assertTrue($client->start_upload_request(str_repeat('b', 32)));
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);

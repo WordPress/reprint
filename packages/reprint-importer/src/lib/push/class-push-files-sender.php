@@ -573,6 +573,74 @@ final class PushFilesSender
             $upload_completes_local_path = true;
         }
 
+        if ($local_path_type_size_and_ctime['type'] === 'file') {
+            $file_byte_offset = $receiver_confirmed_bytes;
+            $maximum_file_payload_bytes = $this->push_stream_client->next_file_body_bytes(
+                $local_path_to_push['path'],
+                $local_path_type_size_and_ctime['size'],
+                $file_byte_offset
+            );
+            if ($maximum_file_payload_bytes === 0) {
+                return $this->step_result(
+                    'failed',
+                    $state,
+                    'request_size_exhausted',
+                    'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.'
+                );
+            }
+
+            $payload = '';
+            if ($local_path_type_size_and_ctime['size'] > 0) {
+                $local_io_failure_detail = null;
+                if (!is_resource($this->local_file_handle)) {
+                    $this->local_file_handle = fopen(
+                        $this->docroot . '/' . $local_path_to_push['path'],
+                        'rb'
+                    );
+                }
+                if (!is_resource($this->local_file_handle)) {
+                    $local_io_failure_detail = 'Could not open the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
+                } elseif (fseek($this->local_file_handle, $file_byte_offset) !== 0) {
+                    $this->close_local_file_handle();
+                    $local_io_failure_detail = 'Could not seek to the receiver-confirmed cursor in the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
+                } else {
+                    $payload = fread($this->local_file_handle, $maximum_file_payload_bytes);
+                }
+
+                $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
+                if ($local_path_type_size_and_ctime_after_read === null) {
+                    $this->close_local_file_handle();
+                    $this->close_local_paths_to_push_handle();
+                    $state['phase'] = 'removing';
+                    $this->store_state($state);
+                    return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
+                }
+                if ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
+                    $this->close_local_file_handle();
+                    $this->close_local_paths_to_push_handle();
+                    $state['phase'] = 'removing';
+                    $this->store_state($state);
+                    return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while its file chunk was being read; remove the upload-only push session before generating another index.');
+                }
+                if ($local_io_failure_detail !== null) {
+                    return $this->step_result('failed', $state, 'local_io_error', $local_io_failure_detail);
+                }
+                if (!is_string($payload) || ( $payload === '' && $file_byte_offset < $local_path_type_size_and_ctime['size'] )) {
+                    $this->close_local_file_handle();
+                    return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.');
+                }
+            }
+
+            $upload_part = [
+                'type' => 'file',
+                'path' => $local_path_to_push['path'],
+                'total_bytes' => $local_path_type_size_and_ctime['size'],
+                'offset' => $file_byte_offset,
+                'payload' => $payload,
+            ];
+            $upload_completes_local_path = $file_byte_offset + strlen($payload) === $local_path_type_size_and_ctime['size'];
+        }
+
         if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
             return $this->step_result(
                 'failed',
@@ -582,83 +650,8 @@ final class PushFilesSender
             );
         }
 
-        $local_path_changed = false;
-        $local_path_disappeared = false;
-        $local_io_failure_detail = null;
-        $request_size_failure_detail = null;
-
-        if ($local_path_type_size_and_ctime['type'] === 'file') {
-            $file_byte_offset = $receiver_confirmed_bytes;
-            $maximum_file_payload_bytes = $this->push_stream_client->next_file_body_bytes(
-                $local_path_to_push['path'],
-                $local_path_type_size_and_ctime['size'],
-                $file_byte_offset
-            );
-            if ($maximum_file_payload_bytes === 0) {
-                $request_size_failure_detail = 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.';
-            } else {
-                $payload = '';
-                if ($local_path_type_size_and_ctime['size'] > 0) {
-                    if (!is_resource($this->local_file_handle)) {
-                        $this->local_file_handle = fopen(
-                            $this->docroot . '/' . $local_path_to_push['path'],
-                            'rb'
-                        );
-                    }
-                    if (!is_resource($this->local_file_handle)) {
-                        $local_io_failure_detail = 'Could not open the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
-                    } elseif (fseek($this->local_file_handle, $file_byte_offset) !== 0) {
-                        $this->close_local_file_handle();
-                        $local_io_failure_detail = 'Could not seek to the receiver-confirmed cursor in the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
-                    }
-                    if ($local_io_failure_detail !== null) {
-                        $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
-                        if ($local_path_type_size_and_ctime_after_read === null) {
-                            $local_path_disappeared = true;
-                        } elseif ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
-                            $local_path_changed = true;
-                        }
-                    } else {
-                        $payload = fread($this->local_file_handle, $maximum_file_payload_bytes);
-                        $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
-                        if ($local_path_type_size_and_ctime_after_read === null) {
-                            $this->close_local_file_handle();
-                            $local_path_disappeared = true;
-                        } elseif ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
-                            $this->close_local_file_handle();
-                            $local_path_changed = true;
-                        } elseif (!is_string($payload) || ( $payload === '' && $file_byte_offset < $local_path_type_size_and_ctime['size'] )) {
-                            $this->close_local_file_handle();
-                            $local_io_failure_detail = 'Could not read the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.';
-                        } else {
-                            $upload_part = [
-                                'type' => 'file',
-                                'path' => $local_path_to_push['path'],
-                                'total_bytes' => $local_path_type_size_and_ctime['size'],
-                                'offset' => $file_byte_offset,
-                                'payload' => $payload,
-                            ];
-                            $upload_completes_local_path = $file_byte_offset + strlen($payload) === $local_path_type_size_and_ctime['size'];
-                        }
-                    }
-                } else {
-                    $upload_part = [
-                        'type' => 'file',
-                        'path' => $local_path_to_push['path'],
-                        'total_bytes' => 0,
-                        'offset' => 0,
-                        'payload' => '',
-                    ];
-                    $upload_completes_local_path = true;
-                }
-            }
-        }
-
-        $part_sent = $upload_part !== null && $this->push_stream_client->send_part($upload_part);
-        if ($upload_part !== null && !$part_sent) {
-            $request_size_failure_detail = 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.';
-        }
-
+        /** @var array<string,mixed> $upload_part */
+        $part_sent = $this->push_stream_client->send_part($upload_part);
         $request_result = $this->push_stream_client->finish_request();
         $failure_result = $this->handle_request_failure($request_result, $state);
         if ($failure_result !== null) {
@@ -666,24 +659,12 @@ final class PushFilesSender
         }
         $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         if (!$part_sent) {
-            if ($local_path_disappeared) {
-                $this->close_local_paths_to_push_handle();
-                $state['phase'] = 'removing';
-            } elseif ($local_path_changed) {
-                $this->close_local_paths_to_push_handle();
-                $state['phase'] = 'removing';
-            }
-            $this->store_state($state);
-            if ($local_path_disappeared) {
-                return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
-            }
-            if ($local_path_changed) {
-                return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while its file chunk was being read; remove the upload-only push session before generating another index.');
-            }
-            if ($local_io_failure_detail !== null) {
-                return $this->step_result('failed', $state, 'local_io_error', $local_io_failure_detail);
-            }
-            return $this->step_result('failed', $state, 'request_size_exhausted', $request_size_failure_detail ?? 'The current request-body budget cannot fit one MIME part for a local path.');
+            return $this->step_result(
+                'failed',
+                $state,
+                'request_size_exhausted',
+                'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.'
+            );
         }
         if ($upload_completes_local_path) {
             $this->close_local_file_handle();
@@ -732,6 +713,16 @@ final class PushFilesSender
             $this->close_local_paths_to_delete_handle();
             return $this->step_result('failed', $state, 'local_io_error', 'Could not seek to the receiver-confirmed cursor in the local deletion list.');
         }
+        $maximum_delete_list_payload_bytes = $this->push_stream_client->next_delete_body_bytes($work_deletes_bytes);
+        if ($maximum_delete_list_payload_bytes === 0) {
+            return $this->step_result('failed', $state, 'request_size_exhausted', 'The current request-body budget cannot fit one deletion-list MIME part.');
+        }
+        $payload = fread($this->local_paths_to_delete_handle, $maximum_delete_list_payload_bytes);
+        if (!is_string($payload) || ( $payload === '' && !feof($this->local_paths_to_delete_handle) )) {
+            return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local deletion list at the receiver-confirmed cursor.');
+        }
+        $local_delete_list_complete = $payload === '';
+
         if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
             return $this->step_result(
                 'failed',
@@ -741,20 +732,12 @@ final class PushFilesSender
             );
         }
 
-        $maximum_delete_list_payload_bytes = $this->push_stream_client->next_delete_body_bytes($work_deletes_bytes);
-        $payload = $maximum_delete_list_payload_bytes > 0
-            ? fread($this->local_paths_to_delete_handle, $maximum_delete_list_payload_bytes)
-            : false;
-        $local_delete_list_complete = is_string($payload)
-            && $payload === ''
-            && feof($this->local_paths_to_delete_handle);
-        $part_sent = is_string($payload)
-            && $this->push_stream_client->send_part([
-                'type' => 'delete-list',
-                'offset' => $work_deletes_bytes,
-                'complete' => $local_delete_list_complete,
-                'payload' => $payload,
-            ]);
+        $part_sent = $this->push_stream_client->send_part([
+            'type' => 'delete-list',
+            'offset' => $work_deletes_bytes,
+            'complete' => $local_delete_list_complete,
+            'payload' => $payload,
+        ]);
         $request_result = $this->push_stream_client->finish_request();
         $failure_result = $this->handle_request_failure($request_result, $state);
         if ($failure_result !== null) {
@@ -762,9 +745,6 @@ final class PushFilesSender
         }
         $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         if (!$part_sent) {
-            if ($maximum_delete_list_payload_bytes > 0) {
-                return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local deletion list at the receiver-confirmed cursor.');
-            }
             return $this->step_result('failed', $state, 'request_size_exhausted', 'The current request-body budget cannot fit one deletion-list MIME part.');
         }
 

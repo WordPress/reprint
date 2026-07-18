@@ -430,7 +430,8 @@ class MultipartPushStreamClient
      * and remaining decoded entity-body budget after reserving worst-case MIME
      * headers and the closing boundary. The path, total size, and offset are
      * encoded exactly as send_part() will encode them. Zero means the caller
-     * should finish this request before reading more local file bytes.
+     * should finish an open request before reading more local file bytes. When
+     * no request is open, the returned capacity is for the next request.
      *
      * @param string $path Raw target-relative file path.
      * @param int $total_bytes Current local file size.
@@ -438,13 +439,9 @@ class MultipartPushStreamClient
      * @return int Maximum payload bytes to read, or zero when no part fits.
      *
      * @throws InvalidArgumentException If total or offset is inconsistent.
-     * @throws RuntimeException If no upload request is open.
      */
     public function next_file_body_bytes(string $path, int $total_bytes, int $offset): int
     {
-        if ($this->curl_handle === null) {
-            throw new RuntimeException('No upload request is open; call start_upload_request() before next_file_body_bytes().');
-        }
         if ($total_bytes < 0 || $offset < 0 || $offset > $total_bytes) {
             throw new InvalidArgumentException('File part total and offset must be non-negative and offset must not exceed total.');
         }
@@ -460,14 +457,13 @@ class MultipartPushStreamClient
     /**
      * Returns the safe maximum for the next raw delete-stream read.
      *
+     * When no request is open, the returned capacity is for the next request.
+     *
      * @param int $offset Target-confirmed raw delete-stream byte offset.
      * @return int Maximum payload bytes to read, or zero when no part fits.
      */
     public function next_delete_body_bytes(int $offset): int
     {
-        if ($this->curl_handle === null) {
-            throw new RuntimeException('No upload request is open; call start_upload_request() before next_delete_body_bytes().');
-        }
         if ($offset < 0) {
             throw new InvalidArgumentException('Delete-list offset must be non-negative.');
         }
@@ -498,7 +494,8 @@ class MultipartPushStreamClient
         // headers; the actual part is charged after send_part().
         $headers = $this->part_headers($part, 0);
         $headers['Content-Length'] = (string) PHP_INT_MAX;
-        $overhead = strlen('--' . $this->boundary . "\r\n\r\n\r\n") + 2;
+        $boundary = $this->boundary === '' ? str_repeat('x', 40) : $this->boundary;
+        $overhead = strlen('--' . $boundary . "\r\n\r\n\r\n") + 2;
         foreach ($headers as $name => $value) {
             $overhead += strlen($name) + 2 + strlen($value) + 2;
         }
@@ -987,7 +984,8 @@ class MultipartPushStreamClient
      */
     private function closing_boundary_bytes(): int
     {
-        return strlen('--' . $this->boundary . "--\r\n");
+        $boundary = $this->boundary === '' ? str_repeat('x', 40) : $this->boundary;
+        return strlen('--' . $boundary . "--\r\n");
     }
 
     /**
