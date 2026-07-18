@@ -77,7 +77,7 @@
  * lock permits only one open sender at a time.
  *
  * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'directory'|'symlink',size:int,ctime:int}
- * @phpstan-type LocalPathToPush array{path:string,path_b64:string,local_paths_to_push_byte_offset:int,next_local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null}
+ * @phpstan-type LocalPathToPush array{path:string,path_b64:string,local_paths_to_push_byte_offset:int,next_local_paths_to_push_byte_offset:int}
  * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
  */
 final class PushFilesSender
@@ -464,14 +464,6 @@ final class PushFilesSender
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
-        if ($local_path_to_push['local_path_type_size_and_ctime'] === null) {
-            $this->close_local_file_handle();
-            $this->close_local_paths_to_push_handle();
-            $state['phase'] = 'removing';
-            $this->store_state($state);
-            return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
-        }
-
         $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
             'push_session_id' => $state['push_session_id'],
             'path_b64' => $local_path_to_push['path_b64'],
@@ -950,7 +942,6 @@ final class PushFilesSender
             'path_b64' => base64_encode($path),
             'local_paths_to_push_byte_offset' => $local_paths_to_push_byte_offset,
             'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
-            'local_path_type_size_and_ctime' => $this->stat_local_path($path),
         ];
     }
 
