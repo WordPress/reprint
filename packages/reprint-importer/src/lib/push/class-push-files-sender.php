@@ -321,13 +321,6 @@ final class PushFilesSender
             case 'removing':
                 $result = $this->remove_push($this->state);
                 break;
-            default:
-                $result = $this->step_result(
-                    'failed',
-                    $this->state,
-                    'invalid_state',
-                    'Active state contains an unsupported phase.'
-                );
         }
 
         if ($result['status'] !== 'continue') {
