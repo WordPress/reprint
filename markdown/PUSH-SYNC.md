@@ -296,8 +296,8 @@ begins until both indexes have been consumed and the two path lists are stable.
 
 `sender.json` contains no second planning checkpoint and no copied receiver
 cursor. It stores the push session and phase, the next byte offset in
-`local_paths_to_push.jsonl`, the fresh-local-index offset used while checking
-deletion paths, the receiver part limit, and learned request-body sizing state.
+`local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
+sizing state.
 Its phases are `creating`, `starting_plan`, `planning`, `pushing_paths`,
 `pushing_deletes`, `committing`, `saving_local_index_at_previous_push`,
 `completing`, `removing`, and `discarding_plan`.
@@ -323,17 +323,17 @@ After all local paths are pushed, a newly opened sender reads
 uploads retain those values in memory for later deletion steps. Those
 receiver-owned values are the only work-delete cursor; `sender.json` does not
 duplicate it. Each uploaded deletion-list part contains one complete local path.
-Before sending it, each sender step checks at most one fresh local index entry;
-the durable fresh-local-index offset lets a later process continue that check.
-The live path must match its planned type, size, and ctime, including planned
-absence.
+The sender trusts this completed, immutable plan without consulting the fresh
+local index or live local tree again. If a deleted path reappears after planning,
+the current push may delete it on the target and the next push will send it.
 
-A changed type, size, or ctime, a vanished path, or a directory that is no
-longer empty moves the sender to `removing`. Repeated bounded remove calls
-delete the upload-only push session; the sender enters `discarding_plan`,
+A changed local path to push, a vanished path to push, or a directory to push
+that is no longer empty moves the sender to `removing`. Repeated bounded remove
+calls delete the upload-only push session; the sender enters `discarding_plan`,
 removes the PushPlan cursor, and changes its status to `restart` so the caller
-can produce a new fresh local index. The remote work and saved local index
-therefore always describe the same planned tree.
+can produce a new fresh local index. Deletions deliberately retain the tree
+captured by the completed fresh local index rather than attempting to describe
+the live tree at commit time.
 
 Repeated `push_commit` calls drive the receiver to `complete`. Only then does
 the sender enter `saving_local_index_at_previous_push` and copy the plan-owned

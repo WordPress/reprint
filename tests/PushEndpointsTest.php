@@ -1510,12 +1510,13 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Removes a push session when a planned deletion reappears locally.
+     * Uses the completed deletion plan when a deleted path reappears locally.
      */
-    public function testHighLevelSenderDoesNotDeleteAPathThatReappearedAfterPlanning(): void
+    public function testHighLevelSenderUsesCompletedDeletionPlanWhenPathReappearsLocally(): void
     {
         $local_docroot = $this->root . '/reappeared-delete-local-docroot';
         mkdir($local_docroot, 0700, true);
+        file_put_contents($this->docroot . '/returned.txt', 'old');
         $fresh_local_index_path = $this->root . '/reappeared-delete-index.jsonl';
         $this->writeIndex($fresh_local_index_path, []);
         $previous_local_index_path = $this->root . '/reappeared-delete-previous-index.jsonl';
@@ -1528,98 +1529,28 @@ final class PushEndpointsTest extends TestCase {
 
         $sender = PushFilesSender::start($options);
         try {
-            $this->takeSenderStepsUntilPhase($sender, 'planning');
-            $this->assertSame('planning', $sender->get_phase());
-            $this->assertTrue($sender->next_step());
-            $this->assertSame('pushing_paths', $sender->get_phase());
-            $this->assertTrue($sender->next_step());
-            $this->assertSame('pushing_deletes', $sender->get_phase());
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_deletes');
             file_put_contents($local_docroot . '/returned.txt', 'new');
-
-            $this->assertTrue($sender->next_step());
-
-            $result = $this->senderResult($sender);
         } finally {
             $sender->close();
         }
+        $result = $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory);
 
-        $this->assertSame('continue', $result['status']);
-        $this->assertSame('removing', $result['phase']);
-        $this->assertSame('local_path_changed', $result['reason']);
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('new', file_get_contents($local_docroot . '/returned.txt'));
+        $this->assertFileDoesNotExist($this->docroot . '/returned.txt');
     }
 
     /**
-     * Checks one fresh local index entry per step before rejecting a reappeared deletion.
+     * Uses the completed deletion plan after a pushed replacement disappears locally.
      */
-    public function testHighLevelSenderResumesADeletionCheckAtTheNextFreshIndexEntry(): void
-    {
-        $local_docroot = $this->root . '/bounded-delete-check-local-docroot';
-        mkdir($local_docroot, 0700, true);
-        $fresh_local_index_path = $this->root . '/bounded-delete-check-index.jsonl';
-        $fresh_index_entries = [];
-        for ($index = 0; $index < 4; ++$index) {
-            $path = sprintf('earlier-%02d.txt', $index);
-            file_put_contents($local_docroot . '/' . $path, 'value');
-            $fresh_index_entries[$path] = $this->indexEntry($local_docroot . '/' . $path, 'file');
-        }
-        $this->writeIndex($fresh_local_index_path, $fresh_index_entries);
-        $previous_local_index_path = $this->root . '/bounded-delete-check-previous-index.jsonl';
-        $this->writeIndex($previous_local_index_path, [
-            'returned.txt' => [1, 3, 'file'],
-        ]);
-        $push_state_directory = $this->root . '/bounded-delete-check-state';
-        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
-
-        for ($step = 0; $step < 30; ++$step) {
-            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
-            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
-            $state = $this->loadActiveState($push_state_directory);
-            if (is_array($state) && $state['phase'] === 'pushing_deletes') {
-                break;
-            }
-        }
-        $this->assertIsArray($state);
-        file_put_contents($local_docroot . '/returned.txt', 'new');
-
-        $fresh_index_lines = file($push_state_directory . '/fresh_local_index.jsonl');
-        $this->assertIsArray($fresh_index_lines);
-        $expected_fresh_local_index_byte_offset = 0;
-        foreach ($fresh_index_lines as $fresh_index_line) {
-            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
-            $this->assertSame('continue', $result['status']);
-            $this->assertSame('pushing_deletes', $result['phase']);
-            $state = $this->loadActiveState($push_state_directory);
-            $this->assertIsArray($state);
-            $expected_fresh_local_index_byte_offset += strlen($fresh_index_line);
-            $this->assertSame(
-                $expected_fresh_local_index_byte_offset,
-                $state['fresh_local_index_byte_offset']
-            );
-        }
-
-        $status = $this->sendPushRequestWithHeaders(
-            'GET',
-            'push_status',
-            ['push_session_id' => $state['push_session_id']],
-            self::SECRET
-        );
-        $status_response = json_decode($status['body'], true, 512, JSON_THROW_ON_ERROR);
-        $this->assertSame(0, $status_response['work_deletes_bytes']);
-
-        $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
-        $this->assertSame('continue', $result['status']);
-        $this->assertSame('removing', $result['phase']);
-        $this->assertSame('local_path_changed', $result['reason']);
-    }
-
-    /**
-     * Rejects a planned replacement that disappears before its deletion is sent.
-     */
-    public function testHighLevelSenderRejectsAPlannedReplacementThatDisappearsBeforeDeletion(): void
+    public function testHighLevelSenderUsesCompletedDeletionPlanAfterPushedReplacementDisappearsLocally(): void
     {
         $local_docroot = $this->root . '/disappeared-replacement-local-docroot';
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/replace.txt', 'new');
+        mkdir($this->docroot . '/replace.txt');
+        file_put_contents($this->docroot . '/replace.txt/old.txt', 'old');
         $fresh_local_index_path = $this->root . '/disappeared-replacement-index.jsonl';
         $this->writeIndex($fresh_local_index_path, [
             'replace.txt' => $this->indexEntry($local_docroot . '/replace.txt', 'file'),
@@ -1643,19 +1574,10 @@ final class PushEndpointsTest extends TestCase {
         $this->assertIsArray($state);
         unlink($local_docroot . '/replace.txt');
 
-        $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $result = $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory);
 
-        $this->assertSame('continue', $result['status']);
-        $this->assertSame('removing', $result['phase']);
-        $this->assertSame('local_path_changed', $result['reason']);
-        $status = $this->sendPushRequestWithHeaders(
-            'GET',
-            'push_status',
-            ['push_session_id' => $state['push_session_id']],
-            self::SECRET
-        );
-        $status_response = json_decode($status['body'], true, 512, JSON_THROW_ON_ERROR);
-        $this->assertSame(0, $status_response['work_deletes_bytes']);
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('new', file_get_contents($this->docroot . '/replace.txt'));
     }
 
     /**
@@ -1796,10 +1718,6 @@ final class PushEndpointsTest extends TestCase {
             PushFilesSender::class,
             'local_paths_to_delete_handle'
         );
-        $fresh_local_index_handle_property = new ReflectionProperty(
-            PushFilesSender::class,
-            'fresh_local_index_handle'
-        );
         $push_stream_client_property = new ReflectionProperty(PushFilesSender::class, 'push_stream_client');
         $curl_handle_property = new ReflectionProperty(MultipartPushStreamClient::class, 'curl_handle');
         $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
@@ -1861,9 +1779,7 @@ final class PushEndpointsTest extends TestCase {
             $first_delete_chunk = $this->senderResult($sender);
             $this->assertSame('pushing_deletes', $first_delete_chunk['phase']);
             $local_paths_to_delete_handle = $local_paths_to_delete_handle_property->getValue($sender);
-            $fresh_local_index_handle = $fresh_local_index_handle_property->getValue($sender);
             $this->assertIsResource($local_paths_to_delete_handle);
-            $this->assertIsResource($fresh_local_index_handle);
             $local_paths_to_delete_position = ftell($local_paths_to_delete_handle);
             $this->assertIsInt($local_paths_to_delete_position);
 
@@ -1875,10 +1791,6 @@ final class PushEndpointsTest extends TestCase {
                 $local_paths_to_delete_handle,
                 $local_paths_to_delete_handle_property->getValue($sender)
             );
-            $this->assertSame(
-                $fresh_local_index_handle,
-                $fresh_local_index_handle_property->getValue($sender)
-            );
             $this->assertGreaterThan(
                 $local_paths_to_delete_position,
                 ftell($local_paths_to_delete_handle)
@@ -1887,9 +1799,7 @@ final class PushEndpointsTest extends TestCase {
             $sender->close();
         }
         $this->assertNull($local_paths_to_delete_handle_property->getValue($sender));
-        $this->assertNull($fresh_local_index_handle_property->getValue($sender));
         $this->assertFalse(is_resource($local_paths_to_delete_handle));
-        $this->assertFalse(is_resource($fresh_local_index_handle));
     }
 
     /**

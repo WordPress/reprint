@@ -123,9 +123,10 @@ A request failure ends the current sender run. The active state remains in
 place so a later push command can resume from the last durable boundary. Only
 an explicit `request_too_large` failure lowers future request sizes.
 
-When a local path to push changes, or a local path to delete reappears, the
-sender reports `local_path_changed` and moves to `removing`. After removal it
-requests a new fresh local index.
+When a local path to push changes, the sender reports `local_path_changed` and
+moves to `removing`. After removal it requests a new fresh local index. The
+sender trusts the completed deletion plan without checking the live local tree;
+changes after planning belong to the next push.
 
 Receiver-confirmed file and work-delete cursors remain receiver state. A newly
 opened sender reads them from `push_status`, while a successful upload retains
@@ -153,8 +154,6 @@ Use these names verbatim inside `PushFilesSender`:
 | --- | --- |
 | Local path to push | `LocalPathToPush`, `$local_path_to_push`, `read_local_path_to_push()` |
 | Local path to delete | `LocalPathToDelete`, `$local_path_to_delete`, `read_local_path_to_delete()` |
-| Fresh local index deletion check | `next_planned_local_path_check()` |
-| Fresh local index byte offset | `$fresh_local_index_byte_offset` |
 | Push stream client | `$push_stream_client`, `create_push_stream_client()` |
 | Push stream client options | `$push_stream_client_options` |
 | Request sizer options | `request_sizer_options`, `$request_sizer_options` |
