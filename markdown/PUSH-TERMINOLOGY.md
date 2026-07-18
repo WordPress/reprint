@@ -118,7 +118,8 @@ indexes are copied through a `.swap` file and published with `rename()`; their
 copy progress is not part of sender state.
 
 A request failure ends the current sender run. The active state remains in
-place so a later push command can resume from the last durable boundary.
+place so a later push command can resume from the last durable boundary. Only
+an explicit `request_too_large` failure lowers future request sizes.
 
 When a local path to push changes, or a local path to delete reappears, the
 sender reports `local_path_changed` and moves to `removing`. After removal it

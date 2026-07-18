@@ -157,10 +157,9 @@ class PushRequestSizerTest extends TestCase
 
     public function testGrowthNeverRetriesARefusedSize(): void
     {
-        $sizer = new PushRequestSizer(["growth_holdoff_successes" => 1]);
+        $sizer = new PushRequestSizer();
         $sizer->record_too_large(); // 32 MiB refused, ceiling capped at 16 MiB
 
-        $sizer->record_success(); // absorbs the holdoff
         for ($i = 0; $i < 5; $i++) {
             $sizer->record_success();
         }
@@ -189,34 +188,6 @@ class PushRequestSizerTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // HTTP request failures
-    // ---------------------------------------------------------------
-
-    public function testRequestFailureHalvesWithoutCappingTheCeiling(): void
-    {
-        $sizer = new PushRequestSizer(["growth_holdoff_successes" => 2]);
-
-        $decision = $sizer->record_request_failure();
-        $this->assertSame('shrink', $decision['action']);
-        $this->assertSame(16 * self::MIB, $sizer->request_body_bytes());
-
-        // Two successes absorb the holdoff, then growth resumes past the
-        // failed size — a transient timeout must not clamp the session.
-        $this->assertSame('steady', $sizer->record_success()['action']);
-        $this->assertSame('steady', $sizer->record_success()['action']);
-        $this->assertSame('grow', $sizer->record_success()['action']);
-        $sizer->record_success();
-        $this->assertSame(64 * self::MIB, $sizer->request_body_bytes());
-    }
-
-    public function testRequestFailureAtFloorGivesUp(): void
-    {
-        $sizer = new PushRequestSizer(["start_bytes" => self::MIB]);
-
-        $this->assertSame('give_up', $sizer->record_request_failure()['action']);
-    }
-
-    // ---------------------------------------------------------------
     // Persistence
     // ---------------------------------------------------------------
 
@@ -238,16 +209,16 @@ class PushRequestSizerTest extends TestCase
         $this->assertSame(16 * self::MIB, $resumed->request_body_bytes());
     }
 
-    public function testRestoredStateIsClampedToConfiguredBounds(): void
+    public function testLoadedStateIsClampedToConfiguredBounds(): void
     {
         $sizer = new PushRequestSizer(
             ["max_bytes" => 64 * self::MIB],
-            ["request_body_bytes" => PHP_INT_MAX, "ceiling_bytes" => -5, "growth_holdoff_remaining" => -2],
+            ["request_body_bytes" => PHP_INT_MAX, "ceiling_bytes" => -5],
         );
 
         $this->assertSame(64 * self::MIB, $sizer->request_body_bytes());
         $state = $sizer->get_state();
         $this->assertNull($state['ceiling_bytes']);
-        $this->assertSame(0, $state['growth_holdoff_remaining']);
+        $this->assertSame(['request_body_bytes', 'ceiling_bytes'], array_keys($state));
     }
 }

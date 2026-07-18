@@ -340,7 +340,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertSame($before, $client->get_request_sizer_state());
     }
 
-    public function testStructured413AppliesPostMaxBytesAndPreservesDetail(): void {
+    public function testStructuredTooLargeResponseAppliesPostMaxBytesAndPreservesDetail(): void {
         if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
             $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');
         }
@@ -373,12 +373,12 @@ final class MultipartPushStreamClientTest extends TestCase {
             'detail' => 'The decoded request body reached 16777217 bytes, exceeding the target post_max_size of 16777216 bytes.',
             'post_max_bytes' => 16 * 1024 * 1024,
         ]);
-        fwrite($connection, "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: " . strlen($response) . "\r\nConnection: close\r\n\r\n" . $response);
+        fwrite($connection, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: " . strlen($response) . "\r\nConnection: close\r\n\r\n" . $response);
         fclose($connection);
         fclose($listener);
 
         $result = $client->finish_request();
-        $this->assertSame('retry', $result['status']);
+        $this->assertSame('failed', $result['status']);
         $this->assertSame('request_too_large', $result['reason']);
         $this->assertSame('The decoded request body reached 16777217 bytes, exceeding the target post_max_size of 16777216 bytes.', $result['detail']);
         $this->assertSame(16 * 1024 * 1024, $result['response']['post_max_bytes']);
@@ -681,6 +681,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'payload' => str_repeat('x', 16 * 1024 * 1024),
         ]);
         $elapsed = microtime(true) - $started;
+        $request_sizer_state = $client->get_request_sizer_state();
         $result = $client->finish_request();
         fclose($connection);
         fclose($listener);
@@ -688,9 +689,10 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertFalse($sent);
         $this->assertGreaterThanOrEqual(0.9, $elapsed);
         $this->assertLessThan(3.0, $elapsed);
-        $this->assertSame('retry', $result['status']);
+        $this->assertSame('failed', $result['status']);
         $this->assertSame('request_failed', $result['reason']);
         $this->assertStringContainsString('no bytes moved for 1s', $result['detail']);
+        $this->assertSame($request_sizer_state, $client->get_request_sizer_state());
     }
 
     public function testResponseWaitTimeoutStartsAfterTheClosingBoundary(): void {
@@ -720,6 +722,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'payload' => 'x',
         ]));
         $started = microtime(true);
+        $request_sizer_state = $client->get_request_sizer_state();
         $result = $client->finish_request();
         $elapsed = microtime(true) - $started;
         fclose($connection);
@@ -727,9 +730,10 @@ final class MultipartPushStreamClientTest extends TestCase {
 
         $this->assertGreaterThanOrEqual(0.9, $elapsed);
         $this->assertLessThan(3.0, $elapsed);
-        $this->assertSame('retry', $result['status']);
+        $this->assertSame('failed', $result['status']);
         $this->assertSame('request_failed', $result['reason']);
         $this->assertStringContainsString('no upload or response bytes moved for 1s', $result['detail']);
+        $this->assertSame($request_sizer_state, $client->get_request_sizer_state());
     }
 
     public function testSlowContinuousResponseProgressMayExceedTheResponseTimeout(): void {

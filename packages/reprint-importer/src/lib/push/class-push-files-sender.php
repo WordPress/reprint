@@ -110,7 +110,7 @@
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
  * @phpstan-type FreshLocalIndexEntry array{path:string,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime,next_fresh_local_index_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'copying_fresh_local_index'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'publishing_local_index'|'completing'|'removing'|'discarding_plan',local_paths_to_push_byte_offset:int,fresh_local_index_byte_offset:int,fresh_local_index_bytes:int,fresh_local_index_ctime:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'copying_fresh_local_index'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'publishing_local_index'|'completing'|'removing'|'discarding_plan',local_paths_to_push_byte_offset:int,fresh_local_index_byte_offset:int,fresh_local_index_bytes:int,fresh_local_index_ctime:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {

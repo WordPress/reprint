@@ -223,7 +223,10 @@ the request starts is too late for PHP's own `post_max_size` warning.
 request it returns a classified push JSON failure, but PHP or the web server
 may reject a request before the exporter runs and that response need not use
 the push JSON protocol. The sender therefore also treats a bare HTTP 413 as
-`request_too_large` and learns a smaller request ceiling.
+`request_too_large` and learns a smaller request ceiling. Timeouts, connection
+resets, empty responses, and malformed responses end the current sender run
+without changing request sizing. A later push command reconciles the receiver
+cursor before continuing.
 
 The WordPress plugin passes the platform-supplied `docroot` to push endpoints,
 defaulting to the web server's `DOCUMENT_ROOT`. A platform supplies the complete

@@ -686,15 +686,18 @@ class MultipartPushStreamClient
                     'body_bytes_sent' => $this->body_bytes_sent,
                 ];
             }
-            $decision = $this->request_sizer->record_request_failure();
             return [
-                'status' => $decision['action'] === 'give_up' ? 'failed' : 'retry',
-                'reason' => $decision['action'] === 'give_up' ? 'request_size_exhausted' : 'request_failed',
+                'status' => 'failed',
+                'reason' => 'request_failed',
                 'detail' => $this->transfer_error ?? 'Invalid JSON response (HTTP ' . $http_code . '): ' . substr($body, 0, 160),
                 'response' => null,
                 'parts_sent' => $this->parts_sent,
                 'body_bytes_sent' => $this->body_bytes_sent,
             ];
+        }
+        if (( $decoded['reason'] ?? null ) === 'request_too_large') {
+            $reported_limit = $decoded['post_max_bytes'] ?? null;
+            $this->request_sizer->record_too_large(is_numeric($reported_limit) ? (int) $reported_limit : null);
         }
         $decoded['http_code'] = $http_code;
         $result = $this->classify_response($decoded, ['accepted']);
@@ -886,7 +889,6 @@ class MultipartPushStreamClient
      *
      * - `request_body_bytes`: current decoded entity-body budget.
      * - `ceiling_bytes`: learned session ceiling, or null while unknown.
-     * - `growth_holdoff_remaining`: accepted requests still required before growth.
      *
      * @return array {
      *     Serializable PushRequestSizer state.
@@ -895,13 +897,10 @@ class MultipartPushStreamClient
      *                                             budget.
      *     @type int|null $ceiling_bytes            Learned session ceiling, or
      *                                             null while unknown.
-     *     @type int      $growth_holdoff_remaining Accepted requests still
-     *                                             required before growth.
      * }
      * @phpstan-return array{
      *     request_body_bytes:int,
-     *     ceiling_bytes:?int,
-     *     growth_holdoff_remaining:int
+     *     ceiling_bytes:?int
      * }
      */
     public function get_request_sizer_state(): array
