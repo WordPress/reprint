@@ -253,7 +253,7 @@ final class PushFilesSender
             if (!is_string($fresh_local_index_path) || $fresh_local_index_path === '') {
                 throw new InvalidArgumentException('PushFilesSender requires a fresh_local_index_path when starting a sender.');
             }
-            $sender->copy_index_through_swap_file(
+            $sender->copy_through_swap_file(
                 $fresh_local_index_path,
                 PushPlan::fresh_local_index_path($sender->push_state_directory)
             );
@@ -622,7 +622,7 @@ final class PushFilesSender
                 $this->local_paths_to_push_byte_offset = $this->state['local_paths_to_push_byte_offset'];
             }
             try {
-                $this->local_path_to_push = $this->read_local_path_to_push($this->local_paths_to_push_handle);
+                $this->local_path_to_push = $this->read_next_local_path_to_push($this->local_paths_to_push_handle);
             } catch (RuntimeException $exception) {
                 $this->fail('local_io_error', $exception->getMessage());
                 return;
@@ -813,6 +813,7 @@ final class PushFilesSender
                         'rb'
                     );
                 }
+
                 if (!is_resource($this->local_file_handle)) {
                     $local_io_failure_detail = 'Could not open the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
                 } else {
@@ -982,7 +983,7 @@ final class PushFilesSender
             }
 
             try {
-                $this->local_path_to_delete = $this->read_local_path_to_delete(
+                $this->local_path_to_delete = $this->read_next_local_path_to_delete(
                     $this->local_paths_to_delete_handle,
                     $delete_list_byte_offset,
                     $maximum_delete_list_payload_bytes
@@ -1177,7 +1178,7 @@ final class PushFilesSender
             $this->push_state_directory
         );
         try {
-            $this->copy_index_through_swap_file(
+            $this->copy_through_swap_file(
                 $fresh_local_index,
                 $local_index_at_previous_push
             );
@@ -1196,17 +1197,17 @@ final class PushFilesSender
      * final rename is atomic: interruption during copy leaves the existing
      * index untouched and a later call overwrites the partial swap file.
      *
-     * @param string $index_to_copy Complete index to copy.
-     * @param string $copied_index Final path for the copied index.
+     * @param string $source_path Complete index to copy.
+     * @param string $target_path Final path for the copied index.
      */
-    private function copy_index_through_swap_file(string $index_to_copy, string $copied_index): void
+    private function copy_through_swap_file(string $source_path, string $target_path): void
     {
-        $swap_index = $copied_index . '.swap';
-        if (!@copy($index_to_copy, $swap_index)) {
+        $swap_index = $target_path . '.swap';
+        if (!@copy($source_path, $swap_index)) {
             throw new RuntimeException('Failed to copy the index to its swap file: ' . $swap_index);
         }
-        if (!@rename($swap_index, $copied_index)) {
-            throw new RuntimeException('Failed to move the copied index into place: ' . $copied_index);
+        if (!@rename($swap_index, $target_path)) {
+            throw new RuntimeException('Failed to move the copied index into place: ' . $target_path);
         }
     }
 
@@ -1288,7 +1289,7 @@ final class PushFilesSender
      * @param resource $local_paths_to_push_handle Open local_paths_to_push file at the next path.
      * @return LocalPathToPush|null Local path to push, or null at EOF.
      */
-    private function read_local_path_to_push($local_paths_to_push_handle): ?array
+    private function read_next_local_path_to_push($local_paths_to_push_handle): ?array
     {
         $line = fgets($local_paths_to_push_handle);
         if ($line === false) {
@@ -1335,7 +1336,7 @@ final class PushFilesSender
      * @throws LengthException When the next complete path does not fit.
      * @throws RuntimeException When the deletion list cannot be read.
      */
-    private function read_local_path_to_delete(
+    private function read_next_local_path_to_delete(
         $local_paths_to_delete_handle,
         int $delete_list_byte_offset,
         int $maximum_delete_list_payload_bytes

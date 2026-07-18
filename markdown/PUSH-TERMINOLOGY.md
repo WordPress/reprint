@@ -152,8 +152,8 @@ Use these names verbatim inside `PushFilesSender`:
 
 | Meaning | Name |
 | --- | --- |
-| Local path to push | `LocalPathToPush`, `$local_path_to_push`, `read_local_path_to_push()` |
-| Local path to delete | `LocalPathToDelete`, `$local_path_to_delete`, `read_local_path_to_delete()` |
+| Local path to push | `LocalPathToPush`, `$local_path_to_push`, `read_next_local_path_to_push()` |
+| Local path to delete | `LocalPathToDelete`, `$local_path_to_delete`, `read_next_local_path_to_delete()` |
 | Push stream client | `$push_stream_client`, `create_push_stream_client()` |
 | Push stream client options | `$push_stream_client_options` |
 | Request sizer options | `request_sizer_options`, `$request_sizer_options` |
@@ -176,6 +176,7 @@ Use these names verbatim inside `PushFilesSender`:
 | Maximum delete-list payload bytes | `$maximum_delete_list_payload_bytes` |
 | Local I/O failure detail | `$local_io_failure_detail` |
 | Whether the local delete list is complete | `$local_delete_list_complete` |
+| Copy through a swap file | `copy_through_swap_file()`, `$source_path`, `$target_path` |
 | Open directory handle | `$directory_handle` |
 | Open local paths-to-push handle | `$local_paths_to_push_handle` |
 | Open local paths-to-delete handle | `$local_paths_to_delete_handle` |
