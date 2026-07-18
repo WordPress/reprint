@@ -1750,9 +1750,9 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Stops after the durable consecutive-retry bound is exhausted.
+     * Leaves active state for a later command after a request failure.
      */
-    public function testHighLevelSenderStopsAfterBoundedRecoverableFailures(): void
+    public function testHighLevelSenderLeavesRequestFailureForTheNextCommand(): void
     {
         $local_docroot = $this->root . '/retry-local-docroot';
         mkdir($local_docroot, 0700, true);
@@ -1779,17 +1779,19 @@ final class PushEndpointsTest extends TestCase {
         $this->assertIsResource($push_lock);
         $this->assertTrue(flock($push_lock, LOCK_EX | LOCK_NB));
         try {
-            for ($failure_number = 1; $failure_number <= 5; ++$failure_number) {
-                $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
-                $this->assertSame($failure_number === 5 ? 'failed' : 'continue', $result['status']);
-            }
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
         } finally {
             flock($push_lock, LOCK_UN);
             fclose($push_lock);
         }
 
-        $this->assertSame('retry_exhausted', $result['reason']);
-        $this->assertSame(5, $this->loadActiveState($push_state_directory)['consecutive_recoverable_failures']);
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame('lock_acquisition_failure', $result['reason']);
+        $this->assertIsArray($this->loadActiveState($push_state_directory));
+        $this->assertSame(
+            'complete',
+            $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory)['status']
+        );
     }
 
     /**
@@ -1851,7 +1853,7 @@ final class PushEndpointsTest extends TestCase {
 
         $this->assertSame('failed', $result['status'], (string) json_encode($result));
         $this->assertSame('malformed_response', $result['reason']);
-        $this->assertSame(0, $this->loadActiveState($push_state_directory)['consecutive_recoverable_failures']);
+        $this->assertIsArray($this->loadActiveState($push_state_directory));
         $this->assertTrue(pcntl_wifexited($status));
         $this->assertSame(0, pcntl_wexitstatus($status));
     }

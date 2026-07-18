@@ -11,8 +11,8 @@
  * bounded steps and owns the local index from which that selection was made.
  * The target owns the upload cursor for every path and for the deletion list.
  * This class retains only the push session phase, selected path-list cursor,
- * type, size, and ctime saved for a partial file, consecutive recoverable-
- * failure count, and learned request limits needed after a process restart.
+ * type, size, and ctime saved for a partial file, and learned request limits
+ * needed after a process restart.
  *
  * ## Usage
  *
@@ -78,12 +78,10 @@
  *
  * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'directory'|'symlink',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,local_paths_to_push_byte_offset:int,next_local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null,consecutive_recoverable_failures:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
  */
 final class PushFilesSender
 {
-    private const MAXIMUM_CONSECUTIVE_RECOVERABLE_FAILURES = 5;
-
     /** @var string Local document root whose local paths to push are sent. */
     private string $docroot;
 
@@ -178,7 +176,6 @@ final class PushFilesSender
                 'phase' => 'creating',
                 'local_paths_to_push_byte_offset' => 0,
                 'local_path_type_size_and_ctime' => null,
-                'consecutive_recoverable_failures' => 0,
                 'max_part_bytes' => null,
                 'request_sizer_state' => $sender->push_stream_client->get_request_sizer_state(),
             ];
@@ -332,7 +329,7 @@ final class PushFilesSender
                 );
         }
 
-        if ($result['status'] === 'complete' || $result['status'] === 'restart') {
+        if ($result['status'] !== 'continue') {
             $this->state = null;
         }
         return $result;
@@ -389,7 +386,6 @@ final class PushFilesSender
         $this->push_stream_client->set_max_part_bytes($response['max_part_bytes']);
         $this->push_stream_client->apply_reported_limits([$response['post_max_bytes']]);
         $state['max_part_bytes'] = $response['max_part_bytes'];
-        $state['consecutive_recoverable_failures'] = 0;
         try {
             if (PushPlan::has_unfinished_plan($this->push_state_directory)) {
                 $this->plan = PushPlan::resume($this->push_state_directory);
@@ -493,7 +489,6 @@ final class PushFilesSender
         $response = $request_result['response'];
         $receiver_path_status = $response['path'];
         $receiver_path_type = $receiver_path_status['type'] ?? null;
-        $state['consecutive_recoverable_failures'] = 0;
 
         $local_path_type_size_and_ctime = $this->stat_local_path($local_path_to_push['path']);
         if ($local_path_type_size_and_ctime === null) {
@@ -516,7 +511,6 @@ final class PushFilesSender
             $this->close_local_file_handle();
             $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
             $state['local_path_type_size_and_ctime'] = null;
-            $state['consecutive_recoverable_failures'] = 0;
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
@@ -676,7 +670,6 @@ final class PushFilesSender
                 $this->close_local_paths_to_push_handle();
                 $state['phase'] = 'removing';
             }
-            $state['consecutive_recoverable_failures'] = 0;
             $this->store_state($state);
             if ($local_path_disappeared) {
                 return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
@@ -698,7 +691,6 @@ final class PushFilesSender
             $state['local_path_type_size_and_ctime'] = $local_path_type_size_and_ctime;
         }
 
-        $state['consecutive_recoverable_failures'] = 0;
         $this->store_state($state);
         return $this->step_result('continue', $state, null, null);
     }
@@ -723,7 +715,6 @@ final class PushFilesSender
         $work_deletes_bytes = $response['work_deletes_bytes'];
         $work_deletes_complete = $response['work_deletes_complete'];
 
-        $state['consecutive_recoverable_failures'] = 0;
         if ($work_deletes_complete) {
             $this->close_local_paths_to_delete_handle();
             $state['phase'] = 'committing';
@@ -772,7 +763,6 @@ final class PushFilesSender
             return $this->step_result('failed', $state, 'request_size_exhausted', 'The current request-body budget cannot fit one deletion-list MIME part.');
         }
 
-        $state['consecutive_recoverable_failures'] = 0;
         $this->store_state($state);
         return $this->step_result('continue', $state, null, null);
     }
@@ -828,7 +818,6 @@ final class PushFilesSender
         /** @var array{send_next_request:bool} $response */
         $response = $request_result['response'];
 
-        $state['consecutive_recoverable_failures'] = 0;
         if ($response['send_next_request']) {
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
@@ -872,7 +861,6 @@ final class PushFilesSender
         /** @var array{removed:bool} $response */
         $response = $request_result['response'];
         if (!$response['removed']) {
-            $state['consecutive_recoverable_failures'] = 0;
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
@@ -1087,10 +1075,10 @@ final class PushFilesSender
     }
 
     /**
-     * Converts a failed request into a bounded workflow result.
+     * Stops the current sender run after a request failure.
      *
      * @param array{status:'complete'|'retry'|'failed',reason:string|null,detail:string|null,response:array<string,mixed>|null,parts_sent:int,body_bytes_sent:int} $request_result Classified request result.
-     * @param State $state Active state, persisted when retry state changes.
+     * @param State $state Active state, persisted when request sizing changes.
      * @return array<string,mixed>|null Null when the request completed successfully.
      */
     private function handle_request_failure(array $request_result, array &$state): ?array
@@ -1098,20 +1086,10 @@ final class PushFilesSender
         if ($request_result['status'] === 'complete') {
             return null;
         }
-        if ($request_result['status'] === 'retry') {
-            ++$state['consecutive_recoverable_failures'];
+        $request_sizer_state = $this->push_stream_client->get_request_sizer_state();
+        if ($state['request_sizer_state'] !== $request_sizer_state) {
             $this->store_state($state);
-            if ($state['consecutive_recoverable_failures'] >= self::MAXIMUM_CONSECUTIVE_RECOVERABLE_FAILURES) {
-                return $this->step_result(
-                    'failed',
-                    $state,
-                    'retry_exhausted',
-                    'Push stopped after ' . self::MAXIMUM_CONSECUTIVE_RECOVERABLE_FAILURES . ' consecutive recoverable failures. Last failure: ' . ( $request_result['detail'] ?? $request_result['reason'] )
-                );
-            }
-            return $this->step_result('continue', $state, $request_result['reason'], $request_result['detail']);
         }
-        $this->store_state($state);
         return $this->step_result('failed', $state, $request_result['reason'], $request_result['detail']);
     }
 

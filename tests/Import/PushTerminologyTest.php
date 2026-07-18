@@ -49,8 +49,6 @@ final class PushTerminologyTest extends TestCase {
             'local_file_handle',
             'path_stat',
             'file_type_bits',
-            'consecutive_recoverable_failures',
-            'MAXIMUM_CONSECUTIVE_RECOVERABLE_FAILURES',
             'upload_request_start_failure',
             'delete_state',
         ];
@@ -88,6 +86,8 @@ final class PushTerminologyTest extends TestCase {
             '/\blocal_paths_to_delete_complete\b/',
             '/\brecoverable_failures\b/',
             '/\bMAXIMUM_RECOVERABLE_FAILURES\b/',
+            '/\bconsecutive_recoverable_failures\b/',
+            '/\bMAXIMUM_CONSECUTIVE_RECOVERABLE_FAILURES\b/',
             '/\bupload_start_failure\b/',
             '/\bclear_state\b/',
             '/\bnext_local_path_upload_part\b/',

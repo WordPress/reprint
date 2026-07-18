@@ -102,14 +102,16 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Open lifecycle lock | `$lock_handle` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
-| Consecutive recoverable failures | `consecutive_recoverable_failures`, `MAXIMUM_CONSECUTIVE_RECOVERABLE_FAILURES` |
 
 `cursor.json` owns planning offsets, output offsets and counts, active deleted
 directory ranges, and `excluded_paths_b64`. `sender.json` does not repeat them.
 Its phases are `creating`, `planning`, `pushing_paths`, `pushing_deletes`,
 `committing`, and `removing`. It records the push session ID, selected path-list
-cursor, local path type, size, and ctime for a partial file, consecutive recoverable-
-failure count, target part limit, and request-sizing state.
+cursor, local path type, size, and ctime for a partial file, target part limit,
+and request-sizing state.
+
+A request failure ends the current sender run. The active state remains in
+place so a later push command can resume from the last durable boundary.
 
 When a local path to push disappears or changes while being read, the sender
 reports `local_path_changed` and moves to `removing`. After removal it requests
