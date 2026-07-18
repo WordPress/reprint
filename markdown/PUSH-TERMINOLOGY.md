@@ -101,7 +101,7 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Lifecycle lock file | `sender.lock`, `$lock_path` |
 | Open lifecycle lock | `$lock_handle` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
-| Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `read_local_path_type_size_and_ctime()` |
+| Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 | Consecutive recoverable failures | `consecutive_recoverable_failures`, `MAXIMUM_CONSECUTIVE_RECOVERABLE_FAILURES` |
 
 `cursor.json` owns planning offsets, output offsets and counts, active deleted

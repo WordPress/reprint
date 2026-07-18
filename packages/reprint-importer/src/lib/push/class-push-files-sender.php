@@ -491,7 +491,7 @@ final class PushFilesSender
         $receiver_path_type = $receiver_path_status['type'] ?? null;
         $state['consecutive_recoverable_failures'] = 0;
 
-        $local_path_type_size_and_ctime = $this->read_local_path_type_size_and_ctime($local_path_to_push['path']);
+        $local_path_type_size_and_ctime = $this->stat_local_path($local_path_to_push['path']);
         if ($local_path_type_size_and_ctime === null) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
@@ -531,7 +531,7 @@ final class PushFilesSender
             if ($directory_is_empty === null) {
                 return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local directory to push: ' . base64_encode($local_path_to_push['path']) . '.');
             }
-            $local_path_type_size_and_ctime_after_read = $this->read_local_path_type_size_and_ctime($local_path_to_push['path']);
+            $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
                 $state['phase'] = 'removing';
@@ -556,7 +556,7 @@ final class PushFilesSender
             $upload_completes_local_path = true;
         } elseif ($local_path_type_size_and_ctime['type'] === 'symlink') {
             $symlink_target = @readlink($this->docroot . '/' . $local_path_to_push['path']);
-            $local_path_type_size_and_ctime_after_read = $this->read_local_path_type_size_and_ctime($local_path_to_push['path']);
+            $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
                 $state['phase'] = 'removing';
@@ -613,7 +613,7 @@ final class PushFilesSender
                         || fseek($this->local_file_handle, $file_byte_offset) !== 0
                     ) {
                         $this->close_local_file_handle();
-                        $local_path_type_size_and_ctime_after_read = $this->read_local_path_type_size_and_ctime($local_path_to_push['path']);
+                        $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
                         if ($local_path_type_size_and_ctime_after_read === null) {
                             $local_path_disappeared = true;
                         } elseif ($local_path_type_size_and_ctime_after_read !== $local_path_type_size_and_ctime) {
@@ -623,7 +623,7 @@ final class PushFilesSender
                         }
                     } else {
                         $payload = fread($this->local_file_handle, $maximum_file_payload_bytes);
-                        $local_path_type_size_and_ctime_after_read = $this->read_local_path_type_size_and_ctime($local_path_to_push['path']);
+                        $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
                         if ($local_path_type_size_and_ctime_after_read === null) {
                             $this->close_local_file_handle();
                             $local_path_disappeared = true;
@@ -947,7 +947,7 @@ final class PushFilesSender
             'path_b64' => base64_encode($path),
             'local_paths_to_push_byte_offset' => $local_paths_to_push_byte_offset,
             'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
-            'local_path_type_size_and_ctime' => $this->read_local_path_type_size_and_ctime($path),
+            'local_path_type_size_and_ctime' => $this->stat_local_path($path),
         ];
     }
 
@@ -1053,7 +1053,7 @@ final class PushFilesSender
      * @param string $path Raw document-root-relative path.
      * @return LocalPathTypeSizeAndCtime|null Current type, size, and ctime, or null when absent or unsupported.
      */
-    private function read_local_path_type_size_and_ctime(string $path): ?array
+    private function stat_local_path(string $path): ?array
     {
         $absolute_path = $this->docroot . '/' . $path;
         clearstatcache(true, $absolute_path);
