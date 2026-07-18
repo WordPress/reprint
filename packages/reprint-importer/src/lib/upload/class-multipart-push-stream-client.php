@@ -449,6 +449,16 @@ class MultipartPushStreamClient
     }
 
     /**
+     * Indicates whether the open upload request contains a complete sent part.
+     *
+     * @return bool True after send_part() succeeds for the current request.
+     */
+    public function has_sent_parts(): bool
+    {
+        return $this->curl_handle !== null && $this->parts_sent > 0;
+    }
+
+    /**
      * Returns the safe maximum for the caller's next file read.
      *
      * The result is bounded by the in-memory chunk limit, target part limit,

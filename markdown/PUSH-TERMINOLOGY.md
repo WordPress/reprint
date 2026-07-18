@@ -158,6 +158,8 @@ Use these names verbatim inside `PushFilesSender`:
 | Push stream client options | `$push_stream_client_options` |
 | Request sizer options | `request_sizer_options`, `$request_sizer_options` |
 | Push request | `send_push_request()` |
+| Open upload request stage | `$upload_request_stage`: `closed`, `sending_parts`, or `finishing` |
+| Whether the open request has sent parts | `MultipartPushStreamClient::has_sent_parts()` |
 | Create push session | `create_push_session()` |
 | Remove push session | `remove_push_session()` |
 | Upload next file chunk | `upload_next_file_chunk()` |

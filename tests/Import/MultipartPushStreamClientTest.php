@@ -31,7 +31,9 @@ final class MultipartPushStreamClientTest extends TestCase {
             'response_timeout' => 2,
         ]);
 
+        $this->assertFalse($client->has_sent_parts());
         $this->assertTrue($client->start_upload_request(str_repeat('a', 32)));
+        $this->assertFalse($client->has_sent_parts());
         $connection = stream_socket_accept($listener, 3);
         $this->assertNotFalse($connection);
         $received = $this->read_available($connection);
@@ -45,6 +47,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'offset' => 0,
             'payload' => "a\0b",
         ]));
+        $this->assertTrue($client->has_sent_parts());
         $received .= $this->read_available($connection);
         $this->assertStringContainsString('Content-Type: multipart/mixed; boundary=reprint-', $received);
         $this->assertStringContainsString('X-Chunk-Type: file', $received);
@@ -54,6 +57,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'offset' => 7,
             'payload' => "gone\0",
         ]));
+        $this->assertTrue($client->has_sent_parts());
         $received .= $this->read_available($connection);
         $this->assertStringContainsString('X-Chunk-Type: delete-list', $received);
         $this->assertStringContainsString('X-Delete-Offset: 7', $received);
@@ -66,6 +70,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $result = $client->finish_request();
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertSame(2, $result['parts_sent']);
+        $this->assertFalse($client->has_sent_parts());
     }
 
     /**

@@ -1861,22 +1861,27 @@ final class PushEndpointsTest extends TestCase {
         ]);
         $push_state_directory = $this->root . '/cancel-and-continue-state';
         $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $upload_request_stage_property = new ReflectionProperty(PushFilesSender::class, 'upload_request_stage');
 
         $sender = PushFilesSender::start($options);
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
             $sender->next_step();
+            $this->assertSame('sending_parts', $upload_request_stage_property->getValue($sender));
 
             $state_before_cancel = $this->loadActiveState($push_state_directory);
             $this->assertIsArray($state_before_cancel);
             $this->assertSame(0, $state_before_cancel['local_paths_to_push_byte_offset']);
             $this->assertSame(1, $this->countEndpointRequests('push_status'));
             $sender->cancel();
+            $this->assertSame('closed', $upload_request_stage_property->getValue($sender));
             $this->assertSame('continue', $sender->get_status());
             $this->assertSame('pushing_paths', $sender->get_phase());
             $this->assertTrue($sender->next_step());
+            $this->assertSame('sending_parts', $upload_request_stage_property->getValue($sender));
             $this->assertSame(2, $this->countEndpointRequests('push_status'));
             $sender->cancel();
+            $this->assertSame('closed', $upload_request_stage_property->getValue($sender));
         } finally {
             $sender->close();
         }
