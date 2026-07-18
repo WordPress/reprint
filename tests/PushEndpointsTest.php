@@ -1559,8 +1559,11 @@ final class PushEndpointsTest extends TestCase {
         $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
         $sender = PushFilesSender::start($options);
         try {
-            $sender->next_step();
-            $sender->next_step();
+            do {
+                $planning_result = $sender->next_step();
+            } while ($planning_result['phase'] === 'planning');
+            $this->assertSame('pushing_paths', $planning_result['phase']);
+
             $first_file_chunk = $sender->next_step();
             $this->assertSame('pushing_paths', $first_file_chunk['phase']);
 

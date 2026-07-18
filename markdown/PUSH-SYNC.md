@@ -103,7 +103,7 @@ A push plan has one lifecycle:
 
 1. `PushPlan::start()` copies the fresh local index into the local push state
    directory and writes a cursor containing the excluded paths.
-2. `next_step()` performs bounded merge steps until it reports `complete`. It
+2. Each `next_step()` merges one path until it reports `complete`. It
    writes files, symlinks, and empty directories with their planned type, size,
    and ctime to
    `local_paths_to_push.jsonl`, and writes raw NUL-delimited paths to

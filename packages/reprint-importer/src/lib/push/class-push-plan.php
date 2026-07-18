@@ -52,8 +52,8 @@
  *
  * ## Durability and memory
  *
- * `start()` copies the fresh local index into plan-owned state. Each bounded
- * step flushes both path lists before atomically publishing the next cursor.
+ * `start()` copies the fresh local index into plan-owned state. Each step
+ * merges one path, flushes both path lists, and atomically publishes the next cursor.
  * `resume()` discards bytes written beyond the saved output offsets and
  * continues from the saved index offsets, so an interrupted step cannot leave
  * duplicate durable records.
@@ -66,7 +66,7 @@
  */
 class PushPlan
 {
-    private const MAX_INDEX_ENTRIES_PER_STEP = 1000;
+    private const PATHS_PER_STEP = 1;
 
     /** @var string Paths and metadata from the last completed push. */
     private string $local_index_at_previous_push;
@@ -348,7 +348,7 @@ class PushPlan
     }
 
     /**
-     * Performs one bounded push plan step.
+     * Merges one path and publishes the resulting push plan cursor.
      *
      * start() establishes a new plan and resume() opens an unfinished one.
      * `complete` means both indexes reached EOF. The caller closes the plan
@@ -386,8 +386,11 @@ class PushPlan
             $this->local_index_at_previous_push_handle
         );
 
-        $index_entries_processed = 0;
+        $paths_processed = 0;
         while ($entry_fresh_index !== null || $entry_previous_index !== null) {
+            if ($paths_processed === self::PATHS_PER_STEP) {
+                break;
+            }
             // Base64 does not preserve byte order ('0' sorts before 'A'
             // in ASCII but encodes a higher value), so ordering uses the
             // decoded path bytes.
@@ -397,11 +400,6 @@ class PushPlan
                 $path_comparison = 1;
             } else {
                 $path_comparison = strcmp($entry_fresh_index["path"], $entry_previous_index["path"]);
-            }
-
-            $index_entries_for_path = $path_comparison === 0 ? 2 : 1;
-            if ($index_entries_processed + $index_entries_for_path > self::MAX_INDEX_ENTRIES_PER_STEP) {
-                break;
             }
 
             $current_shape = null;
@@ -509,7 +507,7 @@ class PushPlan
                     $this->local_index_at_previous_push_handle
                 );
             }
-            $index_entries_processed += $index_entries_for_path;
+            ++$paths_processed;
         }
 
         if (
