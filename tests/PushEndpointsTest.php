@@ -1913,6 +1913,74 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * Continues from the last durable boundary after a process dies with a request open.
+     */
+    public function testHighLevelSenderContinuesAfterProcessDeathWithAnOpenRequest(): void
+    {
+        if (
+            !function_exists('pcntl_fork')
+            || !function_exists('posix_kill')
+            || !defined('SIGKILL')
+        ) {
+            $this->markTestSkipped('Open-request process-death coverage requires pcntl and posix.');
+        }
+        $local_docroot = $this->root . '/killed-request-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $contents = str_repeat('k', 130);
+        file_put_contents($local_docroot . '/file.bin', $contents);
+        $fresh_local_index_path = $this->root . '/killed-request-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'file.bin' => $this->indexEntry($local_docroot . '/file.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/killed-request-state';
+        $request_open_marker = $this->root . '/request-open';
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child === 0) {
+            $sender = PushFilesSender::start($options);
+            for ($step = 0; $step < 300 && $sender->get_phase() !== 'pushing_paths'; ++$step) {
+                if (!$sender->next_step()) {
+                    exit(2);
+                }
+            }
+            if ($sender->get_phase() !== 'pushing_paths' || !$sender->next_step()) {
+                exit(3);
+            }
+            $push_stream_client_property = new ReflectionProperty(
+                PushFilesSender::class,
+                'push_stream_client'
+            );
+            $curl_handle_property = new ReflectionProperty(
+                MultipartPushStreamClient::class,
+                'curl_handle'
+            );
+            $push_stream_client = $push_stream_client_property->getValue($sender);
+            if ($curl_handle_property->getValue($push_stream_client) === null) {
+                exit(4);
+            }
+            file_put_contents($request_open_marker, 'open');
+            posix_kill(getmypid(), SIGKILL);
+            exit(5);
+        }
+
+        pcntl_waitpid($child, $child_status);
+        $this->assertTrue(pcntl_wifsignaled($child_status));
+        $this->assertSame(SIGKILL, pcntl_wtermsig($child_status));
+        $this->assertFileExists($request_open_marker);
+        $state = $this->loadActiveState($push_state_directory);
+        $this->assertIsArray($state);
+        $this->assertSame('pushing_paths', $state['phase']);
+        $this->assertSame(0, $state['local_paths_to_push_byte_offset']);
+
+        $result = $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $this->assertSame('complete', $result['status']);
+        $this->assertSame($contents, file_get_contents($this->docroot . '/file.bin'));
+    }
+
+    /**
      * Removes a push session when a local path to push disappears.
      */
     public function testHighLevelSenderRemovesSessionWhenLocalPathToPushDisappears(): void
