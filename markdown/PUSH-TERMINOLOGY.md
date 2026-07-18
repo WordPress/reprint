@@ -86,7 +86,7 @@ development. There are no compatibility aliases or migration paths.
 
 ## Local push state
 
-The local machine keeps planning and active state outside the target push
+The local machine keeps planning and active state outside the receiver push
 directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 
 | Surface | Name |
@@ -107,7 +107,7 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 directory ranges, and `excluded_paths_b64`. `sender.json` does not repeat them.
 Its phases are `creating`, `planning`, `pushing_paths`, `pushing_deletes`,
 `committing`, and `removing`. It records the push session ID, selected path-list
-cursor, local path type, size, and ctime for a partial file, target part limit,
+cursor, local path type, size, and ctime for a partial file, receiver part limit,
 and request-sizing state.
 
 A request failure ends the current sender run. The active state remains in

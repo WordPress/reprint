@@ -9,7 +9,7 @@
  *
  * PushFilesSender joins two durable protocols. PushPlan selects local paths in
  * bounded steps and owns the local index from which that selection was made.
- * The target owns the upload cursor for every path and for the deletion list.
+ * The receiver owns the upload cursor for every path and for the deletion list.
  * This class retains only the push session phase, selected path-list cursor,
  * type, size, and ctime saved for a partial file, and learned request limits
  * needed after a process restart.
