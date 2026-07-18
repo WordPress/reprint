@@ -674,9 +674,9 @@ class MultipartPushStreamClient
     }
 
     /**
-     * Sends one signed control request and decodes its JSON response.
+     * Sends one signed push request and decodes its JSON response.
      *
-     * Control calls use a no-progress timeout rather than a total-transfer
+     * Push requests use a no-progress timeout rather than a total-transfer
      * deadline and refuse redirects so signatures are never replayed elsewhere.
      *
      * @param string $method GET or POST.
@@ -709,14 +709,14 @@ class MultipartPushStreamClient
      * @throws InvalidArgumentException If the method is unsupported.
      * @throws RuntimeException If transport, redirect, or JSON decoding fails.
      */
-    public function control_request(string $method, string $endpoint, array $parameters, array $expected_statuses): array
+    public function send_push_request(string $method, string $endpoint, array $parameters, array $expected_statuses): array
     {
         $method = strtoupper($method);
         if (!in_array($method, ['GET', 'POST'], true)) {
-            throw new InvalidArgumentException('Multipart push control method must be GET or POST.');
+            throw new InvalidArgumentException('Push request method must be GET or POST.');
         }
         if ($expected_statuses === [] || count(array_filter($expected_statuses, 'is_string')) !== count($expected_statuses)) {
-            throw new InvalidArgumentException('Multipart push control requests require one or more string success statuses.');
+            throw new InvalidArgumentException('Push requests require one or more string success statuses.');
         }
         $url = $this->endpoint_url($endpoint, $parameters);
         $headers = $this->hmac_client->get_envelope_auth_headers($method, $url);
@@ -739,7 +739,7 @@ class MultipartPushStreamClient
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
-            // A control request has a bounded response, but it must not use
+            // A push request has a bounded response, but it must not use
             // CURLOPT_TIMEOUT: that is a total-transfer deadline and kills
             // a slow connection that is still moving bytes. libcurl's low
             // speed timer is a stall timeout instead.
@@ -755,11 +755,11 @@ class MultipartPushStreamClient
             throw new RuntimeException('The target redirected to ' . ($redirect_url === '' ? 'another address' : $redirect_url) . '. Use that address as the push base_url.');
         }
         if (!is_string($body)) {
-            throw new RuntimeException('Push control request failed: ' . ($error === '' ? 'no response' : $error) . '.');
+            throw new RuntimeException('Push request failed: ' . ($error === '' ? 'no response' : $error) . '.');
         }
         $decoded = json_decode($body, true);
         if (!is_array($decoded)) {
-            throw new RuntimeException('Push control request returned invalid JSON (HTTP ' . $http_code . '): ' . substr($body, 0, 160));
+            throw new RuntimeException('Push request returned invalid JSON (HTTP ' . $http_code . '): ' . substr($body, 0, 160));
         }
         $decoded['http_code'] = $http_code;
         return $this->classify_response($decoded, $expected_statuses);
@@ -1039,7 +1039,7 @@ class MultipartPushStreamClient
     }
 
     /**
-     * Classifies every decoded upload and control response by protocol reason.
+     * Classifies every decoded upload and push response by protocol reason.
      *
      * `lock_acquisition_failure` and `offset_gap` are recoverable because a
      * later request can retry the locked operation or use the receiver-

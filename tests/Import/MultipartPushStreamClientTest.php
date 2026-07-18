@@ -429,9 +429,9 @@ final class MultipartPushStreamClientTest extends TestCase {
      * required for a new signature, while an unrecognized rejection reason is
      * preserved for the caller instead of being guessed recoverable.
      */
-    public function testControlRedirectAndUnknownReasonAreTerminal(): void {
+    public function testPushRequestRedirectAndUnknownReasonAreTerminal(): void {
         if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
-            $this->markTestSkipped('Raw control-response coverage requires PHP curl and pcntl.');
+            $this->markTestSkipped('Raw push-response coverage requires PHP curl and pcntl.');
         }
         foreach (['redirect', 'unknown-reason'] as $case) {
             $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
@@ -489,10 +489,10 @@ final class MultipartPushStreamClientTest extends TestCase {
             ]);
             if ($case === 'redirect') {
                 try {
-                    $client->control_request('POST', 'push_create', [
+                    $client->send_push_request('POST', 'push_create', [
                         'push_session_id' => str_repeat('8', 32),
                     ], ['created']);
-                    $this->fail('A redirected control request was accepted.');
+                    $this->fail('A redirected push request was accepted.');
                 } catch (\RuntimeException $exception) {
                     $this->assertSame(
                         'The target redirected to http://example.test/final. Use that address as the push base_url.',
@@ -500,7 +500,7 @@ final class MultipartPushStreamClientTest extends TestCase {
                     );
                 }
             } else {
-                $result = $client->control_request('POST', 'push_create', [
+                $result = $client->send_push_request('POST', 'push_create', [
                     'push_session_id' => str_repeat('9', 32),
                 ], ['created']);
                 $this->assertSame('failed', $result['status']);

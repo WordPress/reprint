@@ -86,7 +86,7 @@ development. There are no compatibility aliases or migration paths.
 
 ## Local push state
 
-The local machine keeps planning and sender state outside the remote push
+The local machine keeps planning and active state outside the target push
 directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 
 | Surface | Name |
@@ -95,22 +95,24 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Local index at the previous push | `local_index_at_previous_push.jsonl`, `$local_index_at_previous_push` |
 | Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
+| Local push state directory | `push_state_directory`, `$push_state_directory` |
 | PushPlan cursor | `cursor.json`, `$cursor_file` |
 | Active state | `sender.json`, `$state_path` |
 | Lifecycle lock file | `sender.lock`, `$lock_path` |
 | Open lifecycle lock | `$lock_handle` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path change fields | `local_path_change_fields`, `$local_path_change_fields` |
+| Consecutive recoverable failures | `consecutive_recoverable_failures`, `MAXIMUM_CONSECUTIVE_RECOVERABLE_FAILURES` |
 
 `cursor.json` owns planning offsets, output offsets and counts, active deleted
 directory ranges, and `excluded_paths_b64`. `sender.json` does not repeat them.
 Its phases are `creating`, `planning`, `pushing_paths`, `pushing_deletes`,
 `committing`, and `removing`. It records the push session ID, selected path-list
-cursor, local path change fields for a partial file, recoverable-failure count,
-target part limit, and request-sizing state. The local path change fields are
-the path's type, size, and ctime.
+cursor, local path change fields for a partial file, consecutive recoverable-
+failure count, target part limit, and request-sizing state. The local path
+change fields are the path's type, size, and ctime.
 
-When a selected local path disappears or changes while being read, the sender
+When a local path to push disappears or changes while being read, the sender
 reports `local_path_changed` and moves to `removing`. After removal it requests
 a new fresh local index.
 
@@ -125,6 +127,34 @@ acquire or release the lock and does not reread `sender.json`. Every
 `continue` result follows a durable sender boundary, so a later process may
 resume after the current process closes the sender. In `pushing_paths` or
 `pushing_deletes`, one step sends at most one multipart part.
+
+## PushFilesSender names
+
+Use these names verbatim inside `PushFilesSender`:
+
+| Meaning | Name |
+| --- | --- |
+| Local path to push | `LocalPathToPush`, `$local_path_to_push`, `read_local_path_to_push()` |
+| Push stream client | `$push_stream_client`, `create_push_stream_client()` |
+| Push stream client options | `$push_stream_client_options` |
+| Request sizer options | `request_sizer_options`, `$request_sizer_options` |
+| Push request | `send_push_request()` |
+| Request result | `$request_result` |
+| Failure result | `$failure_result` |
+| Plan result | `$plan_result` |
+| Receiver path status | `$receiver_path_status` |
+| Receiver path type | `$receiver_path_type` |
+| Receiver-confirmed bytes | `$receiver_confirmed_bytes` |
+| Whether this upload completes the local path | `$upload_completes_local_path` |
+| Maximum file payload bytes | `$maximum_file_payload_bytes` |
+| Maximum delete-list payload bytes | `$maximum_delete_list_payload_bytes` |
+| Local I/O failure detail | `$local_io_failure_detail` |
+| Whether the local delete list is complete | `$local_delete_list_complete` |
+| Open directory handle | `$directory_handle` |
+| Local path stat result | `$path_stat` |
+| File type bits | `$file_type_bits` |
+| Upload-request start failure | `upload_request_start_failure()` |
+| Delete active state | `delete_state()` |
 
 ## Protocol names
 

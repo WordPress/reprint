@@ -2,7 +2,7 @@
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 /**
- * Core class used to plan local filesystem changes for one remote site.
+ * Core class used to plan local filesystem changes for one target.
  *
  * PushPlan merges a path-sorted fresh local index with the local index at the
  * previous push. It writes durable lists of local paths to push and local paths
@@ -21,13 +21,13 @@
  *
  * Example:
  *
- *     $plan = PushPlan::start($site_dir, $fresh_local_index_path);
+ *     $plan = PushPlan::start($push_state_directory, $fresh_local_index_path);
  *     do {
  *         $result = $plan->next_step();
  *     } while ($result["status"] === "more");
  *     $plan->close();
  *
- *     // Push the selected paths and wait for the receiver to commit them.
+ *     // Push the local paths to push and wait for the receiver to commit them.
  *     $plan->after_successful_push();
  *
  * A later process continues an unfinished plan with `resume()`. The retained
@@ -80,7 +80,7 @@ class PushPlan
     /** @var string Plan-owned copy of the fresh local index. */
     private string $fresh_local_index;
 
-    /** @var string Path to the durable cursor for this site's push plan. */
+    /** @var string Path to the durable PushPlan cursor. */
     private string $cursor_file;
 
     /** @var list<string> Receiver-owned paths that the plan must not push or delete. */
@@ -108,17 +108,17 @@ class PushPlan
      * initial cursor before opening the plan files. An existing cursor is
      * rejected so an unfinished plan cannot be overwritten.
      *
-     * @param string       $site_dir               Per-site directory for durable push-plan state.
+     * @param string       $push_state_directory   Local push state directory.
      * @param string       $fresh_local_index_path Path to the path-sorted fresh local index.
      * @param list<string> $excluded_paths         Receiver-owned paths that the plan must not push or delete.
      * @return self Open plan positioned at the initial cursor.
      */
     public static function start(
-        string $site_dir,
+        string $push_state_directory,
         string $fresh_local_index_path,
         array $excluded_paths = []
     ): self {
-        $plan = new self($site_dir);
+        $plan = new self($push_state_directory);
         if (is_file($plan->cursor_file)) {
             throw new LogicException("Cannot start a push plan while an unfinished plan exists: {$plan->cursor_file}");
         }
@@ -144,18 +144,18 @@ class PushPlan
     }
 
     /**
-     * Resumes the unfinished push plan retained in a site directory.
+     * Resumes the unfinished push plan retained in local push state.
      *
      * Reuses the plan-owned fresh local index and the offsets, counts, and
      * deleted-directory ranges in the durable cursor. Excluded paths are the
      * ones originally passed to start().
      *
-     * @param string $site_dir Per-site directory containing the unfinished plan.
+     * @param string $push_state_directory Local push state directory containing the unfinished plan.
      * @return self Open plan positioned at its last durable cursor.
      */
-    public static function resume(string $site_dir): self
+    public static function resume(string $push_state_directory): self
     {
-        $plan = new self($site_dir);
+        $plan = new self($push_state_directory);
         $cursor = $plan->load_cursor();
         if ($cursor === null) {
             throw new LogicException("Cannot resume a push plan without an unfinished plan: {$plan->cursor_file}");
@@ -177,55 +177,55 @@ class PushPlan
     }
 
     /**
-     * Reports whether the site directory contains a plan that has not been
+     * Reports whether local push state contains a plan that has not been
      * published or discarded.
      *
-     * @param string $site_dir Per-site directory for durable push-plan state.
+     * @param string $push_state_directory Local push state directory.
      */
-    public static function has_unfinished_plan(string $site_dir): bool
+    public static function has_unfinished_plan(string $push_state_directory): bool
     {
-        return is_file(rtrim($site_dir, "/") . "/cursor.json");
+        return is_file(rtrim($push_state_directory, "/") . "/cursor.json");
     }
 
     /**
-     * Returns the JSONL path list produced for positive local work.
+     * Returns the JSONL local paths to push list.
      *
-     * @param string $site_dir Per-site directory for durable push-plan state.
+     * @param string $push_state_directory Local push state directory.
      */
-    public static function local_paths_to_push_path(string $site_dir): string
+    public static function local_paths_to_push_path(string $push_state_directory): string
     {
-        return rtrim($site_dir, "/") . "/local_paths_to_push.jsonl";
+        return rtrim($push_state_directory, "/") . "/local_paths_to_push.jsonl";
     }
 
     /**
      * Returns the raw NUL-delimited path list produced for local deletions.
      *
-     * @param string $site_dir Per-site directory for durable push-plan state.
+     * @param string $push_state_directory Local push state directory.
      */
-    public static function local_paths_to_delete_path(string $site_dir): string
+    public static function local_paths_to_delete_path(string $push_state_directory): string
     {
-        return rtrim($site_dir, "/") . "/local_paths_to_delete";
+        return rtrim($push_state_directory, "/") . "/local_paths_to_delete";
     }
 
     /**
-     * Initializes the paths for one site's durable push-plan files.
+     * Initializes the files in one local push state directory.
      *
-     * Creates the per-site directory when it does not already exist. Plan
+     * Creates the directory when it does not already exist. Plan
      * files are opened only after start() or resume() establishes a cursor.
      *
-     * @param string $site_dir Per-site directory for durable push-plan state.
+     * @param string $push_state_directory Local push state directory.
      */
-    private function __construct(string $site_dir)
+    private function __construct(string $push_state_directory)
     {
-        $site_dir = rtrim($site_dir, "/");
-        if (!is_dir($site_dir) && !@mkdir($site_dir, 0755, true) && !is_dir($site_dir)) {
-            throw new RuntimeException("Failed to create the push plan directory: {$site_dir}");
+        $push_state_directory = rtrim($push_state_directory, "/");
+        if (!is_dir($push_state_directory) && !@mkdir($push_state_directory, 0755, true) && !is_dir($push_state_directory)) {
+            throw new RuntimeException("Failed to create the push plan directory: {$push_state_directory}");
         }
-        $this->local_index_at_previous_push = $site_dir . "/local_index_at_previous_push.jsonl";
-        $this->local_paths_to_push = self::local_paths_to_push_path($site_dir);
-        $this->local_paths_to_delete = self::local_paths_to_delete_path($site_dir);
-        $this->fresh_local_index = $site_dir . "/fresh_local_index.jsonl";
-        $this->cursor_file = $site_dir . "/cursor.json";
+        $this->local_index_at_previous_push = $push_state_directory . "/local_index_at_previous_push.jsonl";
+        $this->local_paths_to_push = self::local_paths_to_push_path($push_state_directory);
+        $this->local_paths_to_delete = self::local_paths_to_delete_path($push_state_directory);
+        $this->fresh_local_index = $push_state_directory . "/fresh_local_index.jsonl";
+        $this->cursor_file = $push_state_directory . "/cursor.json";
     }
 
     /**
@@ -316,7 +316,7 @@ class PushPlan
     }
 
     /**
-     * Discards a closed plan after its remote push session is removed.
+     * Discards a closed plan after its push session is removed.
      *
      * Removing the cursor permits the next push to start from a new local
      * index. The plan-owned index and output files may remain because start()
@@ -872,7 +872,7 @@ class PushPlan
     /**
      * Removes the cursor after the completed fresh local index is published.
      *
-     * With no cursor, the site directory no longer contains an unfinished
+     * With no cursor, the local push state directory no longer contains an unfinished
      * push plan and start() may create the next one.
      */
     private function remove_cursor(): void

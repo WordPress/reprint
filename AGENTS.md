@@ -13,6 +13,10 @@ Use its terms verbatim in identifiers, comments, tests, documentation, plans,
 review replies, commit messages, and pull-request descriptions. Do not replace
 them with near-synonyms.
 
+`tests/Import/PushTerminologyTest.php` keeps retired terms out of push code and
+requires `PushFilesSender` names to remain in the glossary. Update the glossary
+and this test together when the language contract changes.
+
 ## Streaming is the point — never buffer
 
 - Never accumulate a request body, a frame plan, or any "send later"
