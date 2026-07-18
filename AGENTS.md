@@ -77,7 +77,7 @@ Inside a class, omit the class name when context already supplies it: use
   or operation ceiling is fixed and small enough to make the whole step
   predictably bounded.
 - If stopping between two actions changes what must happen on resume, those
-  actions belong to separate durable phases. Publish the next phase only after
+  actions belong to separate durable phases. Store the next phase only after
   the current action has completed or the target has confirmed it.
 - Store state only when durable state changes. A cheap step must not reopen
   files, reread retained entries, recreate subordinate processors, or rewrite

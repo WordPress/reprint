@@ -36,9 +36,9 @@ if (!class_exists('Site_Export_Push_Exception', false)) {
  *     | array{path_b64:string,state:'complete',type:'directory'|'symlink',accepted_bytes:0}
  * )
  * @phpstan-type InFlightWork (
- *     array{phase:'preparing'|'receiving'|'publishing',path_b64:string,type:'file',total_bytes:int}
- *     | array{phase:'preparing'|'publishing',path_b64:string,type:'directory'}
- *     | array{phase:'preparing'|'publishing',path_b64:string,type:'symlink',target_b64:string}
+ *     array{phase:'preparing'|'receiving'|'completing',path_b64:string,type:'file',total_bytes:int}
+ *     | array{phase:'preparing'|'completing',path_b64:string,type:'directory'}
+ *     | array{phase:'preparing'|'completing',path_b64:string,type:'symlink',target_b64:string}
  * )
  * @phpstan-type CommitState array{
  *     phase:'deleting_files'|'installing_files'|'complete',
@@ -462,7 +462,7 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Returns the work state published by the latest accepted MIME part.
+     * Returns the receiver-confirmed work state from the latest accepted MIME part.
      *
      * The value is meaningful only after next_change() returns true. Calling
      * next_change() again clears the previous value before processing, and
@@ -545,7 +545,7 @@ final class Site_Export_Push_Session {
      */
     public function get_status(?string $path = null): array {
         return $this->with_push_lock(function () use ($path): array {
-            $this->finish_published_inflight();
+            $this->finish_inflight_completion();
             $reported_path = null;
             if ($path !== null) {
                 $this->assert_path_does_not_overlap_excluded_paths($path);
@@ -647,7 +647,7 @@ final class Site_Export_Push_Session {
                         throw new InvalidArgumentException('A nonempty delete stream must end in NUL before commit; the final record is unterminated.');
                     }
                 }
-                $this->finish_published_inflight();
+                $this->finish_inflight_completion();
                 if ($this->read_inflight() !== null) {
                     throw new InvalidArgumentException('Commit cannot begin while work remains in flight.');
                 }
@@ -757,7 +757,7 @@ final class Site_Export_Push_Session {
                     throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'A remove tombstone already exists for push session ' . $this->push_session_id . '.');
                 }
                 if (!@rename($this->push_directory, $removing_push_directory)) {
-                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the push removal tombstone.');
+                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not move the push directory to its removal tombstone.');
                 }
             } finally {
                 flock($lock, LOCK_UN);
@@ -873,7 +873,7 @@ final class Site_Export_Push_Session {
     /**
      * Reads the durable description of in-flight work.
      *
-     * A push receives or publishes one work value at a time. Its identity and
+     * A push receives or completes one work value at a time. Its identity and
      * phase are stored in `work/inflight.json`; file bytes, when
      * applicable, are stored separately in `work/inflight.data`. This method
      * reads the record before upload, status, or commit decides what work is
@@ -881,13 +881,13 @@ final class Site_Export_Push_Session {
      *
      * The JSON record is the authority for whether work is in flight. Callers
      * use its type and phase to decide whether they can receive more bytes,
-     * publish the completed value, or begin commit work. A missing record means
+     * finish the completed value, or begin commit work. A missing record means
      * there is no in-flight work.
      *
      * @return array|null {
      *     In-flight work, or null when none exists.
      *
-     *     @type string $phase Current `preparing`, `receiving`, or `publishing`
+     *     @type string $phase Current `preparing`, `receiving`, or `completing`
      *                         phase. Only files use `receiving`.
      *     @type string $path_b64 Base64-encoded work path.
      *     @type string $type One of `file`, `directory`, or `symlink`.
@@ -901,21 +901,20 @@ final class Site_Export_Push_Session {
     }
 
     /**
-     * Finishes a publication which crossed its durable publication boundary.
+     * Finishes in-flight work which crossed its durable completion boundary.
      *
-     * Publishing metadata is written before the completed work value changes.
+     * The `completing` phase is stored before the completed work value changes.
      * That ordering lets a later upload, status request, or commit distinguish a
-     * crash before publication from a crash after the data-file rename. When the
-     * fixed data file remains it is authoritative and is renamed into work/files.
-     * When it has already been consumed, the completed value is checked as the
-     * durable record of publication. Only then is the in-flight metadata
-     * removed.
+     * stop before completion from one after the data-file rename. When the fixed
+     * data file remains it is authoritative and is renamed into work/files.
+     * When it has already been consumed, the matching work value confirms
+     * completion. Only then is the in-flight metadata removed.
      *
      * @return void
      */
-    private function finish_published_inflight(): void {
+    private function finish_inflight_completion(): void {
         $inflight = $this->read_inflight();
-        if ($inflight === null || $inflight['phase'] !== 'publishing') {
+        if ($inflight === null || $inflight['phase'] !== 'completing') {
             return;
         }
         $path = base64_decode($inflight['path_b64'], true);
@@ -925,39 +924,39 @@ final class Site_Export_Push_Session {
             $data = $this->lstat_path($this->work_inflight_data_path);
             if ($data !== null) {
                 if ($data['type'] !== 'file' || $data['size'] !== $inflight['total_bytes']) {
-                    throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Publishing in-flight data has an invalid size.');
+                    throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'In-flight file completion has an invalid data size.');
                 }
                 $this->ensure_private_parent($work_path);
                 if ($work_identity !== null) {
                     $this->remove_work_path($work_path);
                 }
                 if (!@rename($this->work_inflight_data_path, $work_path)) {
-                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish in-flight file data.');
+                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not move in-flight file data to its work-file path.');
                 }
             } elseif ($work_identity === null || $work_identity['type'] !== 'file' || $work_identity['size'] !== $inflight['total_bytes']) {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Published in-flight data has no completed file.');
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'In-flight file completion has neither data nor a matching work file.');
             }
         } elseif ($inflight['type'] === 'directory') {
             if ($work_identity === null) {
                 $this->ensure_private_parent($work_path);
-                // The process umask filters 0777 to the document-root mode used by normal publication.
+                // The process umask filters 0777 to the document-root mode used by normal completion.
                 // Until commit, 0700 work ancestors deny group and other traversal.
                 if (!@mkdir($work_path, 0777)) {
-                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the in-flight directory.');
+                    throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create the in-flight directory at its work-file path.');
                 }
             } elseif ($work_identity['type'] !== 'directory') {
-                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Published in-flight directory has an incompatible completed value.');
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'In-flight directory completion found an incompatible work value.');
             }
         } elseif ($work_identity === null) {
             $this->ensure_private_parent($work_path);
             if (!@symlink(base64_decode($inflight['target_b64'], true), $work_path)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish the in-flight symlink.');
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create the in-flight symlink at its work-file path.');
             }
         } elseif ($work_identity['type'] !== 'symlink' || @readlink($work_path) !== base64_decode($inflight['target_b64'], true)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Published in-flight symlink has an incompatible completed value.');
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'In-flight symlink completion found an incompatible work value.');
         }
         if (!@unlink($this->work_inflight_path)) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear published in-flight metadata.');
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear in-flight metadata after completing work.');
         }
     }
 
@@ -999,7 +998,7 @@ final class Site_Export_Push_Session {
         if ($offset > $total_bytes || $part_bytes > $total_bytes - $offset) {
             throw new InvalidArgumentException('File part for ' . base64_encode($path) . ' exceeds its declared total of ' . $total_bytes . ' bytes.');
         }
-        $this->finish_published_inflight();
+        $this->finish_inflight_completion();
         $inflight = $this->read_inflight();
         $complete_path = $this->work_files_directory . '/' . $path;
         $complete = $this->lstat_path($complete_path);
@@ -1057,17 +1056,17 @@ final class Site_Export_Push_Session {
         }
         $accepted_bytes = $actual_bytes + $received;
         if ($accepted_bytes === $total_bytes) {
-            $inflight['phase'] = 'publishing';
+            $inflight['phase'] = 'completing';
             $this->write_json($this->work_inflight_path, $inflight);
             $this->ensure_private_parent($complete_path);
             if (($existing = $this->lstat_path($complete_path)) !== null) {
                 $this->remove_work_path($complete_path);
             }
             if (!@rename($this->work_inflight_data_path, $complete_path)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish completed work file ' . base64_encode($path) . '.');
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not move in-flight file data to the work-file path ' . base64_encode($path) . '.');
             }
             if (!@unlink($this->work_inflight_path)) {
-                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear published in-flight metadata for ' . base64_encode($path) . '.');
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear in-flight metadata after completing work for ' . base64_encode($path) . '.');
             }
             $state = 'complete';
         } else {
@@ -1101,7 +1100,7 @@ final class Site_Export_Push_Session {
         }
         $path = $this->decode_path_header($headers, 'x-directory-path');
         $target = $this->work_files_directory . '/' . $path;
-        $this->finish_published_inflight();
+        $this->finish_inflight_completion();
         $inflight = $this->read_inflight();
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
             throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'In-flight work already occupies the slot: ' . $inflight['path_b64'] . '.');
@@ -1122,14 +1121,14 @@ final class Site_Export_Push_Session {
         if ($identity !== null) {
             $this->remove_work_path($target);
         }
-        $inflight['phase'] = 'publishing';
+        $inflight['phase'] = 'completing';
         $this->write_json($this->work_inflight_path, $inflight);
         $this->ensure_private_parent($target);
         if (!is_dir($target) && !@mkdir($target, 0777)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not stage explicit empty directory ' . base64_encode($path) . '.');
         }
         if (!@unlink($this->work_inflight_path)) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear published in-flight metadata for ' . base64_encode($path) . '.');
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear in-flight metadata after completing work for ' . base64_encode($path) . '.');
         }
         $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'directory', 'accepted_bytes' => 0];
     }
@@ -1171,7 +1170,7 @@ final class Site_Export_Push_Session {
             throw new InvalidArgumentException('Symlink target must contain between 1 and ' . self::MAX_PATH_BYTES . ' bytes without NUL.');
         }
         $target = $this->work_files_directory . '/' . $path;
-        $this->finish_published_inflight();
+        $this->finish_inflight_completion();
         $inflight = $this->read_inflight();
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
             throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'In-flight work already occupies the slot: ' . $inflight['path_b64'] . '.');
@@ -1192,14 +1191,14 @@ final class Site_Export_Push_Session {
         if ($identity !== null) {
             $this->remove_work_path($target);
         }
-        $inflight['phase'] = 'publishing';
+        $inflight['phase'] = 'completing';
         $this->write_json($this->work_inflight_path, $inflight);
         $this->ensure_private_parent($target);
         if (!@symlink($target_value, $target)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not stage symlink ' . base64_encode($path) . '.');
         }
         if (!@unlink($this->work_inflight_path)) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear published in-flight metadata for ' . base64_encode($path) . '.');
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not clear in-flight metadata after completing work for ' . base64_encode($path) . '.');
         }
         $this->current_change = ['path_b64' => base64_encode($path), 'state' => 'complete', 'type' => 'symlink', 'accepted_bytes' => 0];
     }
@@ -2181,11 +2180,12 @@ final class Site_Export_Push_Session {
      *
      * The temporary name includes the push session ID so concurrent push sessions updating
      * shared control files do not collide before the commit-state lock serializes
-     * the final rename. Permissions are committed before publication.
+     * the final rename. Permissions are applied to the temporary file before
+     * that rename.
      *
      * @param string $path Absolute destination path.
      * @param string $contents Complete file contents to write.
-     * @param int $permissions File mode committed to the temporary file.
+     * @param int $permissions File mode applied to the temporary file.
      */
     private function write_atomic_file(string $path, string $contents, int $permissions): void {
         $temporary = $path . '.tmp-' . $this->push_session_id;
@@ -2207,7 +2207,7 @@ final class Site_Export_Push_Session {
         @chmod($temporary, $permissions);
         if (!@rename($temporary, $path)) {
             @unlink($temporary);
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not publish metadata file ' . $path . '.');
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not replace metadata file ' . $path . '.');
         }
     }
 

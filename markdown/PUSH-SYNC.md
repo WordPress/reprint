@@ -129,7 +129,7 @@ simpler than two copy cursors, retained handles, and per-chunk state writes
 until measurements from materially larger installations justify that machinery.
 
 Each step flushes both path lists and the append-only deleted-directory stack
-before atomically publishing the cursor with the two index offsets, two output
+before atomically storing the cursor with the two index offsets, two output
 byte offsets, path counts, and active stack byte offset. Each stack entry links
 to the preceding active directory, so resume reads only the top entry. A later
 process calls `PushPlan::resume()` with only
@@ -164,17 +164,18 @@ push identity and policy plus whether the work-delete stream is complete.
 and validated against the current schema.
 
 `work/files/` contains completed work values only. A single `work/inflight.json`
-record identifies the value currently being received or published, and
+record identifies the value currently being received or completed, and
 `work/inflight.data` contains in-flight file bytes. Its actual size is the
 receiver-confirmed cursor. A file replayed from byte zero restarts the same
 path; a continuation must begin at that confirmed cursor. An upload for another
 local path is rejected until the in-flight work is complete. `work/deletes` is
 the corresponding durable delete queue.
 
-Publication records its phase before it creates work-file parents or replaces
-the completed value. A status, upload, or commit request can therefore finish
-a publication after a lost response. Commit refuses to begin while work is
-still being prepared or received, so it traverses completed work files only.
+The `completing` phase is stored before the receiver creates work-file parents
+or replaces the completed value. A status, upload, or commit request can
+therefore finish that work after a lost response. Commit refuses to begin while
+work is still being prepared or received, so it traverses completed work files
+only.
 
 `remove()` renames a removable push directory to
 `.removing-<push-session-id>/` before bounded cleanup. A false return means
@@ -381,7 +382,7 @@ Remote-side, journaled, idempotent, driven by repeated commands until done.
 Order:
 
 1. **Receive work, outside maintenance:** multipart requests write one bounded
-   chunk at a time into `work/inflight.data` and publish complete values in
+   chunk at a time into `work/inflight.data` and move complete values into
    `work/files`. The site runs normally throughout receipt.
 2. **Maintenance on.** Commit writes the `.maintenance` file itself, and since
    WordPress executes that file, ours whitelists reprint API requests

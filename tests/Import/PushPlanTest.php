@@ -40,7 +40,7 @@ final class PushPlanTest extends TestCase
     //  Successful push
     // ------------------------------------------------------------------
 
-    public function testCompletedPlanCanRemoveItsCursorAfterTheSenderPublishesTheIndex(): void
+    public function testCompletedPlanCanRemoveItsCursorAfterTheSenderSavesTheIndex(): void
     {
         $localIndexAtPreviousPush = $this->tempDir . '/state/push/example.com/local_index_at_previous_push.jsonl';
         $this->assertFileDoesNotExist($localIndexAtPreviousPush);
@@ -103,7 +103,7 @@ final class PushPlanTest extends TestCase
         $this->startPlan();
     }
 
-    public function testDiscardAllowsANewPlanWithoutPublishingTheOldIndex(): void
+    public function testDiscardAllowsANewPlanWithoutSavingTheOldIndex(): void
     {
         $firstIndex = $this->writeIndex(['first.txt' => [100, 5, 'file']]);
         $plan = $this->startPlan($firstIndex);

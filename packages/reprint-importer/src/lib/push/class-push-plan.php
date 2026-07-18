@@ -19,8 +19,9 @@
  * While sender.json says `planning`, cursor.json exists and the sender owns an
  * open PushPlan under sender.lock. A false next_step() result means both indexes
  * reached EOF; the sender closes the plan before changing its phase. The plan
- * cursor then remains in place until a confirmed commit publishes the fresh
- * local index or removal discards the plan. cursor.json owns planning progress;
+ * cursor then remains in place until a confirmed commit saves the fresh local
+ * index as the local index at the previous push, or removal discards the plan.
+ * cursor.json owns planning progress;
  * sender.json never duplicates it.
  *
  * ## Change detection
@@ -33,7 +34,7 @@
  *
  * With no local index from a previous push, every file, symlink, and empty
  * directory is selected, and no deletion can be detected. Excluded paths are
- * omitted from both path lists but remain in the fresh local index published
+ * omitted from both path lists but remain in the fresh local index saved
  * after success.
  *
  * The index reader trusts the entry values produced by the indexer. It retains
@@ -43,7 +44,7 @@
  *
  * The sender copies the fresh local index into plan-owned state before
  * `start()`. Each step merges one path, flushes the plan output changed by that
- * step, and atomically publishes the next cursor.
+ * step, and atomically stores the next cursor.
  * `resume()` discards bytes written beyond the saved output offsets and
  * continues from the saved index offsets, so an interrupted step cannot leave
  * duplicate durable entries.
@@ -181,8 +182,9 @@ class PushPlan
     /**
      * Loads a retained plan without opening files used only while planning.
      *
-     * The returned plan is closed. It can publish a successful push or be
-     * discarded without opening and immediately closing all planning handles.
+     * The returned plan is closed. It can remove its cursor after a successful
+     * push or be discarded without opening and immediately closing all planning
+     * handles.
      *
      * @param string $push_state_directory Local push state directory containing the retained plan.
      * @return self Closed plan loaded from its durable cursor.
@@ -200,8 +202,7 @@ class PushPlan
     }
 
     /**
-     * Reports whether local push state contains a plan that has not been
-     * published or discarded.
+     * Reports whether local push state contains a retained planning cursor.
      *
      * @param string $push_state_directory Local push state directory.
      */
@@ -241,7 +242,7 @@ class PushPlan
     }
 
     /**
-     * Returns the local index published after the previous successful push.
+     * Returns the local index saved after the previous successful push.
      *
      * @param string $push_state_directory Local push state directory.
      */
@@ -327,11 +328,11 @@ class PushPlan
     }
 
     /**
-     * Removes the planning cursor after the sender publishes a successful push.
+     * Removes the planning cursor after the sender finishes a successful push.
      *
      * Only a closed, completed plan can remove its cursor. The sender owns
-     * commit and publishes the fresh local index through its own swap-file
-     * phase before calling this method.
+     * commit and saves the fresh local index as the local index at the previous
+     * push before calling this method.
      */
     public function after_successful_push(): void
     {
@@ -364,7 +365,7 @@ class PushPlan
     }
 
     /**
-     * Merges one path and publishes the resulting push plan cursor.
+     * Merges one path and stores the resulting push plan cursor.
      *
      * A true return means another path may be merged. False means both indexes
      * reached EOF and remains false on later calls. The owning sender closes the
@@ -563,8 +564,8 @@ class PushPlan
      * Closes every plan file handle and prevents further plan steps.
      *
      * The durable cursor and plan-owned files remain available to resume the
-     * plan or to publish the completed fresh local index after a successful
-     * push.
+     * plan or to let the sender save the completed fresh local index after a
+     * successful push.
      */
     public function close(): void
     {
@@ -599,9 +600,9 @@ class PushPlan
     /**
      * Opens one output at its durable cursor offset and discards later bytes.
      *
-     * Plan output is flushed before its cursor is published, so a valid cursor
+     * Plan output is flushed before its cursor is stored, so a valid cursor
      * cannot exceed the output length. A process may stop after writing output
-     * but before publishing its next cursor. Truncating to the saved offset
+     * but before storing its next cursor. Truncating to the saved offset
      * removes only that uncommitted tail before the plan continues.
      *
      * @param string $path        Path to the push-plan output file.
@@ -624,7 +625,7 @@ class PushPlan
     /**
      * Positions an index handle at its durable cursor offset.
      *
-     * The plan owns immutable index files, and publishes their consumed byte
+     * The plan owns immutable index files, and records their consumed byte
      * offsets only after finishing the corresponding step.
      *
      * @param resource $handle      Open index handle to position.
@@ -935,7 +936,7 @@ class PushPlan
      * A temporary file and rename prevent readers from observing a partial cursor.
      *
      * @param array $cursor {
-     *     Cursor to publish as the durable plan boundary.
+     *     Cursor to store as the durable plan boundary.
      *
      *     @type int      $byte_offset_in_fresh_index                Consumed bytes in the fresh local index.
      *     @type int      $byte_offset_in_previous_index             Consumed bytes in the local index at the previous push.
@@ -959,7 +960,7 @@ class PushPlan
     }
 
     /**
-     * Removes the cursor after the completed fresh local index is published.
+     * Removes the cursor after the completed fresh local index is saved.
      *
      * With no cursor, the local push state directory no longer contains an unfinished
      * push plan and start() may create the next one.

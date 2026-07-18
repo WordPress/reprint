@@ -643,7 +643,7 @@ final class Site_Export_Multipart_Processor {
     }
 
     /**
-     * Publishes the pending physical field into the unique normalized map.
+     * Moves the pending physical field into the unique normalized map.
      *
      * A field remains pending while continuation lines arrive. It is stored
      * only when the next field or the header-block terminator is complete, so

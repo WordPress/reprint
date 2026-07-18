@@ -13,7 +13,7 @@ messages, or pull-request descriptions.
   change.
 - **Work files**, **in-flight work**, and **work deletes** are the only durable
   work owned by a push session. Work files are complete values. In-flight work
-  is the one value currently being received or published.
+  is the one value currently being received or completed.
 - **Commit** consumes work deletes and work files; it does not create or remove
   a push session.
 - **Remove** deletes a push directory in bounded calls.
@@ -64,8 +64,8 @@ the live push directory and while performing one tombstone cleanup step, so
 create cannot recreate the same push session until that cleanup finishes.
 
 `inflight.json` records the path and type of the one in-flight work value.
-File records use `preparing`, `receiving`, or `publishing` and also contain
-`total_bytes`. Directory and symlink records use `preparing` or `publishing`;
+File records use `preparing`, `receiving`, or `completing` and also contain
+`total_bytes`. Directory and symlink records use `preparing` or `completing`;
 symlink records also contain `target_b64`. `inflight.data` contains in-flight
 file bytes, and its actual size is the receiver-confirmed cursor. Both paths
 are absent when no work is in flight.

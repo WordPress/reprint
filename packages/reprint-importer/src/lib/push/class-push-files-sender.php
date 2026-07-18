@@ -365,7 +365,7 @@ final class PushFilesSender
      * phase step is bounded except the deliberate complete-index copy described
      * in the class documentation. The caller may close the sender after this
      * method returns true; close() confirms any open multipart request before
-     * publishing its local boundary. A false return directs the caller to
+     * storing its local boundary. A false return directs the caller to
      * get_status(), where `restart` means the old push session and local plan
      * are gone and a new local index is required.
      *
@@ -1035,7 +1035,7 @@ final class PushFilesSender
     }
 
     /**
-     * Finishes the retained upload request and publishes any changed local boundary.
+     * Finishes the retained upload request and stores any changed local boundary.
      */
     private function finish_upload_request(): void
     {
