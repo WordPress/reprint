@@ -107,8 +107,7 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 directory ranges, and `excluded_paths_b64`. `sender.json` does not repeat them.
 Its phases are `creating`, `planning`, `pushing_paths`, `pushing_deletes`,
 `committing`, and `removing`. It records the push session ID, selected path-list
-cursor, local path type, size, and ctime for a partial file, receiver part limit,
-and request-sizing state.
+cursor, receiver part limit, and request-sizing state.
 
 A request failure ends the current sender run. The active state remains in
 place so a later push command can resume from the last durable boundary.

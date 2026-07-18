@@ -1589,7 +1589,7 @@ final class PushEndpointsTest extends TestCase {
             $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->loadActiveState($push_state_directory);
-            if (is_array($state) && $state['phase'] === 'pushing_paths' && is_array($state['local_path_type_size_and_ctime'])) {
+            if (is_array($state) && $state['phase'] === 'pushing_paths' && $step >= 2) {
                 break;
             }
         }
@@ -1629,7 +1629,7 @@ final class PushEndpointsTest extends TestCase {
             $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->loadActiveState($push_state_directory);
-            if (is_array($state) && $state['phase'] === 'pushing_paths' && is_array($state['local_path_type_size_and_ctime'])) {
+            if (is_array($state) && $state['phase'] === 'pushing_paths' && $step >= 2) {
                 break;
             }
         }
@@ -1710,7 +1710,7 @@ final class PushEndpointsTest extends TestCase {
             $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->loadActiveState($push_state_directory);
-            if (is_array($state) && $state['phase'] === 'pushing_paths' && is_array($state['local_path_type_size_and_ctime'])) {
+            if (is_array($state) && $state['phase'] === 'pushing_paths' && $step >= 2) {
                 break;
             }
         }

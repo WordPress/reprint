@@ -10,9 +10,8 @@
  * PushFilesSender joins two durable protocols. PushPlan selects local paths in
  * bounded steps and owns the local index from which that selection was made.
  * The receiver owns the upload cursor for every path and for the deletion list.
- * This class retains only the push session phase, selected path-list cursor,
- * type, size, and ctime saved for a partial file, and learned request limits
- * needed after a process restart.
+ * Durable sender state retains the push session phase, selected path-list
+ * cursor, and learned request limits needed after a process restart.
  *
  * ## Usage
  *
@@ -79,7 +78,7 @@
  * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'directory'|'symlink',size:int,ctime:int}
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
  */
 final class PushFilesSender
 {
@@ -177,7 +176,6 @@ final class PushFilesSender
                 'push_session_id' => bin2hex(random_bytes(16)),
                 'phase' => 'creating',
                 'local_paths_to_push_byte_offset' => 0,
-                'local_path_type_size_and_ctime' => null,
                 'max_part_bytes' => null,
                 'request_sizer_state' => $sender->push_stream_client->get_request_sizer_state(),
             ];
@@ -457,7 +455,6 @@ final class PushFilesSender
         if ($local_path_to_push === null) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
-            $state['local_path_type_size_and_ctime'] = null;
             $state['phase'] = 'pushing_deletes';
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
@@ -500,24 +497,17 @@ final class PushFilesSender
         $receiver_path_status = $response['path'];
         $receiver_path_type = $receiver_path_status['type'] ?? null;
 
-        $local_path_is_unchanged_since_previous_chunk = $state['local_path_type_size_and_ctime'] === $local_path_type_size_and_ctime;
-        if (!$local_path_is_unchanged_since_previous_chunk) {
-            $this->close_local_file_handle();
-        }
         if (
-            $local_path_is_unchanged_since_previous_chunk
-            && $receiver_path_status['state'] === 'complete'
+            $receiver_path_status['state'] === 'complete'
             && $receiver_path_type === $local_path_type_size_and_ctime['type']
             && ( $local_path_type_size_and_ctime['type'] !== 'file' || $receiver_path_status['accepted_bytes'] === $local_path_type_size_and_ctime['size'] )
         ) {
             $this->close_local_file_handle();
             $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
-            $state['local_path_type_size_and_ctime'] = null;
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
-        $receiver_confirmed_bytes = $local_path_is_unchanged_since_previous_chunk
-            && $receiver_path_status['state'] === 'partial'
+        $receiver_confirmed_bytes = $receiver_path_status['state'] === 'partial'
             && $receiver_path_type === 'file'
             && $receiver_path_status['accepted_bytes'] <= $local_path_type_size_and_ctime['size']
                 ? $receiver_path_status['accepted_bytes']
@@ -698,9 +688,6 @@ final class PushFilesSender
         if ($upload_completes_local_path) {
             $this->close_local_file_handle();
             $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
-            $state['local_path_type_size_and_ctime'] = null;
-        } else {
-            $state['local_path_type_size_and_ctime'] = $local_path_type_size_and_ctime;
         }
 
         $this->store_state($state);
