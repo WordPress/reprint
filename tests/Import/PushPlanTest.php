@@ -152,11 +152,14 @@ final class PushPlanTest extends TestCase
         );
         $this->assertSame('', file_get_contents($this->planPath('local_paths_to_delete')));
 
-        // Pin the local_paths_to_push representation: it remains base64-path JSONL.
+        // Pin the local_paths_to_push representation: paths remain base64 in JSONL.
         $pathsToPush = file_get_contents($this->planPath('local_paths_to_push.jsonl'));
         $this->assertIsString($pathsToPush);
         $firstLine = strtok($pathsToPush, "\n");
-        $this->assertSame('{"path":"' . base64_encode('index.php') . '"}', $firstLine);
+        $this->assertSame(
+            '{"path":"' . base64_encode('index.php') . '","type":"file","size":5,"ctime":100}',
+            $firstLine
+        );
     }
 
     public function testPlanCopiesEveryFreshLocalIndexEntryAndExcludesOnlyPushAndDeletePaths(): void

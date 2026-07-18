@@ -422,7 +422,7 @@ class PushPlan
                     $current_shape !== "non_empty_directory"
                     && !$this->path_conflicts_with_excluded_paths($entry_fresh_index["path"])
                 ) {
-                    $this->append_local_path_to_push($entry_fresh_index["path"]);
+                    $this->append_local_path_to_push($entry_fresh_index);
                     ++$local_paths_to_push_count;
                 }
             } elseif ($path_comparison > 0) {
@@ -477,7 +477,7 @@ class PushPlan
                     }
                 }
                 if ($needs_push && !$path_is_excluded) {
-                    $this->append_local_path_to_push($entry_fresh_index["path"]);
+                    $this->append_local_path_to_push($entry_fresh_index);
                     ++$local_paths_to_push_count;
                 }
             }
@@ -653,16 +653,29 @@ class PushPlan
     }
 
     /**
-     * Appends one path to the JSONL list of local paths to push.
+     * Appends one path and its planned type, size, and ctime to the JSONL list.
      *
      * Base64 keeps arbitrary filesystem path bytes representable in JSON.
      *
-     * @param string $path Raw filesystem path selected for push.
+     * @param array $entry {
+     *     Fresh local index entry selected for push.
+     *
+     *     @type string $path  Decoded filesystem path.
+     *     @type string $type  Entry type: `file`, `link`, or `dir`.
+     *     @type int    $size  Indexed size used for change detection.
+     *     @type int    $ctime Indexed change timestamp.
+     * }
+     * @phpstan-param array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool} $entry
      */
-    private function append_local_path_to_push(string $path): void
+    private function append_local_path_to_push(array $entry): void
     {
         $line = json_encode(
-            ["path" => base64_encode($path)],
+            [
+                "path" => base64_encode($entry["path"]),
+                "type" => $entry["type"] === "link" ? "symlink" : ($entry["type"] === "dir" ? "directory" : "file"),
+                "size" => $entry["size"],
+                "ctime" => $entry["ctime"],
+            ],
             JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
         ) . "\n";
         if (fwrite($this->local_paths_to_push_handle, $line) !== strlen($line)) {
