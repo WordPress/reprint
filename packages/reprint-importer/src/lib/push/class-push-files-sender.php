@@ -386,6 +386,7 @@ final class PushFilesSender
         $this->push_stream_client->set_max_part_bytes($response['max_part_bytes']);
         $this->push_stream_client->apply_reported_limits([$response['post_max_bytes']]);
         $state['max_part_bytes'] = $response['max_part_bytes'];
+        $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         try {
             if (PushPlan::has_unfinished_plan($this->push_state_directory)) {
                 $this->plan = PushPlan::resume($this->push_state_directory);
@@ -670,6 +671,7 @@ final class PushFilesSender
         if ($failure_result !== null) {
             return $failure_result;
         }
+        $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         if (!$part_sent) {
             if ($local_path_disappeared) {
                 $this->close_local_paths_to_push_handle();
@@ -766,6 +768,7 @@ final class PushFilesSender
         if ($failure_result !== null) {
             return $failure_result;
         }
+        $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         if (!$part_sent) {
             if ($maximum_delete_list_payload_bytes > 0) {
                 return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local deletion list at the receiver-confirmed cursor.');
@@ -1034,6 +1037,7 @@ final class PushFilesSender
         }
         $request_sizer_state = $this->push_stream_client->get_request_sizer_state();
         if ($state['request_sizer_state'] !== $request_sizer_state) {
+            $state['request_sizer_state'] = $request_sizer_state;
             $this->store_state($state);
         }
         return $this->step_result('failed', $state, $request_result['reason'], $request_result['detail']);
@@ -1067,13 +1071,12 @@ final class PushFilesSender
     }
 
     /**
-     * Atomically stores the complete state and current sizing state.
+     * Atomically stores the complete active state.
      *
      * @param State $state Active state.
      */
-    private function store_state(array &$state): void
+    private function store_state(array $state): void
     {
-        $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         $json = $this->encode_json($state, 'active state');
         $temporary_path = $this->state_path . '.tmp';
         if (file_put_contents($temporary_path, $json) !== strlen($json)) {
