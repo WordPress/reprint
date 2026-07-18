@@ -860,6 +860,27 @@ class MultipartPushStreamClient
     }
 
     /**
+     * Closes the active request, if any, and the reusable connection context.
+     *
+     * An active request is abandoned without a closing MIME boundary. Call
+     * finish_request() first when its sent parts should be confirmed.
+     */
+    public function close(): void
+    {
+        if ($this->curl_handle !== null) {
+            if ($this->multi_handle !== null) {
+                curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
+            }
+            curl_close($this->curl_handle);
+            $this->curl_handle = null;
+        }
+        if ($this->multi_handle !== null) {
+            curl_multi_close($this->multi_handle);
+            $this->multi_handle = null;
+        }
+    }
+
+    /**
      * Encodes and validates the protocol headers for one already-read payload.
      *
      * Paths and symlink targets are base64 because filesystem byte strings are

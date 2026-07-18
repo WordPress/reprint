@@ -352,6 +352,9 @@ final class PushFilesSender
         $this->close_local_paths_to_push_handle();
         $this->close_local_paths_to_delete_handle();
         $this->close_fresh_local_index_handle();
+        if (isset($this->push_stream_client)) {
+            $this->push_stream_client->close();
+        }
         if (is_resource($this->lock_handle)) {
             $this->release_lock($this->lock_handle);
         }
