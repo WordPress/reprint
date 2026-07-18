@@ -94,20 +94,19 @@ directory the indexer could inspect. The indexer records physical emptiness
 while it observes the directory; the later planner never reopens the live tree
 to classify it.
 
-The `PushPlan` constructor copies its fresh local index argument to the
-per-site `fresh_local_index.jsonl`. `next_step()` merges that retained copy
-with `local_index_at_previous_push.jsonl` in bounded steps. It writes changed files,
+`PushPlan::start()` copies its fresh local index argument to the per-site
+`fresh_local_index.jsonl` and retains the excluded paths in `cursor.json`.
+`next_step()` merges that retained copy with
+`local_index_at_previous_push.jsonl` in bounded steps. It writes changed files,
 symlinks, and empty directories to `local_paths_to_push.jsonl`, and raw
 NUL-delimited paths to `local_paths_to_delete`. The plan atomically retains a
-cursor with both input offsets and both committed output lengths. A new plan
-instance resumes from that cursor, keeps using the retained fresh local index,
-and truncates any output written after its retained lengths.
+cursor with both index offsets and both committed output lengths.
 
-The caller constructs a plan with its per-site directory, fresh local index,
-and excluded paths, calls `next_step()` until it completes, and explicitly
-closes the plan. Those steps reuse the constructor-opened input and output
-handles; a new process constructs a new plan and resumes from `cursor.json`
-without adopting a new constructor input.
+The caller passes the per-site directory, fresh local index, and excluded paths
+to `PushPlan::start()`, calls `next_step()` until it completes, and explicitly
+closes the plan. A new process calls `PushPlan::resume()` with only the per-site
+directory. It uses the retained index and excluded paths, truncates output after
+the retained lengths, and continues from the retained offsets.
 
 The first push to a site has no local index from a previous push or previously
 pushed rows: every current local file counts as changed, and no local deletion
