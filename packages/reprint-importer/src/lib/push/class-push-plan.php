@@ -66,8 +66,6 @@
  */
 class PushPlan
 {
-    private const PATHS_PER_STEP = 1;
-
     /** @var string Paths and metadata from the last completed push. */
     private string $local_index_at_previous_push;
 
@@ -386,11 +384,7 @@ class PushPlan
             $this->local_index_at_previous_push_handle
         );
 
-        $paths_processed = 0;
-        while ($entry_fresh_index !== null || $entry_previous_index !== null) {
-            if ($paths_processed === self::PATHS_PER_STEP) {
-                break;
-            }
+        if ($entry_fresh_index !== null || $entry_previous_index !== null) {
             // Base64 does not preserve byte order ('0' sorts before 'A'
             // in ASCII but encodes a higher value), so ordering uses the
             // decoded path bytes.
@@ -412,20 +406,20 @@ class PushPlan
                 $local_index_at_previous_push_shape = $this->entry_shape($entry_previous_index);
 
                 // Byte sorting can put a sibling such as `a-other` before
-                // `a/child`. Keep every deleted directory that could still
-                // contain a later path, and discard the ranges already passed.
-                while ($seen_deleted_directories !== []) {
+                // `a/child`. Every retained non-empty directory has a later
+                // descendant, so adjacent previous-index entries can pass at
+                // most the top sibling range.
+                if ($seen_deleted_directories !== []) {
                     $deleted_directory = $seen_deleted_directories[
                         count($seen_deleted_directories) - 1
                     ];
                     $descendant_prefix = $deleted_directory . "/";
                     if (
-                        strpos($entry_previous_index["path"], $descendant_prefix) === 0
-                        || strcmp($entry_previous_index["path"], $descendant_prefix) <= 0
+                        strpos($entry_previous_index["path"], $descendant_prefix) !== 0
+                        && strcmp($entry_previous_index["path"], $descendant_prefix) > 0
                     ) {
-                        break;
+                        array_pop($seen_deleted_directories);
                     }
-                    array_pop($seen_deleted_directories);
                 }
             }
 
@@ -507,7 +501,6 @@ class PushPlan
                     $this->local_index_at_previous_push_handle
                 );
             }
-            ++$paths_processed;
         }
 
         if (
