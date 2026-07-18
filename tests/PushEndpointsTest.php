@@ -1644,6 +1644,44 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * Distinguishes an unpushable local file type from a path that disappeared.
+     */
+    public function testHighLevelSenderReportsWhenLocalPathChangesToUnsupportedType(): void
+    {
+        if (!function_exists('posix_mkfifo')) {
+            $this->markTestSkipped('posix_mkfifo() is unavailable.');
+        }
+
+        $local_docroot = $this->root . '/unsupported-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.bin', str_repeat('A', 2000));
+        $fresh_local_index_path = $this->root . '/unsupported-local-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'value.bin' => $this->indexEntry($local_docroot . '/value.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/unsupported-local-state';
+
+        for ($step = 0; $step < 30; ++$step) {
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (is_array($state) && $state['phase'] === 'pushing_paths' && is_array($state['local_path_type_size_and_ctime'])) {
+                break;
+            }
+        }
+        $this->assertIsArray($state);
+
+        unlink($local_docroot . '/value.bin');
+        $this->assertTrue(posix_mkfifo($local_docroot . '/value.bin', 0600));
+
+        $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $this->assertSame('continue', $result['status']);
+        $this->assertSame('removing', $result['phase']);
+        $this->assertSame('local_path_changed', $result['reason']);
+        $this->assertStringContainsString('file type that cannot be pushed', $result['detail']);
+    }
+
+    /**
      * Applies receiver exclusions without maintaining a second baseline model.
      */
     public function testHighLevelSenderUsesReceiverExclusionsInPushPlan(): void

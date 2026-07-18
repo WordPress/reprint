@@ -77,6 +77,7 @@
  * lock permits only one open sender at a time.
  *
  * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'directory'|'symlink',size:int,ctime:int}
+ * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int}
  * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
  */
@@ -481,6 +482,13 @@ final class PushFilesSender
             $state['phase'] = 'removing';
             $this->store_state($state);
             return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
+        }
+        if ($local_path_type_size_and_ctime['type'] === 'unsupported') {
+            $this->close_local_file_handle();
+            $this->close_local_paths_to_push_handle();
+            $state['phase'] = 'removing';
+            $this->store_state($state);
+            return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push changed to a file type that cannot be pushed; remove the upload-only push session before generating another index.');
         }
         $saved_type_size_and_ctime_matches = $state['local_path_type_size_and_ctime'] === $local_path_type_size_and_ctime;
         if (!$saved_type_size_and_ctime_matches) {
@@ -975,7 +983,7 @@ final class PushFilesSender
      * gap documented for local change detection.
      *
      * @param string $path Raw document-root-relative path.
-     * @return LocalPathTypeSizeAndCtime|null Current type, size, and ctime, or null when absent or unsupported.
+     * @return LocalPathStat|null Current type, size, and ctime, or null when absent.
      */
     private function stat_local_path(string $path): ?array
     {
@@ -993,7 +1001,7 @@ final class PushFilesSender
         } elseif ($file_type_bits === 0120000) {
             $type = 'symlink';
         } else {
-            return null;
+            $type = 'unsupported';
         }
         return [
             'type' => $type,
