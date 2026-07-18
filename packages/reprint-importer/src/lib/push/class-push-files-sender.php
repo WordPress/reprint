@@ -477,14 +477,14 @@ final class PushFilesSender
     }
 
     /**
-     * Reconciles one local path to push and sends at most one upload part.
+     * Checks one local path against planned and receiver state, then sends at most one part.
      *
      * A file part contains one bounded local file chunk. A directory or symlink
      * part contains that one complete value. The durable local-path-list cursor
      * advances only after the containing request is confirmed.
      *
      * @param State $state Active state.
-     * @return array<string,mixed> Result of one reconciliation or upload part.
+     * @return array<string,mixed> Result of one status check or upload part.
      */
     private function upload_next_file_chunk(array &$state): array
     {
@@ -775,7 +775,7 @@ final class PushFilesSender
      * Reads the receiver's deletion cursor and sends at most one list part.
      *
      * @param State $state Active state.
-     * @return array<string,mixed> Result of one reconciliation or list part.
+     * @return array<string,mixed> Result of one status check or deletion-list part.
      */
     private function upload_next_chunk_of_deleted_paths(array &$state): array
     {
