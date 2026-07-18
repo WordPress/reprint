@@ -110,6 +110,9 @@ final class PushFilesSender
     /** @var resource|null Open local file retained while pushing its chunks. */
     private $local_file_handle = null;
 
+    /** @var LocalPathToPush|null Current selected path retained between its chunks. */
+    private ?array $local_path_to_push = null;
+
     /** @var resource|null Open fresh local index retained while checking planned replacements. */
     private $fresh_local_index_handle = null;
 
@@ -492,14 +495,17 @@ final class PushFilesSender
             }
         }
 
-        try {
-            $local_path_to_push = $this->read_local_path_to_push(
-                $this->local_paths_to_push_handle,
-                $state['local_paths_to_push_byte_offset']
-            );
-        } catch (RuntimeException $exception) {
-            return $this->step_result('failed', $state, 'local_io_error', $exception->getMessage());
+        if ($this->local_path_to_push === null) {
+            try {
+                $this->local_path_to_push = $this->read_local_path_to_push(
+                    $this->local_paths_to_push_handle,
+                    $state['local_paths_to_push_byte_offset']
+                );
+            } catch (RuntimeException $exception) {
+                return $this->step_result('failed', $state, 'local_io_error', $exception->getMessage());
+            }
         }
+        $local_path_to_push = $this->local_path_to_push;
         if ($local_path_to_push === null) {
             if ($this->upload_request_open) {
                 $failure_result = $this->finish_upload_request($state);
@@ -559,6 +565,7 @@ final class PushFilesSender
             ) {
                 $this->close_local_file_handle();
                 $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
+                $this->local_path_to_push = null;
                 $this->store_state($state);
                 return $this->step_result('continue', $state, null, null);
             }
@@ -740,6 +747,7 @@ final class PushFilesSender
             $this->close_local_file_handle();
             $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
             $this->next_file_byte_offset = null;
+            $this->local_path_to_push = null;
         } else {
             $this->next_file_byte_offset = $receiver_confirmed_bytes + strlen($upload_part['payload']);
         }

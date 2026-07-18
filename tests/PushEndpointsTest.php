@@ -1576,6 +1576,8 @@ final class PushEndpointsTest extends TestCase {
             $local_file_handle = $local_file_handle_property->getValue($sender);
             $this->assertIsResource($local_paths_to_push_handle);
             $this->assertIsResource($local_file_handle);
+            $local_paths_to_push_position = ftell($local_paths_to_push_handle);
+            $this->assertIsInt($local_paths_to_push_position);
             $push_stream_client = $push_stream_client_property->getValue($sender);
             $curl_handle = $curl_handle_property->getValue($push_stream_client);
             $this->assertNotNull($curl_handle);
@@ -1584,6 +1586,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame('pushing_paths', $second_file_chunk['phase']);
             $this->assertSame($local_paths_to_push_handle, $local_paths_to_push_handle_property->getValue($sender));
             $this->assertSame($local_file_handle, $local_file_handle_property->getValue($sender));
+            $this->assertSame($local_paths_to_push_position, ftell($local_paths_to_push_handle));
             $this->assertSame($curl_handle, $curl_handle_property->getValue($push_stream_client));
             clearstatcache(true, $push_state_directory . '/sender.json');
             $this->assertSame($state_inode_before_upload, fileinode($push_state_directory . '/sender.json'));
