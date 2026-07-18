@@ -1464,6 +1464,61 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * Retains one open PushPlan and leaves sender state untouched while planning continues.
+     */
+    public function testHighLevelSenderRetainsPushPlanAcrossPlanningSteps(): void
+    {
+        $local_docroot = $this->root . '/retained-plan-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/retained-plan-index.jsonl';
+        $index_entries = [];
+        for ($index = 0; $index < 2500; ++$index) {
+            $index_entries[sprintf('file-%04d.txt', $index)] = [1, 1, 'file'];
+        }
+        $this->writeIndex($fresh_local_index_path, $index_entries);
+        $push_state_directory = $this->root . '/retained-plan-state';
+        $state_path = $push_state_directory . '/sender.json';
+        $plan_property = new ReflectionProperty(PushFilesSender::class, 'plan');
+        $fresh_local_index_handle_property = new ReflectionProperty(
+            PushPlan::class,
+            'fresh_local_index_handle'
+        );
+        $fresh_local_index_handle = null;
+
+        $sender = PushFilesSender::start(
+            $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+        );
+        try {
+            $create_result = $sender->next_step();
+            $this->assertSame('planning', $create_result['phase']);
+            $plan = $plan_property->getValue($sender);
+            $this->assertInstanceOf(PushPlan::class, $plan);
+            $fresh_local_index_handle = $fresh_local_index_handle_property->getValue($plan);
+            $this->assertIsResource($fresh_local_index_handle);
+
+            clearstatcache(true, $state_path);
+            $state_inode = fileinode($state_path);
+            $this->assertIsInt($state_inode);
+
+            $first_plan_result = $sender->next_step();
+            $this->assertSame('planning', $first_plan_result['phase']);
+            $this->assertSame($plan, $plan_property->getValue($sender));
+            clearstatcache(true, $state_path);
+            $this->assertSame($state_inode, fileinode($state_path));
+
+            $second_plan_result = $sender->next_step();
+            $this->assertSame('planning', $second_plan_result['phase']);
+            $this->assertSame($plan, $plan_property->getValue($sender));
+            clearstatcache(true, $state_path);
+            $this->assertSame($state_inode, fileinode($state_path));
+        } finally {
+            $sender->close();
+        }
+
+        $this->assertFalse(is_resource($fresh_local_index_handle));
+    }
+
+    /**
      * Retains the path lists and current local file until close().
      */
     public function testHighLevelSenderRetainsOpenFilesUntilClose(): void

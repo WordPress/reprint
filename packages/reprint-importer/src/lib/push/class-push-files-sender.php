@@ -111,6 +111,9 @@ final class PushFilesSender
     /** @var resource|null Open local file retained while pushing its chunks. */
     private $local_file_handle = null;
 
+    /** @var PushPlan Plan retained while its bounded steps run. */
+    private PushPlan $plan;
+
     /** @var State|null Active state, or null after terminal completion. */
     private ?array $state = null;
 
@@ -211,6 +214,9 @@ final class PushFilesSender
             }
             $sender->state = $state;
             $sender->push_stream_client = $sender->create_push_stream_client($state);
+            if ($state['phase'] === 'planning') {
+                $sender->plan = PushPlan::resume($sender->push_state_directory);
+            }
             return $sender;
         } catch (Throwable $throwable) {
             $sender->close();
@@ -340,6 +346,9 @@ final class PushFilesSender
      */
     public function close(): void
     {
+        if (isset($this->plan)) {
+            $this->plan->close();
+        }
         $this->close_local_file_handle();
         $this->close_local_paths_to_push_handle();
         $this->close_local_paths_to_delete_handle();
@@ -383,15 +392,14 @@ final class PushFilesSender
         $state['consecutive_recoverable_failures'] = 0;
         try {
             if (PushPlan::has_unfinished_plan($this->push_state_directory)) {
-                $plan = PushPlan::resume($this->push_state_directory);
+                $this->plan = PushPlan::resume($this->push_state_directory);
             } else {
-                $plan = PushPlan::start(
+                $this->plan = PushPlan::start(
                     $this->push_state_directory,
                     $this->fresh_local_index_path,
                     $excluded_paths
                 );
             }
-            $plan->close();
         } catch (RuntimeException $exception) {
             clearstatcache(true, $this->fresh_local_index_path);
             if (is_file($this->fresh_local_index_path)) {
@@ -420,16 +428,12 @@ final class PushFilesSender
      */
     private function next_plan_step(array &$state): array
     {
-        $plan = PushPlan::resume($this->push_state_directory);
-        try {
-            $plan_result = $plan->next_step();
-        } finally {
-            $plan->close();
-        }
+        $plan_result = $this->plan->next_step();
         if ($plan_result['status'] === 'complete') {
+            $this->plan->close();
             $state['phase'] = 'pushing_paths';
+            $this->store_state($state);
         }
-        $this->store_state($state);
         return $this->step_result('continue', $state, null, null);
     }
 
@@ -833,9 +837,11 @@ final class PushFilesSender
         // A prior process may have published the plan after the receiver
         // completed but stopped before it removed sender.json.
         if (PushPlan::has_unfinished_plan($this->push_state_directory)) {
-            $plan = PushPlan::resume($this->push_state_directory);
-            $plan->close();
-            $plan->after_successful_push();
+            if (!isset($this->plan)) {
+                $this->plan = PushPlan::resume($this->push_state_directory);
+            }
+            $this->plan->close();
+            $this->plan->after_successful_push();
         }
         $push_session_id = $state['push_session_id'];
         $this->delete_state();
@@ -874,9 +880,11 @@ final class PushFilesSender
         // A repeated remove may follow a process that discarded the plan but
         // stopped before it removed sender.json.
         if (PushPlan::has_unfinished_plan($this->push_state_directory)) {
-            $plan = PushPlan::resume($this->push_state_directory);
-            $plan->close();
-            $plan->discard();
+            if (!isset($this->plan)) {
+                $this->plan = PushPlan::resume($this->push_state_directory);
+            }
+            $this->plan->close();
+            $this->plan->discard();
         }
         $push_session_id = $state['push_session_id'];
         $this->delete_state();
