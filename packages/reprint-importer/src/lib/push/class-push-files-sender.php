@@ -321,7 +321,7 @@ final class PushFilesSender
                 $result = $this->commit_push($this->state);
                 break;
             case 'removing':
-                $result = $this->remove_push($this->state);
+                $result = $this->remove_push_session($this->state);
                 break;
         }
 
@@ -846,7 +846,7 @@ final class PushFilesSender
      * @param State $state Active state.
      * @return array<string,mixed> Removal continuation or terminal restart.
      */
-    private function remove_push(array &$state): array
+    private function remove_push_session(array &$state): array
     {
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_remove', [
             'push_session_id' => $state['push_session_id'],

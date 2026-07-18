@@ -141,6 +141,7 @@ Use these names verbatim inside `PushFilesSender`:
 | Request sizer options | `request_sizer_options`, `$request_sizer_options` |
 | Push request | `send_push_request()` |
 | Create push session | `create_push_session()` |
+| Remove push session | `remove_push_session()` |
 | Upload next file chunk | `upload_next_file_chunk()` |
 | Upload next chunk of deleted paths | `upload_next_chunk_of_deleted_paths()` |
 | Request result | `$request_result` |
