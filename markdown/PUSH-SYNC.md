@@ -243,15 +243,15 @@ The sender has an explicit open/close lifecycle. `PushFilesSender::start()`
 rejects unfinished sender state, writes the initial `creating` state, and
 acquires `sender.lock`. `PushFilesSender::resume()` acquires the same lock and
 reads the unfinished state once. The returned sender keeps that state in memory
-while `advance()` publishes each later durable boundary. `close()` releases the
+while `next_step()` publishes each later durable boundary. `close()` releases the
 lock. A second local process cannot start or resume the same sender until the
 open sender is closed. The caller may stop after any `continue` result, close
 the sender, and resume from that boundary in a later process. If the process
-stops inside `advance()`, the next process uses the preceding sender boundary
+stops inside `next_step()`, the next process uses the preceding sender boundary
 and receiver-confirmed cursors to reconcile work completed after it.
 
 `push_create` supplies the receiver exclusion policy. The sender passes that
-policy to `PushPlan::start()`, then each `planning` advance runs one bounded
+policy to `PushPlan::start()`, then each `planning` step runs one bounded
 `next_step()`. PushPlan owns the fresh index, merge offsets, output lengths and
 counts, deleted-directory ranges, and exclusions in `cursor.json`. No upload
 begins until both indexes have been consumed and the two path lists are stable.
@@ -271,7 +271,7 @@ from different source versions cannot be joined. A lost upload response leaves
 the earlier local path-list boundary in place; the next process checks the
 receiver and either advances past complete work or safely replays it.
 
-After positive work, each deletion advance reads `work_deletes_bytes` and
+After positive work, each deletion step reads `work_deletes_bytes` and
 `work_deletes_complete` from `push_status`. Those receiver-owned values are the
 only work-delete cursor. A cursor beyond `local_paths_to_delete` cannot belong
 to this plan, so the sender removes the upload-only session instead of guessing
@@ -290,7 +290,7 @@ Repeated `push_commit` calls drive the receiver to `complete`. Only then does
 index; exclusions suppress remote work rather than creating a second retained
 index representation.
 
-Each positive-work or deletion advance sends at most one multipart part. A file
+Each positive-work or deletion step sends at most one multipart part. A file
 or deletion-list part contains one bounded chunk; a directory or symlink part
 contains one complete value. The sender derives Content-Length from the
 bytes actually read, closes work deletes explicitly, and never selects another
@@ -402,7 +402,7 @@ Files first, database second, each PR small and stacked in this order:
    resume lifecycle, bounded local change and deletion detection, and durable
    path lists for the sender.
 6. **Push stream endpoint** — the store's HTTP surface plus a sender that
-   sends one resumable multipart part per advance; deletion work received;
+   sends one resumable multipart part per step; deletion work received;
    `--force-http` with honest help text (the first
    push networking this flag can gate). Decisions this slice locked in:
    sending streams through libcurl's pause mechanism, which PHP's curl

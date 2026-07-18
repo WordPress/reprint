@@ -20,8 +20,8 @@
  *
  *  1. Start a new sender with `start()`, or continue an unfinished sender with
  *     `resume()`. Both methods acquire the per-site sender lock.
- *  2. Call `advance()` while the current process has enough time and memory for
- *     another bounded step.
+ *  2. Call `next_step()` while the current process has enough time and memory
+ *     for another bounded step.
  *  3. Call `close()` to release the sender lock, even when more work remains.
  *
  * Example:
@@ -31,7 +31,7 @@
  *         : PushFilesSender::resume($options);
  *     try {
  *         while ($has_time_remaining() && $has_memory_available()) {
- *             $result = $sender->advance();
+ *             $result = $sender->next_step();
  *             if ($result['status'] !== 'continue') {
  *                 break;
  *             }
@@ -41,8 +41,8 @@
  *     }
  *
  * Every `continue` result has published a durable boundary before returning.
- * The caller may therefore close after any advance and use `resume()` in a
- * later process. If a process stops during an advance, the next process starts
+ * The caller may therefore close after any step and use `resume()` in a later
+ * process. If a process stops during a step, the next process starts
  * from the preceding durable boundary and reconciles any receiver-confirmed
  * work before sending more data. The lock remains held until close().
  *
@@ -61,7 +61,7 @@
  * prior accepted part. Otherwise it starts that path at offset zero. This
  * prevents bytes from different source versions from being joined.
  *
- * The deletion cursor is never copied into sender state. Each advance reads it
+ * The deletion cursor is never copied into sender state. Each step reads it
  * from `push_status` and checks that it belongs to the plan's stable deletion
  * list. If a selected path disappears, the sender removes the upload-only
  * remote session, discards the plan, and returns `restart` so the caller can
@@ -69,7 +69,7 @@
  *
  * ## Streaming and durability
  *
- * Each positive-work or deletion advance sends at most one multipart part and
+ * Each positive-work or deletion step sends at most one multipart part and
  * holds at most one bounded payload string. Multipart bytes leave for the
  * network before `send_part()` returns. Sender state and PushPlan's cursor are
  * written atomically, and a per-site lock permits only one open sender at a
@@ -77,7 +77,7 @@
  *
  * @phpstan-type SourceToken array{type:'file'|'directory'|'symlink',size:int,ctime:int}
  * @phpstan-type SelectedSource array{path:string,path_b64:string,local_paths_to_push_byte_offset:int,next_local_paths_to_push_byte_offset:int,source_token:SourceToken|null}
- * @phpstan-type SenderState array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,source_token:SourceToken|null,recoverable_failures:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,source_token:SourceToken|null,recoverable_failures:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
  */
 final class PushFilesSender
 {
@@ -92,25 +92,25 @@ final class PushFilesSender
     /** @var string Per-target directory shared with PushPlan. */
     private string $site_dir;
 
-    /** @var string Atomic checkpoint for the active remote sender workflow. */
-    private string $sender_state_path;
+    /** @var string Atomic checkpoint for the active remote workflow. */
+    private string $state_path;
 
-    /** @var string Advisory lock held throughout one open sender lifecycle. */
-    private string $sender_lock_path;
+    /** @var string Advisory lock file for one open lifecycle. */
+    private string $lock_path;
 
-    /** @var resource|null Exclusive sender lock held from start() or resume() through close(). */
-    private $sender_lock = null;
+    /** @var resource|null Exclusive lock held from start() or resume() through close(). */
+    private $lock_handle = null;
 
-    /** @var SenderState|null Active sender state, or null after terminal completion. */
+    /** @var State|null Active state, or null after terminal completion. */
     private ?array $state = null;
 
-    /** @var bool Whether close() has released this sender's lock. */
+    /** @var bool Whether close() has released the lock. */
     private bool $closed = false;
 
     /** @var MultipartPushStreamClient Reusable connection and request-sizing context. */
     private MultipartPushStreamClient $client;
 
-    /** @var array<string,mixed> Options used to construct this sender's PushRequestSizer. */
+    /** @var array<string,mixed> Options used to construct the PushRequestSizer. */
     private array $request_sizer_config;
 
     /** @var array<string,mixed> Transport options used by start() or resume(). */
@@ -144,12 +144,12 @@ final class PushFilesSender
     public static function start(array $options): self
     {
         $sender = new self($options);
-        $sender->sender_lock = $sender->acquire_sender_lock();
+        $sender->lock_handle = $sender->acquire_lock();
         try {
-            if ($sender->read_sender_state() !== null) {
+            if ($sender->load_state() !== null) {
                 throw new LogicException(
                     'Cannot start a push files sender while unfinished sender state exists: '
-                    . $sender->sender_state_path
+                    . $sender->state_path
                 );
             }
             clearstatcache(true, $sender->fresh_local_index_path);
@@ -169,7 +169,7 @@ final class PushFilesSender
                 'max_part_bytes' => null,
                 'request_sizer_state' => $sender->client->get_request_sizer_state(),
             ];
-            $sender->persist_state($sender->state);
+            $sender->store_state($sender->state);
             return $sender;
         } catch (Throwable $throwable) {
             $sender->close();
@@ -180,7 +180,7 @@ final class PushFilesSender
     /**
      * Resumes an unfinished sender while holding its exclusive site lock.
      *
-     * The sender state is read once under the acquired lock. advance() then
+     * The sender state is read once under the acquired lock. next_step() then
      * works from that in-memory state, publishing each later durable boundary
      * without reopening sender.json.
      *
@@ -190,13 +190,13 @@ final class PushFilesSender
     public static function resume(array $options): self
     {
         $sender = new self($options);
-        $sender->sender_lock = $sender->acquire_sender_lock();
+        $sender->lock_handle = $sender->acquire_lock();
         try {
-            $state = $sender->read_sender_state();
+            $state = $sender->load_state();
             if ($state === null) {
                 throw new LogicException(
                     'Cannot resume a push files sender without unfinished sender state: '
-                    . $sender->sender_state_path
+                    . $sender->state_path
                 );
             }
             $sender->state = $state;
@@ -252,14 +252,14 @@ final class PushFilesSender
         $this->docroot = rtrim($docroot, '/');
         $this->fresh_local_index_path = $fresh_local_index_path;
         $this->site_dir = rtrim($site_dir, '/');
-        $this->sender_state_path = $this->site_dir . '/sender.json';
-        $this->sender_lock_path = $this->site_dir . '/sender.lock';
+        $this->state_path = $this->site_dir . '/sender.json';
+        $this->lock_path = $this->site_dir . '/sender.lock';
         $this->request_sizer_config = $request_sizer_config;
         $this->client_options = $client_options;
     }
 
     /**
-     * Performs the next bounded transition on this open sender.
+     * Performs the next bounded step.
      *
      * start() or resume() has already acquired the site lock and loaded the
      * durable state, so this method only dispatches its current phase and
@@ -269,23 +269,23 @@ final class PushFilesSender
      * are gone and a new local index is required.
      *
      * @return array {
-     *     Result of one sender advance.
+     *     Result of one step.
      *
      *     @type string      $status          `continue`, `complete`, `restart`, or `failed`.
-     *     @type string      $phase           Durable sender phase or `complete`.
+     *     @type string      $phase           Durable phase or `complete`.
      *     @type string      $push_session_id Remote push session ID.
      *     @type string|null $reason          Machine-readable result classification.
      *     @type string|null $detail          Human-readable result detail.
      * }
      * @phpstan-return array{status:'continue'|'complete'|'restart'|'failed',phase:string,push_session_id:string,reason:string|null,detail:string|null}
      */
-    public function advance(): array
+    public function next_step(): array
     {
         if ($this->closed) {
-            throw new LogicException('Cannot advance a push files sender after close().');
+            throw new LogicException('Cannot call next_step() after close().');
         }
         if ($this->state === null) {
-            throw new LogicException('Cannot advance a push files sender after it reaches a terminal result.');
+            throw new LogicException('Cannot call next_step() after the sender reaches a terminal result.');
         }
 
         switch ($this->state['phase']) {
@@ -293,7 +293,7 @@ final class PushFilesSender
                 $result = $this->create_push($this->state);
                 break;
             case 'planning':
-                $result = $this->advance_plan($this->state);
+                $result = $this->next_plan_step($this->state);
                 break;
             case 'pushing_paths':
                 $result = $this->next_positive_work_upload_part($this->state);
@@ -323,24 +323,24 @@ final class PushFilesSender
     }
 
     /**
-     * Releases the per-site sender lock and prevents further advances.
+     * Releases the per-site lock and prevents further steps.
      *
-     * Durable sender state remains available to resume unless advance()
+     * Durable state remains available to resume unless next_step()
      * already completed or discarded the workflow.
      */
     public function close(): void
     {
-        if (is_resource($this->sender_lock)) {
-            $this->release_sender_lock($this->sender_lock);
+        if (is_resource($this->lock_handle)) {
+            $this->release_lock($this->lock_handle);
         }
-        $this->sender_lock = null;
+        $this->lock_handle = null;
         $this->closed = true;
     }
 
     /**
      * Creates the remote session and starts PushPlan with its exclusion policy.
      *
-     * @param SenderState $state Active sender state.
+     * @param State $state Active state.
      * @return array<string,mixed> Durable result after the create request.
      */
     private function create_push(array &$state): array
@@ -391,7 +391,7 @@ final class PushFilesSender
                 throw $exception;
             }
             $state['phase'] = 'removing';
-            $this->persist_state($state);
+            $this->store_state($state);
             return $this->step_result(
                 'continue',
                 $state,
@@ -401,17 +401,17 @@ final class PushFilesSender
         }
 
         $state['phase'] = 'planning';
-        $this->persist_state($state);
+        $this->store_state($state);
         return $this->step_result('continue', $state, null, null);
     }
 
     /**
      * Performs one PushPlan step and moves to selected paths at plan completion.
      *
-     * @param SenderState $state Active sender state.
+     * @param State $state Active state.
      * @return array<string,mixed> Durable result after one bounded plan step.
      */
-    private function advance_plan(array &$state): array
+    private function next_plan_step(array &$state): array
     {
         $plan = PushPlan::resume($this->site_dir);
         try {
@@ -422,7 +422,7 @@ final class PushFilesSender
         if ($planning['status'] === 'complete') {
             $state['phase'] = 'pushing_paths';
         }
-        $this->persist_state($state);
+        $this->store_state($state);
         return $this->step_result('continue', $state, null, null);
     }
 
@@ -433,7 +433,7 @@ final class PushFilesSender
      * part contains that one complete value. The selected path-list cursor
      * advances only after the receiver confirms the value as complete.
      *
-     * @param SenderState $state Active sender state.
+     * @param State $state Active state.
      * @return array<string,mixed> Result of one reconciliation or upload part.
      */
     private function next_positive_work_upload_part(array &$state): array
@@ -459,12 +459,12 @@ final class PushFilesSender
             $state['local_paths_to_push_byte_offset'] = $local_paths_to_push_byte_offset;
             $state['source_token'] = null;
             $state['phase'] = 'pushing_deletes';
-            $this->persist_state($state);
+            $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
         if ($selected_source['source_token'] === null) {
             $state['phase'] = 'removing';
-            $this->persist_state($state);
+            $this->store_state($state);
             return $this->step_result('continue', $state, 'source_changed', 'A selected source path disappeared; remove the upload-only push session before generating another index.');
         }
 
@@ -494,7 +494,7 @@ final class PushFilesSender
         $source_token_after_status = $this->source_token($selected_source['path']);
         if ($source_token_after_status === null) {
             $state['phase'] = 'removing';
-            $this->persist_state($state);
+            $this->store_state($state);
             return $this->step_result('continue', $state, 'source_changed', 'A selected source path disappeared; remove the upload-only push session before generating another index.');
         }
         $source_token = $source_token_after_status;
@@ -508,7 +508,7 @@ final class PushFilesSender
             $state['local_paths_to_push_byte_offset'] = $selected_source['next_local_paths_to_push_byte_offset'];
             $state['source_token'] = null;
             $state['recoverable_failures'] = 0;
-            $this->persist_state($state);
+            $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
         $confirmed_bytes = $saved_source_matches
@@ -529,17 +529,17 @@ final class PushFilesSender
             $source_token_after_read = $this->source_token($selected_source['path']);
             if ($source_token_after_read === null) {
                 $state['phase'] = 'removing';
-                $this->persist_state($state);
+                $this->store_state($state);
                 return $this->step_result('continue', $state, 'source_changed', 'A selected source path disappeared; remove the upload-only push session before generating another index.');
             }
             if ($source_token_after_read !== $source_token) {
-                $this->persist_state($state);
+                $this->store_state($state);
                 return $this->step_result('continue', $state, 'source_changed', 'The selected source changed while it was being read; retry it from receiver-confirmed state.');
             }
             if (!$directory_is_empty) {
                 $state['local_paths_to_push_byte_offset'] = $selected_source['next_local_paths_to_push_byte_offset'];
                 $state['source_token'] = null;
-                $this->persist_state($state);
+                $this->store_state($state);
                 return $this->step_result('continue', $state, null, null);
             }
             $upload_part = [
@@ -553,11 +553,11 @@ final class PushFilesSender
             $source_token_after_read = $this->source_token($selected_source['path']);
             if ($source_token_after_read === null) {
                 $state['phase'] = 'removing';
-                $this->persist_state($state);
+                $this->store_state($state);
                 return $this->step_result('continue', $state, 'source_changed', 'A selected source path disappeared; remove the upload-only push session before generating another index.');
             }
             if ($source_token_after_read !== $source_token) {
-                $this->persist_state($state);
+                $this->store_state($state);
                 return $this->step_result('continue', $state, 'source_changed', 'The selected source changed while it was being read; retry it from receiver-confirmed state.');
             }
             if (!is_string($symlink_target) || $symlink_target === '') {
@@ -673,7 +673,7 @@ final class PushFilesSender
                 $state['phase'] = 'removing';
             }
             $state['recoverable_failures'] = 0;
-            $this->persist_state($state);
+            $this->store_state($state);
             if ($source_disappeared) {
                 return $this->step_result('continue', $state, 'source_changed', 'A selected source path disappeared; remove the upload-only push session before generating another index.');
             }
@@ -706,14 +706,14 @@ final class PushFilesSender
         }
 
         $state['recoverable_failures'] = 0;
-        $this->persist_state($state);
+        $this->store_state($state);
         return $this->step_result('continue', $state, null, null);
     }
 
     /**
      * Reads the receiver's deletion cursor and sends at most one list part.
      *
-     * @param SenderState $state Active sender state.
+     * @param State $state Active state.
      * @return array<string,mixed> Result of one reconciliation or list part.
      */
     private function next_delete_list_upload_part(array &$state): array
@@ -748,12 +748,12 @@ final class PushFilesSender
         $state['recoverable_failures'] = 0;
         if ($work_deletes_bytes > $local_paths_to_delete_bytes) {
             $state['phase'] = 'removing';
-            $this->persist_state($state);
+            $this->store_state($state);
             return $this->step_result('continue', $state, 'source_changed', 'The receiver deletion-list cursor cannot belong to the current local list.');
         }
         if ($work_deletes_complete) {
             $state['phase'] = 'committing';
-            $this->persist_state($state);
+            $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
 
@@ -823,14 +823,14 @@ final class PushFilesSender
         }
 
         $state['recoverable_failures'] = 0;
-        $this->persist_state($state);
+        $this->store_state($state);
         return $this->step_result('continue', $state, null, null);
     }
 
     /**
      * Requests one bounded receiver commit step and publishes a completed plan.
      *
-     * @param SenderState $state Active sender state.
+     * @param State $state Active state.
      * @return array<string,mixed> Commit continuation or terminal completion.
      */
     private function commit_push(array &$state): array
@@ -857,7 +857,7 @@ final class PushFilesSender
 
         $state['recoverable_failures'] = 0;
         if ($response['send_next_request']) {
-            $this->persist_state($state);
+            $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
 
@@ -869,7 +869,7 @@ final class PushFilesSender
             $plan->after_successful_push();
         }
         $push_session_id = $state['push_session_id'];
-        $this->clear_sender_state();
+        $this->clear_state();
         return [
             'status' => 'complete',
             'phase' => 'complete',
@@ -882,7 +882,7 @@ final class PushFilesSender
     /**
      * Removes an upload-only remote session and discards its local PushPlan.
      *
-     * @param SenderState $state Active sender state.
+     * @param State $state Active state.
      * @return array<string,mixed> Removal continuation or terminal restart.
      */
     private function remove_push(array &$state): array
@@ -904,7 +904,7 @@ final class PushFilesSender
         }
         if (!$response['removed']) {
             $state['recoverable_failures'] = 0;
-            $this->persist_state($state);
+            $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
 
@@ -916,7 +916,7 @@ final class PushFilesSender
             $plan->discard();
         }
         $push_session_id = $state['push_session_id'];
-        $this->clear_sender_state();
+        $this->clear_state();
         return [
             'status' => 'restart',
             'phase' => 'complete',
@@ -929,7 +929,7 @@ final class PushFilesSender
     /**
      * Builds a streaming client from the sizing evidence in durable state.
      *
-     * @param SenderState|null $state Current state, or null before a push starts.
+     * @param State|null $state Current state, or null before a push starts.
      */
     private function create_client(?array $state): MultipartPushStreamClient
     {
@@ -1089,9 +1089,9 @@ final class PushFilesSender
     }
 
     /**
-     * Converts upload setup failure into the sender's bounded retry policy.
+     * Converts upload setup failure into the bounded retry policy.
      *
-     * @param SenderState $state Active sender state.
+     * @param State $state Active state.
      * @param string $fallback_detail Detail used only if classification fails.
      * @return array<string,mixed> Recoverable or terminal step result.
      */
@@ -1113,7 +1113,7 @@ final class PushFilesSender
      * Sends a signed control request and classifies transport exceptions.
      *
      * Redirects and malformed JSON are terminal. A missing response is
-     * recoverable within the sender's fixed retry bound because create, status,
+     * recoverable within the fixed retry bound because create, status,
      * commit, and remove requests are idempotent.
      *
      * @param string $method GET or POST.
@@ -1222,7 +1222,7 @@ final class PushFilesSender
      * Converts a failed request into a bounded workflow result.
      *
      * @param array{status:'complete'|'retry'|'failed',reason:string|null,detail:string|null,response:array<string,mixed>|null,parts_sent:int,body_bytes_sent:int} $request Classified request result.
-     * @param SenderState $state Active sender state, persisted when evidence changes.
+     * @param State $state Active state, persisted when evidence changes.
      * @return array<string,mixed>|null Null when the request completed successfully.
      */
     private function handle_request_failure(array $request, array &$state): ?array
@@ -1232,7 +1232,7 @@ final class PushFilesSender
         }
         if ($request['status'] === 'retry') {
             ++$state['recoverable_failures'];
-            $this->persist_state($state);
+            $this->store_state($state);
             if ($state['recoverable_failures'] >= self::MAXIMUM_RECOVERABLE_FAILURES) {
                 return $this->step_result(
                     'failed',
@@ -1243,98 +1243,98 @@ final class PushFilesSender
             }
             return $this->step_result('continue', $state, $request['reason'], $request['detail']);
         }
-        $this->persist_state($state);
+        $this->store_state($state);
         return $this->step_result('failed', $state, $request['reason'], $request['detail']);
     }
 
     /**
-     * Reads the active sender state from its atomic JSON file.
+     * Loads the active state from its atomic JSON file.
      *
      * The writer owns the schema. Reading retains only file and JSON failure
      * handling rather than maintaining a second field-by-field validator.
      *
-     * @return SenderState|null Active sender state, or null when none exists.
+     * @return State|null Active state, or null when none exists.
      */
-    private function read_sender_state(): ?array
+    private function load_state(): ?array
     {
-        clearstatcache(true, $this->sender_state_path);
-        if (!is_file($this->sender_state_path)) {
+        clearstatcache(true, $this->state_path);
+        if (!is_file($this->state_path)) {
             return null;
         }
-        $json = file_get_contents($this->sender_state_path);
+        $json = file_get_contents($this->state_path);
         if (!is_string($json)) {
-            throw new RuntimeException('Failed to read sender state: ' . $this->sender_state_path);
+            throw new RuntimeException('Failed to read sender state: ' . $this->state_path);
         }
         try {
             $state = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException $exception) {
-            throw new RuntimeException('Failed to decode sender state: ' . $this->sender_state_path, 0, $exception);
+            throw new RuntimeException('Failed to decode sender state: ' . $this->state_path, 0, $exception);
         }
         if (!is_array($state)) {
-            throw new RuntimeException('Sender state does not contain a JSON object: ' . $this->sender_state_path);
+            throw new RuntimeException('Sender state does not contain a JSON object: ' . $this->state_path);
         }
         return $state;
     }
 
     /**
-     * Atomically publishes the complete sender state and current sizing evidence.
+     * Atomically stores the complete state and current sizing evidence.
      *
-     * @param SenderState $state Active sender state.
+     * @param State $state Active state.
      */
-    private function persist_state(array &$state): void
+    private function store_state(array &$state): void
     {
         $state['request_sizer_state'] = $this->client->get_request_sizer_state();
         $json = $this->encode_json($state, 'sender state');
-        $temporary_path = $this->sender_state_path . '.tmp';
+        $temporary_path = $this->state_path . '.tmp';
         if (file_put_contents($temporary_path, $json) !== strlen($json)) {
             throw new RuntimeException('Failed to write sender state: ' . $temporary_path);
         }
-        if (!rename($temporary_path, $this->sender_state_path)) {
-            throw new RuntimeException('Failed to move sender state into place: ' . $this->sender_state_path);
+        if (!rename($temporary_path, $this->state_path)) {
+            throw new RuntimeException('Failed to move sender state into place: ' . $this->state_path);
         }
     }
 
     /**
-     * Removes sender state after local and remote terminal work is durable.
+     * Removes the state after local and remote terminal work is durable.
      */
-    private function clear_sender_state(): void
+    private function clear_state(): void
     {
-        clearstatcache(true, $this->sender_state_path);
-        if (is_file($this->sender_state_path) && !unlink($this->sender_state_path)) {
-            throw new RuntimeException('Failed to remove sender state: ' . $this->sender_state_path);
+        clearstatcache(true, $this->state_path);
+        if (is_file($this->state_path) && !unlink($this->state_path)) {
+            throw new RuntimeException('Failed to remove sender state: ' . $this->state_path);
         }
     }
 
     /**
-     * Acquires non-blocking exclusive ownership of one sender lifecycle.
+     * Acquires non-blocking exclusive ownership of one lifecycle.
      *
      * @return resource Open locked handle retained until close().
      */
-    private function acquire_sender_lock()
+    private function acquire_lock()
     {
-        $lock = fopen($this->sender_lock_path, 'c+');
-        if (!is_resource($lock)) {
-            throw new RuntimeException('Failed to open the sender lock: ' . $this->sender_lock_path);
+        $lock_handle = fopen($this->lock_path, 'c+');
+        if (!is_resource($lock_handle)) {
+            throw new RuntimeException('Failed to open the sender lock: ' . $this->lock_path);
         }
-        if (!flock($lock, LOCK_EX | LOCK_NB)) {
-            fclose($lock);
+        if (!flock($lock_handle, LOCK_EX | LOCK_NB)) {
+            fclose($lock_handle);
             throw new RuntimeException(
                 'Cannot start or resume this push files sender while another process holds its lock: '
-                . $this->sender_lock_path
+                . $this->lock_path
             );
         }
-        return $lock;
+        return $lock_handle;
     }
 
     /**
-     * Releases and closes a sender lock returned by acquire_sender_lock().
+     * Releases and closes a lock returned by acquire_lock().
      *
-     * @param resource $lock Open locked sender handle.
+     * @param resource $lock_handle Open locked handle.
      */
-    private function release_sender_lock($lock): void
+    private function release_lock($lock_handle): void
     {
-        flock($lock, LOCK_UN);
-        fclose($lock);
+        flock($lock_handle, LOCK_UN);
+        fclose($lock_handle);
     }
 
     /**
@@ -1356,7 +1356,7 @@ final class PushFilesSender
      * Builds one workflow result without changing durable state.
      *
      * @param 'continue'|'failed' $status Step disposition.
-     * @param SenderState $state Active sender state.
+     * @param State $state Active state.
      * @param string|null $reason Machine-readable classification.
      * @param string|null $detail Human-readable condition.
      * @return array{status:'continue'|'failed',phase:string,push_session_id:string,reason:string|null,detail:string|null}

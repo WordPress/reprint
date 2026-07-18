@@ -96,8 +96,9 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Positive-work path list | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
 | PushPlan cursor | `cursor.json`, `$cursor_file` |
-| Active sender state | `sender.json`, `$sender_state_path` |
-| Sender lifecycle lock | `sender.lock`, `$sender_lock_path` |
+| Active state | `sender.json`, `$state_path` |
+| Lifecycle lock file | `sender.lock`, `$lock_path` |
+| Open lifecycle lock | `$lock_handle` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Partial-file source evidence | `$source_token` |
 
@@ -114,11 +115,11 @@ sender reads them from `push_status`; it does not copy them into `sender.json`.
 `commit.json` and `$commit_state` remain the receiver commit checkpoint.
 
 `PushFilesSender::start()` and `PushFilesSender::resume()` acquire
-`sender.lock`; `PushFilesSender::close()` releases it. `advance()` does not
+`sender.lock`; `PushFilesSender::close()` releases it. `next_step()` does not
 acquire or release the lock and does not reread `sender.json`. Every
 `continue` result follows a durable sender boundary, so a later process may
 resume after the current process closes the sender. In `pushing_paths` or
-`pushing_deletes`, one advance sends at most one multipart part.
+`pushing_deletes`, one step sends at most one multipart part.
 
 ## Protocol names
 

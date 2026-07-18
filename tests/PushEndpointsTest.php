@@ -1320,7 +1320,7 @@ final class PushEndpointsTest extends TestCase {
     /**
      * Completes mixed local work while reconstructing the sender each step.
      *
-     * Each sender advance carries at most one part. A partial file then changes,
+     * Each sender step carries at most one part. A partial file then changes,
      * so the reconstructed sender must restart that path at byte zero rather
      * than append new bytes to the receiver's old prefix.
      */
@@ -1360,7 +1360,7 @@ final class PushEndpointsTest extends TestCase {
         $removed_caller_index = false;
         $commit_advances = 0;
         for ($step = 0; $step < 200; ++$step) {
-            $result = $this->advanceSender($local_docroot, $fresh_local_index_path, $site_dir);
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->readSenderState($site_dir);
             if (
@@ -1424,7 +1424,7 @@ final class PushEndpointsTest extends TestCase {
     /**
      * Sends one deletion-list chunk and returns before reading the next one.
      */
-    public function testHighLevelSenderSendsOneDeletionListPartPerAdvance(): void
+    public function testHighLevelSenderSendsOneDeletionListPartPerStep(): void
     {
         $local_docroot = $this->root . '/single-delete-part-source';
         mkdir($local_docroot, 0700, true);
@@ -1440,7 +1440,7 @@ final class PushEndpointsTest extends TestCase {
         $this->seedPreviousLocalIndex($site_dir, $previous_local_index_path);
 
         for ($step = 0; $step < 30; ++$step) {
-            $result = $this->advanceSender($local_docroot, $fresh_local_index_path, $site_dir);
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->readSenderState($site_dir);
             if (is_array($state) && $state['phase'] === 'pushing_deletes') {
@@ -1449,7 +1449,7 @@ final class PushEndpointsTest extends TestCase {
         }
         $this->assertIsArray($state);
 
-        $result = $this->advanceSender($local_docroot, $fresh_local_index_path, $site_dir);
+        $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
         $this->assertSame('continue', $result['status']);
         $this->assertSame('pushing_deletes', $result['phase']);
         $status = $this->sendControlRequestWithHeaders(
@@ -1478,7 +1478,7 @@ final class PushEndpointsTest extends TestCase {
         $site_dir = $this->root . '/deleted-source-state';
 
         for ($step = 0; $step < 30; ++$step) {
-            $result = $this->advanceSender($local_docroot, $fresh_local_index_path, $site_dir);
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->readSenderState($site_dir);
             if (is_array($state) && $state['phase'] === 'pushing_paths' && is_array($state['source_token'])) {
@@ -1490,7 +1490,7 @@ final class PushEndpointsTest extends TestCase {
         unlink($local_docroot . '/large.bin');
 
         for (; $step < 60; ++$step) {
-            $result = $this->advanceSender($local_docroot, $fresh_local_index_path, $site_dir);
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             if ($result['status'] !== 'continue') {
                 break;
@@ -1563,8 +1563,8 @@ final class PushEndpointsTest extends TestCase {
         $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $site_dir);
         $sender = PushFilesSender::start($options);
         try {
-            $first = $sender->advance();
-            $second = $sender->advance();
+            $first = $sender->next_step();
+            $second = $sender->next_step();
             $this->assertSame('continue', $first['status']);
             $this->assertSame('continue', $second['status']);
             try {
@@ -1581,15 +1581,15 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('pushing_paths', $state_at_caller_stop['phase']);
 
         try {
-            $sender->advance();
-            $this->fail('A closed sender must reject another advance.');
+            $sender->next_step();
+            $this->fail('A closed sender must reject another step.');
         } catch (LogicException $exception) {
             $this->assertStringContainsString('after close()', $exception->getMessage());
         }
 
         $resumed_sender = PushFilesSender::resume($options);
         try {
-            $result_after_resume = $resumed_sender->advance();
+            $result_after_resume = $resumed_sender->next_step();
             $this->assertSame('continue', $result_after_resume['status']);
             $this->assertSame('pushing_deletes', $result_after_resume['phase']);
         } finally {
@@ -1624,7 +1624,7 @@ final class PushEndpointsTest extends TestCase {
         $site_dir = $this->root . '/retry-state';
 
         for ($step = 0; $step < 20; ++$step) {
-            $result = $this->advanceSender($local_docroot, $fresh_local_index_path, $site_dir);
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->readSenderState($site_dir);
             if (is_array($state) && $state['phase'] === 'pushing_paths') {
@@ -1640,7 +1640,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertTrue(flock($push_lock, LOCK_EX | LOCK_NB));
         try {
             for ($failure_number = 1; $failure_number <= 5; ++$failure_number) {
-                $result = $this->advanceSender($local_docroot, $fresh_local_index_path, $site_dir);
+                $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
                 $this->assertSame($failure_number === 5 ? 'failed' : 'continue', $result['status']);
             }
         } finally {
@@ -1702,7 +1702,7 @@ final class PushEndpointsTest extends TestCase {
             'response_timeout' => 2,
         ]);
         try {
-            $result = $sender->advance();
+            $result = $sender->next_step();
         } finally {
             $sender->close();
         }
@@ -1734,7 +1734,7 @@ final class PushEndpointsTest extends TestCase {
         $this->seedPreviousLocalIndex($site_dir, $previous_local_index_path);
 
         for ($step = 0; $step < 30; ++$step) {
-            $result = $this->advanceSender($local_docroot, $fresh_local_index_path, $site_dir);
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->readSenderState($site_dir);
             if (is_array($state) && $state['phase'] === 'pushing_deletes') {
@@ -1765,7 +1765,7 @@ final class PushEndpointsTest extends TestCase {
         );
 
         for (; $step < 70; ++$step) {
-            $result = $this->advanceSender($local_docroot, $fresh_local_index_path, $site_dir);
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->readSenderState($site_dir);
             if (is_array($state) && $state['phase'] === 'committing') {
@@ -1780,7 +1780,7 @@ final class PushEndpointsTest extends TestCase {
         );
 
         for (; $step < 140; ++$step) {
-            $result = $this->advanceSender($local_docroot, $fresh_local_index_path, $site_dir);
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             if ($result['status'] !== 'continue') {
                 break;
@@ -1987,11 +1987,11 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Starts or resumes one sender, advances it once, and explicitly closes it.
+     * Starts or resumes one sender, takes its next step, and explicitly closes it.
      *
-     * @return array<string,mixed> Result of the one sender advance.
+     * @return array<string,mixed> Result of the one sender step.
      */
-    private function advanceSender(
+    private function nextSenderStep(
         string $local_docroot,
         string $fresh_local_index_path,
         string $site_dir
@@ -2005,14 +2005,14 @@ final class PushEndpointsTest extends TestCase {
             ? PushFilesSender::resume($options)
             : PushFilesSender::start($options);
         try {
-            return $sender->advance();
+            return $sender->next_step();
         } finally {
             $sender->close();
         }
     }
 
     /**
-     * Advances one open sender until the workflow reaches a terminal result.
+     * Runs sender steps until the workflow reaches a terminal result.
      *
      * @return array<string,mixed> Terminal sender result.
      */
@@ -2031,7 +2031,7 @@ final class PushEndpointsTest extends TestCase {
             : PushFilesSender::start($options);
         try {
             for ($step = 0; $step < 200; ++$step) {
-                $result = $sender->advance();
+                $result = $sender->next_step();
                 $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
                 if ($result['status'] !== 'continue') {
                     return $result;
@@ -2040,7 +2040,7 @@ final class PushEndpointsTest extends TestCase {
         } finally {
             $sender->close();
         }
-        $this->fail('The high-level sender did not reach a terminal result in 200 advances.');
+        $this->fail('The high-level sender did not reach a terminal result in 200 steps.');
     }
 
     /**
