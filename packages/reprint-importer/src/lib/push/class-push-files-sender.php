@@ -998,7 +998,6 @@ final class PushFilesSender
         $response = $request_result['response'];
 
         if ($response['send_next_request']) {
-            $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
 
@@ -1039,7 +1038,6 @@ final class PushFilesSender
         /** @var array{removed:bool} $response */
         $response = $request_result['response'];
         if (!$response['removed']) {
-            $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
 
