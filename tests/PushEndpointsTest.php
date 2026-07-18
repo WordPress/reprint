@@ -2244,10 +2244,12 @@ final class PushEndpointsTest extends TestCase {
         ]);
         try {
             $this->assertFalse($sender->next_step());
+            $this->assertFalse($sender->next_step());
             $result = $this->senderResult($sender);
         } finally {
             $sender->close();
         }
+        $this->assertFalse($sender->next_step());
         pcntl_waitpid($child, $status);
         fclose($listener);
 

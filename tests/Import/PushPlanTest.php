@@ -73,8 +73,7 @@ final class PushPlanTest extends TestCase
     public function testAfterSuccessfulPushRejectsAClosedIncompletePlan(): void
     {
         $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(2)));
-        $result = $plan->next_step();
-        $this->assertSame('more', $result['status']);
+        $this->assertTrue($plan->next_step());
         $plan->close();
 
         $this->expectException(LogicException::class);
@@ -86,8 +85,7 @@ final class PushPlanTest extends TestCase
     {
         $this->recordSuccessfulPush($this->writeIndex($this->manyFileEntries(2)));
         $plan = $this->startPlan();
-        $result = $plan->next_step();
-        $this->assertSame('more', $result['status']);
+        $this->assertTrue($plan->next_step());
         $plan->close();
 
         $this->expectException(LogicException::class);
@@ -347,9 +345,7 @@ final class PushPlanTest extends TestCase
         $current = $this->writeIndex($entries);
         $plan = $this->startPlan($current);
 
-        $first = $plan->next_step();
-
-        $this->assertSame('more', $first['status']);
+        $this->assertTrue($plan->next_step());
         $plan->close();
         $resumedPlan = $this->resumePlan();
         $result = $this->planToCompletion($resumedPlan);
@@ -502,10 +498,9 @@ final class PushPlanTest extends TestCase
         rename($replacement, $current);
         clearstatcache(true, $current);
 
-        $complete = $plan->next_step();
+        $this->assertFalse($plan->next_step());
 
-        $this->assertSame('complete', $complete['status']);
-        $this->assertPathCounts(1, 0, $complete);
+        $this->assertPathCounts(1, 0, $this->planCursor());
         $this->assertSame(['value.txt'], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
         $this->assertSame(0, filesize($this->planPath('local_paths_to_delete')));
         $plan->close();
@@ -517,11 +512,9 @@ final class PushPlanTest extends TestCase
         $current = $this->writeIndex($entries);
         $plan = $this->startPlan($current);
 
-        $first = $plan->next_step();
+        $this->assertTrue($plan->next_step());
 
-        $this->assertSame('more', $first['status']);
-        $this->assertArrayNotHasKey('cursor', $first);
-        $this->assertPathCounts(1, 0, $first);
+        $this->assertPathCounts(1, 0, $this->planCursor());
         $this->assertCount(1, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
         $this->assertSame(0, filesize($this->planPath('local_paths_to_delete')));
         $plan->close();
@@ -534,11 +527,46 @@ final class PushPlanTest extends TestCase
         $this->assertCount(2, $this->indexEntries($this->planPath('fresh_local_index.jsonl')));
     }
 
+    public function testStepRetainsTheNextIndexEntryUntilClose(): void
+    {
+        $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(3)));
+        $fresh_index_handle_property = new ReflectionProperty(PushPlan::class, 'fresh_local_index_handle');
+        $fresh_index_entry_property = new ReflectionProperty(PushPlan::class, 'fresh_local_index_entry');
+
+        $this->assertTrue($plan->next_step());
+        $first_cursor = $this->planCursor();
+        $fresh_index_handle = $fresh_index_handle_property->getValue($plan);
+        $this->assertIsResource($fresh_index_handle);
+        $this->assertGreaterThan(
+            $first_cursor['byte_offset_in_fresh_index'],
+            ftell($fresh_index_handle)
+        );
+        $retained_entry = $fresh_index_entry_property->getValue($plan);
+        $this->assertIsArray($retained_entry);
+        $this->assertSame('file-0001.txt', $retained_entry['path']);
+
+        $this->assertTrue($plan->next_step());
+        $second_cursor = $this->planCursor();
+        $this->assertGreaterThan(
+            $second_cursor['byte_offset_in_fresh_index'],
+            ftell($fresh_index_handle)
+        );
+        $this->assertSame(2, $second_cursor['local_paths_to_push_count']);
+
+        $plan->close();
+        $plan->close();
+        $resumed_plan = $this->resumePlan();
+        $this->assertFalse($resumed_plan->next_step());
+        $this->assertFalse($resumed_plan->next_step());
+        $resumed_plan->close();
+        $resumed_plan->close();
+        $this->assertFalse($resumed_plan->next_step());
+    }
+
     public function testCursorUsesLiteralPathCountAndByteOffsetKeys(): void
     {
         $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(2)));
-        $result = $plan->next_step();
-        $this->assertSame('more', $result['status']);
+        $this->assertTrue($plan->next_step());
 
         $cursorContents = file_get_contents($this->planPath('cursor.json'));
         $this->assertIsString($cursorContents);
@@ -581,15 +609,13 @@ final class PushPlanTest extends TestCase
         $this->recordSuccessfulPush($this->writeIndex($localIndexAtPreviousPushEntries));
         $plan = $this->startPlan($current);
 
-        $first = $plan->next_step();
-        $this->assertSame('more', $first['status']);
+        $this->assertTrue($plan->next_step());
         $firstPushBytes = filesize($this->planPath('local_paths_to_push.jsonl'));
         $firstDeleteBytes = filesize($this->planPath('local_paths_to_delete'));
         $plan->close();
 
         $reopened = $this->resumePlan();
-        $resumed = $reopened->next_step();
-        $this->assertSame('more', $resumed['status']);
+        $this->assertTrue($reopened->next_step());
         $this->assertSame(
             $firstPushBytes,
             filesize($this->planPath('local_paths_to_push.jsonl'))
@@ -635,13 +661,11 @@ final class PushPlanTest extends TestCase
     {
         $current = $this->writeIndex($this->manyFileEntries(2));
         $plan = $this->startPlan($current);
-        $first = $plan->next_step();
-        $this->assertSame('more', $first['status']);
+        $this->assertTrue($plan->next_step());
         $plan->close();
 
         $reopened = $this->resumePlan();
-        $complete = $reopened->next_step();
-        $this->assertSame('complete', $complete['status']);
+        $this->assertFalse($reopened->next_step());
         $freshLocalIndex = file_get_contents($this->planPath('fresh_local_index.jsonl'));
         $pathsToPush = file_get_contents($this->planPath('local_paths_to_push.jsonl'));
         $localPathsToDelete = file_get_contents($this->planPath('local_paths_to_delete'));
@@ -651,7 +675,7 @@ final class PushPlanTest extends TestCase
         $replayedEof = $replayedPlan->next_step();
         $replayedPlan->close();
 
-        $this->assertSame($complete, $replayedEof);
+        $this->assertFalse($replayedEof);
         $this->assertSame($freshLocalIndex, file_get_contents($this->planPath('fresh_local_index.jsonl')));
         $this->assertSame($pathsToPush, file_get_contents($this->planPath('local_paths_to_push.jsonl')));
         $this->assertSame($localPathsToDelete, file_get_contents($this->planPath('local_paths_to_delete')));
@@ -663,17 +687,15 @@ final class PushPlanTest extends TestCase
         $index_to_copy = $this->writeIndex($this->manyFileEntries(2));
         copy($index_to_copy, $current);
         $plan = $this->startPlan($current);
-        $first = $plan->next_step();
-        $this->assertSame('more', $first['status']);
+        $this->assertTrue($plan->next_step());
 
         $replacement = $this->writeIndex($this->manyFileEntries(3));
         rename($replacement, $current);
         clearstatcache(true, $current);
 
-        $complete = $plan->next_step();
+        $this->assertFalse($plan->next_step());
 
-        $this->assertSame('complete', $complete['status']);
-        $this->assertPathCounts(2, 0, $complete);
+        $this->assertPathCounts(2, 0, $this->planCursor());
         $this->assertCount(2, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
         $plan->close();
     }
@@ -685,8 +707,7 @@ final class PushPlanTest extends TestCase
         $current = $this->writeIndex($entries);
         $plan = $this->startPlan($current, ['private']);
 
-        $first = $plan->next_step();
-        $this->assertSame('more', $first['status']);
+        $this->assertTrue($plan->next_step());
         $plan->close();
 
         $resumedPlan = $this->resumePlan();
@@ -766,19 +787,28 @@ final class PushPlanTest extends TestCase
     /**
      * Continue the plan until it reports that both indexes were consumed.
      *
-     * @return array{status:'more'|'complete',local_paths_to_push_count:int,local_paths_to_delete_count:int}
+     * @return array<string,mixed> Durable planning cursor after both indexes reach EOF.
      */
     private function planToCompletion(PushPlan $plan): array
     {
         for ($step = 0; $step < 100; ++$step) {
-            $result = $plan->next_step();
-            if ($result['status'] === 'complete') {
+            if (!$plan->next_step()) {
+                $cursor = $this->planCursor();
                 $plan->close();
-                return $result;
+                return $cursor;
             }
-            $this->assertSame('more', $result['status']);
         }
         $this->fail('Push plan did not complete within 100 bounded steps.');
+    }
+
+    /** @return array<string,mixed> */
+    private function planCursor(): array
+    {
+        $contents = file_get_contents($this->planPath('cursor.json'));
+        $this->assertIsString($contents);
+        $cursor = json_decode($contents, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertIsArray($cursor);
+        return $cursor;
     }
 
     private function assertPathCounts(

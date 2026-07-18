@@ -2,37 +2,26 @@
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 /**
- * Core class used to plan local filesystem changes for one target.
+ * Internal planner for one PushFilesSender lifecycle.
  *
  * PushPlan merges a path-sorted fresh local index with the local index at the
  * previous push. It writes durable lists of local paths to push and local paths
  * to delete without reading the local tree or accumulating either index in
  * memory.
  *
- * ## Usage
+ * PushFilesSender is the only caller-visible processor. It owns the lifecycle
+ * lock, top-level phase, transport, result, commit, restart, and removal.
+ * PushPlan only merges the two indexes, publishes its planning cursor, and
+ * produces the local paths to push and local paths to delete.
  *
- * A push plan has four stages:
+ * ## Durable boundary
  *
- *  1. Start a new plan with `start()`, or continue an unfinished plan with
- *     `resume()`.
- *  2. Call `next_step()` until it reports `complete`.
- *  3. Call `close()`, then use the two path lists to perform the push.
- *  4. After the receiver commits successfully, call `after_successful_push()`.
- *
- * Example:
- *
- *     $plan = PushPlan::start($push_state_directory, $fresh_local_index_path);
- *     do {
- *         $result = $plan->next_step();
- *     } while ($result["status"] === "more");
- *     $plan->close();
- *
- *     // Push the local paths to push and wait for the receiver to commit them.
- *     $plan->after_successful_push();
- *
- * A later process continues an unfinished plan with `resume()`. The retained
- * cursor preserves its progress and the excluded paths originally passed to
- * `start()`.
+ * While sender.json says `planning`, cursor.json exists and the sender owns an
+ * open PushPlan under sender.lock. A false next_step() result means both indexes
+ * reached EOF; the sender closes the plan before changing its phase. The plan
+ * cursor then remains in place until a confirmed commit publishes the fresh
+ * local index or removal discards the plan. cursor.json owns planning progress;
+ * sender.json never duplicates it.
  *
  * ## Change detection
  *
@@ -47,7 +36,7 @@
  * omitted from both path lists but remain in the fresh local index published
  * after success.
  *
- * The index reader trusts the entry fields produced by the indexer. It retains
+ * The index reader trusts the entry values produced by the indexer. It retains
  * failure handling for reading lines, decoding JSON, and decoding base64 paths.
  *
  * ## Durability and memory
@@ -56,9 +45,9 @@
  * merges one path, flushes both path lists, and atomically publishes the next cursor.
  * `resume()` discards bytes written beyond the saved output offsets and
  * continues from the saved index offsets, so an interrupted step cannot leave
- * duplicate durable records.
+ * duplicate durable entries.
  *
- * PushPlan holds one entry from each index and the active deleted-directory
+ * PushPlan retains the next entry from each index and the active deleted-directory
  * ranges needed to suppress redundant descendant deletions. It never loads an
  * index or path list in full.
  *
@@ -89,6 +78,21 @@ class PushPlan
 
     /** @var bool Whether close() has closed this plan's file handles. */
     private bool $closed = false;
+
+    /** @var bool Whether both index handles reached EOF at a durable boundary. */
+    private bool $complete = false;
+
+    /** @var array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}|null */
+    private ?array $fresh_local_index_entry = null;
+
+    /** @var bool Whether $fresh_local_index_entry has been read, including EOF. */
+    private bool $fresh_local_index_entry_loaded = false;
+
+    /** @var array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}|null */
+    private ?array $previous_local_index_entry = null;
+
+    /** @var bool Whether $previous_local_index_entry has been read, including EOF. */
+    private bool $previous_local_index_entry_loaded = false;
 
     /** @var resource|null */
     private $fresh_local_index_handle = null;
@@ -166,6 +170,7 @@ class PushPlan
             $plan->excluded_paths[] = $excluded_path;
         }
         $plan->closed = false;
+        $plan->complete = false;
         $plan->open_plan_files();
         return $plan;
     }
@@ -251,6 +256,10 @@ class PushPlan
      */
     private function open_plan_files(): void
     {
+        $this->fresh_local_index_entry = null;
+        $this->fresh_local_index_entry_loaded = false;
+        $this->previous_local_index_entry = null;
+        $this->previous_local_index_entry_loaded = false;
         $this->local_paths_to_push_handle = $this->open_and_truncate_and_seek(
             $this->local_paths_to_push,
             $this->cursor["byte_offset_in_local_paths_to_push"]
@@ -348,26 +357,22 @@ class PushPlan
     /**
      * Merges one path and publishes the resulting push plan cursor.
      *
-     * start() establishes a new plan and resume() opens an unfinished one.
-     * `complete` means both indexes reached EOF. The caller closes the plan
-     * before using its output files.
+     * A true return means another path may be merged. False means both indexes
+     * reached EOF and remains false on later calls. The owning sender closes the
+     * plan before using its output files.
      *
      * Exclusions suppress network changes, not entries in the retained fresh
      * local index saved as the local index at the previous push after success.
      *
-     * @return array {
-     *     Result of this plan step.
-     *
-     *     @type string $status                      `more` or `complete`.
-     *     @type int    $local_paths_to_push_count   Number of local paths to push written so far.
-     *     @type int    $local_paths_to_delete_count Number of local paths to delete written so far.
-     * }
-     * @phpstan-return array{status:'more'|'complete',local_paths_to_push_count:int,local_paths_to_delete_count:int}
+     * @return bool Whether another planning step may be performed.
      */
-    public function next_step(): array
+    public function next_step(): bool
     {
+        if ($this->complete) {
+            return false;
+        }
         if ($this->closed) {
-            throw new LogicException("Cannot advance a push plan after close().");
+            throw new LogicException("Cannot take a push plan step after close().");
         }
 
         $byte_offset_in_fresh_index = $this->cursor["byte_offset_in_fresh_index"];
@@ -379,10 +384,18 @@ class PushPlan
         // redundant descendant deletions.
         $seen_deleted_directories = $this->cursor["seen_deleted_directories"];
 
-        $entry_fresh_index = $this->parse_next_index_entry($this->fresh_local_index_handle);
-        $entry_previous_index = $this->parse_next_index_entry(
-            $this->local_index_at_previous_push_handle
-        );
+        if (!$this->fresh_local_index_entry_loaded) {
+            $this->fresh_local_index_entry = $this->parse_next_index_entry($this->fresh_local_index_handle);
+            $this->fresh_local_index_entry_loaded = true;
+        }
+        if (!$this->previous_local_index_entry_loaded) {
+            $this->previous_local_index_entry = $this->parse_next_index_entry(
+                $this->local_index_at_previous_push_handle
+            );
+            $this->previous_local_index_entry_loaded = true;
+        }
+        $entry_fresh_index = $this->fresh_local_index_entry;
+        $entry_previous_index = $this->previous_local_index_entry;
 
         if ($entry_fresh_index !== null || $entry_previous_index !== null) {
             // Base64 does not preserve byte order ('0' sorts before 'A'
@@ -493,11 +506,11 @@ class PushPlan
 
             if ($path_comparison <= 0) {
                 $byte_offset_in_fresh_index = ftell($this->fresh_local_index_handle);
-                $entry_fresh_index = $this->parse_next_index_entry($this->fresh_local_index_handle);
+                $this->fresh_local_index_entry = $this->parse_next_index_entry($this->fresh_local_index_handle);
             }
             if ($path_comparison >= 0) {
                 $byte_offset_in_previous_index = ftell($this->local_index_at_previous_push_handle);
-                $entry_previous_index = $this->parse_next_index_entry(
+                $this->previous_local_index_entry = $this->parse_next_index_entry(
                     $this->local_index_at_previous_push_handle
                 );
             }
@@ -510,7 +523,8 @@ class PushPlan
             throw new RuntimeException("Failed to flush local_paths_to_push or local_paths_to_delete.");
         }
 
-        $complete = $entry_fresh_index === null && $entry_previous_index === null;
+        $complete = $this->fresh_local_index_entry === null
+            && $this->previous_local_index_entry === null;
         if ($complete) {
             $seen_deleted_directories = [];
         }
@@ -526,28 +540,8 @@ class PushPlan
         ];
         $this->save_cursor($cursor_after_step);
         $this->cursor = $cursor_after_step;
-        if (!$complete) {
-            // The merge reads one entry ahead. Return both handles to the
-            // durable offsets so the next step reads that entry again.
-            $this->safe_seek(
-                $this->fresh_local_index_handle,
-                $this->cursor["byte_offset_in_fresh_index"],
-                "fresh local index"
-            );
-            if ($this->local_index_at_previous_push_handle) {
-                $this->safe_seek(
-                    $this->local_index_at_previous_push_handle,
-                    $this->cursor["byte_offset_in_previous_index"],
-                    "local index at the previous push"
-                );
-            }
-        }
-
-        return [
-            "status" => $complete ? "complete" : "more",
-            "local_paths_to_push_count" => $this->cursor["local_paths_to_push_count"],
-            "local_paths_to_delete_count" => $this->cursor["local_paths_to_delete_count"],
-        ];
+        $this->complete = $complete;
+        return !$complete;
     }
 
     /**
@@ -575,6 +569,10 @@ class PushPlan
         $this->local_index_at_previous_push_handle = null;
         $this->local_paths_to_push_handle = null;
         $this->local_paths_to_delete_handle = null;
+        $this->fresh_local_index_entry = null;
+        $this->fresh_local_index_entry_loaded = false;
+        $this->previous_local_index_entry = null;
+        $this->previous_local_index_entry_loaded = false;
         $this->closed = true;
     }
 

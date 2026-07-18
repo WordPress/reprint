@@ -354,11 +354,11 @@ final class PushFilesSender
      */
     public function next_step(): bool
     {
+        if ($this->status !== 'continue') {
+            return false;
+        }
         if (!is_resource($this->lock_handle)) {
             throw new LogicException('Cannot call next_step() after close().');
-        }
-        if ($this->status !== 'continue') {
-            throw new LogicException('Cannot call next_step() after the sender reaches a terminal result.');
         }
 
         switch ($this->state['phase']) {
@@ -545,8 +545,7 @@ final class PushFilesSender
      */
     private function next_plan_step(): void
     {
-        $plan_result = $this->plan->next_step();
-        if ($plan_result['status'] === 'complete') {
+        if (!$this->plan->next_step()) {
             $this->plan->close();
             $this->state['phase'] = 'pushing_paths';
             $this->store_state($this->state);
