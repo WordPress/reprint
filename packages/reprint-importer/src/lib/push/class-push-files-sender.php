@@ -383,7 +383,7 @@ final class PushFilesSender
         $state['max_part_bytes'] = $response['max_part_bytes'];
         $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         try {
-            if (PushPlan::has_unfinished_plan($this->push_state_directory)) {
+            if (PushPlan::has_plan($this->push_state_directory)) {
                 $this->plan = PushPlan::resume($this->push_state_directory);
             } else {
                 $this->plan = PushPlan::start(
@@ -822,7 +822,7 @@ final class PushFilesSender
 
         // A prior process may have published the plan after the receiver
         // completed but stopped before it removed sender.json.
-        if (PushPlan::has_unfinished_plan($this->push_state_directory)) {
+        if (PushPlan::has_plan($this->push_state_directory)) {
             if (!isset($this->plan)) {
                 $this->plan = PushPlan::resume($this->push_state_directory);
             }
@@ -864,7 +864,7 @@ final class PushFilesSender
 
         // A repeated remove may follow a process that discarded the plan but
         // stopped before it removed sender.json.
-        if (PushPlan::has_unfinished_plan($this->push_state_directory)) {
+        if (PushPlan::has_plan($this->push_state_directory)) {
             if (!isset($this->plan)) {
                 $this->plan = PushPlan::resume($this->push_state_directory);
             }

@@ -109,11 +109,11 @@ final class PushPlanTest extends TestCase
     {
         $firstIndex = $this->writeIndex(['first.txt' => [100, 5, 'file']]);
         $plan = $this->startPlan($firstIndex);
-        $this->assertTrue(PushPlan::has_unfinished_plan($this->planDirectory()));
+        $this->assertTrue(PushPlan::has_plan($this->planDirectory()));
         $plan->close();
         $plan->discard();
 
-        $this->assertFalse(PushPlan::has_unfinished_plan($this->planDirectory()));
+        $this->assertFalse(PushPlan::has_plan($this->planDirectory()));
         $this->assertFileDoesNotExist($this->planPath('local_index_at_previous_push.jsonl'));
 
         $secondIndex = $this->writeIndex(['second.txt' => [200, 6, 'file']]);

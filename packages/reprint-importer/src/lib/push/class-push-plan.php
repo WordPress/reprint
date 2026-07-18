@@ -182,7 +182,7 @@ class PushPlan
      *
      * @param string $push_state_directory Local push state directory.
      */
-    public static function has_unfinished_plan(string $push_state_directory): bool
+    public static function has_plan(string $push_state_directory): bool
     {
         return is_file(rtrim($push_state_directory, "/") . "/cursor.json");
     }
