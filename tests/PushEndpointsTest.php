@@ -1464,6 +1464,91 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * Retains the path lists and current local file until close().
+     */
+    public function testHighLevelSenderRetainsOpenFilesUntilClose(): void
+    {
+        $local_docroot = $this->root . '/retained-handles-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/file.bin', str_repeat('A', 130));
+        $fresh_local_index_path = $this->root . '/retained-handles-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'file.bin' => $this->indexEntry($local_docroot . '/file.bin', 'file'),
+        ]);
+        $previous_local_index_path = $this->root . '/retained-handles-previous-index.jsonl';
+        $previous_entries = [];
+        for ($index = 0; $index < 20; ++$index) {
+            $previous_entries[sprintf('delete-%02d.txt', $index)] = [1, 1, 'file'];
+        }
+        $this->writeIndex($previous_local_index_path, $previous_entries);
+        $push_state_directory = $this->root . '/retained-handles-state';
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+
+        $local_paths_to_push_handle_property = new ReflectionProperty(
+            PushFilesSender::class,
+            'local_paths_to_push_handle'
+        );
+        $local_file_handle_property = new ReflectionProperty(PushFilesSender::class, 'local_file_handle');
+        $local_paths_to_delete_handle_property = new ReflectionProperty(
+            PushFilesSender::class,
+            'local_paths_to_delete_handle'
+        );
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $sender = PushFilesSender::start($options);
+        try {
+            $sender->next_step();
+            $sender->next_step();
+            $first_file_chunk = $sender->next_step();
+            $this->assertSame('pushing_paths', $first_file_chunk['phase']);
+
+            $local_paths_to_push_handle = $local_paths_to_push_handle_property->getValue($sender);
+            $local_file_handle = $local_file_handle_property->getValue($sender);
+            $this->assertIsResource($local_paths_to_push_handle);
+            $this->assertIsResource($local_file_handle);
+
+            $second_file_chunk = $sender->next_step();
+            $this->assertSame('pushing_paths', $second_file_chunk['phase']);
+            $this->assertSame($local_paths_to_push_handle, $local_paths_to_push_handle_property->getValue($sender));
+            $this->assertSame($local_file_handle, $local_file_handle_property->getValue($sender));
+
+            file_put_contents($local_docroot . '/file.bin', str_repeat('B', 131));
+            $changed_file_chunk = $sender->next_step();
+            $this->assertSame('pushing_paths', $changed_file_chunk['phase']);
+            $this->assertFalse(is_resource($local_file_handle));
+            $local_file_handle = $local_file_handle_property->getValue($sender);
+            $this->assertIsResource($local_file_handle);
+        } finally {
+            $sender->close();
+        }
+        $this->assertNull($local_paths_to_push_handle_property->getValue($sender));
+        $this->assertNull($local_file_handle_property->getValue($sender));
+        $this->assertFalse(is_resource($local_paths_to_push_handle));
+        $this->assertFalse(is_resource($local_file_handle));
+
+        $sender = PushFilesSender::resume($options);
+        try {
+            $sender->next_step();
+            $sender->next_step();
+            $sender->next_step();
+            $first_delete_chunk = $sender->next_step();
+            $this->assertSame('pushing_deletes', $first_delete_chunk['phase']);
+            $local_paths_to_delete_handle = $local_paths_to_delete_handle_property->getValue($sender);
+            $this->assertIsResource($local_paths_to_delete_handle);
+
+            $second_delete_chunk = $sender->next_step();
+            $this->assertSame('pushing_deletes', $second_delete_chunk['phase']);
+            $this->assertSame(
+                $local_paths_to_delete_handle,
+                $local_paths_to_delete_handle_property->getValue($sender)
+            );
+        } finally {
+            $sender->close();
+        }
+        $this->assertNull($local_paths_to_delete_handle_property->getValue($sender));
+        $this->assertFalse(is_resource($local_paths_to_delete_handle));
+    }
+
+    /**
      * Removes a push session when a local path to push disappears.
      */
     public function testHighLevelSenderRemovesSessionWhenLocalPathToPushDisappears(): void

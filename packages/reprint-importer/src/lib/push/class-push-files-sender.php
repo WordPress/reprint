@@ -71,9 +71,10 @@
  *
  * Each local-path upload or deletion step sends at most one multipart part and
  * holds at most one bounded payload string. Multipart bytes leave for the
- * network before `send_part()` returns. Active state and PushPlan's cursor are
- * written atomically, and the lifecycle lock permits only one open sender at a
- * time.
+ * network before `send_part()` returns. An open sender retains its path-list
+ * handles and current local file handle between steps; close() releases them.
+ * Active state and PushPlan's cursor are written atomically, and the lifecycle
+ * lock permits only one open sender at a time.
  *
  * @phpstan-type LocalPathChangeFields array{type:'file'|'directory'|'symlink',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,local_paths_to_push_byte_offset:int,next_local_paths_to_push_byte_offset:int,local_path_change_fields:LocalPathChangeFields|null}
@@ -100,6 +101,15 @@ final class PushFilesSender
 
     /** @var resource|null Exclusive lock held from start() or resume() through close(). */
     private $lock_handle = null;
+
+    /** @var resource|null Open local_paths_to_push list retained while pushing local paths. */
+    private $local_paths_to_push_handle = null;
+
+    /** @var resource|null Open local_paths_to_delete list retained while pushing deleted paths. */
+    private $local_paths_to_delete_handle = null;
+
+    /** @var resource|null Open local file retained while pushing its chunks. */
+    private $local_file_handle = null;
 
     /** @var State|null Active state, or null after terminal completion. */
     private ?array $state = null;
@@ -296,10 +306,10 @@ final class PushFilesSender
                 $result = $this->next_plan_step($this->state);
                 break;
             case 'pushing_paths':
-                $result = $this->next_local_path_upload_part($this->state);
+                $result = $this->upload_next_file_chunk($this->state);
                 break;
             case 'pushing_deletes':
-                $result = $this->next_delete_list_upload_part($this->state);
+                $result = $this->upload_next_chunk_of_deleted_paths($this->state);
                 break;
             case 'committing':
                 $result = $this->commit_push($this->state);
@@ -330,6 +340,9 @@ final class PushFilesSender
      */
     public function close(): void
     {
+        $this->close_local_file_handle();
+        $this->close_local_paths_to_push_handle();
+        $this->close_local_paths_to_delete_handle();
         if (is_resource($this->lock_handle)) {
             $this->release_lock($this->lock_handle);
         }
@@ -430,17 +443,19 @@ final class PushFilesSender
      * @param State $state Active state.
      * @return array<string,mixed> Result of one reconciliation or upload part.
      */
-    private function next_local_path_upload_part(array &$state): array
+    private function upload_next_file_chunk(array &$state): array
     {
-        $local_paths_to_push_path = PushPlan::local_paths_to_push_path($this->push_state_directory);
-        $local_paths_to_push_handle = fopen($local_paths_to_push_path, 'rb');
-        if (!is_resource($local_paths_to_push_handle)) {
-            return $this->step_result('failed', $state, 'local_io_error', 'Could not open the local paths to push.');
+        if (!is_resource($this->local_paths_to_push_handle)) {
+            $local_paths_to_push_path = PushPlan::local_paths_to_push_path($this->push_state_directory);
+            $this->local_paths_to_push_handle = fopen($local_paths_to_push_path, 'rb');
+            if (!is_resource($this->local_paths_to_push_handle)) {
+                return $this->step_result('failed', $state, 'local_io_error', 'Could not open the local paths to push.');
+            }
         }
 
         try {
             $local_path_record = $this->read_local_path_to_push(
-                $local_paths_to_push_handle,
+                $this->local_paths_to_push_handle,
                 $state['local_paths_to_push_byte_offset']
             );
             $local_path_to_push = $local_path_record === null
@@ -453,17 +468,19 @@ final class PushFilesSender
                     'local_path_change_fields' => $this->read_local_path_change_fields($local_path_record['path']),
                 ];
         } catch (RuntimeException $exception) {
-            fclose($local_paths_to_push_handle);
             return $this->step_result('failed', $state, 'local_io_error', $exception->getMessage());
         }
-        fclose($local_paths_to_push_handle);
         if ($local_path_to_push === null) {
+            $this->close_local_file_handle();
+            $this->close_local_paths_to_push_handle();
             $state['local_path_change_fields'] = null;
             $state['phase'] = 'pushing_deletes';
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
         if ($local_path_to_push['local_path_change_fields'] === null) {
+            $this->close_local_file_handle();
+            $this->close_local_paths_to_push_handle();
             $state['phase'] = 'removing';
             $this->store_state($state);
             return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
@@ -485,17 +502,23 @@ final class PushFilesSender
 
         $local_path_change_fields = $this->read_local_path_change_fields($local_path_to_push['path']);
         if ($local_path_change_fields === null) {
+            $this->close_local_file_handle();
+            $this->close_local_paths_to_push_handle();
             $state['phase'] = 'removing';
             $this->store_state($state);
             return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
         }
         $saved_change_fields_match = $state['local_path_change_fields'] === $local_path_change_fields;
+        if (!$saved_change_fields_match) {
+            $this->close_local_file_handle();
+        }
         if (
             $saved_change_fields_match
             && $receiver_path_status['state'] === 'complete'
             && $receiver_path_type === $local_path_change_fields['type']
             && ( $local_path_change_fields['type'] !== 'file' || $receiver_path_status['accepted_bytes'] === $local_path_change_fields['size'] )
         ) {
+            $this->close_local_file_handle();
             $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
             $state['local_path_change_fields'] = null;
             $state['consecutive_recoverable_failures'] = 0;
@@ -519,6 +542,7 @@ final class PushFilesSender
             }
             $local_path_change_fields_after_read = $this->read_local_path_change_fields($local_path_to_push['path']);
             if ($local_path_change_fields_after_read === null) {
+                $this->close_local_paths_to_push_handle();
                 $state['phase'] = 'removing';
                 $this->store_state($state);
                 return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
@@ -543,6 +567,7 @@ final class PushFilesSender
             $symlink_target = @readlink($this->docroot . '/' . $local_path_to_push['path']);
             $local_path_change_fields_after_read = $this->read_local_path_change_fields($local_path_to_push['path']);
             if ($local_path_change_fields_after_read === null) {
+                $this->close_local_paths_to_push_handle();
                 $state['phase'] = 'removing';
                 $this->store_state($state);
                 return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
@@ -586,11 +611,17 @@ final class PushFilesSender
             } else {
                 $payload = '';
                 if ($local_path_change_fields['size'] > 0) {
-                    $file_handle = fopen($this->docroot . '/' . $local_path_to_push['path'], 'rb');
-                    if (!is_resource($file_handle) || fseek($file_handle, $file_byte_offset) !== 0) {
-                        if (is_resource($file_handle)) {
-                            fclose($file_handle);
-                        }
+                    if (!is_resource($this->local_file_handle)) {
+                        $this->local_file_handle = fopen(
+                            $this->docroot . '/' . $local_path_to_push['path'],
+                            'rb'
+                        );
+                    }
+                    if (
+                        !is_resource($this->local_file_handle)
+                        || fseek($this->local_file_handle, $file_byte_offset) !== 0
+                    ) {
+                        $this->close_local_file_handle();
                         $local_path_change_fields_after_read = $this->read_local_path_change_fields($local_path_to_push['path']);
                         if ($local_path_change_fields_after_read === null) {
                             $local_path_disappeared = true;
@@ -600,14 +631,16 @@ final class PushFilesSender
                             $local_io_failure_detail = 'Could not open the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.';
                         }
                     } else {
-                        $payload = fread($file_handle, $maximum_file_payload_bytes);
-                        fclose($file_handle);
+                        $payload = fread($this->local_file_handle, $maximum_file_payload_bytes);
                         $local_path_change_fields_after_read = $this->read_local_path_change_fields($local_path_to_push['path']);
                         if ($local_path_change_fields_after_read === null) {
+                            $this->close_local_file_handle();
                             $local_path_disappeared = true;
                         } elseif ($local_path_change_fields_after_read !== $local_path_change_fields) {
+                            $this->close_local_file_handle();
                             $local_path_changed = true;
                         } elseif (!is_string($payload) || ( $payload === '' && $file_byte_offset < $local_path_change_fields['size'] )) {
+                            $this->close_local_file_handle();
                             $local_io_failure_detail = 'Could not read the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.';
                         } else {
                             $upload_part = [
@@ -645,6 +678,7 @@ final class PushFilesSender
         }
         if (!$part_sent) {
             if ($local_path_disappeared) {
+                $this->close_local_paths_to_push_handle();
                 $state['phase'] = 'removing';
             }
             $state['consecutive_recoverable_failures'] = 0;
@@ -661,6 +695,7 @@ final class PushFilesSender
             return $this->step_result('failed', $state, 'request_size_exhausted', $request_size_failure_detail ?? 'The current request-body budget cannot fit one MIME part for a local path.');
         }
         if ($upload_completes_local_path) {
+            $this->close_local_file_handle();
             $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
             $state['local_path_change_fields'] = null;
         } else {
@@ -679,7 +714,7 @@ final class PushFilesSender
      * @param State $state Active state.
      * @return array<string,mixed> Result of one reconciliation or list part.
      */
-    private function next_delete_list_upload_part(array &$state): array
+    private function upload_next_chunk_of_deleted_paths(array &$state): array
     {
         $request_result = $this->send_push_request('GET', 'push_status', [
             'push_session_id' => $state['push_session_id'],
@@ -693,33 +728,36 @@ final class PushFilesSender
         $work_deletes_bytes = $response['work_deletes_bytes'];
         $work_deletes_complete = $response['work_deletes_complete'];
 
-        $local_paths_to_delete_path = PushPlan::local_paths_to_delete_path($this->push_state_directory);
         $state['consecutive_recoverable_failures'] = 0;
         if ($work_deletes_complete) {
+            $this->close_local_paths_to_delete_handle();
             $state['phase'] = 'committing';
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
 
-        $local_paths_to_delete_handle = fopen($local_paths_to_delete_path, 'rb');
-        if (!is_resource($local_paths_to_delete_handle) || fseek($local_paths_to_delete_handle, $work_deletes_bytes) !== 0) {
-            if (is_resource($local_paths_to_delete_handle)) {
-                fclose($local_paths_to_delete_handle);
-            }
+        if (!is_resource($this->local_paths_to_delete_handle)) {
+            $local_paths_to_delete_path = PushPlan::local_paths_to_delete_path($this->push_state_directory);
+            $this->local_paths_to_delete_handle = fopen($local_paths_to_delete_path, 'rb');
+        }
+        if (
+            !is_resource($this->local_paths_to_delete_handle)
+            || fseek($this->local_paths_to_delete_handle, $work_deletes_bytes) !== 0
+        ) {
+            $this->close_local_paths_to_delete_handle();
             return $this->step_result('failed', $state, 'local_io_error', 'Could not open the local deletion list at the receiver-confirmed cursor.');
         }
         if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
-            fclose($local_paths_to_delete_handle);
             return $this->upload_request_start_failure($state);
         }
 
         $maximum_delete_list_payload_bytes = $this->push_stream_client->next_delete_body_bytes($work_deletes_bytes);
         $payload = $maximum_delete_list_payload_bytes > 0
-            ? fread($local_paths_to_delete_handle, $maximum_delete_list_payload_bytes)
+            ? fread($this->local_paths_to_delete_handle, $maximum_delete_list_payload_bytes)
             : false;
         $local_delete_list_complete = is_string($payload)
             && $payload === ''
-            && feof($local_paths_to_delete_handle);
+            && feof($this->local_paths_to_delete_handle);
         $part_sent = is_string($payload)
             && $this->push_stream_client->send_part([
                 'type' => 'delete-list',
@@ -727,8 +765,6 @@ final class PushFilesSender
                 'complete' => $local_delete_list_complete,
                 'payload' => $payload,
             ]);
-        fclose($local_paths_to_delete_handle);
-
         $request_result = $this->push_stream_client->finish_request();
         $failure_result = $this->handle_request_failure($request_result, $state);
         if ($failure_result !== null) {
@@ -744,6 +780,39 @@ final class PushFilesSender
         $state['consecutive_recoverable_failures'] = 0;
         $this->store_state($state);
         return $this->step_result('continue', $state, null, null);
+    }
+
+    /**
+     * Closes the current local file when its upload or this lifecycle ends.
+     */
+    private function close_local_file_handle(): void
+    {
+        if (is_resource($this->local_file_handle)) {
+            fclose($this->local_file_handle);
+        }
+        $this->local_file_handle = null;
+    }
+
+    /**
+     * Closes the local paths-to-push list when that phase or this lifecycle ends.
+     */
+    private function close_local_paths_to_push_handle(): void
+    {
+        if (is_resource($this->local_paths_to_push_handle)) {
+            fclose($this->local_paths_to_push_handle);
+        }
+        $this->local_paths_to_push_handle = null;
+    }
+
+    /**
+     * Closes the deleted-path list when that phase or this lifecycle ends.
+     */
+    private function close_local_paths_to_delete_handle(): void
+    {
+        if (is_resource($this->local_paths_to_delete_handle)) {
+            fclose($this->local_paths_to_delete_handle);
+        }
+        $this->local_paths_to_delete_handle = null;
     }
 
     /**

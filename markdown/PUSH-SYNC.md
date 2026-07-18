@@ -250,6 +250,13 @@ the sender, and resume from that boundary in a later process. If the process
 stops inside `next_step()`, the next process uses the preceding sender boundary
 and receiver-confirmed cursors to reconcile work completed after it.
 
+The open sender lazily opens `local_paths_to_push.jsonl`,
+`local_paths_to_delete`, and the current local file. It retains those handles
+across `next_step()` calls, closes each one when its phase or file ends, and
+closes any remaining handles before `close()` releases the lifecycle lock. A
+later process opens them again and seeks to the durable or receiver-confirmed
+byte offset.
+
 `push_create` supplies the receiver exclusion policy. The sender passes that
 policy to `PushPlan::start()`, then each `planning` step runs one bounded
 `next_step()`. PushPlan owns the fresh index, merge offsets, output lengths and

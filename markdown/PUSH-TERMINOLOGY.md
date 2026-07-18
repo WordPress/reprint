@@ -139,6 +139,8 @@ Use these names verbatim inside `PushFilesSender`:
 | Push stream client options | `$push_stream_client_options` |
 | Request sizer options | `request_sizer_options`, `$request_sizer_options` |
 | Push request | `send_push_request()` |
+| Upload next file chunk | `upload_next_file_chunk()` |
+| Upload next chunk of deleted paths | `upload_next_chunk_of_deleted_paths()` |
 | Request result | `$request_result` |
 | Failure result | `$failure_result` |
 | Plan result | `$plan_result` |
@@ -151,6 +153,9 @@ Use these names verbatim inside `PushFilesSender`:
 | Local I/O failure detail | `$local_io_failure_detail` |
 | Whether the local delete list is complete | `$local_delete_list_complete` |
 | Open directory handle | `$directory_handle` |
+| Open local paths-to-push handle | `$local_paths_to_push_handle` |
+| Open local paths-to-delete handle | `$local_paths_to_delete_handle` |
+| Open local file handle | `$local_file_handle` |
 | Local path stat result | `$path_stat` |
 | File type bits | `$file_type_bits` |
 | Upload-request start failure | `upload_request_start_failure()` |
