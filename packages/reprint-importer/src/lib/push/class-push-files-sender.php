@@ -1055,7 +1055,11 @@ final class PushFilesSender
      */
     private function store_state(array $state): void
     {
-        $json = $this->encode_json($state, 'active state');
+        try {
+            $json = json_encode($state, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new RuntimeException('Failed to encode active state.', 0, $exception);
+        }
         $temporary_path = $this->state_path . '.tmp';
         if (file_put_contents($temporary_path, $json) !== strlen($json)) {
             throw new RuntimeException('Failed to write active state: ' . $temporary_path);
@@ -1106,21 +1110,6 @@ final class PushFilesSender
     {
         flock($lock_handle, LOCK_UN);
         fclose($lock_handle);
-    }
-
-    /**
-     * Encodes a durable JSON object and names the operation if encoding fails.
-     *
-     * @param array<string,mixed> $value Value to encode.
-     * @param string $description Human-readable value description.
-     */
-    private function encode_json(array $value, string $description): string
-    {
-        try {
-            return json_encode($value, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
-        } catch (JsonException $exception) {
-            throw new RuntimeException('Failed to encode ' . $description . '.', 0, $exception);
-        }
     }
 
     /**
