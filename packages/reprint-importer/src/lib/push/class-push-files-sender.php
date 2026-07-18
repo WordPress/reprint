@@ -578,7 +578,12 @@ final class PushFilesSender
         }
 
         if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
-            return $this->upload_request_start_failure($state);
+            return $this->step_result(
+                'failed',
+                $state,
+                'request_failed',
+                $this->push_stream_client->get_last_error()
+            );
         }
 
         $local_path_changed = false;
@@ -734,7 +739,12 @@ final class PushFilesSender
             return $this->step_result('failed', $state, 'local_io_error', 'Could not open the local deletion list at the receiver-confirmed cursor.');
         }
         if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
-            return $this->upload_request_start_failure($state);
+            return $this->step_result(
+                'failed',
+                $state,
+                'request_failed',
+                $this->push_stream_client->get_last_error()
+            );
         }
 
         $maximum_delete_list_payload_bytes = $this->push_stream_client->next_delete_body_bytes($work_deletes_bytes);
@@ -945,27 +955,6 @@ final class PushFilesSender
             'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
             'local_path_type_size_and_ctime' => $this->stat_local_path($path),
         ];
-    }
-
-    /**
-     * Converts upload setup failure into the bounded retry policy.
-     *
-     * @param State $state Active state.
-     * @return array<string,mixed> Recoverable or terminal step result.
-     */
-    private function upload_request_start_failure(array &$state): array
-    {
-        $request_result = [
-            'status' => 'retry',
-            'reason' => 'request_failed',
-            'detail' => $this->push_stream_client->get_last_error(),
-            'response' => null,
-            'parts_sent' => 0,
-            'body_bytes_sent' => 0,
-        ];
-        $failure_result = $this->handle_request_failure($request_result, $state);
-        /** @var array<string,mixed> $failure_result */
-        return $failure_result;
     }
 
     /**

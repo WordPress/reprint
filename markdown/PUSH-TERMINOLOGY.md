@@ -160,7 +160,6 @@ Use these names verbatim inside `PushFilesSender`:
 | Open local file handle | `$local_file_handle` |
 | Local path stat result | `$path_stat` |
 | File type bits | `$file_type_bits` |
-| Upload-request start failure | `upload_request_start_failure()` |
 | Delete active state | `delete_state()` |
 
 ## Protocol names
