@@ -104,6 +104,9 @@ final class PushFilesSender
     /** @var resource|null Open local_paths_to_push list retained while pushing local paths. */
     private $local_paths_to_push_handle = null;
 
+    /** @var int|null Current byte offset of the retained local paths-to-push handle. */
+    private ?int $local_paths_to_push_byte_offset = null;
+
     /** @var resource|null Open local_paths_to_delete list retained while pushing deleted paths. */
     private $local_paths_to_delete_handle = null;
 
@@ -502,13 +505,19 @@ final class PushFilesSender
         }
 
         if ($this->local_path_to_push === null) {
+            if ($this->local_paths_to_push_byte_offset !== $state['local_paths_to_push_byte_offset']) {
+                if (fseek($this->local_paths_to_push_handle, $state['local_paths_to_push_byte_offset']) !== 0) {
+                    return $this->step_result('failed', $state, 'local_io_error', 'Failed to seek to the active byte offset in the local paths to push.');
+                }
+                $this->local_paths_to_push_byte_offset = $state['local_paths_to_push_byte_offset'];
+            }
             try {
-                $this->local_path_to_push = $this->read_local_path_to_push(
-                    $this->local_paths_to_push_handle,
-                    $state['local_paths_to_push_byte_offset']
-                );
+                $this->local_path_to_push = $this->read_local_path_to_push($this->local_paths_to_push_handle);
             } catch (RuntimeException $exception) {
                 return $this->step_result('failed', $state, 'local_io_error', $exception->getMessage());
+            }
+            if ($this->local_path_to_push !== null) {
+                $this->local_paths_to_push_byte_offset = $this->local_path_to_push['next_local_paths_to_push_byte_offset'];
             }
         }
         $local_path_to_push = $this->local_path_to_push;
@@ -953,6 +962,7 @@ final class PushFilesSender
             fclose($this->local_paths_to_push_handle);
         }
         $this->local_paths_to_push_handle = null;
+        $this->local_paths_to_push_byte_offset = null;
     }
 
     /**
@@ -1083,15 +1093,11 @@ final class PushFilesSender
     /**
      * Reads one local path to push at an exact durable byte offset.
      *
-     * @param resource $local_paths_to_push_handle Open local_paths_to_push file.
-     * @param int $local_paths_to_push_byte_offset Byte offset of the path to read.
+     * @param resource $local_paths_to_push_handle Open local_paths_to_push file at the next path.
      * @return LocalPathToPush|null Local path to push, or null at EOF.
      */
-    private function read_local_path_to_push($local_paths_to_push_handle, int $local_paths_to_push_byte_offset): ?array
+    private function read_local_path_to_push($local_paths_to_push_handle): ?array
     {
-        if (fseek($local_paths_to_push_handle, $local_paths_to_push_byte_offset) !== 0) {
-            throw new RuntimeException('Failed to seek to the active byte offset in the local paths to push.');
-        }
         $line = fgets($local_paths_to_push_handle);
         if ($line === false) {
             if (feof($local_paths_to_push_handle)) {
