@@ -933,13 +933,14 @@ final class PushFilesSender
             throw new RuntimeException('Failed to decode a local path to push.', 0, $exception);
         }
         /** @var array{path:string} $decoded_local_path */
-        $path = base64_decode($decoded_local_path['path'], true);
+        $path_b64 = $decoded_local_path['path'];
+        $path = base64_decode($path_b64, true);
         if ($path === false) {
             throw new RuntimeException('Failed to decode a path in the local paths-to-push file.');
         }
         return [
             'path' => $path,
-            'path_b64' => base64_encode($path),
+            'path_b64' => $path_b64,
             'local_paths_to_push_byte_offset' => $local_paths_to_push_byte_offset,
             'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
         ];
