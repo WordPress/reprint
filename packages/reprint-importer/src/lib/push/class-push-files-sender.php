@@ -77,7 +77,7 @@
  * lock permits only one open sender at a time.
  *
  * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'directory'|'symlink',size:int,ctime:int}
- * @phpstan-type LocalPathToPush array{path:string,path_b64:string,local_paths_to_push_byte_offset:int,next_local_paths_to_push_byte_offset:int}
+ * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int}
  * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
  */
 final class PushFilesSender
@@ -678,7 +678,6 @@ final class PushFilesSender
             $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
             $state['local_path_type_size_and_ctime'] = null;
         } else {
-            $state['local_paths_to_push_byte_offset'] = $local_path_to_push['local_paths_to_push_byte_offset'];
             $state['local_path_type_size_and_ctime'] = $local_path_type_size_and_ctime;
         }
 
@@ -939,7 +938,6 @@ final class PushFilesSender
         return [
             'path' => $path,
             'path_b64' => $path_b64,
-            'local_paths_to_push_byte_offset' => $local_paths_to_push_byte_offset,
             'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
         ];
     }
