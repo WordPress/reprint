@@ -332,8 +332,8 @@ class PushPlan
      * Removes the planning cursor after the sender publishes a successful push.
      *
      * Only a closed, completed plan can remove its cursor. The sender owns
-     * commit and publishes the fresh local index in its own bounded phase
-     * before calling this method.
+     * commit and publishes the fresh local index through its own swap-file
+     * phase before calling this method.
      */
     public function after_successful_push(): void
     {

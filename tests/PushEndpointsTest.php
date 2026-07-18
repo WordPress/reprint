@@ -1651,9 +1651,9 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Copies a large fresh local index in bounded steps and resumes its exact offset.
+     * Publishes a large fresh local index through one replaceable swap file.
      */
-    public function testHighLevelSenderCopiesALargeFreshLocalIndexInBoundedSteps(): void
+    public function testHighLevelSenderCopiesALargeFreshLocalIndexThroughSwapFile(): void
     {
         $local_docroot = $this->root . '/large-index-local-docroot';
         mkdir($local_docroot, 0700, true);
@@ -1661,16 +1661,8 @@ final class PushEndpointsTest extends TestCase {
         $index_bytes = 4 * 1024 * 1024 + 37;
         file_put_contents($fresh_local_index_path, str_repeat('x', $index_bytes));
         $push_state_directory = $this->root . '/large-index-state';
-        $temporary_index_path = $push_state_directory . '/fresh_local_index.jsonl.tmp';
+        $swap_index_path = $push_state_directory . '/fresh_local_index.jsonl.swap';
         $retained_index_path = $push_state_directory . '/fresh_local_index.jsonl';
-        $index_to_copy_handle_property = new ReflectionProperty(
-            PushFilesSender::class,
-            'index_to_copy_handle'
-        );
-        $index_copy_handle_property = new ReflectionProperty(
-            PushFilesSender::class,
-            'index_copy_handle'
-        );
         $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
 
         $sender = PushFilesSender::start($options);
@@ -1678,29 +1670,26 @@ final class PushEndpointsTest extends TestCase {
             $this->assertTrue($sender->next_step());
             $this->assertSame('copying_fresh_local_index', $sender->get_phase());
 
+            file_put_contents($swap_index_path, 'partial earlier copy');
             $this->assertTrue($sender->next_step());
-            $this->assertSame('copying_fresh_local_index', $sender->get_phase());
+            $this->assertSame('starting_plan', $sender->get_phase());
             $state = $this->loadActiveState($push_state_directory);
             $this->assertIsArray($state);
-            $this->assertSame(4 * 1024 * 1024, $state['fresh_local_index_copy_byte_offset']);
-            $this->assertSame(4 * 1024 * 1024, filesize($temporary_index_path));
-            $this->assertIsResource($index_to_copy_handle_property->getValue($sender));
-            $this->assertIsResource($index_copy_handle_property->getValue($sender));
+            $this->assertArrayNotHasKey('fresh_local_index_copy_byte_offset', $state);
+            $this->assertArrayNotHasKey('local_index_at_previous_push_copy_byte_offset', $state);
         } finally {
             $sender->close();
         }
-        $this->assertNull($index_to_copy_handle_property->getValue($sender));
-        $this->assertNull($index_copy_handle_property->getValue($sender));
 
         $sender = PushFilesSender::resume($options);
         try {
             $this->assertTrue($sender->next_step());
-            $this->assertSame('starting_plan', $sender->get_phase());
+            $this->assertSame('planning', $sender->get_phase());
         } finally {
             $sender->close();
         }
 
-        $this->assertFileDoesNotExist($temporary_index_path);
+        $this->assertFileDoesNotExist($swap_index_path);
         $this->assertSame($index_bytes, filesize($retained_index_path));
         $this->assertSame(hash_file('sha256', $fresh_local_index_path), hash_file('sha256', $retained_index_path));
     }

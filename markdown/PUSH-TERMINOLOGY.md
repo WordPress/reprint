@@ -112,9 +112,10 @@ the target exclusions once for the active push, with a maximum of 100 paths.
 `sender.json` does not repeat those values. Its phases are `creating`,
 `copying_fresh_local_index`, `starting_plan`, `planning`, `pushing_paths`,
 `pushing_deletes`, `committing`, `publishing_local_index`, `completing`,
-`removing`, and `discarding_plan`. It stores the push session ID, bounded index
-copy offsets, selected path-list cursor, receiver part limit, and request-sizing
-state.
+`removing`, and `discarding_plan`. It stores the push session ID, selected
+path-list cursor, receiver part limit, and request-sizing state. Complete local
+indexes are copied through a `.swap` file and published with `rename()`; their
+copy progress is not part of sender state.
 
 A request failure ends the current sender run. The active state remains in
 place so a later push command can resume from the last durable boundary.

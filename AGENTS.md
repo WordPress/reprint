@@ -70,8 +70,8 @@ Inside a class, omit the class name when context already supplies it: use
 ### One bounded event per step
 
 - A step performs at most one meaningful unit: one index merge, one file
-  chunk, one chunk of deleted paths, one bounded index copy, one target commit
-  call, one removal call, or one phase transition.
+  chunk, one chunk of deleted paths, one target commit call, one removal call,
+  or one phase transition.
 - Never put a loop over all paths, all deletions, all chunks, or all remaining
   work inside a stepping method. A local loop is acceptable only when its byte
   or operation ceiling is fixed and small enough to make the whole step
@@ -82,6 +82,12 @@ Inside a class, omit the class name when context already supplies it: use
 - Store state only when durable state changes. A cheap step must not reopen
   files, reread retained entries, recreate subordinate processors, or rewrite
   an unchanged state file.
+- The complete local-index copy through a `.swap` file is the deliberate
+  exception to the bounded-step rule. At about 150 bytes per entry, one million
+  paths produce roughly 150 MB; even a 10 MiB/s drive copies that in about 15
+  seconds. This accepts that a 1 MiB/s drive reaches 30 seconds at roughly
+  200,000 paths. Keep this as one streaming `copy()` plus atomic `rename()`
+  until measurements justify resumable copy cursors and their additional state.
 
 ### Single pass and bounded memory
 

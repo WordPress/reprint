@@ -103,8 +103,9 @@ A push plan is an internal part of the sender lifecycle:
 
 1. The sender stores at most 100 target exclusions once in
    `excluded_paths.json`, copies the fresh local index into the local push state
-   directory in chunks of at most 4 MiB, and then calls `PushPlan::start()`.
-   The plan reads the stored exclusions and writes its initial cursor.
+   directory through a `.swap` file, atomically renames the completed copy, and
+   then calls `PushPlan::start()`. The plan reads the stored exclusions and
+   writes its initial cursor.
 2. Each `next_step()` merges one path. It returns true while another planning
    step remains and false when both indexes reach EOF. It
    writes files, symlinks, and empty directories with their planned type, size,
@@ -113,8 +114,17 @@ A push plan is an internal part of the sender lifecycle:
    `local_paths_to_delete`.
 3. The sender closes the plan before consuming those two files.
 4. After the receiver commits successfully, the sender publishes the retained
-   fresh local index as `local_index_at_previous_push.jsonl` in chunks of at
-   most 4 MiB. It then asks the closed plan to remove its cursor.
+   fresh local index as `local_index_at_previous_push.jsonl` through the same
+   swap-file copy. It then asks the closed plan to remove its cursor.
+
+The complete index copy is a deliberate exception to bounded sender steps. A
+representative index entry is about 150 bytes, so one million paths produce
+roughly 150 MB, which takes about 15 seconds even at 10 MiB/s. PHP `copy()`
+streams the index without loading it into memory, and only the final rename
+changes the published path. This accepts that a 1 MiB/s drive reaches 30 seconds
+at roughly 200,000 paths. A stopped copy is repeated on resume. This stays
+simpler than two copy cursors, retained handles, and per-chunk state writes
+until measurements from materially larger installations justify that machinery.
 
 Each step flushes both path lists and the append-only deleted-directory stack
 before atomically publishing the cursor with the two index offsets, two output
@@ -279,10 +289,9 @@ counts, deleted-directory ranges, and exclusions in `cursor.json`. No upload
 begins until both indexes have been consumed and the two path lists are stable.
 
 `sender.json` contains no second planning checkpoint and no copied receiver
-cursor. It stores the push session and phase, bounded index copy offsets, the
-next byte offset in `local_paths_to_push.jsonl`, the fresh-local-index offset
-used while checking deletion paths, the receiver part limit, and learned
-request-body sizing state.
+cursor. It stores the push session and phase, the next byte offset in
+`local_paths_to_push.jsonl`, the fresh-local-index offset used while checking
+deletion paths, the receiver part limit, and learned request-body sizing state.
 Its phases are `creating`, `copying_fresh_local_index`, `starting_plan`,
 `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
 `publishing_local_index`, `completing`, `removing`, and `discarding_plan`.
