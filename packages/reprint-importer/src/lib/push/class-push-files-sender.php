@@ -490,12 +490,12 @@ final class PushFilesSender
             $this->store_state($state);
             return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push changed to a file type that cannot be pushed; remove the upload-only push session before generating another index.');
         }
-        $saved_type_size_and_ctime_matches = $state['local_path_type_size_and_ctime'] === $local_path_type_size_and_ctime;
-        if (!$saved_type_size_and_ctime_matches) {
+        $local_path_is_unchanged_since_previous_chunk = $state['local_path_type_size_and_ctime'] === $local_path_type_size_and_ctime;
+        if (!$local_path_is_unchanged_since_previous_chunk) {
             $this->close_local_file_handle();
         }
         if (
-            $saved_type_size_and_ctime_matches
+            $local_path_is_unchanged_since_previous_chunk
             && $receiver_path_status['state'] === 'complete'
             && $receiver_path_type === $local_path_type_size_and_ctime['type']
             && ( $local_path_type_size_and_ctime['type'] !== 'file' || $receiver_path_status['accepted_bytes'] === $local_path_type_size_and_ctime['size'] )
@@ -506,7 +506,7 @@ final class PushFilesSender
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
-        $receiver_confirmed_bytes = $saved_type_size_and_ctime_matches
+        $receiver_confirmed_bytes = $local_path_is_unchanged_since_previous_chunk
             && $receiver_path_status['state'] === 'partial'
             && $receiver_path_type === 'file'
             && $receiver_path_status['accepted_bytes'] <= $local_path_type_size_and_ctime['size']
