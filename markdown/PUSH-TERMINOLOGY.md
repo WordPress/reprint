@@ -140,8 +140,8 @@ them in memory for later steps in the same lifecycle. It does not copy them into
 acquire or release the lock and does not reread `sender.json`. A sender retains
 one multipart request across steps. A caller stopping between steps calls
 `cancel()` to discard that request and return to the preceding durable
-boundary, then calls `close()` to release the lock. Without cancellation,
-`close()` finishes the request and stores its confirmed local boundary. In `pushing_paths` or
+boundary, then calls `close()` to release resources and the lock. `close()`
+never finishes an open request. In `pushing_paths` or
 `pushing_deletes`, one step sends at most one multipart part. `next_step()`
 returns true while another step may be performed and false when `get_status()`
 reports `complete`, `restart`, or `failed`.

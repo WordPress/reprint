@@ -43,10 +43,10 @@
  *
  * The caller may cancel whenever next_step() returns true. cancel() abandons an
  * open multipart request and returns the in-memory sender to its preceding
- * durable boundary. close() otherwise finishes the request before releasing
- * the lock. If a process stops without closing, the next process starts from
- * the preceding durable boundary and reads receiver-confirmed work before
- * sending more data.
+ * durable boundary. close() only releases resources and the lock; it never
+ * finishes an open request. If a process stops without closing, the next
+ * process starts from the preceding durable boundary and reads
+ * receiver-confirmed work before sending more data.
  *
  * Before start() returns, the sender copies the completed fresh local index
  * through a swap file into plan-owned state. A new push then calls `push_create`
@@ -89,10 +89,10 @@
  *
  * Each local-path upload or deletion step sends at most one multipart part and
  * holds at most one bounded payload string. A deletion part contains one path.
- * Multipart bytes leave for the network before `send_part()` returns. One request carries
- * successive parts until its request-body budget is spent or close() finishes
- * it. An open sender retains that request, its path-list handles, and its
- * current local file handle between steps.
+ * Multipart bytes leave for the network before `send_part()` returns. One
+ * request carries successive parts until its request-body budget is spent or
+ * the current path phase ends. An open sender retains that request, its
+ * path-list handles, and its current local file handle between steps.
  *
  * Copying a complete local index is the deliberate exception to bounded steps.
  * A representative index entry is about 150 bytes, so one million paths produce
@@ -360,11 +360,11 @@ final class PushFilesSender
      * start() or resume() has already acquired the lifecycle lock and loaded the
      * durable state, so this method only dispatches its current phase. Every
      * phase step is bounded except the deliberate complete-index copy described
-     * in the class documentation. The caller may close the sender after this
-     * method returns true; close() confirms any open multipart request before
-     * storing its local boundary. A false return directs the caller to
-     * get_status(), where `restart` means the old push session and local plan
-     * are gone and a new local index is required.
+     * in the class documentation. A caller stopping after this method returns
+     * true calls cancel() before close(); close() does not finish an open
+     * multipart request. A false return directs the caller to get_status(),
+     * where `restart` means the old push session and local plan are gone and a
+     * new local index is required.
      *
      * @return bool Whether the sender can perform another step.
      */
@@ -485,24 +485,14 @@ final class PushFilesSender
     }
 
     /**
-     * Releases the lifecycle lock and prevents further steps.
+     * Releases open resources and the lifecycle lock without finishing a request.
      *
-     * Durable state remains available to resume unless next_step()
+     * The caller uses cancel() first when stopping with an open multipart
+     * request. Durable state remains available to resume unless next_step()
      * already completed or discarded the workflow.
      */
     public function close(): void
     {
-        $close_failure = null;
-        if ($this->upload_request_stage !== 'closed' && isset($this->state)) {
-            try {
-                $this->finish_upload_request();
-                if ($this->status === 'failed') {
-                    $close_failure = new RuntimeException($this->detail ?? 'The multipart upload request failed while closing the sender.');
-                }
-            } catch (Throwable $throwable) {
-                $close_failure = $throwable;
-            }
-        }
         if (isset($this->plan)) {
             $this->plan->close();
         }
@@ -512,13 +502,12 @@ final class PushFilesSender
         if (isset($this->push_stream_client)) {
             $this->push_stream_client->close();
         }
+        $this->upload_request_stage = 'closed';
+        $this->state_before_upload_request = null;
         if (is_resource($this->lock_handle)) {
             $this->release_lock($this->lock_handle);
         }
         $this->lock_handle = null;
-        if ($close_failure !== null) {
-            throw $close_failure;
-        }
     }
 
     /**
