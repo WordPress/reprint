@@ -9,7 +9,7 @@ the end maps it to a PR stack.
 
 1. The local machine knows what changed locally since its last push to this
    remote (files, deletions, database rows), by comparing against the local
-   baselines it stored at the end of that push.
+   paths and rows stored after that push.
 2. It shows a summary of local uploads and deletions. The user confirms that
    local should win for those paths and rows.
 3. It transfers everything into a private push directory on the remote — file bytes,
@@ -19,9 +19,10 @@ the end maps it to a PR stack.
    moves work files into place, executes deletions, and commits the database
    diff, and fixes symlinks — inside a maintenance window that lasts seconds,
    not the length of the transfer.
-5. It stores the current local indexes as the new local baselines. The push is
-   complete only after this step; a crashed push is re-driven from the top and
-   converges.
+5. It stores the current local paths as the local index at the previous push
+   and stores the current rows as the previously pushed rows. The push is
+   complete only after this step; a crashed push is
+   re-driven from the top and converges.
 
 Both sides act only when the local machine calls: no worker, no polling, no
 sessions. The remote is a passive authenticated API.
@@ -77,20 +78,49 @@ managed `false` hard-disables push without abandoning durable commit recovery.
 
 ctime is machine-local, so push never compares a local timestamp to a remote
 one. It only answers "what changed locally since my last successful push to
-this remote" by comparing the current local indexes against local baselines.
+this remote" by comparing the current local paths and rows against the local
+index at the previous push and the previously pushed rows.
 
-The local machine keeps one set of baselines **per remote site**, overwritten
-after each successful commit:
+The local machine keeps these files **per remote site**, overwritten after
+each successful commit:
 
-    <state-dir>/push/<site>/last-sync-local-files.jsonl
-    <state-dir>/push/<site>/last-sync-local-rows.jsonl   (phase two)
+    <state-dir>/push/<site>/local_index_at_previous_push.jsonl
+    <state-dir>/push/<site>/previously_pushed_rows.jsonl   (phase two)
 
-Each file baseline is a copy of a local file index in the `.import-index.jsonl`
-format the pull path already reads and writes — one JSON object per line,
-sorted by path.
+`PushPlan` derives the local paths to push and delete by merging a path-sorted
+fresh local index with `local_index_at_previous_push.jsonl`. It never reopens
+the live tree. The indexer records physical emptiness while it observes each
+directory, so a completed index distinguishes empty directories from non-empty
+ones. Files and symlinks change when their `type`, `ctime`, or `size` changes;
+unrelated index fields do not select a path for upload.
 
-The first push to a site has no baselines: every current local file counts as
-changed, and no local deletion can be detected yet.
+The index reader trusts the indexer's entry fields. It handles only failures to
+read a line, decode its JSON, or decode its base64 path. This keeps schema
+ownership with the indexer instead of partially validating the same record in
+the push plan.
+
+A push plan has one lifecycle:
+
+1. `PushPlan::start()` copies the fresh local index into the per-site plan
+   directory and writes a cursor containing the excluded paths.
+2. `next_step()` performs bounded merge steps until it reports `complete`. It
+   writes files, symlinks, and empty directories to
+   `local_paths_to_push.jsonl`, and writes raw NUL-delimited paths to
+   `local_paths_to_delete`.
+3. The caller closes the plan before consuming those two files.
+4. After the receiver commits successfully, `after_successful_push()` publishes
+   the retained fresh local index as `local_index_at_previous_push.jsonl`.
+
+Each step flushes both path lists before atomically publishing the cursor with
+the two index offsets, two output byte offsets, path counts, and active
+deleted-directory ranges. A later process calls `PushPlan::resume()` with only
+the per-site directory. Resume uses the retained index and exclusions, discards
+bytes beyond the durable output offsets, and continues from the durable index
+offsets.
+
+The first push to a site has no local index from a previous push or previously
+pushed rows. Every current file, symlink, and empty directory is selected, and
+no local deletion can be detected yet.
 
 Push is intentionally local-wins. If a developer edited the remote site
 outside Reprint, a later push of the same path or row overwrites that remote
@@ -99,10 +129,11 @@ manager.
 
 ## Deletes
 
-Local deletions since the last push come out of the baseline comparison. They
+Local deletions since the last push come from paths present in
+`local_index_at_previous_push.jsonl` but absent from the fresh local index. They
 travel as NUL-delimited document-root-relative paths in `work/deletes`. Commit
-records its byte offset before and after every destructive mutation, so a
-later request can resume from durable evidence instead of repeating a delete.
+records its byte offset before and after every destructive mutation, so a later
+request can resume from durable evidence instead of repeating a delete.
 
 ## The push session
 
@@ -220,8 +251,8 @@ Order:
    `commit.json` checkpoint written before each document-root mutation. The
    future database batch and symlink updates follow the same bounded cursor.
 4. **Maintenance off:** commit releases its `commit-state` ownership after
-   completion; the driver updates local baselines after commit
-   completes.
+   completion; the driver saves the local index at the previous push and rows
+   after commit completes.
 
 If the driver dies mid-commit: WordPress stops honoring the `.maintenance`
 file after 10 minutes on its own, and the next commit request resumes from
@@ -248,9 +279,9 @@ The database is pushed as a diff — INSERT, UPDATE, DELETE — never as a dump
 that replaces tables. The mechanics mirror the file design:
 
 - A **row index** — `(table, primary key, row hash)` — plays the role
-  `(path, ctime, size)` plays for files. The local machine keeps the row
-  index from the last push as a baseline; diffing against it yields the
-  upsert and delete sets.
+  `(path, type, ctime, size)` plays for files. The local machine keeps the row
+  index from the last push as `previously_pushed_rows`; diffing against it
+  yields the upsert and delete sets.
 - Push is local-wins for rows too. Rows changed on the remote outside Reprint
   are overwritten when the local diff touches the same primary key.
 - The diff stream passes through the URL rewriter in the local-to-remote
@@ -286,8 +317,9 @@ Files first, database second, each PR small and stacked in this order:
    the closed #298).
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
    the configured storage path; web guards for inside-docroot placement.
-5. **Push journal and local diff** — per-site local baselines, capture and
-   overwrite logic, local change and deletion detection.
+5. **Push plan and local diff** — per-site retained indexes, explicit start and
+   resume lifecycle, bounded local change and deletion detection, and durable
+   path lists for the sender.
 6. **Push stream endpoint** — the store's HTTP surface plus a sender that
    streams framed chunks for many files through one authenticated request;
    deletion work received; `--force-http` with honest help text (the first
@@ -306,8 +338,8 @@ Files first, database second, each PR small and stacked in this order:
    `work/files` into the document root with the whitelisted maintenance file
    and resumable `commit.json` cursor.
 9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
-10. **Row index and database diff** — the local row index, row baseline,
-    diff generation and URL rewrite, the commit batch.
+10. **Row index and database diff** — the local row index, previously pushed
+    rows, diff generation and URL rewrite, the commit batch.
 11. **`reprint push`** — the one command that orchestrates plan, confirm,
     transfer, commit, resume.
 12. **Budgets and resumable limits** — push requests stay bounded by two
