@@ -55,11 +55,11 @@
  *
  * ## Resume after local changes
  *
- * Before sending the local path to push at the durable list offset, the sender
- * asks `push_status` what the receiver has accepted. A partial file resumes
- * only when its current type, size, and ctime equal the values saved after the
- * prior accepted part. Otherwise it starts that path at offset zero. This
- * prevents bytes from different local file versions from being joined.
+ * Each selected path carries the type, size, and ctime from the fresh local
+ * index used for planning. The sender compares the live path with those values
+ * before sending and again after each read. A difference removes the
+ * upload-only push session, because its work and the planned local index no
+ * longer describe the same local tree.
  *
  * The deletion cursor is never copied into active state. Each step reads it
  * from `push_status` and checks that it belongs to the plan's stable deletion
@@ -78,7 +78,7 @@
  *
  * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'directory'|'symlink',size:int,ctime:int}
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
- * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int}
+ * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
  */
 final class PushFilesSender
@@ -462,19 +462,8 @@ final class PushFilesSender
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
-        $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
-            'push_session_id' => $state['push_session_id'],
-            'path_b64' => $local_path_to_push['path_b64'],
-        ], ['accepted']);
-        $failure_result = $this->handle_request_failure($request_result, $state);
-        if ($failure_result !== null) {
-            return $failure_result;
-        }
-        /** @var array{path:array{state:'missing'|'partial'|'complete',type?:'file'|'directory'|'symlink',accepted_bytes:int}} $response */
-        $response = $request_result['response'];
-        $receiver_path_status = $response['path'];
-        $receiver_path_type = $receiver_path_status['type'] ?? null;
 
+        $planned_local_path_type_size_and_ctime = $local_path_to_push['planned_local_path_type_size_and_ctime'];
         $local_path_type_size_and_ctime = $this->stat_local_path($local_path_to_push['path']);
         if ($local_path_type_size_and_ctime === null) {
             $this->close_local_file_handle();
@@ -490,6 +479,27 @@ final class PushFilesSender
             $this->store_state($state);
             return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push changed to a file type that cannot be pushed; remove the upload-only push session before generating another index.');
         }
+        if ($local_path_type_size_and_ctime !== $planned_local_path_type_size_and_ctime) {
+            $this->close_local_file_handle();
+            $this->close_local_paths_to_push_handle();
+            $state['phase'] = 'removing';
+            $this->store_state($state);
+            return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push changed after planning; remove the upload-only push session before generating another index.');
+        }
+
+        $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
+            'push_session_id' => $state['push_session_id'],
+            'path_b64' => $local_path_to_push['path_b64'],
+        ], ['accepted']);
+        $failure_result = $this->handle_request_failure($request_result, $state);
+        if ($failure_result !== null) {
+            return $failure_result;
+        }
+        /** @var array{path:array{state:'missing'|'partial'|'complete',type?:'file'|'directory'|'symlink',accepted_bytes:int}} $response */
+        $response = $request_result['response'];
+        $receiver_path_status = $response['path'];
+        $receiver_path_type = $receiver_path_status['type'] ?? null;
+
         $local_path_is_unchanged_since_previous_chunk = $state['local_path_type_size_and_ctime'] === $local_path_type_size_and_ctime;
         if (!$local_path_is_unchanged_since_previous_chunk) {
             $this->close_local_file_handle();
@@ -528,15 +538,17 @@ final class PushFilesSender
                 $this->store_state($state);
                 return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
             }
-            if ($local_path_type_size_and_ctime_after_read !== $local_path_type_size_and_ctime) {
+            if ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
+                $this->close_local_paths_to_push_handle();
+                $state['phase'] = 'removing';
                 $this->store_state($state);
-                return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while it was being read; retry it from receiver-confirmed state.');
+                return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while its directory was being read; remove the upload-only push session before generating another index.');
             }
             if (!$directory_is_empty) {
-                $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
-                $state['local_path_type_size_and_ctime'] = null;
+                $this->close_local_paths_to_push_handle();
+                $state['phase'] = 'removing';
                 $this->store_state($state);
-                return $this->step_result('continue', $state, null, null);
+                return $this->step_result('continue', $state, 'local_path_changed', 'A directory selected as empty now contains a local path; remove the upload-only push session before generating another index.');
             }
             $upload_part = [
                 'type' => 'directory',
@@ -553,9 +565,11 @@ final class PushFilesSender
                 $this->store_state($state);
                 return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
             }
-            if ($local_path_type_size_and_ctime_after_read !== $local_path_type_size_and_ctime) {
+            if ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
+                $this->close_local_paths_to_push_handle();
+                $state['phase'] = 'removing';
                 $this->store_state($state);
-                return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while it was being read; retry it from receiver-confirmed state.');
+                return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while its symlink was being read; remove the upload-only push session before generating another index.');
             }
             if ($symlink_target === false) {
                 return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local symlink target to push: ' . base64_encode($local_path_to_push['path']) . '.');
@@ -611,7 +625,7 @@ final class PushFilesSender
                         $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
                         if ($local_path_type_size_and_ctime_after_read === null) {
                             $local_path_disappeared = true;
-                        } elseif ($local_path_type_size_and_ctime_after_read !== $local_path_type_size_and_ctime) {
+                        } elseif ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
                             $local_path_changed = true;
                         }
                     } else {
@@ -620,7 +634,7 @@ final class PushFilesSender
                         if ($local_path_type_size_and_ctime_after_read === null) {
                             $this->close_local_file_handle();
                             $local_path_disappeared = true;
-                        } elseif ($local_path_type_size_and_ctime_after_read !== $local_path_type_size_and_ctime) {
+                        } elseif ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
                             $this->close_local_file_handle();
                             $local_path_changed = true;
                         } elseif (!is_string($payload) || ( $payload === '' && $file_byte_offset < $local_path_type_size_and_ctime['size'] )) {
@@ -665,13 +679,16 @@ final class PushFilesSender
             if ($local_path_disappeared) {
                 $this->close_local_paths_to_push_handle();
                 $state['phase'] = 'removing';
+            } elseif ($local_path_changed) {
+                $this->close_local_paths_to_push_handle();
+                $state['phase'] = 'removing';
             }
             $this->store_state($state);
             if ($local_path_disappeared) {
                 return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
             }
             if ($local_path_changed) {
-                return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while it was being read; retry it from receiver-confirmed state.');
+                return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while its file chunk was being read; remove the upload-only push session before generating another index.');
             }
             if ($local_io_failure_detail !== null) {
                 return $this->step_result('failed', $state, 'local_io_error', $local_io_failure_detail);
@@ -934,7 +951,7 @@ final class PushFilesSender
         } catch (JsonException $exception) {
             throw new RuntimeException('Failed to decode a local path to push.', 0, $exception);
         }
-        /** @var array{path:string} $decoded_local_path */
+        /** @var array{path:string,type:'file'|'directory'|'symlink',size:int,ctime:int} $decoded_local_path */
         $path_b64 = $decoded_local_path['path'];
         $path = base64_decode($path_b64, true);
         if ($path === false) {
@@ -944,6 +961,11 @@ final class PushFilesSender
             'path' => $path,
             'path_b64' => $path_b64,
             'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
+            'planned_local_path_type_size_and_ctime' => [
+                'type' => $decoded_local_path['type'],
+                'size' => $decoded_local_path['size'],
+                'ctime' => $decoded_local_path['ctime'],
+            ],
         ];
     }
 

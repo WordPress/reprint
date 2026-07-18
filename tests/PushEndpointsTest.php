@@ -1320,9 +1320,8 @@ final class PushEndpointsTest extends TestCase {
     /**
      * Completes mixed local work while reconstructing the sender each step.
      *
-     * Each sender step carries at most one part. A partial file then changes,
-     * so the reconstructed sender must restart that path at byte zero rather
-     * than append new bytes to the receiver's old prefix.
+     * Each sender step carries at most one part and resumes from the durable
+     * boundary left by the preceding sender.
      */
     public function testHighLevelSenderStreamsAndResumesFromDurableBoundaries(): void
     {
@@ -1356,7 +1355,6 @@ final class PushEndpointsTest extends TestCase {
         $push_state_directory = $this->root . '/sender-state';
         $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
 
-        $changed_partial_local_file = false;
         $removed_caller_index = false;
         $commit_advances = 0;
         for ($step = 0; $step < 200; ++$step) {
@@ -1371,29 +1369,6 @@ final class PushEndpointsTest extends TestCase {
                 unlink($fresh_local_index_path);
                 $removed_caller_index = true;
             }
-            if (
-                !$changed_partial_local_file
-                && is_array($state)
-                && $state['phase'] === 'pushing_paths'
-                && is_array($state['local_path_type_size_and_ctime'])
-            ) {
-                $status = $this->sendPushRequestWithHeaders(
-                    'GET',
-                    'push_status',
-                    [
-                        'push_session_id' => $state['push_session_id'],
-                        'path_b64' => base64_encode('nested/large.bin'),
-                    ],
-                    self::SECRET
-                );
-                $status_response = json_decode($status['body'], true, 512, JSON_THROW_ON_ERROR);
-                $this->assertSame('partial', $status_response['path']['state']);
-                $this->assertSame(64, $status_response['path']['accepted_bytes']);
-                sleep(1);
-                file_put_contents($local_docroot . '/nested/large.bin', str_repeat('B', 2000));
-                clearstatcache(true, $local_docroot . '/nested/large.bin');
-                $changed_partial_local_file = true;
-            }
             if (is_array($state) && $state['phase'] === 'committing') {
                 ++$commit_advances;
             }
@@ -1403,10 +1378,9 @@ final class PushEndpointsTest extends TestCase {
         }
 
         $this->assertTrue($removed_caller_index, 'PushPlan must own the fresh index after planning starts.');
-        $this->assertTrue($changed_partial_local_file, 'The test must change a file behind a partial receiver cursor.');
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertGreaterThan(1, $commit_advances, 'The endpoint work budget must require repeated commit requests.');
-        $this->assertSame(str_repeat('B', 2000), file_get_contents($this->docroot . '/nested/large.bin'));
+        $this->assertSame(str_repeat('A', 2000), file_get_contents($this->docroot . '/nested/large.bin'));
         $this->assertSame('new!', file_get_contents($this->docroot . '/same-size.txt'));
         $this->assertSame('replacement', file_get_contents($this->docroot . '/replace-directory'));
         $this->assertDirectoryExists($this->docroot . '/empty-directory');
@@ -1566,12 +1540,6 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame($local_paths_to_push_handle, $local_paths_to_push_handle_property->getValue($sender));
             $this->assertSame($local_file_handle, $local_file_handle_property->getValue($sender));
 
-            file_put_contents($local_docroot . '/file.bin', str_repeat('B', 131));
-            $changed_file_chunk = $sender->next_step();
-            $this->assertSame('pushing_paths', $changed_file_chunk['phase']);
-            $this->assertFalse(is_resource($local_file_handle));
-            $local_file_handle = $local_file_handle_property->getValue($sender);
-            $this->assertIsResource($local_file_handle);
         } finally {
             $sender->close();
         }
@@ -1641,6 +1609,83 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNull($this->loadActiveState($push_state_directory));
         $this->assertFileDoesNotExist($push_state_directory . '/cursor.json');
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
+    }
+
+    /**
+     * Removes work selected from an older local-file version.
+     */
+    public function testHighLevelSenderRemovesSessionWhenPlannedFileChangesDuringUpload(): void
+    {
+        $local_docroot = $this->root . '/changed-planned-file-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/large.bin', str_repeat('A', 2000));
+        $fresh_local_index_path = $this->root . '/changed-planned-file-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'large.bin' => $this->indexEntry($local_docroot . '/large.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/changed-planned-file-state';
+
+        for ($step = 0; $step < 30; ++$step) {
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (is_array($state) && $state['phase'] === 'pushing_paths' && is_array($state['local_path_type_size_and_ctime'])) {
+                break;
+            }
+        }
+        $this->assertIsArray($state);
+        $push_session_id = $state['push_session_id'];
+
+        sleep(1);
+        file_put_contents($local_docroot . '/large.bin', str_repeat('B', 2000));
+        clearstatcache(true, $local_docroot . '/large.bin');
+
+        $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $this->assertSame('continue', $result['status']);
+        $this->assertSame('removing', $result['phase']);
+        $this->assertSame('local_path_changed', $result['reason']);
+
+        for (; $step < 60; ++$step) {
+            $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            if ($result['status'] !== 'continue') {
+                break;
+            }
+        }
+        $this->assertSame('restart', $result['status']);
+        $this->assertNull($this->loadActiveState($push_state_directory));
+        $this->assertFileDoesNotExist($push_state_directory . '/cursor.json');
+        $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
+    }
+
+    /**
+     * Rejects an empty-directory selection after that directory gains a child.
+     */
+    public function testHighLevelSenderRemovesSessionWhenPlannedEmptyDirectoryChanges(): void
+    {
+        $local_docroot = $this->root . '/changed-empty-directory-docroot';
+        mkdir($local_docroot . '/empty', 0700, true);
+        $fresh_local_index_path = $this->root . '/changed-empty-directory-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'empty' => $this->indexEntry($local_docroot . '/empty', 'dir', true),
+        ]);
+        $push_state_directory = $this->root . '/changed-empty-directory-state';
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $sender = PushFilesSender::start($options);
+        try {
+            $this->assertSame('planning', $sender->next_step()['phase']);
+            $this->assertSame('pushing_paths', $sender->next_step()['phase']);
+            file_put_contents($local_docroot . '/empty/child.txt', 'new');
+
+            $result = $sender->next_step();
+        } finally {
+            $sender->close();
+        }
+
+        $this->assertSame('continue', $result['status']);
+        $this->assertSame('removing', $result['phase']);
+        $this->assertSame('local_path_changed', $result['reason']);
     }
 
     /**
