@@ -114,9 +114,11 @@ A push plan is an internal part of the sender lifecycle:
 4. After the receiver commits successfully, `after_successful_push()` publishes
    the retained fresh local index as `local_index_at_previous_push.jsonl`.
 
-Each step flushes both path lists before atomically publishing the cursor with
-the two index offsets, two output byte offsets, path counts, and active
-deleted-directory ranges. A later process calls `PushPlan::resume()` with only
+Each step flushes both path lists and the append-only deleted-directory stack
+before atomically publishing the cursor with the two index offsets, two output
+byte offsets, path counts, and active stack byte offset. Each stack entry links
+to the preceding active directory, so resume reads only the top entry. A later
+process calls `PushPlan::resume()` with only
 the local push state directory. Resume uses the retained index and
 `excluded_paths.json`, discards
 bytes beyond the durable output offsets, and continues from the durable index
@@ -236,6 +238,7 @@ An active push keeps these files under `<state-dir>/push/<site>/`:
 ```text
 fresh_local_index.jsonl             plan-owned fresh local index
 excluded_paths.json                 target exclusions for the active push
+deleted_directories_stack.jsonl     append-only planning stack
 local_index_at_previous_push.jsonl  index published after the previous commit
 local_paths_to_push.jsonl           local paths to push
 local_paths_to_delete               raw NUL-delimited local paths to delete

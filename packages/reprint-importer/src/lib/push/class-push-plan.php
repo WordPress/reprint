@@ -47,11 +47,12 @@
  * continues from the saved index offsets, so an interrupted step cannot leave
  * duplicate durable entries.
  *
- * PushPlan retains the next entry from each index and the active deleted-directory
- * ranges needed to suppress redundant descendant deletions. It never loads an
- * index or path list in full.
+ * PushPlan retains the next entry from each index and the top of an append-only
+ * deleted-directory stack needed to suppress redundant descendant deletions. It
+ * never loads an index, path list, or the stack in full.
  *
- * @phpstan-type PushPlanCursor array{byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int,local_paths_to_delete_count:int,seen_deleted_directories:list<string>}
+ * @phpstan-type PushPlanCursor array{byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int,local_paths_to_delete_count:int,deleted_directory_stack_top_byte_offset:int|null}
+ * @phpstan-type DeletedDirectoryStackEntry array{path:string,previous_byte_offset:int|null}
  */
 class PushPlan
 {
@@ -72,6 +73,9 @@ class PushPlan
 
     /** @var string Sender-owned excluded paths retained for the active push. */
     private string $excluded_paths_file;
+
+    /** @var string Append-only deleted-directory stack for the active plan. */
+    private string $deleted_directories_stack;
 
     /** @var list<string> Receiver-owned paths that the plan must not push or delete. */
     private array $excluded_paths = [];
@@ -97,6 +101,9 @@ class PushPlan
     /** @var bool Whether $previous_local_index_entry has been read, including EOF. */
     private bool $previous_local_index_entry_loaded = false;
 
+    /** @var DeletedDirectoryStackEntry|null Top active deleted-directory stack entry. */
+    private ?array $deleted_directory_stack_entry = null;
+
     /** @var resource|null */
     private $fresh_local_index_handle = null;
     /** @var resource|null */
@@ -105,6 +112,8 @@ class PushPlan
     private $local_paths_to_push_handle = null;
     /** @var resource|null */
     private $local_paths_to_delete_handle = null;
+    /** @var resource|null */
+    private $deleted_directories_stack_handle = null;
 
     /**
      * Starts a push plan from a fresh local index.
@@ -131,6 +140,9 @@ class PushPlan
 
         $plan->atomic_copy($fresh_local_index_path, $plan->fresh_local_index);
         $plan->excluded_paths = $plan->load_excluded_paths();
+        if (file_put_contents($plan->deleted_directories_stack, '') !== 0) {
+            throw new RuntimeException("Failed to initialize the deleted-directory stack: {$plan->deleted_directories_stack}");
+        }
         $plan->cursor = [
             "byte_offset_in_fresh_index" => 0,
             "byte_offset_in_previous_index" => 0,
@@ -138,7 +150,7 @@ class PushPlan
             "byte_offset_in_local_paths_to_delete" => 0,
             "local_paths_to_push_count" => 0,
             "local_paths_to_delete_count" => 0,
-            "seen_deleted_directories" => [],
+            "deleted_directory_stack_top_byte_offset" => null,
         ];
         $plan->save_cursor($plan->cursor);
         $plan->open_plan_files();
@@ -241,6 +253,7 @@ class PushPlan
         $this->fresh_local_index = $push_state_directory . "/fresh_local_index.jsonl";
         $this->cursor_file = $push_state_directory . "/cursor.json";
         $this->excluded_paths_file = $push_state_directory . "/excluded_paths.json";
+        $this->deleted_directories_stack = $push_state_directory . "/deleted_directories_stack.jsonl";
     }
 
     /**
@@ -255,6 +268,7 @@ class PushPlan
         $this->fresh_local_index_entry_loaded = false;
         $this->previous_local_index_entry = null;
         $this->previous_local_index_entry_loaded = false;
+        $this->deleted_directory_stack_entry = null;
         $this->local_paths_to_push_handle = $this->open_and_truncate_and_seek(
             $this->local_paths_to_push,
             $this->cursor["byte_offset_in_local_paths_to_push"]
@@ -286,6 +300,13 @@ class PushPlan
                 "local index at the previous push"
             );
         }
+        $this->deleted_directories_stack_handle = fopen($this->deleted_directories_stack, "a+b");
+        if (!is_resource($this->deleted_directories_stack_handle)) {
+            throw new RuntimeException("Failed to open the deleted-directory stack: {$this->deleted_directories_stack}");
+        }
+        $this->deleted_directory_stack_entry = $this->read_deleted_directory_stack_entry(
+            $this->cursor["deleted_directory_stack_top_byte_offset"]
+        );
     }
 
     /**
@@ -374,10 +395,7 @@ class PushPlan
         $byte_offset_in_previous_index = $this->cursor["byte_offset_in_previous_index"];
         $local_paths_to_push_count = $this->cursor["local_paths_to_push_count"];
         $local_paths_to_delete_count = $this->cursor["local_paths_to_delete_count"];
-        // This stack can grow with overlapping deleted-directory prefix
-        // ranges. We accept that memory and cursor growth to avoid emitting
-        // redundant descendant deletions.
-        $seen_deleted_directories = $this->cursor["seen_deleted_directories"];
+        $deleted_directory_stack_top_byte_offset = $this->cursor["deleted_directory_stack_top_byte_offset"];
 
         if (!$this->fresh_local_index_entry_loaded) {
             $this->fresh_local_index_entry = $this->parse_next_index_entry($this->fresh_local_index_handle);
@@ -417,16 +435,16 @@ class PushPlan
                 // `a/child`. Every retained non-empty directory has a later
                 // descendant, so adjacent previous-index entries can pass at
                 // most the top sibling range.
-                if ($seen_deleted_directories !== []) {
-                    $deleted_directory = $seen_deleted_directories[
-                        count($seen_deleted_directories) - 1
-                    ];
-                    $descendant_prefix = $deleted_directory . "/";
+                if ($this->deleted_directory_stack_entry !== null) {
+                    $descendant_prefix = $this->deleted_directory_stack_entry["path"] . "/";
                     if (
                         strpos($entry_previous_index["path"], $descendant_prefix) !== 0
                         && strcmp($entry_previous_index["path"], $descendant_prefix) > 0
                     ) {
-                        array_pop($seen_deleted_directories);
+                        $deleted_directory_stack_top_byte_offset = $this->deleted_directory_stack_entry["previous_byte_offset"];
+                        $this->deleted_directory_stack_entry = $this->read_deleted_directory_stack_entry(
+                            $deleted_directory_stack_top_byte_offset
+                        );
                     }
                 }
             }
@@ -447,15 +465,18 @@ class PushPlan
                 // descendant entries are already covered by that record.
                 if (
                     !$this->path_conflicts_with_excluded_paths($entry_previous_index["path"])
-                    && !$this->is_covered_by_seen_deleted_directory(
+                    && !$this->deleted_directory_stack_covers_path(
                         $entry_previous_index["path"],
-                        $seen_deleted_directories
+                        $this->deleted_directory_stack_entry
                     )
                 ) {
                     $this->append_local_path_to_delete($entry_previous_index["path"]);
                     ++$local_paths_to_delete_count;
                     if ($local_index_at_previous_push_shape === "non_empty_directory") {
-                        $seen_deleted_directories[] = $entry_previous_index["path"];
+                        $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
+                            $entry_previous_index["path"],
+                            $deleted_directory_stack_top_byte_offset
+                        );
                     }
                 }
             } else {
@@ -482,15 +503,18 @@ class PushPlan
                 if (
                     $needs_delete
                     && !$path_is_excluded
-                    && !$this->is_covered_by_seen_deleted_directory(
+                    && !$this->deleted_directory_stack_covers_path(
                         $entry_previous_index["path"],
-                        $seen_deleted_directories
+                        $this->deleted_directory_stack_entry
                     )
                 ) {
                     $this->append_local_path_to_delete($entry_previous_index["path"]);
                     ++$local_paths_to_delete_count;
                     if ($local_index_at_previous_push_shape === "non_empty_directory") {
-                        $seen_deleted_directories[] = $entry_previous_index["path"];
+                        $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
+                            $entry_previous_index["path"],
+                            $deleted_directory_stack_top_byte_offset
+                        );
                     }
                 }
                 if ($needs_push && !$path_is_excluded) {
@@ -514,14 +538,16 @@ class PushPlan
         if (
             !fflush($this->local_paths_to_push_handle)
             || !fflush($this->local_paths_to_delete_handle)
+            || !fflush($this->deleted_directories_stack_handle)
         ) {
-            throw new RuntimeException("Failed to flush local_paths_to_push or local_paths_to_delete.");
+            throw new RuntimeException("Failed to flush a push-plan output.");
         }
 
         $complete = $this->fresh_local_index_entry === null
             && $this->previous_local_index_entry === null;
         if ($complete) {
-            $seen_deleted_directories = [];
+            $deleted_directory_stack_top_byte_offset = null;
+            $this->deleted_directory_stack_entry = null;
         }
         $cursor_after_step = [
             "byte_offset_in_fresh_index" => $byte_offset_in_fresh_index,
@@ -530,7 +556,7 @@ class PushPlan
             "byte_offset_in_local_paths_to_delete" => ftell($this->local_paths_to_delete_handle),
             "local_paths_to_push_count" => $local_paths_to_push_count,
             "local_paths_to_delete_count" => $local_paths_to_delete_count,
-            "seen_deleted_directories" => $seen_deleted_directories,
+            "deleted_directory_stack_top_byte_offset" => $deleted_directory_stack_top_byte_offset,
         ];
         $this->save_cursor($cursor_after_step);
         $this->cursor = $cursor_after_step;
@@ -559,14 +585,19 @@ class PushPlan
         if (is_resource($this->local_paths_to_delete_handle)) {
             fclose($this->local_paths_to_delete_handle);
         }
+        if (is_resource($this->deleted_directories_stack_handle)) {
+            fclose($this->deleted_directories_stack_handle);
+        }
         $this->fresh_local_index_handle = null;
         $this->local_index_at_previous_push_handle = null;
         $this->local_paths_to_push_handle = null;
         $this->local_paths_to_delete_handle = null;
+        $this->deleted_directories_stack_handle = null;
         $this->fresh_local_index_entry = null;
         $this->fresh_local_index_entry_loaded = false;
         $this->previous_local_index_entry = null;
         $this->previous_local_index_entry_loaded = false;
+        $this->deleted_directory_stack_entry = null;
         $this->closed = true;
     }
 
@@ -697,24 +728,81 @@ class PushPlan
     }
 
     /**
-     * Indicates whether an active deleted directory contains the path.
+     * Appends one active directory and links it to the preceding stack entry.
      *
-     * next_step() discards passed directory ranges before calling this method,
-     * so only the last active directory can contain the current path.
-     *
-     * @param string   $path                     Raw filesystem path to classify.
-     * @param string[] $seen_deleted_directories Deleted directories whose ranges remain active.
-     * @return bool Whether a previously selected directory deletion covers the path.
+     * @param string   $path                 Raw directory path selected for deletion.
+     * @param int|null $previous_byte_offset Byte offset of the preceding active entry.
+     * @return int Byte offset of the appended entry.
      */
-    private function is_covered_by_seen_deleted_directory(
-        string $path,
-        array $seen_deleted_directories
-    ): bool {
-        if ($seen_deleted_directories === []) {
-            return false;
+    private function append_deleted_directory_stack_entry(string $path, ?int $previous_byte_offset): int
+    {
+        if (fseek($this->deleted_directories_stack_handle, 0, SEEK_END) !== 0) {
+            throw new RuntimeException("Failed to seek to the end of the deleted-directory stack.");
         }
-        $deleted_directory = $seen_deleted_directories[count($seen_deleted_directories) - 1];
-        return strpos($path, $deleted_directory . "/") === 0;
+        $byte_offset = ftell($this->deleted_directories_stack_handle);
+        if (!is_int($byte_offset)) {
+            throw new RuntimeException("Failed to determine the deleted-directory stack byte offset.");
+        }
+        $line = json_encode(
+            [
+                "path_b64" => base64_encode($path),
+                "previous_byte_offset" => $previous_byte_offset,
+            ],
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+        ) . "\n";
+        if (fwrite($this->deleted_directories_stack_handle, $line) !== strlen($line)) {
+            throw new RuntimeException("Failed to append to the deleted-directory stack.");
+        }
+        $this->deleted_directory_stack_entry = [
+            "path" => $path,
+            "previous_byte_offset" => $previous_byte_offset,
+        ];
+        return $byte_offset;
+    }
+
+    /**
+     * Reads one stack entry addressed by the planning cursor.
+     *
+     * @param int|null $byte_offset Entry byte offset, or null for an empty stack.
+     * @return DeletedDirectoryStackEntry|null Decoded stack entry, or null.
+     */
+    private function read_deleted_directory_stack_entry(?int $byte_offset): ?array
+    {
+        if ($byte_offset === null) {
+            return null;
+        }
+        if (fseek($this->deleted_directories_stack_handle, $byte_offset) !== 0) {
+            throw new RuntimeException("Failed to seek in the deleted-directory stack.");
+        }
+        $line = fgets($this->deleted_directories_stack_handle);
+        if (!is_string($line)) {
+            throw new RuntimeException("Failed to read the deleted-directory stack entry at byte {$byte_offset}.");
+        }
+        try {
+            $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new RuntimeException("Failed to decode the deleted-directory stack entry at byte {$byte_offset}.", 0, $exception);
+        }
+        /** @var array{path_b64:string,previous_byte_offset:int|null} $entry */
+        $path = base64_decode($entry["path_b64"], true);
+        if ($path === false) {
+            throw new RuntimeException("Failed to decode the deleted-directory path at byte {$byte_offset}.");
+        }
+        return [
+            "path" => $path,
+            "previous_byte_offset" => $entry["previous_byte_offset"],
+        ];
+    }
+
+    /**
+     * Reports whether the active deleted directory contains the path.
+     *
+     * @param string                          $path  Raw filesystem path to classify.
+     * @param DeletedDirectoryStackEntry|null $entry Top active stack entry.
+     */
+    private function deleted_directory_stack_covers_path(string $path, ?array $entry): bool
+    {
+        return $entry !== null && strpos($path, $entry["path"] . "/") === 0;
     }
 
     /**
@@ -823,9 +911,6 @@ class PushPlan
     /**
      * Loads the durable cursor for an unfinished push plan.
      *
-     * Deleted-directory paths are decoded from base64 so path comparisons use
-     * their original bytes. Excluded paths remain encoded until resume().
-     *
      * @return array|null {
      *     Durable cursor, or null when no unfinished plan exists.
      *
@@ -835,7 +920,7 @@ class PushPlan
      *     @type int      $byte_offset_in_local_paths_to_delete      Durable bytes in the local paths to delete output.
      *     @type int      $local_paths_to_push_count                 Number of local paths to push written so far.
      *     @type int      $local_paths_to_delete_count               Number of local paths to delete written so far.
-     *     @type string[] $seen_deleted_directories                  Decoded deleted-directory paths with active ranges.
+     *     @type int|null $deleted_directory_stack_top_byte_offset   Active stack entry, or null for an empty stack.
      * }
      * @phpstan-return PushPlanCursor|null
      */
@@ -860,13 +945,6 @@ class PushPlan
         if (!is_array($cursor)) {
             throw new RuntimeException("The cursor must be a JSON object: {$this->cursor_file}");
         }
-        $decoded_directories = [];
-        foreach ($cursor["seen_deleted_directories"] as $encoded_directory) {
-            /** @var string $directory */
-            $directory = base64_decode($encoded_directory, true);
-            $decoded_directories[] = $directory;
-        }
-        $cursor["seen_deleted_directories"] = $decoded_directories;
         /** @var PushPlanCursor $cursor */
         return $cursor;
     }
@@ -874,9 +952,7 @@ class PushPlan
     /**
      * Persists the next durable push-plan boundary atomically.
      *
-     * Deleted-directory paths are base64-encoded because JSON cannot represent
-     * arbitrary filesystem path bytes. A temporary file and rename prevent
-     * readers from observing a partial cursor.
+     * A temporary file and rename prevent readers from observing a partial cursor.
      *
      * @param array $cursor {
      *     Cursor to publish as the durable plan boundary.
@@ -887,18 +963,13 @@ class PushPlan
      *     @type int      $byte_offset_in_local_paths_to_delete      Durable bytes in the local paths to delete output.
      *     @type int      $local_paths_to_push_count                 Number of local paths to push written so far.
      *     @type int      $local_paths_to_delete_count               Number of local paths to delete written so far.
-     *     @type string[] $seen_deleted_directories                  Decoded deleted-directory paths with active ranges.
+     *     @type int|null $deleted_directory_stack_top_byte_offset   Active stack entry, or null for an empty stack.
      * }
      * @phpstan-param PushPlanCursor $cursor
      */
     private function save_cursor(array $cursor): void
     {
-        $cursor_for_storage = $cursor;
-        $cursor_for_storage["seen_deleted_directories"] = array_map(
-            "base64_encode",
-            $cursor["seen_deleted_directories"]
-        );
-        $contents = json_encode($cursor_for_storage, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+        $contents = json_encode($cursor, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
         $temporary_cursor = $this->cursor_file . ".tmp";
         if (file_put_contents($temporary_cursor, $contents) !== strlen($contents)) {
             throw new RuntimeException("Failed to write the cursor: {$temporary_cursor}");

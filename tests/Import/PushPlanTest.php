@@ -331,6 +331,32 @@ final class PushPlanTest extends TestCase
         $this->assertSame("gone\0", file_get_contents($this->planPath('local_paths_to_delete')));
     }
 
+    public function testDeletedDirectoryStackAppendsWithoutGrowingTheCursor(): void
+    {
+        $this->recordSuccessfulPush($this->writeIndex([
+            'a' => [1, 0, 'dir', false],
+            'a/child.txt' => [1, 1, 'file'],
+            'b.txt' => [1, 1, 'file'],
+        ]));
+        $plan = $this->startPlan();
+
+        $this->assertTrue($plan->next_step());
+        $stack_bytes = filesize($this->planPath('deleted_directories_stack.jsonl'));
+        $this->assertIsInt($stack_bytes);
+        $this->assertGreaterThan(0, $stack_bytes);
+        $first_cursor = $this->planCursor();
+        $this->assertSame(0, $first_cursor['deleted_directory_stack_top_byte_offset']);
+
+        $this->assertTrue($plan->next_step());
+        $this->assertFalse($plan->next_step());
+        $complete_cursor = $this->planCursor();
+        $this->assertNull($complete_cursor['deleted_directory_stack_top_byte_offset']);
+        $this->assertSame($stack_bytes, filesize($this->planPath('deleted_directories_stack.jsonl')));
+        $plan->close();
+
+        $this->assertSame("a\0b.txt\0", file_get_contents($this->planPath('local_paths_to_delete')));
+    }
+
     public function testSeenDeletedDirectorySurvivesAnInterleavedSiblingCursor(): void
     {
         $this->recordSuccessfulPush($this->writeIndex([
@@ -579,7 +605,7 @@ final class PushPlanTest extends TestCase
             'byte_offset_in_local_paths_to_delete',
             'local_paths_to_push_count',
             'local_paths_to_delete_count',
-            'seen_deleted_directories',
+            'deleted_directory_stack_top_byte_offset',
         ], array_keys($cursor));
         $this->assertSame(
             filesize($this->planPath('local_paths_to_push.jsonl')),
@@ -644,6 +670,7 @@ final class PushPlanTest extends TestCase
             'local_index_at_previous_push_handle',
             'local_paths_to_push_handle',
             'local_paths_to_delete_handle',
+            'deleted_directories_stack_handle',
         ] as $property_name) {
             $property = new ReflectionProperty(PushPlan::class, $property_name);
             $this->assertNull($property->getValue($loaded));
