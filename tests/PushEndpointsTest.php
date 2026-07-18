@@ -1556,6 +1556,8 @@ final class PushEndpointsTest extends TestCase {
             PushFilesSender::class,
             'local_paths_to_delete_handle'
         );
+        $push_stream_client_property = new ReflectionProperty(PushFilesSender::class, 'push_stream_client');
+        $curl_handle_property = new ReflectionProperty(MultipartPushStreamClient::class, 'curl_handle');
         $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
         $sender = PushFilesSender::start($options);
         try {
@@ -1563,6 +1565,9 @@ final class PushEndpointsTest extends TestCase {
                 $planning_result = $sender->next_step();
             } while ($planning_result['phase'] === 'planning');
             $this->assertSame('pushing_paths', $planning_result['phase']);
+            clearstatcache(true, $push_state_directory . '/sender.json');
+            $state_inode_before_upload = fileinode($push_state_directory . '/sender.json');
+            $this->assertIsInt($state_inode_before_upload);
 
             $first_file_chunk = $sender->next_step();
             $this->assertSame('pushing_paths', $first_file_chunk['phase']);
@@ -1571,11 +1576,17 @@ final class PushEndpointsTest extends TestCase {
             $local_file_handle = $local_file_handle_property->getValue($sender);
             $this->assertIsResource($local_paths_to_push_handle);
             $this->assertIsResource($local_file_handle);
+            $push_stream_client = $push_stream_client_property->getValue($sender);
+            $curl_handle = $curl_handle_property->getValue($push_stream_client);
+            $this->assertNotNull($curl_handle);
 
             $second_file_chunk = $sender->next_step();
             $this->assertSame('pushing_paths', $second_file_chunk['phase']);
             $this->assertSame($local_paths_to_push_handle, $local_paths_to_push_handle_property->getValue($sender));
             $this->assertSame($local_file_handle, $local_file_handle_property->getValue($sender));
+            $this->assertSame($curl_handle, $curl_handle_property->getValue($push_stream_client));
+            clearstatcache(true, $push_state_directory . '/sender.json');
+            $this->assertSame($state_inode_before_upload, fileinode($push_state_directory . '/sender.json'));
 
         } finally {
             $sender->close();
@@ -1584,6 +1595,9 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNull($local_file_handle_property->getValue($sender));
         $this->assertFalse(is_resource($local_paths_to_push_handle));
         $this->assertFalse(is_resource($local_file_handle));
+        $this->assertNull($curl_handle_property->getValue($push_stream_client));
+        clearstatcache(true, $push_state_directory . '/sender.json');
+        $this->assertNotSame($state_inode_before_upload, fileinode($push_state_directory . '/sender.json'));
 
         $sender = PushFilesSender::resume($options);
         try {

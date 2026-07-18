@@ -123,9 +123,9 @@ sender reads them from `push_status`; it does not copy them into `sender.json`.
 
 `PushFilesSender::start()` and `PushFilesSender::resume()` acquire
 `sender.lock`; `PushFilesSender::close()` releases it. `next_step()` does not
-acquire or release the lock and does not reread `sender.json`. Every
-`continue` result follows a durable sender boundary, so a later process may
-resume after the current process closes the sender. In `pushing_paths` or
+acquire or release the lock and does not reread `sender.json`. A sender retains
+one multipart request across steps. close() finishes it and stores the confirmed
+local boundary before releasing the lock. In `pushing_paths` or
 `pushing_deletes`, one step sends at most one multipart part.
 
 ## PushFilesSender names

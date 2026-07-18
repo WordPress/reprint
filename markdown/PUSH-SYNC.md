@@ -299,9 +299,11 @@ index representation.
 
 Each local-path upload or deletion step sends at most one multipart part. A file
 or deletion-list part contains one bounded chunk; a directory or symlink part
-contains one complete value. The sender derives Content-Length from the
-bytes actually read, closes work deletes explicitly, and never reads another
-local path to push until the current one is complete. Receiver
+contains one complete value. The sender retains one multipart request across
+successive steps until its body budget is spent or the caller closes the
+sender. close() finishes that request and stores the confirmed local boundary.
+The sender derives Content-Length from the bytes actually read and never reads
+another local path to push until the current one is complete. Receiver
 contention, offset gaps, and transport failures end the current sender run. The
 caller may run the push command again; it resumes from the last durable local
 boundary and reads receiver-confirmed progress before sending more work.
