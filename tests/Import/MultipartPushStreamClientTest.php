@@ -423,6 +423,145 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertStringContainsString('Invalid JSON response', $result['detail']);
     }
 
+    public function testPushRequestStopsReadingAnOversizedResponse(): void {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('Raw push-response coverage requires PHP curl and pcntl.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        $this->assertNotFalse($listener, (string) $error);
+        $address = stream_socket_get_name($listener, false);
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child === 0) {
+            $connection = stream_socket_accept($listener, 3);
+            if ($connection === false) {
+                exit(2);
+            }
+            stream_set_timeout($connection, 3);
+            $request = '';
+            while (strpos($request, "\r\n\r\n") === false && !feof($connection)) {
+                $piece = fread($connection, 64 * 1024);
+                if (!is_string($piece) || $piece === '') {
+                    break;
+                }
+                $request .= $piece;
+            }
+            $response_bytes = 1024 * 1024 + 1;
+            fwrite(
+                $connection,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {$response_bytes}\r\nConnection: close\r\n\r\n"
+            );
+            $remaining = $response_bytes;
+            while ($remaining > 0) {
+                $bytes_written = @fwrite($connection, str_repeat('x', min($remaining, 64 * 1024)));
+                if (!is_int($bytes_written) || $bytes_written === 0) {
+                    break;
+                }
+                $remaining -= $bytes_written;
+            }
+            fclose($connection);
+            fclose($listener);
+            exit(0);
+        }
+
+        $client = new MultipartPushStreamClient([
+            'base_url' => 'http://' . $address . '/?reprint-api=1',
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'connect_timeout' => 2,
+            'response_timeout' => 2,
+        ]);
+        $result = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => str_repeat('7', 32),
+        ], ['created']);
+        pcntl_waitpid($child, $status);
+        fclose($listener);
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame('response_too_large', $result['reason']);
+        $this->assertSame('The target response exceeded 1048576 bytes.', $result['detail']);
+    }
+
+    public function testUploadRequestStopsReadingAnOversizedResponse(): void {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork') || PHP_VERSION_ID < 80100) {
+            $this->markTestSkipped('Raw upload-response coverage requires PHP curl, pcntl, and CURL_READFUNC_PAUSE support.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        $this->assertNotFalse($listener, (string) $error);
+        $address = stream_socket_get_name($listener, false);
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child === 0) {
+            $connection = stream_socket_accept($listener, 3);
+            if ($connection === false) {
+                exit(2);
+            }
+            stream_set_timeout($connection, 3);
+            $request = '';
+            $closing_boundary = null;
+            while (!feof($connection)) {
+                $piece = fread($connection, 64 * 1024);
+                if (!is_string($piece) || $piece === '') {
+                    exit(3);
+                }
+                $request .= $piece;
+                if (
+                    $closing_boundary === null
+                    && preg_match('/boundary=(reprint-[a-f0-9]+)/', $request, $matches) === 1
+                ) {
+                    $closing_boundary = '--' . $matches[1] . "--\r\n";
+                }
+                if ($closing_boundary !== null && strpos($request, $closing_boundary) !== false) {
+                    break;
+                }
+            }
+            $response_bytes = 1024 * 1024 + 1;
+            fwrite(
+                $connection,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {$response_bytes}\r\nConnection: close\r\n\r\n"
+            );
+            $remaining = $response_bytes;
+            while ($remaining > 0) {
+                $bytes_written = @fwrite($connection, str_repeat('x', min($remaining, 64 * 1024)));
+                if (!is_int($bytes_written) || $bytes_written === 0) {
+                    break;
+                }
+                $remaining -= $bytes_written;
+            }
+            fclose($connection);
+            fclose($listener);
+            exit(0);
+        }
+
+        $client = new MultipartPushStreamClient([
+            'base_url' => 'http://' . $address . '/?reprint-api=1',
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'connect_timeout' => 2,
+            'stall_timeout' => 2,
+            'response_timeout' => 2,
+        ]);
+        $this->assertTrue($client->start_upload_request(str_repeat('6', 32)));
+        $this->assertTrue($client->send_part([
+            'type' => 'file',
+            'path' => 'oversized-response.bin',
+            'total_bytes' => 1,
+            'offset' => 0,
+            'payload' => 'x',
+        ]));
+        $result = $client->finish_request();
+        pcntl_waitpid($child, $status);
+        fclose($listener);
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame('response_too_large', $result['reason']);
+        $this->assertSame('The target response exceeded 1048576 bytes.', $result['detail']);
+    }
+
     /**
      * Keeps redirects and unknown protocol failures terminal.
      *

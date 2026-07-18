@@ -58,6 +58,9 @@
  */
 class MultipartPushStreamClient
 {
+    /** Maximum JSON response bytes retained from the target. */
+    private const MAX_RESPONSE_BYTES = 1024 * 1024;
+
     /** @var string Exporter API URL used as the base of every signed request target. */
     private string $base_url;
 
@@ -142,6 +145,12 @@ class MultipartPushStreamClient
 
     /** @var string|null Setup failure exposed when start_upload_request() returns false. */
     private ?string $last_error = null;
+
+    /** @var string Bounded response body for the currently open upload request. */
+    private string $response_body = '';
+
+    /** @var bool Whether the current upload response crossed MAX_RESPONSE_BYTES. */
+    private bool $response_too_large = false;
 
     /**
      * Configures one reusable connection context and its independent limits.
@@ -258,6 +267,8 @@ class MultipartPushStreamClient
         $this->body_bytes_sent = 0;
         $this->parts_sent = 0;
         $this->last_error = null;
+        $this->response_body = '';
+        $this->response_too_large = false;
 
         $request_url = $this->endpoint_url('push_upload', ['push_session_id' => $push_session_id]);
         $headers = $this->hmac_client->get_envelope_auth_headers('POST', $request_url);
@@ -282,9 +293,16 @@ class MultipartPushStreamClient
             CURLOPT_UPLOAD => true,
             CURLOPT_CUSTOMREQUEST => 'POST',
             CURLOPT_HTTPHEADER => $header_lines,
-            CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
+            CURLOPT_WRITEFUNCTION => function ($curl_handle, string $bytes): int {
+                if (strlen($this->response_body) + strlen($bytes) > self::MAX_RESPONSE_BYTES) {
+                    $this->response_too_large = true;
+                    return 0;
+                }
+                $this->response_body .= $bytes;
+                return strlen($bytes);
+            },
             CURLOPT_READFUNCTION => function ($curl_handle, $stream, int $length) {
                 $this->curl_requested_body = true;
                 if ($this->outbound_prefix !== '') {
@@ -607,9 +625,20 @@ class MultipartPushStreamClient
 
         $http_code = (int) curl_getinfo($this->curl_handle, CURLINFO_HTTP_CODE);
         $redirect_url = (string) curl_getinfo($this->curl_handle, CURLINFO_REDIRECT_URL);
-        $body = (string) curl_multi_getcontent($this->curl_handle);
+        $body = $this->response_body;
         curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
         $this->curl_handle = null;
+
+        if ($this->response_too_large) {
+            return [
+                'status' => 'failed',
+                'reason' => 'response_too_large',
+                'detail' => 'The target response exceeded ' . self::MAX_RESPONSE_BYTES . ' bytes.',
+                'response' => null,
+                'parts_sent' => $this->parts_sent,
+                'body_bytes_sent' => $this->body_bytes_sent,
+            ];
+        }
 
         if (in_array($http_code, [301, 302, 303, 307, 308], true)) {
             return [
@@ -699,6 +728,8 @@ class MultipartPushStreamClient
         $this->outbound_consumed_bytes = 0;
         $this->body_bytes_sent = 0;
         $this->parts_sent = 0;
+        $this->response_body = '';
+        $this->response_too_large = false;
     }
 
     /**
@@ -758,14 +789,23 @@ class MultipartPushStreamClient
         if (function_exists('reprint_apply_curl_ca_bundle')) {
             reprint_apply_curl_ca_bundle($handle);
         }
+        $response_body = '';
+        $response_too_large = false;
         curl_setopt_array($handle, [
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_POST => $method === 'POST',
             CURLOPT_POSTFIELDS => $method === 'POST' ? '' : null,
             CURLOPT_HTTPHEADER => $lines,
-            CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
+            CURLOPT_WRITEFUNCTION => function ($handle, string $bytes) use (&$response_body, &$response_too_large): int {
+                if (strlen($response_body) + strlen($bytes) > self::MAX_RESPONSE_BYTES) {
+                    $response_too_large = true;
+                    return 0;
+                }
+                $response_body .= $bytes;
+                return strlen($bytes);
+            },
             // A push request has a bounded response, but it must not use
             // CURLOPT_TIMEOUT: that is a total-transfer deadline and kills
             // a slow connection that is still moving bytes. libcurl's low
@@ -773,11 +813,21 @@ class MultipartPushStreamClient
             CURLOPT_LOW_SPEED_LIMIT => 1,
             CURLOPT_LOW_SPEED_TIME => $this->response_timeout,
         ]);
-        $body = curl_exec($handle);
+        $completed = curl_exec($handle);
         $error = curl_error($handle);
         $http_code = (int) curl_getinfo($handle, CURLINFO_HTTP_CODE);
         $redirect_url = (string) curl_getinfo($handle, CURLINFO_REDIRECT_URL);
         curl_close($handle);
+        if ($response_too_large) {
+            return [
+                'status' => 'failed',
+                'reason' => 'response_too_large',
+                'detail' => 'The target response exceeded ' . self::MAX_RESPONSE_BYTES . ' bytes.',
+                'response' => null,
+                'parts_sent' => 0,
+                'body_bytes_sent' => 0,
+            ];
+        }
         if (in_array($http_code, [301, 302, 303, 307, 308], true)) {
             return [
                 'status' => 'failed',
@@ -788,7 +838,7 @@ class MultipartPushStreamClient
                 'body_bytes_sent' => 0,
             ];
         }
-        if (!is_string($body)) {
+        if ($completed !== true) {
             return [
                 'status' => 'failed',
                 'reason' => 'request_failed',
@@ -798,6 +848,7 @@ class MultipartPushStreamClient
                 'body_bytes_sent' => 0,
             ];
         }
+        $body = $response_body;
         $decoded = json_decode($body, true);
         if (!is_array($decoded)) {
             return [
