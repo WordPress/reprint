@@ -305,13 +305,13 @@ class PushPlan
                 throw new RuntimeException("Failed to open local index at the previous push: {$this->local_index_at_previous_push}");
             }
         }
-        $this->safe_seek(
+        $this->seek_to_cursor(
             $this->fresh_local_index_handle,
             $this->cursor["byte_offset_in_fresh_index"],
             "fresh local index"
         );
         if ($this->local_index_at_previous_push_handle) {
-            $this->safe_seek(
+            $this->seek_to_cursor(
                 $this->local_index_at_previous_push_handle,
                 $this->cursor["byte_offset_in_previous_index"],
                 "local index at the previous push"
@@ -599,9 +599,10 @@ class PushPlan
     /**
      * Opens one output at its durable cursor offset and discards later bytes.
      *
-     * A process may stop after writing output but before publishing its next
-     * cursor. Truncating to the saved offset removes only that uncommitted
-     * tail before the plan continues.
+     * Plan output is flushed before its cursor is published, so a valid cursor
+     * cannot exceed the output length. A process may stop after writing output
+     * but before publishing its next cursor. Truncating to the saved offset
+     * removes only that uncommitted tail before the plan continues.
      *
      * @param string $path        Path to the push-plan output file.
      * @param int    $byte_offset Durable byte offset at which writing resumes.
@@ -613,14 +614,6 @@ class PushPlan
         if (!$handle) {
             throw new RuntimeException("Failed to open push plan output for writing: {$path}");
         }
-        $identity = fstat($handle);
-        $actual_bytes = is_array($identity) ? (int) $identity["size"] : -1;
-        if ($actual_bytes < $byte_offset) {
-            fclose($handle);
-            throw new RuntimeException(
-                "Push plan output {$path} contains {$actual_bytes} bytes, shorter than its cursor byte offset {$byte_offset}."
-            );
-        }
         if (!ftruncate($handle, $byte_offset) || fseek($handle, $byte_offset) !== 0) {
             fclose($handle);
             throw new RuntimeException("Failed to truncate and seek push plan output {$path} to byte {$byte_offset}.");
@@ -631,22 +624,15 @@ class PushPlan
     /**
      * Positions an index handle at its durable cursor offset.
      *
-     * Rejects an offset beyond the current file length instead of silently
-     * positioning the handle at an invalid plan boundary.
+     * The plan owns immutable index files, and publishes their consumed byte
+     * offsets only after finishing the corresponding step.
      *
      * @param resource $handle      Open index handle to position.
      * @param int      $byte_offset Durable byte offset saved in the cursor.
      * @param string   $description Human-readable index name used in failures.
      */
-    private function safe_seek($handle, int $byte_offset, string $description): void
+    private function seek_to_cursor($handle, int $byte_offset, string $description): void
     {
-        $identity = fstat($handle);
-        $file_bytes = is_array($identity) ? (int) $identity["size"] : -1;
-        if ($byte_offset > $file_bytes) {
-            throw new RuntimeException(
-                "The {$description} cursor offset {$byte_offset} exceeds its {$file_bytes}-byte file."
-            );
-        }
         if (fseek($handle, $byte_offset) !== 0) {
             throw new RuntimeException("Failed to seek the {$description} to byte {$byte_offset}.");
         }
