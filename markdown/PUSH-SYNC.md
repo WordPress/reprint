@@ -244,31 +244,30 @@ The sender has an explicit open/close lifecycle. `PushFilesSender::start()`
 rejects unfinished active state, writes the initial `creating` state, and
 acquires `sender.lock`. `PushFilesSender::resume()` acquires the same lock and
 reads the unfinished state once. The returned sender keeps that state in memory
-while `next_step()` publishes each later durable boundary. `close()` releases the
-lock. A second local process cannot start or resume the same sender until the
-open sender is closed. The caller may stop after any `continue` result, close
-the sender, and resume from that boundary in a later process. If the process
-stops inside `next_step()`, the next process uses the preceding sender boundary
-and receiver-confirmed cursors to reconcile work completed after it.
+while `next_step()` performs bounded work. `close()` finishes an open multipart
+request, stores its confirmed local boundary, and releases the lock. A second
+local process cannot start or resume the same sender until the open sender is
+closed. The caller may stop after any `continue` result and close the sender. If
+the process stops without closing, the next process uses the preceding sender
+boundary and receiver-confirmed cursors to account for later remote work.
 
 The open sender lazily opens `local_paths_to_push.jsonl`,
 `local_paths_to_delete`, and the current local file. It retains those handles
-across `next_step()` calls, closes each one when its phase or file ends, and
-closes any remaining handles before `close()` releases the lifecycle lock. A
-later process opens them again and seeks to the durable or receiver-confirmed
-byte offset.
+across `next_step()` calls, lets each handle advance with the work, and seeks
+only when a newly opened or receiver-confirmed offset differs. It closes each
+handle when its phase or file ends and closes any remaining handles before
+`close()` releases the lifecycle lock.
 
 `push_create` supplies the receiver exclusion policy. The sender passes that
-policy to `PushPlan::start()`, then each `planning` step runs one bounded
-`next_step()`. PushPlan owns the fresh index, merge offsets, output lengths and
+policy to `PushPlan::start()`, then each `planning` step merges one path.
+PushPlan owns the fresh index, merge offsets, output lengths and
 counts, deleted-directory ranges, and exclusions in `cursor.json`. No upload
 begins until both indexes have been consumed and the two path lists are stable.
 
 `sender.json` contains no second planning checkpoint and no copied receiver
 cursor. It records only the push session and phase, the next byte offset in
-`local_paths_to_push.jsonl`, the type, size, and ctime saved for a partial file,
-the consecutive recoverable-failure count, the target part limit, and learned
-request-body sizing state. Its phases are `creating`, `planning`,
+`local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
+sizing state. Its phases are `creating`, `planning`,
 `pushing_paths`, `pushing_deletes`, `committing`, and `removing`.
 
 Each local path to push carries the type, size, and ctime from the index used to
