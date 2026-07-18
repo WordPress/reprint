@@ -13,7 +13,7 @@ the end maps it to a PR stack.
 2. It shows a summary of local uploads and deletions. The user confirms that
    local should win for those paths and rows.
 3. It transfers everything into a private push directory on the remote — file bytes,
-   a deletion manifest, and (phase two) the database diff. The transfer is
+   the work-delete stream, and (phase two) the database diff. The transfer is
    resumable at byte granularity.
 4. It drives the commit step with repeated commands until done. The remote
    moves work files into place, executes deletions, and commits the database
@@ -224,6 +224,87 @@ physical target outside the document root. A platform hook or embedding router
 must choose its document root, reprint directory, and excluded paths as server
 configuration; request parameters cannot select any of them.
 
+## Local files sender
+
+`PushFilesSender` joins the durable `PushPlan` to the receiver's push session.
+An active push keeps these files under `<state-dir>/push/<site>/`:
+
+```text
+fresh_local_index.jsonl             plan-owned fresh local index
+local_index_at_previous_push.jsonl  index published after the previous commit
+local_paths_to_push.jsonl           positive-work paths
+local_paths_to_delete               raw NUL-delimited local paths to delete
+cursor.json                         PushPlan cursor
+sender.json                         remote sender phase and resume evidence
+sender.lock                         per-site sender lifecycle lock
+```
+
+The sender has an explicit open/close lifecycle. `PushFilesSender::start()`
+rejects unfinished sender state, writes the initial `creating` state, and
+acquires `sender.lock`. `PushFilesSender::resume()` acquires the same lock and
+reads the unfinished state once. The returned sender keeps that state in memory
+while `advance()` publishes each later durable boundary. `close()` releases the
+lock. A second local process cannot start or resume the same sender until the
+open sender is closed. The caller may stop after any `continue` result, close
+the sender, and resume from that boundary in a later process. If the process
+stops inside `advance()`, the next process uses the preceding sender boundary
+and receiver-confirmed cursors to reconcile work completed after it.
+
+`push_create` supplies the receiver exclusion policy. The sender passes that
+policy to `PushPlan::start()`, then each `planning` advance runs one bounded
+`next_step()`. PushPlan owns the fresh index, merge offsets, output lengths and
+counts, deleted-directory ranges, and exclusions in `cursor.json`. No upload
+begins until both indexes have been consumed and the two path lists are stable.
+
+`sender.json` contains no second planning checkpoint and no copied receiver
+cursor. It records only the push session and phase, the next byte offset in
+`local_paths_to_push.jsonl`, source evidence for a partial file, the bounded
+recoverable-failure count, the target part limit, and learned request-body
+sizing state. Its phases are `creating`, `planning`, `pushing_paths`,
+`pushing_deletes`, `committing`, and `removing`.
+
+Before sending the selected positive-work path, the sender asks `push_status`
+what the receiver has accepted for that path. A partial file resumes only when
+its current type, size, and ctime equal the source token saved after the prior
+accepted part. Otherwise the sender starts that path at offset zero, so bytes
+from different source versions cannot be joined. A lost upload response leaves
+the earlier local path-list boundary in place; the next process checks the
+receiver and either advances past complete work or safely replays it.
+
+After positive work, each deletion advance reads `work_deletes_bytes` and
+`work_deletes_complete` from `push_status`. Those receiver-owned values are the
+only work-delete cursor. A cursor beyond `local_paths_to_delete` cannot belong
+to this plan, so the sender removes the upload-only session instead of guessing
+a local offset.
+
+The source token is its current type, size, and ctime. A changed token restarts
+the same in-flight work at offset zero, so new-version bytes are never appended
+behind an old-version prefix. A vanished selected path or impossible receiver
+work-delete cursor moves the sender to `removing`. Repeated bounded remove calls
+delete the remote upload-only session; the sender then discards the PushPlan and
+returns `restart` so the caller can produce a new fresh local index.
+
+Repeated `push_commit` calls drive the receiver to `complete`. Only then does
+`after_successful_push()` publish the plan-owned fresh local index as
+`local_index_at_previous_push.jsonl`. Excluded entries remain in that complete
+index; exclusions suppress remote work rather than creating a second retained
+index representation.
+
+Each positive-work or deletion advance sends at most one multipart part. A file
+or deletion-list part contains one bounded chunk; a directory or symlink part
+contains one complete value. The sender derives Content-Length from the
+bytes actually read, closes work deletes explicitly, and never selects another
+positive-work path until the current one is complete. Recoverable target
+contention, offset gaps, and ambiguous transport failures are retried at a fixed
+bounded count; exhaustion returns a terminal failure rather than a final retry.
+
+The token has one honest timestamp-resolution gap: a same-size edit that keeps
+the same ctime second is not detected by the token, and remains invisible when
+a freshly generated index contains the same size/ctime/type evidence. Other
+drift remains detectable by the next local-index diff. Push streaming requires
+PHP 8.1 or newer because older PHP cURL bindings can truncate a paused upload;
+pull remains PHP 7.4-compatible.
+
 ## Where reprint stores its own data on the remote
 
 The remote is configured with one storage path for everything reprint keeps:
@@ -321,14 +402,14 @@ Files first, database second, each PR small and stacked in this order:
    resume lifecycle, bounded local change and deletion detection, and durable
    path lists for the sender.
 6. **Push stream endpoint** — the store's HTTP surface plus a sender that
-   streams framed chunks for many files through one authenticated request;
-   deletion work received; `--force-http` with honest help text (the first
+   sends one resumable multipart part per advance; deletion work received;
+   `--force-http` with honest help text (the first
    push networking this flag can gate). Decisions this slice locked in:
    sending streams through libcurl's pause mechanism, which PHP's curl
    extension supports from 8.1 — so `reprint push` requires PHP 8.1+ (pull
    keeps 7.4+; the full story is
    https://github.com/WordPress/reprint/issues/327) — and paths
-   travel base64-encoded in frames, response cursors, and control-plane
+   travel base64-encoded in MIME headers, response cursors, and control-plane
    parameters, because file paths are arbitrary bytes and JSON strings must
    be UTF-8.
 7. **Package unification** — importer and exporter become one Reprint

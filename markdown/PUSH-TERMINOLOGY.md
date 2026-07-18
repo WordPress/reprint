@@ -84,6 +84,42 @@ failure key is `non_recoverable_commit_failure`.
 These JSON records are unversioned while their schemas are still under
 development. There are no compatibility aliases or migration paths.
 
+## Local push state
+
+The local machine keeps planning and sender state outside the remote push
+directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
+
+| Surface | Name |
+| --- | --- |
+| Plan-owned fresh local index | `fresh_local_index.jsonl`, `$fresh_local_index` |
+| Local index at the previous push | `local_index_at_previous_push.jsonl`, `$local_index_at_previous_push` |
+| Positive-work path list | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
+| Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
+| PushPlan cursor | `cursor.json`, `$cursor_file` |
+| Active sender state | `sender.json`, `$sender_state_path` |
+| Sender lifecycle lock | `sender.lock`, `$sender_lock_path` |
+| Selected path-list cursor | `$local_paths_to_push_byte_offset` |
+| Partial-file source evidence | `$source_token` |
+
+`cursor.json` owns planning offsets, output offsets and counts, active deleted
+directory ranges, and `excluded_paths_b64`. `sender.json` does not repeat them.
+Its phases are `creating`, `planning`, `pushing_paths`, `pushing_deletes`,
+`committing`, and `removing`. It records the push session ID, selected path-list
+cursor, partial-file source token, recoverable-failure count, target part limit,
+and request-sizing state.
+
+Receiver-confirmed file and work-delete cursors remain receiver state. The
+sender reads them from `push_status`; it does not copy them into `sender.json`.
+`push.json` remains the receiver-owned push identity and policy, while
+`commit.json` and `$commit_state` remain the receiver commit checkpoint.
+
+`PushFilesSender::start()` and `PushFilesSender::resume()` acquire
+`sender.lock`; `PushFilesSender::close()` releases it. `advance()` does not
+acquire or release the lock and does not reread `sender.json`. Every
+`continue` result follows a durable sender boundary, so a later process may
+resume after the current process closes the sender. In `pushing_paths` or
+`pushing_deletes`, one advance sends at most one multipart part.
+
 ## Protocol names
 
 The work-upload endpoint is `push_upload` and its push-session parameter is

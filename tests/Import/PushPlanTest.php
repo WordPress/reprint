@@ -105,6 +105,31 @@ final class PushPlanTest extends TestCase
         $this->startPlan();
     }
 
+    public function testDiscardAllowsANewPlanWithoutPublishingTheOldIndex(): void
+    {
+        $firstIndex = $this->writeIndex(['first.txt' => [100, 5, 'file']]);
+        $plan = $this->startPlan($firstIndex);
+        $this->assertTrue(PushPlan::has_unfinished_plan($this->planDirectory()));
+        $plan->close();
+        $plan->discard();
+
+        $this->assertFalse(PushPlan::has_unfinished_plan($this->planDirectory()));
+        $this->assertFileDoesNotExist($this->planPath('local_index_at_previous_push.jsonl'));
+
+        $secondIndex = $this->writeIndex(['second.txt' => [200, 6, 'file']]);
+        $secondPlan = $this->startPlan($secondIndex);
+        $result = $this->planToCompletion($secondPlan);
+        $this->assertPathCounts(1, 0, $result);
+        $this->assertSame(
+            ['second.txt'],
+            $this->listPaths(PushPlan::local_paths_to_push_path($this->planDirectory()))
+        );
+        $this->assertSame(
+            [],
+            $this->localPathsToDelete(PushPlan::local_paths_to_delete_path($this->planDirectory()))
+        );
+    }
+
     // ------------------------------------------------------------------
     //  Local plan
     // ------------------------------------------------------------------

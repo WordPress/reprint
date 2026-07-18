@@ -58,6 +58,9 @@ require_once __DIR__ . '/lib/state/class-import-state.php';
 
 // Adaptive sizing for push request bodies
 require_once __DIR__ . '/lib/upload/class-push-request-sizer.php';
+require_once __DIR__ . '/lib/upload/class-multipart-push-stream-client.php';
+require_once __DIR__ . '/lib/push/class-push-plan.php';
+require_once __DIR__ . '/lib/push/class-push-files-sender.php';
 
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';

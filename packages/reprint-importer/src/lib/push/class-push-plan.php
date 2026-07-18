@@ -177,6 +177,37 @@ class PushPlan
     }
 
     /**
+     * Reports whether the site directory contains a plan that has not been
+     * published or discarded.
+     *
+     * @param string $site_dir Per-site directory for durable push-plan state.
+     */
+    public static function has_unfinished_plan(string $site_dir): bool
+    {
+        return is_file(rtrim($site_dir, "/") . "/cursor.json");
+    }
+
+    /**
+     * Returns the JSONL path list produced for positive local work.
+     *
+     * @param string $site_dir Per-site directory for durable push-plan state.
+     */
+    public static function local_paths_to_push_path(string $site_dir): string
+    {
+        return rtrim($site_dir, "/") . "/local_paths_to_push.jsonl";
+    }
+
+    /**
+     * Returns the raw NUL-delimited path list produced for local deletions.
+     *
+     * @param string $site_dir Per-site directory for durable push-plan state.
+     */
+    public static function local_paths_to_delete_path(string $site_dir): string
+    {
+        return rtrim($site_dir, "/") . "/local_paths_to_delete";
+    }
+
+    /**
      * Initializes the paths for one site's durable push-plan files.
      *
      * Creates the per-site directory when it does not already exist. Plan
@@ -191,8 +222,8 @@ class PushPlan
             throw new RuntimeException("Failed to create the push plan directory: {$site_dir}");
         }
         $this->local_index_at_previous_push = $site_dir . "/local_index_at_previous_push.jsonl";
-        $this->local_paths_to_push = $site_dir . "/local_paths_to_push.jsonl";
-        $this->local_paths_to_delete = $site_dir . "/local_paths_to_delete";
+        $this->local_paths_to_push = self::local_paths_to_push_path($site_dir);
+        $this->local_paths_to_delete = self::local_paths_to_delete_path($site_dir);
         $this->fresh_local_index = $site_dir . "/fresh_local_index.jsonl";
         $this->cursor_file = $site_dir . "/cursor.json";
     }
@@ -281,6 +312,21 @@ class PushPlan
         }
 
         $this->atomic_copy($this->fresh_local_index, $this->local_index_at_previous_push);
+        $this->remove_cursor();
+    }
+
+    /**
+     * Discards a closed plan after its remote push session is removed.
+     *
+     * Removing the cursor permits the next push to start from a new local
+     * index. The plan-owned index and output files may remain because start()
+     * replaces or truncates them before they can be used again.
+     */
+    public function discard(): void
+    {
+        if (!$this->closed) {
+            throw new LogicException("Close the push plan before discarding it.");
+        }
         $this->remove_cursor();
     }
 
