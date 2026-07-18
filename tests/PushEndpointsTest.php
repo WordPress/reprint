@@ -1356,7 +1356,7 @@ final class PushEndpointsTest extends TestCase {
         $site_dir = $this->root . '/sender-state';
         $this->seedPreviousLocalIndex($site_dir, $previous_local_index_path);
 
-        $changed_partial_source = false;
+        $changed_partial_local_file = false;
         $removed_caller_index = false;
         $commit_advances = 0;
         for ($step = 0; $step < 200; ++$step) {
@@ -1372,10 +1372,10 @@ final class PushEndpointsTest extends TestCase {
                 $removed_caller_index = true;
             }
             if (
-                !$changed_partial_source
+                !$changed_partial_local_file
                 && is_array($state)
                 && $state['phase'] === 'pushing_paths'
-                && is_array($state['source_token'])
+                && is_array($state['local_path_change_fields'])
             ) {
                 $status = $this->sendControlRequestWithHeaders(
                     'GET',
@@ -1392,7 +1392,7 @@ final class PushEndpointsTest extends TestCase {
                 sleep(1);
                 file_put_contents($local_docroot . '/nested/large.bin', str_repeat('B', 2000));
                 clearstatcache(true, $local_docroot . '/nested/large.bin');
-                $changed_partial_source = true;
+                $changed_partial_local_file = true;
             }
             if (is_array($state) && $state['phase'] === 'committing') {
                 ++$commit_advances;
@@ -1403,7 +1403,7 @@ final class PushEndpointsTest extends TestCase {
         }
 
         $this->assertTrue($removed_caller_index, 'PushPlan must own the fresh index after planning starts.');
-        $this->assertTrue($changed_partial_source, 'The test must change a file behind a partial receiver cursor.');
+        $this->assertTrue($changed_partial_local_file, 'The test must change a file behind a partial receiver cursor.');
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertGreaterThan(1, $commit_advances, 'The endpoint work budget must require repeated commit requests.');
         $this->assertSame(str_repeat('B', 2000), file_get_contents($this->docroot . '/nested/large.bin'));
@@ -1426,7 +1426,7 @@ final class PushEndpointsTest extends TestCase {
      */
     public function testHighLevelSenderSendsOneDeletionListPartPerStep(): void
     {
-        $local_docroot = $this->root . '/single-delete-part-source';
+        $local_docroot = $this->root . '/single-delete-part-local-docroot';
         mkdir($local_docroot, 0700, true);
         $fresh_local_index_path = $this->root . '/single-delete-part-index.jsonl';
         $this->writeIndex($fresh_local_index_path, []);
@@ -1466,22 +1466,22 @@ final class PushEndpointsTest extends TestCase {
     /**
      * Removes a remote session when a selected local path disappears.
      */
-    public function testHighLevelSenderRemovesSessionWhenSelectedSourceDisappears(): void
+    public function testHighLevelSenderRemovesSessionWhenSelectedLocalPathDisappears(): void
     {
-        $local_docroot = $this->root . '/deleted-source';
+        $local_docroot = $this->root . '/deleted-local-docroot';
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/large.bin', str_repeat('A', 2000));
-        $fresh_local_index_path = $this->root . '/deleted-source-index.jsonl';
+        $fresh_local_index_path = $this->root . '/deleted-local-index.jsonl';
         $this->writeIndex($fresh_local_index_path, [
             'large.bin' => $this->indexEntry($local_docroot . '/large.bin', 'file'),
         ]);
-        $site_dir = $this->root . '/deleted-source-state';
+        $site_dir = $this->root . '/deleted-local-state';
 
         for ($step = 0; $step < 30; ++$step) {
             $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $site_dir);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->readSenderState($site_dir);
-            if (is_array($state) && $state['phase'] === 'pushing_paths' && is_array($state['source_token'])) {
+            if (is_array($state) && $state['phase'] === 'pushing_paths' && is_array($state['local_path_change_fields'])) {
                 break;
             }
         }
@@ -1497,7 +1497,7 @@ final class PushEndpointsTest extends TestCase {
             }
         }
         $this->assertSame('restart', $result['status'], (string) json_encode($result));
-        $this->assertSame('source_changed', $result['reason']);
+        $this->assertSame('local_path_changed', $result['reason']);
         $this->assertNull($this->readSenderState($site_dir));
         $this->assertFileDoesNotExist($site_dir . '/cursor.json');
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
@@ -1508,7 +1508,7 @@ final class PushEndpointsTest extends TestCase {
      */
     public function testHighLevelSenderUsesReceiverExclusionsInPushPlan(): void
     {
-        $local_docroot = $this->root . '/excluded-source';
+        $local_docroot = $this->root . '/excluded-local-docroot';
         mkdir($local_docroot . '/preserved', 0700, true);
         file_put_contents($local_docroot . '/preserved/value.txt', 'local-change');
         file_put_contents($local_docroot . '/public.txt', 'public-change');
@@ -1537,7 +1537,7 @@ final class PushEndpointsTest extends TestCase {
      */
     public function testHighLevelSenderOwnsSiteLockAndResumesAfterClose(): void
     {
-        $local_docroot = $this->root . '/locked-source';
+        $local_docroot = $this->root . '/locked-local-docroot';
         $site_dir = $this->root . '/locked-state';
         mkdir($local_docroot, 0700, true);
         mkdir($site_dir, 0700, true);
@@ -1614,7 +1614,7 @@ final class PushEndpointsTest extends TestCase {
      */
     public function testHighLevelSenderStopsAfterBoundedRecoverableFailures(): void
     {
-        $local_docroot = $this->root . '/retry-source';
+        $local_docroot = $this->root . '/retry-local-docroot';
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/value.txt', 'value');
         $fresh_local_index_path = $this->root . '/retry-index.jsonl';
@@ -1686,7 +1686,7 @@ final class PushEndpointsTest extends TestCase {
             exit(0);
         }
 
-        $local_docroot = $this->root . '/malformed-source';
+        $local_docroot = $this->root . '/malformed-local-docroot';
         $site_dir = $this->root . '/malformed-state';
         mkdir($local_docroot, 0700, true);
         $fresh_local_index_path = $this->root . '/malformed-index.jsonl';
@@ -1722,7 +1722,7 @@ final class PushEndpointsTest extends TestCase {
     public function testHighLevelSenderRepeatsDeletionAndCommitAfterLostResponses(): void
     {
         file_put_contents($this->docroot . '/delete-after-lost-response.txt', 'old');
-        $local_docroot = $this->root . '/lost-response-source';
+        $local_docroot = $this->root . '/lost-response-local-docroot';
         mkdir($local_docroot, 0700, true);
         $fresh_local_index_path = $this->root . '/lost-response-index.jsonl';
         $this->writeIndex($fresh_local_index_path, []);

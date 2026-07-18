@@ -100,14 +100,19 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Lifecycle lock file | `sender.lock`, `$lock_path` |
 | Open lifecycle lock | `$lock_handle` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
-| Partial-file source token | `$source_token` |
+| Local path change fields | `local_path_change_fields`, `$local_path_change_fields` |
 
 `cursor.json` owns planning offsets, output offsets and counts, active deleted
 directory ranges, and `excluded_paths_b64`. `sender.json` does not repeat them.
 Its phases are `creating`, `planning`, `pushing_paths`, `pushing_deletes`,
 `committing`, and `removing`. It records the push session ID, selected path-list
-cursor, partial-file source token, recoverable-failure count, target part limit,
-and request-sizing state.
+cursor, local path change fields for a partial file, recoverable-failure count,
+target part limit, and request-sizing state. The local path change fields are
+the path's type, size, and ctime.
+
+When a selected local path disappears or changes while being read, the sender
+reports `local_path_changed` and moves to `removing`. After removal it requests
+a new fresh local index.
 
 Receiver-confirmed file and work-delete cursors remain receiver state. The
 sender reads them from `push_status`; it does not copy them into `sender.json`.

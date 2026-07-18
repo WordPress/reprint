@@ -159,7 +159,7 @@ final class PushPlanTest extends TestCase
         $this->assertSame('{"path":"' . base64_encode('index.php') . '"}', $firstLine);
     }
 
-    public function testPlanCopiesEverySourceIndexEntryAndExcludesOnlyPushAndDeletePaths(): void
+    public function testPlanCopiesEveryFreshLocalIndexEntryAndExcludesOnlyPushAndDeletePaths(): void
     {
         $this->recordSuccessfulPush($this->writeIndex([
             'gone.txt' => [1, 1, 'file'],
@@ -633,8 +633,8 @@ final class PushPlanTest extends TestCase
     public function testReplacingTheStartingIndexBetweenStepsDoesNotChangeThePlan(): void
     {
         $current = $this->tempDir . '/fresh-local-index.jsonl';
-        $source = $this->writeIndex($this->manyFileEntries(1001));
-        copy($source, $current);
+        $index_to_copy = $this->writeIndex($this->manyFileEntries(1001));
+        copy($index_to_copy, $current);
         $plan = $this->startPlan($current);
         $first = $plan->next_step();
         $this->assertSame('more', $first['status']);

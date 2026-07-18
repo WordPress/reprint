@@ -48,8 +48,8 @@ limits replay.
 
 Every request carries an HMAC signature over exactly four values — the
 HTTP method, the URL's path and query, a timestamp, and a random nonce. Payloads are not signed and not hashed: TLS already
-guarantees their integrity, and signing streams was the single biggest source
-of buffering pain. Signing cost is constant per request regardless of payload
+guarantees their integrity, and signing streams was the single biggest cause of
+buffering pain. Signing cost is constant per request regardless of payload
 size. The secret travels in no URL and no body, so it never lands in an
 access log.
 
@@ -258,29 +258,29 @@ begins until both indexes have been consumed and the two path lists are stable.
 
 `sender.json` contains no second planning checkpoint and no copied receiver
 cursor. It records only the push session and phase, the next byte offset in
-`local_paths_to_push.jsonl`, the source token for a partial file, the bounded
-recoverable-failure count, the target part limit, and learned request-body
-sizing state. Its phases are `creating`, `planning`, `pushing_paths`,
-`pushing_deletes`, `committing`, and `removing`.
+`local_paths_to_push.jsonl`, the type, size, and ctime saved for a partial file,
+the bounded recoverable-failure count, the target part limit, and learned
+request-body sizing state. Its phases are `creating`, `planning`,
+`pushing_paths`, `pushing_deletes`, `committing`, and `removing`.
 
 Before sending the selected positive-work path, the sender asks `push_status`
 what the receiver has accepted for that path. A partial file resumes only when
-its current type, size, and ctime equal the source token saved after the prior
-accepted part. Otherwise the sender starts that path at offset zero, so bytes
-from different source versions cannot be joined. A lost upload response leaves
-the earlier local path-list boundary in place; the next process checks the
-receiver and either advances past complete work or safely replays it.
+its current type, size, and ctime equal the local path change fields saved after
+the prior accepted part. Otherwise the sender starts that path at offset zero,
+so bytes from different local file versions cannot be joined. A lost upload
+response leaves the earlier local path-list boundary in place; the next process
+checks the receiver and either advances past complete work or safely replays it.
 
 After positive work, each deletion step reads `work_deletes_bytes` and
 `work_deletes_complete` from `push_status`. Those receiver-owned values are the
 only work-delete cursor; `sender.json` does not duplicate it.
 
-The source token is its current type, size, and ctime. A changed token restarts
-the same in-flight work at offset zero, so new-version bytes are never appended
-behind an old-version prefix. A vanished selected path moves the sender to
-`removing`. Repeated bounded remove calls delete the remote upload-only session;
-the sender then discards the PushPlan and returns `restart` so the caller can
-produce a new fresh local index.
+The local path change fields are its current type, size, and ctime. Changed
+fields restart the same in-flight work at offset zero, so new-version bytes are
+never appended behind an old-version prefix. A vanished selected path moves the
+sender to `removing`. Repeated bounded remove calls delete the remote upload-only
+session; the sender then discards the PushPlan and returns `restart` so the
+caller can produce a new fresh local index.
 
 Repeated `push_commit` calls drive the receiver to `complete`. Only then does
 `after_successful_push()` publish the plan-owned fresh local index as
@@ -296,12 +296,12 @@ positive-work path until the current one is complete. Recoverable target
 contention, offset gaps, and ambiguous transport failures are retried at a fixed
 bounded count; exhaustion returns a terminal failure rather than a final retry.
 
-The token has one honest timestamp-resolution gap: a same-size edit that keeps
-the same ctime second is not detected by the token, and remains invisible when
-a freshly generated index contains the same size, ctime, and type values. Other
-drift remains detectable by the next local-index diff. Push streaming requires
-PHP 8.1 or newer because older PHP cURL bindings can truncate a paused upload;
-pull remains PHP 7.4-compatible.
+The local path change fields have one honest timestamp-resolution gap: a
+same-size edit that keeps the same ctime second leaves the fields unchanged and
+remains invisible when a freshly generated index contains the same size, ctime,
+and type values. Other drift remains detectable by the next local-index diff.
+Push streaming requires PHP 8.1 or newer because older PHP cURL bindings can
+truncate a paused upload; pull remains PHP 7.4-compatible.
 
 ## Where reprint stores its own data on the remote
 

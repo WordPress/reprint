@@ -83,19 +83,19 @@ them with near-synonyms.
 
 ## Resume and drift — the hard part
 
-- Any resumable transfer must assume the source changed between sessions.
+- Any resumable transfer must assume the local path changed between sessions.
   A resumed push must never append new-version bytes behind an old-version
-  prefix — that builds a file no version of the source ever was, and size
-  checks alone will happily verify it.
-- The mechanisms here: the sender persists a source token (size + ctime —
-  the same signals the journal diff keys on; mtime can be backdated by
-  touch(), ctime cannot) alongside every cursor and restarts a changed file
-  at offset 0; the receiver treats an offset-0 frame for anything it cannot
-  vouch for as a restart (remove, then upload fresh), while verified work
-  files replayed at their verified size are skipped.
+  prefix — that builds file contents which never existed locally, and size
+  checks alone will happily verify them.
+- The mechanisms here: the sender persists the local path's type, size, and
+  ctime alongside every cursor and restarts a changed file at offset 0. These
+  are the same fields the journal diff compares; mtime can be backdated by
+  touch(), ctime cannot. The receiver treats an offset-0 frame for anything it
+  cannot vouch for as a restart (remove, then upload fresh), while verified
+  work files replayed at their verified size are skipped.
 - Document the honest gaps where the mechanism is documented: a same-size
-  edit within one timestamp second escapes the token; the diff layer is the
-  deeper net.
+  edit within one timestamp second leaves the change fields unchanged; the
+  diff layer is the deeper net.
 
 ## Testing
 
@@ -118,8 +118,8 @@ them with near-synonyms.
 - Never state a guarantee in a docblock, PR description, or review reply
   without pointing at the line that enforces it. Real defects here were
   sentences written from memory: "a 409 catches resume-after-change" (true
-  only for verified work files), "the token uses the signals the diff
-  trusts" (the diff keys on ctime; the token used mtime).
+  only for verified work files), "the saved fields match the fields the diff
+  compares" (the diff keys on ctime; the saved fields used mtime).
 - Probe platform behavior empirically instead of assuming, and record the
   result: PHP's curl binding honors CURL_READFUNC_PAUSE only from 8.1 —
   on 7.4/8.0 the upload silently truncates (issue #327 has the full

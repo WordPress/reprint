@@ -10,7 +10,7 @@
  * that part. send_part() does not queue future work: when it returns true,
  * libcurl has consumed the complete MIME prefix, payload, and suffix through
  * the active transfer. The caller can then drop that one payload string, read
- * the next bounded source piece, and call send_part() again.
+ * the next bounded local file piece, and call send_part() again.
  *
  * Example:
  *
@@ -23,7 +23,7 @@
  *         if ($maximum === 0) {
  *             break;
  *         }
- *         $payload = read_source_piece($path, $offset, $maximum);
+ *         $payload = read_local_file_piece($path, $offset, $maximum);
  *         if (!$client->send_part([
  *             'type' => 'file',
  *             'path' => $path,
@@ -54,7 +54,7 @@
  * Pausing from a PHP cURL read callback is reliable only on PHP 8.1 and newer;
  * older bindings interpret CURL_READFUNC_PAUSE as end-of-body and silently
  * truncate the upload. The constructor enforces that runtime requirement while
- * this source file remains PHP 7.4 parseable for import.php's pull commands.
+ * this PHP file remains PHP 7.4 parseable for import.php's pull commands.
  */
 class MultipartPushStreamClient
 {
@@ -334,8 +334,8 @@ class MultipartPushStreamClient
     /**
      * Sends one already-read bounded multipart part over the active transfer.
      *
-     * Headers are computed from strlen($part['payload']), so a short source read
-     * produces a smaller truthful frame rather than a body shorter than its
+     * Headers are computed from strlen($part['payload']), so a short local file
+     * read produces a smaller truthful frame rather than a body shorter than its
      * declared Content-Length. The method first verifies that the complete MIME
      * part and closing delimiter fit the current request-body budget. If they do,
      * it resumes cURL and pumps until every byte of this part has been consumed
@@ -355,7 +355,7 @@ class MultipartPushStreamClient
      *         directory or symlink.
      *     @type string $path Required target-relative path for a file,
      *         directory, or symlink.
-     *     @type int $total_bytes Required complete source size for a file.
+     *     @type int $total_bytes Required complete local file size.
      *     @type int $offset Required target-confirmed byte offset for a file or
      *         delete list.
      *     @type string $target Required raw link target for a symlink. Must be
@@ -430,10 +430,10 @@ class MultipartPushStreamClient
      * and remaining decoded entity-body budget after reserving worst-case MIME
      * headers and the closing boundary. The path, total size, and offset are
      * encoded exactly as send_part() will encode them. Zero means the caller
-     * should finish this request before reading more source bytes.
+     * should finish this request before reading more local file bytes.
      *
      * @param string $path Raw target-relative file path.
-     * @param int $total_bytes Current source file size.
+     * @param int $total_bytes Current local file size.
      * @param int $offset Target-confirmed offset for the next piece.
      * @return int Maximum payload bytes to read, or zero when no part fits.
      *
@@ -487,7 +487,7 @@ class MultipartPushStreamClient
      *     @type string $type Required. `file` or `delete-list`.
      *     @type string $payload Required empty string used only for header sizing.
      *     @type string $path Required target-relative path for a file.
-     *     @type int $total_bytes Required complete source size for a file.
+     *     @type int $total_bytes Required complete local file size.
      *     @type int $offset Required target-confirmed byte offset.
      * }
      * @return int Maximum body bytes allowed after MIME overhead and the close.
@@ -854,7 +854,7 @@ class MultipartPushStreamClient
      *
      * - `type`: required `file`, `directory`, `symlink`, or `delete-list`.
      * - `path`: required for file, directory, and symlink parts.
-     * - `total_bytes`: required complete source size for a file.
+     * - `total_bytes`: required complete local file size.
      * - `offset`: required target-confirmed offset for a file or delete list.
      * - `target`: required raw link target for a symlink.
      * - `complete`: optional delete-list completion declaration.

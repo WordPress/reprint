@@ -177,7 +177,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertSame(0, pcntl_wexitstatus($status), 'The child must receive both requests on its one accepted connection.');
     }
 
-    public function testTargetPartLimitBoundsTheNextSourceRead(): void {
+    public function testTargetPartLimitBoundsTheNextLocalFileRead(): void {
         if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
             $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');
         }
@@ -203,7 +203,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client->finish_request();
     }
 
-    public function testNextSourceReadAndPartOmitModeTransport(): void {
+    public function testNextLocalFileReadAndPartOmitModeTransport(): void {
         if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
             $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');
         }

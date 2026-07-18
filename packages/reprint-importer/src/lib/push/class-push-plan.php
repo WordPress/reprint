@@ -6,7 +6,7 @@
  *
  * PushPlan merges a path-sorted fresh local index with the local index at the
  * previous push. It writes durable lists of local paths to push and local paths
- * to delete without reading the source tree or accumulating either index in
+ * to delete without reading the local tree or accumulating either index in
  * memory.
  *
  * ## Usage
@@ -68,7 +68,7 @@ class PushPlan
 {
     private const MAX_INDEX_ENTRIES_PER_STEP = 1000;
 
-    /** @var string Paths and source metadata from the last completed push. */
+    /** @var string Paths and metadata from the last completed push. */
     private string $local_index_at_previous_push;
 
     /** @var string JSONL file of local paths to push. */
@@ -883,25 +883,26 @@ class PushPlan
     }
 
     /**
-     * Replaces a target file atomically with a complete copy of the source.
+     * Replaces a destination file atomically with a complete copy.
      *
-     * The copy is written beside the target and renamed into place so readers
-     * observe either the previous complete file or the new complete file.
+     * The copy is written beside the destination and renamed into place so
+     * readers observe either the previous complete file or the new complete
+     * file.
      *
-     * @param string $source Existing file to copy.
-     * @param string $target File path to replace atomically.
+     * @param string $file_to_copy Existing file to copy.
+     * @param string $destination File path to replace atomically.
      */
-    private function atomic_copy(string $source, string $target): void
+    private function atomic_copy(string $file_to_copy, string $destination): void
     {
-        if (!is_file($source)) {
-            throw new RuntimeException("Cannot copy to {$target}, the source file is missing: {$source}");
+        if (!is_file($file_to_copy)) {
+            throw new RuntimeException("Cannot copy to {$destination}, the file to copy is missing: {$file_to_copy}");
         }
-        $tmp = $target . ".tmp";
-        if (!copy($source, $tmp)) {
-            throw new RuntimeException("Failed to copy {$source} to the temporary file {$tmp}.");
+        $tmp = $destination . ".tmp";
+        if (!copy($file_to_copy, $tmp)) {
+            throw new RuntimeException("Failed to copy {$file_to_copy} to the temporary file {$tmp}.");
         }
-        if (!rename($tmp, $target)) {
-            throw new RuntimeException("Failed to move the temporary file into place: {$target}");
+        if (!rename($tmp, $destination)) {
+            throw new RuntimeException("Failed to move the temporary file into place: {$destination}");
         }
     }
 }
