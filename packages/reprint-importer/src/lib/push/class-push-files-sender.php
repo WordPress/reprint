@@ -152,6 +152,9 @@ final class PushFilesSender
     public static function start(array $options): self
     {
         $sender = new self($options);
+        if (!is_dir($sender->push_state_directory) && !@mkdir($sender->push_state_directory, 0755, true) && !is_dir($sender->push_state_directory)) {
+            throw new RuntimeException('Failed to create the push state directory: ' . $sender->push_state_directory);
+        }
         $sender->lock_handle = $sender->acquire_lock();
         try {
             clearstatcache(true, $sender->state_path);
@@ -198,6 +201,12 @@ final class PushFilesSender
     public static function resume(array $options): self
     {
         $sender = new self($options);
+        if (!is_dir($sender->push_state_directory)) {
+            throw new LogicException(
+                'Cannot resume a push files sender without unfinished active state: '
+                . $sender->state_path
+            );
+        }
         $sender->lock_handle = $sender->acquire_lock();
         try {
             $state = $sender->load_state();
@@ -225,7 +234,6 @@ final class PushFilesSender
      * @param array<string,mixed> $options Options documented by start().
      *
      * @throws InvalidArgumentException If local path or transport options are invalid.
-     * @throws RuntimeException If the push state directory cannot be created.
      */
     private function __construct(array $options)
     {
@@ -240,9 +248,6 @@ final class PushFilesSender
         }
         if (!is_string($push_state_directory) || $push_state_directory === '') {
             throw new InvalidArgumentException('PushFilesSender requires a push_state_directory.');
-        }
-        if (!is_dir($push_state_directory) && !@mkdir($push_state_directory, 0755, true) && !is_dir($push_state_directory)) {
-            throw new RuntimeException('Failed to create the push state directory: ' . $push_state_directory);
         }
         $request_sizer_options = $options['request_sizer_options'] ?? [];
         if (!is_array($request_sizer_options)) {

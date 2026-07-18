@@ -1750,6 +1750,29 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * Leaves a missing push state directory absent when there is nothing to resume.
+     */
+    public function testHighLevelSenderDoesNotCreateStateDirectoryWhenResumeHasNoState(): void
+    {
+        $local_docroot = $this->root . '/missing-state-local-docroot';
+        $push_state_directory = $this->root . '/missing-state';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/missing-state-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, []);
+
+        try {
+            PushFilesSender::resume(
+                $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+            );
+            $this->fail('Resuming without active state must fail.');
+        } catch (LogicException $exception) {
+            $this->assertStringContainsString('without unfinished active state', $exception->getMessage());
+        }
+
+        $this->assertDirectoryDoesNotExist($push_state_directory);
+    }
+
+    /**
      * Leaves active state for a later command after a request failure.
      */
     public function testHighLevelSenderLeavesRequestFailureForTheNextCommand(): void
