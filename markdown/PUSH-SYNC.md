@@ -247,8 +247,10 @@ reads the unfinished state once. The returned sender keeps that state in memory
 while `next_step()` performs bounded work. `close()` finishes an open multipart
 request, stores its confirmed local boundary, and releases the lock. A second
 local process cannot start or resume the same sender until the open sender is
-closed. The caller may stop after any `continue` result and close the sender. If
-the process stops without closing, the next process uses the preceding sender
+closed. `next_step()` returns true while another step may be performed and false
+after completion, restart, or failure; the caller reads that outcome from the
+sender. The caller may stop after any true return and close the sender. If the
+process stops without closing, the next process uses the preceding sender
 boundary and receiver-confirmed cursors to account for later remote work.
 
 The open sender lazily opens `local_paths_to_push.jsonl`,
@@ -287,8 +289,9 @@ and every path in that part must remain absent or match its planned replacement.
 A changed type, size, or ctime, a vanished path, or a directory that is no
 longer empty moves the sender to `removing`. Repeated bounded remove calls
 delete the upload-only push session; the sender then discards the PushPlan and
-returns `restart` so the caller can produce a new fresh local index. The remote
-work and published local index therefore always describe the same planned tree.
+changes its status to `restart` so the caller can produce a new fresh local
+index. The remote work and published local index therefore always describe the
+same planned tree.
 
 Repeated `push_commit` calls drive the receiver to `complete`. Only then does
 `after_successful_push()` publish the plan-owned fresh local index as

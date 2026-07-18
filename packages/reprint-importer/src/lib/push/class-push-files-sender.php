@@ -30,20 +30,20 @@
  *         : PushFilesSender::resume($options);
  *     try {
  *         while ($has_time_remaining() && $has_memory_available()) {
- *             $result = $sender->next_step();
- *             if ($result['status'] !== 'continue') {
+ *             if (!$sender->next_step()) {
  *                 break;
  *             }
  *         }
+ *         $status = $sender->get_status();
  *     } finally {
  *         $sender->close();
  *     }
  *
- * The caller may close after any `continue` result. close() finishes an open
- * multipart request, stores its confirmed local boundary, and releases the
- * lock. If a process stops without closing, the next process starts from the
- * preceding durable boundary and reads receiver-confirmed work before sending
- * more data.
+ * The caller may close whenever next_step() returns true. close() finishes an
+ * open multipart request, stores its confirmed local boundary, and releases
+ * the lock. If a process stops without closing, the next process starts from
+ * the preceding durable boundary and reads receiver-confirmed work before
+ * sending more data.
  *
  * A new push first calls `push_create` to learn receiver-owned exclusions, then
  * starts PushPlan with that policy. After planning completes, local files,
@@ -64,7 +64,8 @@
  * from `push_status` and sends complete planned paths only while they remain
  * absent or match the replacement in the fresh local index. If a selected path
  * changes, the sender removes the upload-only push session, discards the plan,
- * and returns `restart` so the caller can produce a new local index.
+ * and changes the sender status to `restart` so the caller can produce a new
+ * local index.
  *
  * ## Streaming and durability
  *
@@ -131,8 +132,17 @@ final class PushFilesSender
     /** @var PushPlan Plan retained while its bounded steps run. */
     private PushPlan $plan;
 
-    /** @var State|null Active state, or null after terminal completion. */
-    private ?array $state = null;
+    /** @var State State retained for the open sender lifecycle. */
+    private array $state;
+
+    /** @var 'continue'|'complete'|'restart'|'failed' Outcome of the open sender lifecycle. */
+    private string $status = 'continue';
+
+    /** @var string|null Machine-readable classification for the current outcome. */
+    private ?string $reason = null;
+
+    /** @var string|null Human-readable explanation for the current outcome. */
+    private ?string $detail = null;
 
     /** @var MultipartPushStreamClient Reusable connection and request-sizing context. */
     private MultipartPushStreamClient $push_stream_client;
@@ -312,56 +322,85 @@ final class PushFilesSender
      *
      * start() or resume() has already acquired the lifecycle lock and loaded the
      * durable state, so this method only dispatches its current phase. The
-     * caller may close the sender after `continue`; close() confirms any open
-     * multipart request before publishing its local boundary. `restart` means
-     * the old push session and local plan are gone and a new local index is
-     * required.
+     * caller may close the sender after this method returns true; close()
+     * confirms any open multipart request before publishing its local
+     * boundary. A false return directs the caller to get_status(), where
+     * `restart` means the old push session and local plan are gone and a new
+     * local index is required.
      *
-     * @return array {
-     *     Result of one step.
-     *
-     *     @type string      $status          `continue`, `complete`, `restart`, or `failed`.
-     *     @type string      $phase           Durable phase or `complete`.
-     *     @type string      $push_session_id Push session ID.
-     *     @type string|null $reason          Machine-readable result classification.
-     *     @type string|null $detail          Human-readable result detail.
-     * }
-     * @phpstan-return array{status:'continue'|'complete'|'restart'|'failed',phase:string,push_session_id:string,reason:string|null,detail:string|null}
+     * @return bool Whether the sender can perform another step.
      */
-    public function next_step(): array
+    public function next_step(): bool
     {
         if (!is_resource($this->lock_handle)) {
             throw new LogicException('Cannot call next_step() after close().');
         }
-        if ($this->state === null) {
+        if ($this->status !== 'continue') {
             throw new LogicException('Cannot call next_step() after the sender reaches a terminal result.');
         }
 
         switch ($this->state['phase']) {
             case 'creating':
-                $result = $this->create_push_session();
+                $this->create_push_session();
                 break;
             case 'planning':
-                $result = $this->next_plan_step();
+                $this->next_plan_step();
                 break;
             case 'pushing_paths':
-                $result = $this->upload_next_file_chunk();
+                $this->upload_next_file_chunk();
                 break;
             case 'pushing_deletes':
-                $result = $this->upload_next_chunk_of_deleted_paths();
+                $this->upload_next_chunk_of_deleted_paths();
                 break;
             case 'committing':
-                $result = $this->commit_push();
+                $this->commit_push();
                 break;
             case 'removing':
-                $result = $this->remove_push_session();
+                $this->remove_push_session();
                 break;
         }
 
-        if ($result['status'] !== 'continue') {
-            $this->state = null;
-        }
-        return $result;
+        return $this->status === 'continue';
+    }
+
+    /**
+     * Returns whether the sender can continue or why it stopped.
+     *
+     * @return 'continue'|'complete'|'restart'|'failed' Current sender status.
+     */
+    public function get_status(): string
+    {
+        return $this->status;
+    }
+
+    /**
+     * Returns the current durable sender phase.
+     *
+     * @return string Current phase.
+     */
+    public function get_phase(): string
+    {
+        return $this->state['phase'];
+    }
+
+    /**
+     * Returns the machine-readable classification for the current outcome.
+     *
+     * @return string|null Current classification, or null when none applies.
+     */
+    public function get_reason(): ?string
+    {
+        return $this->reason;
+    }
+
+    /**
+     * Returns the human-readable explanation for the current outcome.
+     *
+     * @return string|null Current explanation, or null when none applies.
+     */
+    public function get_detail(): ?string
+    {
+        return $this->detail;
     }
 
     /**
@@ -373,11 +412,11 @@ final class PushFilesSender
     public function close(): void
     {
         $close_failure = null;
-        if ($this->state_before_upload_request !== null && $this->state !== null) {
+        if ($this->state_before_upload_request !== null && isset($this->state)) {
             try {
-                $failure_result = $this->finish_upload_request();
-                if ($failure_result !== null) {
-                    $close_failure = new RuntimeException($failure_result['detail'] ?? 'The multipart upload request failed while closing the sender.');
+                $this->finish_upload_request();
+                if ($this->status === 'failed') {
+                    $close_failure = new RuntimeException($this->detail ?? 'The multipart upload request failed while closing the sender.');
                 }
             } catch (Throwable $throwable) {
                 $close_failure = $throwable;
@@ -404,19 +443,16 @@ final class PushFilesSender
 
     /**
      * Creates the push session and starts PushPlan with its exclusion policy.
-     *
-     * @return array<string,mixed> Durable result after the create request.
      */
-    private function create_push_session(): array
+    private function create_push_session(): void
     {
         /** @var State $state */
         $state =& $this->state;
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_create', [
             'push_session_id' => $state['push_session_id'],
         ], ['created']);
-        $failure_result = $this->handle_request_failure($request_result);
-        if ($failure_result !== null) {
-            return $failure_result;
+        if ($this->handle_request_failure($request_result)) {
+            return;
         }
 
         /** @var array{max_part_bytes:int,post_max_bytes:?int,excluded_paths_b64:list<string>} $response */
@@ -425,7 +461,8 @@ final class PushFilesSender
         foreach ($response['excluded_paths_b64'] as $encoded_path) {
             $path = base64_decode($encoded_path, true);
             if ($path === false) {
-                return $this->step_result('failed', $state, 'unexpected_response', 'Could not decode an excluded path returned by push_create.');
+                $this->fail('unexpected_response', 'Could not decode an excluded path returned by push_create.');
+                return;
             }
             $excluded_paths[] = $path;
         }
@@ -436,14 +473,10 @@ final class PushFilesSender
         $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         clearstatcache(true, $this->fresh_local_index_path);
         if (!is_file($this->fresh_local_index_path)) {
-            $state['phase'] = 'removing';
-            $this->store_state($state);
-            return $this->step_result(
-                'continue',
-                $state,
-                'local_path_changed',
+            $this->start_removing_push_session_after_local_change(
                 'The fresh local index disappeared before planning began; remove the upload-only push session before generating another index.'
             );
+            return;
         }
         if (PushPlan::has_plan($this->push_state_directory)) {
             $this->plan = PushPlan::resume($this->push_state_directory);
@@ -457,15 +490,12 @@ final class PushFilesSender
 
         $state['phase'] = 'planning';
         $this->store_state($state);
-        return $this->step_result('continue', $state, null, null);
     }
 
     /**
      * Performs one PushPlan step and moves to local paths to push at plan completion.
-     *
-     * @return array<string,mixed> Durable result after one bounded plan step.
      */
-    private function next_plan_step(): array
+    private function next_plan_step(): void
     {
         /** @var State $state */
         $state =& $this->state;
@@ -475,7 +505,6 @@ final class PushFilesSender
             $state['phase'] = 'pushing_paths';
             $this->store_state($state);
         }
-        return $this->step_result('continue', $state, null, null);
     }
 
     /**
@@ -484,37 +513,38 @@ final class PushFilesSender
      * A file part contains one bounded local file chunk. A directory or symlink
      * part contains that one complete value. The durable local-path-list cursor
      * advances only after the containing request is confirmed.
-     *
-     * @return array<string,mixed> Result of one status check or upload part.
      */
-    private function upload_next_file_chunk(): array
+    private function upload_next_file_chunk(): void
     {
         /** @var State $state */
         $state =& $this->state;
         if ($this->upload_request_should_finish) {
-            $failure_result = $this->finish_upload_request();
-            return $failure_result ?? $this->step_result('continue', $state, null, null);
+            $this->finish_upload_request();
+            return;
         }
 
         if (!is_resource($this->local_paths_to_push_handle)) {
             $local_paths_to_push_path = PushPlan::local_paths_to_push_path($this->push_state_directory);
             $this->local_paths_to_push_handle = fopen($local_paths_to_push_path, 'rb');
             if (!is_resource($this->local_paths_to_push_handle)) {
-                return $this->step_result('failed', $state, 'local_io_error', 'Could not open the local paths to push.');
+                $this->fail('local_io_error', 'Could not open the local paths to push.');
+                return;
             }
         }
 
         if ($this->local_path_to_push === null) {
             if ($this->local_paths_to_push_byte_offset !== $state['local_paths_to_push_byte_offset']) {
                 if (fseek($this->local_paths_to_push_handle, $state['local_paths_to_push_byte_offset']) !== 0) {
-                    return $this->step_result('failed', $state, 'local_io_error', 'Failed to seek to the active byte offset in the local paths to push.');
+                    $this->fail('local_io_error', 'Failed to seek to the active byte offset in the local paths to push.');
+                    return;
                 }
                 $this->local_paths_to_push_byte_offset = $state['local_paths_to_push_byte_offset'];
             }
             try {
                 $this->local_path_to_push = $this->read_local_path_to_push($this->local_paths_to_push_handle);
             } catch (RuntimeException $exception) {
-                return $this->step_result('failed', $state, 'local_io_error', $exception->getMessage());
+                $this->fail('local_io_error', $exception->getMessage());
+                return;
             }
             if ($this->local_path_to_push !== null) {
                 $this->local_paths_to_push_byte_offset = $this->local_path_to_push['next_local_paths_to_push_byte_offset'];
@@ -523,14 +553,14 @@ final class PushFilesSender
         $local_path_to_push = $this->local_path_to_push;
         if ($local_path_to_push === null) {
             if ($this->state_before_upload_request !== null) {
-                $failure_result = $this->finish_upload_request();
-                return $failure_result ?? $this->step_result('continue', $state, null, null);
+                $this->finish_upload_request();
+                return;
             }
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
             $state['phase'] = 'pushing_deletes';
             $this->store_state($state);
-            return $this->step_result('continue', $state, null, null);
+            return;
         }
 
         $planned_local_path_type_size_and_ctime = $local_path_to_push['planned_local_path_type_size_and_ctime'];
@@ -538,23 +568,26 @@ final class PushFilesSender
         if ($local_path_type_size_and_ctime === null) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
-            $state['phase'] = 'removing';
-            $this->store_state($state);
-            return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
+            $this->start_removing_push_session_after_local_change(
+                'A local path to push disappeared; remove the upload-only push session before generating another index.'
+            );
+            return;
         }
         if ($local_path_type_size_and_ctime['type'] === 'unsupported') {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
-            $state['phase'] = 'removing';
-            $this->store_state($state);
-            return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push changed to a file type that cannot be pushed; remove the upload-only push session before generating another index.');
+            $this->start_removing_push_session_after_local_change(
+                'A local path to push changed to a file type that cannot be pushed; remove the upload-only push session before generating another index.'
+            );
+            return;
         }
         if ($local_path_type_size_and_ctime !== $planned_local_path_type_size_and_ctime) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
-            $state['phase'] = 'removing';
-            $this->store_state($state);
-            return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push changed after planning; remove the upload-only push session before generating another index.');
+            $this->start_removing_push_session_after_local_change(
+                'A local path to push changed after planning; remove the upload-only push session before generating another index.'
+            );
+            return;
         }
 
         if ($this->state_before_upload_request !== null) {
@@ -564,9 +597,8 @@ final class PushFilesSender
                 'push_session_id' => $state['push_session_id'],
                 'path_b64' => $local_path_to_push['path_b64'],
             ], ['accepted']);
-            $failure_result = $this->handle_request_failure($request_result);
-            if ($failure_result !== null) {
-                return $failure_result;
+            if ($this->handle_request_failure($request_result)) {
+                return;
             }
             /** @var array{path:array{state:'missing'|'partial'|'complete',type?:'file'|'directory'|'symlink',accepted_bytes:int}} $response */
             $response = $request_result['response'];
@@ -582,7 +614,7 @@ final class PushFilesSender
                 $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
                 $this->local_path_to_push = null;
                 $this->store_state($state);
-                return $this->step_result('continue', $state, null, null);
+                return;
             }
             $receiver_confirmed_bytes = $receiver_path_status['state'] === 'partial'
                 && $receiver_path_type === 'file'
@@ -598,26 +630,30 @@ final class PushFilesSender
         if ($local_path_type_size_and_ctime['type'] === 'directory') {
             $directory_is_empty = $this->directory_is_empty($local_path_to_push['path']);
             if ($directory_is_empty === null) {
-                return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local directory to push: ' . base64_encode($local_path_to_push['path']) . '.');
+                $this->fail('local_io_error', 'Could not read the local directory to push: ' . base64_encode($local_path_to_push['path']) . '.');
+                return;
             }
             $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
-                $state['phase'] = 'removing';
-                $this->store_state($state);
-                return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
+                $this->start_removing_push_session_after_local_change(
+                    'A local path to push disappeared; remove the upload-only push session before generating another index.'
+                );
+                return;
             }
             if ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
                 $this->close_local_paths_to_push_handle();
-                $state['phase'] = 'removing';
-                $this->store_state($state);
-                return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while its directory was being read; remove the upload-only push session before generating another index.');
+                $this->start_removing_push_session_after_local_change(
+                    'The local path to push changed while its directory was being read; remove the upload-only push session before generating another index.'
+                );
+                return;
             }
             if (!$directory_is_empty) {
                 $this->close_local_paths_to_push_handle();
-                $state['phase'] = 'removing';
-                $this->store_state($state);
-                return $this->step_result('continue', $state, 'local_path_changed', 'A directory selected as empty now contains a local path; remove the upload-only push session before generating another index.');
+                $this->start_removing_push_session_after_local_change(
+                    'A directory selected as empty now contains a local path; remove the upload-only push session before generating another index.'
+                );
+                return;
             }
             $upload_part = [
                 'type' => 'directory',
@@ -630,18 +666,21 @@ final class PushFilesSender
             $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
-                $state['phase'] = 'removing';
-                $this->store_state($state);
-                return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
+                $this->start_removing_push_session_after_local_change(
+                    'A local path to push disappeared; remove the upload-only push session before generating another index.'
+                );
+                return;
             }
             if ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
                 $this->close_local_paths_to_push_handle();
-                $state['phase'] = 'removing';
-                $this->store_state($state);
-                return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while its symlink was being read; remove the upload-only push session before generating another index.');
+                $this->start_removing_push_session_after_local_change(
+                    'The local path to push changed while its symlink was being read; remove the upload-only push session before generating another index.'
+                );
+                return;
             }
             if ($symlink_target === false) {
-                return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local symlink target to push: ' . base64_encode($local_path_to_push['path']) . '.');
+                $this->fail('local_io_error', 'Could not read the local symlink target to push: ' . base64_encode($local_path_to_push['path']) . '.');
+                return;
             }
             $upload_part = [
                 'type' => 'symlink',
@@ -662,14 +701,10 @@ final class PushFilesSender
             if ($maximum_file_payload_bytes === 0) {
                 if ($this->state_before_upload_request !== null && $this->upload_request_has_parts) {
                     $this->upload_request_should_finish = true;
-                    return $this->step_result('continue', $state, null, null);
+                    return;
                 }
-                return $this->step_result(
-                    'failed',
-                    $state,
-                    'request_size_exhausted',
-                    'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.'
-                );
+                $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.');
+                return;
             }
 
             $payload = '';
@@ -704,23 +739,27 @@ final class PushFilesSender
                 if ($local_path_type_size_and_ctime_after_read === null) {
                     $this->close_local_file_handle();
                     $this->close_local_paths_to_push_handle();
-                    $state['phase'] = 'removing';
-                    $this->store_state($state);
-                    return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
+                    $this->start_removing_push_session_after_local_change(
+                        'A local path to push disappeared; remove the upload-only push session before generating another index.'
+                    );
+                    return;
                 }
                 if ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
                     $this->close_local_file_handle();
                     $this->close_local_paths_to_push_handle();
-                    $state['phase'] = 'removing';
-                    $this->store_state($state);
-                    return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while its file chunk was being read; remove the upload-only push session before generating another index.');
+                    $this->start_removing_push_session_after_local_change(
+                        'The local path to push changed while its file chunk was being read; remove the upload-only push session before generating another index.'
+                    );
+                    return;
                 }
                 if ($local_io_failure_detail !== null) {
-                    return $this->step_result('failed', $state, 'local_io_error', $local_io_failure_detail);
+                    $this->fail('local_io_error', $local_io_failure_detail);
+                    return;
                 }
                 if (!is_string($payload) || ( $payload === '' && $file_byte_offset < $local_path_type_size_and_ctime['size'] )) {
                     $this->close_local_file_handle();
-                    return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.');
+                    $this->fail('local_io_error', 'Could not read the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.');
+                    return;
                 }
             }
 
@@ -738,12 +777,8 @@ final class PushFilesSender
             $this->state_before_upload_request = $state;
             if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
                 $this->state_before_upload_request = null;
-                return $this->step_result(
-                    'failed',
-                    $state,
-                    'request_failed',
-                    $this->push_stream_client->get_last_error()
-                );
+                $this->fail('request_failed', $this->push_stream_client->get_last_error());
+                return;
             }
             $this->upload_request_has_parts = false;
         }
@@ -753,18 +788,14 @@ final class PushFilesSender
         if (!$part_sent) {
             if ($this->upload_request_has_parts) {
                 $this->upload_request_should_finish = true;
-                return $this->step_result('continue', $state, null, null);
+                return;
             }
-            $failure_result = $this->finish_upload_request();
-            if ($failure_result !== null) {
-                return $failure_result;
+            $this->finish_upload_request();
+            if ($this->status !== 'continue') {
+                return;
             }
-            return $this->step_result(
-                'failed',
-                $state,
-                'request_size_exhausted',
-                'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.'
-            );
+            $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.');
+            return;
         }
         $this->upload_request_has_parts = true;
         if ($upload_completes_local_path) {
@@ -776,21 +807,18 @@ final class PushFilesSender
             $this->next_file_byte_offset = $receiver_confirmed_bytes + strlen($upload_part['payload']);
         }
         $this->upload_request_should_finish = $this->push_stream_client->should_finish_request();
-        return $this->step_result('continue', $state, null, null);
     }
 
     /**
      * Reads the receiver's deletion cursor and sends at most one list part.
-     *
-     * @return array<string,mixed> Result of one status check or deletion-list part.
      */
-    private function upload_next_chunk_of_deleted_paths(): array
+    private function upload_next_chunk_of_deleted_paths(): void
     {
         /** @var State $state */
         $state =& $this->state;
         if ($this->upload_request_should_finish) {
-            $failure_result = $this->finish_upload_request();
-            return $failure_result ?? $this->step_result('continue', $state, null, null);
+            $this->finish_upload_request();
+            return;
         }
 
         if ($this->state_before_upload_request !== null) {
@@ -799,9 +827,8 @@ final class PushFilesSender
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
                 'push_session_id' => $state['push_session_id'],
             ], ['accepted']);
-            $failure_result = $this->handle_request_failure($request_result);
-            if ($failure_result !== null) {
-                return $failure_result;
+            if ($this->handle_request_failure($request_result)) {
+                return;
             }
             /** @var array{work_deletes_bytes:int,work_deletes_complete:bool} $response */
             $response = $request_result['response'];
@@ -811,7 +838,7 @@ final class PushFilesSender
                 $this->close_fresh_local_index_handle();
                 $state['phase'] = 'committing';
                 $this->store_state($state);
-                return $this->step_result('continue', $state, null, null);
+                return;
             }
             $this->next_delete_list_byte_offset = $work_deletes_bytes;
         }
@@ -820,13 +847,15 @@ final class PushFilesSender
             $local_paths_to_delete_path = PushPlan::local_paths_to_delete_path($this->push_state_directory);
             $this->local_paths_to_delete_handle = fopen($local_paths_to_delete_path, 'rb');
             if (!is_resource($this->local_paths_to_delete_handle)) {
-                return $this->step_result('failed', $state, 'local_io_error', 'Could not open the local deletion list.');
+                $this->fail('local_io_error', 'Could not open the local deletion list.');
+                return;
             }
         }
         if ($this->local_paths_to_delete_byte_offset !== $work_deletes_bytes) {
             if (fseek($this->local_paths_to_delete_handle, $work_deletes_bytes) !== 0) {
                 $this->close_local_paths_to_delete_handle();
-                return $this->step_result('failed', $state, 'local_io_error', 'Could not seek to the receiver-confirmed cursor in the local deletion list.');
+                $this->fail('local_io_error', 'Could not seek to the receiver-confirmed cursor in the local deletion list.');
+                return;
             }
             $this->local_paths_to_delete_byte_offset = $work_deletes_bytes;
         }
@@ -834,24 +863,28 @@ final class PushFilesSender
         if ($maximum_delete_list_payload_bytes === 0) {
             if ($this->state_before_upload_request !== null && $this->upload_request_has_parts) {
                 $this->upload_request_should_finish = true;
-                return $this->step_result('continue', $state, null, null);
+                return;
             }
-            return $this->step_result('failed', $state, 'request_size_exhausted', 'The current request-body budget cannot fit one deletion-list MIME part.');
+            $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one deletion-list MIME part.');
+            return;
         }
         $payload = fread($this->local_paths_to_delete_handle, $maximum_delete_list_payload_bytes);
         if (!is_string($payload) || ( $payload === '' && !feof($this->local_paths_to_delete_handle) )) {
-            return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local deletion list at the receiver-confirmed cursor.');
+            $this->fail('local_io_error', 'Could not read the local deletion list at the receiver-confirmed cursor.');
+            return;
         }
         $this->local_paths_to_delete_byte_offset += strlen($payload);
         if ($payload !== '') {
             $last_path_end = strrpos($payload, "\0");
             if ($last_path_end === false) {
-                return $this->step_result('failed', $state, 'request_size_exhausted', 'The current request-body budget cannot fit one complete local path to delete.');
+                $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one complete local path to delete.');
+                return;
             }
             $payload = substr($payload, 0, $last_path_end + 1);
             if (fseek($this->local_paths_to_delete_handle, $work_deletes_bytes + strlen($payload)) !== 0) {
                 $this->close_local_paths_to_delete_handle();
-                return $this->step_result('failed', $state, 'local_io_error', 'Could not position the local deletion list after the next complete paths.');
+                $this->fail('local_io_error', 'Could not position the local deletion list after the next complete paths.');
+                return;
             }
             $this->local_paths_to_delete_byte_offset = $work_deletes_bytes + strlen($payload);
             $local_paths_to_delete = explode("\0", $payload);
@@ -866,14 +899,16 @@ final class PushFilesSender
                         $local_path_to_delete
                     );
                 } catch (RuntimeException $exception) {
-                    return $this->step_result('failed', $state, 'local_io_error', $exception->getMessage());
+                    $this->fail('local_io_error', $exception->getMessage());
+                    return;
                 }
                 if ($local_path_type_size_and_ctime !== $planned_local_path_type_size_and_ctime) {
                     $this->close_local_paths_to_delete_handle();
                     $this->close_fresh_local_index_handle();
-                    $state['phase'] = 'removing';
-                    $this->store_state($state);
-                    return $this->step_result('continue', $state, 'local_path_changed', 'A local path selected for deletion now exists; remove the upload-only push session before generating another index.');
+                    $this->start_removing_push_session_after_local_change(
+                        'A local path selected for deletion now exists; remove the upload-only push session before generating another index.'
+                    );
+                    return;
                 }
             }
         }
@@ -883,12 +918,8 @@ final class PushFilesSender
             $this->state_before_upload_request = $state;
             if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
                 $this->state_before_upload_request = null;
-                return $this->step_result(
-                    'failed',
-                    $state,
-                    'request_failed',
-                    $this->push_stream_client->get_last_error()
-                );
+                $this->fail('request_failed', $this->push_stream_client->get_last_error());
+                return;
             }
             $this->upload_request_has_parts = false;
         }
@@ -902,42 +933,52 @@ final class PushFilesSender
         if (!$part_sent) {
             if ($this->upload_request_has_parts) {
                 $this->upload_request_should_finish = true;
-                return $this->step_result('continue', $state, null, null);
+                return;
             }
-            $failure_result = $this->finish_upload_request();
-            if ($failure_result !== null) {
-                return $failure_result;
+            $this->finish_upload_request();
+            if ($this->status !== 'continue') {
+                return;
             }
-            return $this->step_result('failed', $state, 'request_size_exhausted', 'The current request-body budget cannot fit one deletion-list MIME part.');
+            $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one deletion-list MIME part.');
+            return;
         }
 
         $this->upload_request_has_parts = true;
         $this->next_delete_list_byte_offset = $work_deletes_bytes + strlen($payload);
         $this->upload_request_should_finish = $this->push_stream_client->should_finish_request();
-        return $this->step_result('continue', $state, null, null);
     }
 
     /**
      * Finishes the retained upload request and publishes its local boundary.
-     *
-     * @return array<string,mixed>|null Failure result, or null after confirmation.
      */
-    private function finish_upload_request(): ?array
+    private function finish_upload_request(): void
     {
         /** @var State $state */
         $state =& $this->state;
         $request_result = $this->push_stream_client->finish_request();
-        $failure_result = $this->handle_request_failure($request_result);
+        $request_failed = $this->handle_request_failure($request_result);
         $this->upload_request_should_finish = false;
         $this->upload_request_has_parts = false;
         $this->next_file_byte_offset = null;
         $this->next_delete_list_byte_offset = null;
-        if ($failure_result === null) {
+        if (!$request_failed) {
             $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
             $this->store_state($state);
         }
         $this->state_before_upload_request = null;
-        return $failure_result;
+    }
+
+    /**
+     * Moves a changed local tree to push-session removal.
+     *
+     * @param string $detail Human-readable description of the local change.
+     */
+    private function start_removing_push_session_after_local_change(string $detail): void
+    {
+        $this->state['phase'] = 'removing';
+        $this->store_state($this->state);
+        $this->reason = 'local_path_changed';
+        $this->detail = $detail;
     }
 
     /**
@@ -990,25 +1031,22 @@ final class PushFilesSender
 
     /**
      * Requests one bounded receiver commit step and publishes a completed plan.
-     *
-     * @return array<string,mixed> Commit continuation or terminal completion.
      */
-    private function commit_push(): array
+    private function commit_push(): void
     {
         /** @var State $state */
         $state =& $this->state;
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_commit', [
             'push_session_id' => $state['push_session_id'],
         ], ['accepted']);
-        $failure_result = $this->handle_request_failure($request_result);
-        if ($failure_result !== null) {
-            return $failure_result;
+        if ($this->handle_request_failure($request_result)) {
+            return;
         }
         /** @var array{send_next_request:bool} $response */
         $response = $request_result['response'];
 
         if ($response['send_next_request']) {
-            return $this->step_result('continue', $state, null, null);
+            return;
         }
 
         // A prior process may have published the plan after the receiver
@@ -1019,37 +1057,27 @@ final class PushFilesSender
             }
             $this->plan->after_successful_push();
         }
-        $push_session_id = $state['push_session_id'];
         $this->delete_state();
-        return [
-            'status' => 'complete',
-            'phase' => 'complete',
-            'push_session_id' => $push_session_id,
-            'reason' => null,
-            'detail' => null,
-        ];
+        $this->status = 'complete';
     }
 
     /**
      * Removes an upload-only push session and discards its local PushPlan.
-     *
-     * @return array<string,mixed> Removal continuation or terminal restart.
      */
-    private function remove_push_session(): array
+    private function remove_push_session(): void
     {
         /** @var State $state */
         $state =& $this->state;
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_remove', [
             'push_session_id' => $state['push_session_id'],
         ], ['accepted']);
-        $failure_result = $this->handle_request_failure($request_result);
-        if ($failure_result !== null) {
-            return $failure_result;
+        if ($this->handle_request_failure($request_result)) {
+            return;
         }
         /** @var array{removed:bool} $response */
         $response = $request_result['response'];
         if (!$response['removed']) {
-            return $this->step_result('continue', $state, null, null);
+            return;
         }
 
         // A repeated remove may follow a process that discarded the plan but
@@ -1060,15 +1088,10 @@ final class PushFilesSender
             }
             $this->plan->discard();
         }
-        $push_session_id = $state['push_session_id'];
         $this->delete_state();
-        return [
-            'status' => 'restart',
-            'phase' => 'complete',
-            'push_session_id' => $push_session_id,
-            'reason' => 'local_path_changed',
-            'detail' => 'The upload-only push session was removed. Generate a new local index before retrying.',
-        ];
+        $this->status = 'restart';
+        $this->reason = 'local_path_changed';
+        $this->detail = 'The upload-only push session was removed. Generate a new local index before retrying.';
     }
 
     /**
@@ -1264,14 +1287,14 @@ final class PushFilesSender
      * Stops the current sender run after a request failure.
      *
      * @param array{status:'complete'|'retry'|'failed',reason:string|null,detail:string|null,response:array<string,mixed>|null,parts_sent:int,body_bytes_sent:int} $request_result Classified request result.
-     * @return array<string,mixed>|null Null when the request completed successfully.
+     * @return bool Whether the request failed.
      */
-    private function handle_request_failure(array $request_result): ?array
+    private function handle_request_failure(array $request_result): bool
     {
         /** @var State $state */
         $state =& $this->state;
         if ($request_result['status'] === 'complete') {
-            return null;
+            return false;
         }
         $durable_state = $this->state_before_upload_request ?? $state;
         $request_sizer_state = $this->push_stream_client->get_request_sizer_state();
@@ -1279,7 +1302,8 @@ final class PushFilesSender
             $durable_state['request_sizer_state'] = $request_sizer_state;
             $this->store_state($durable_state);
         }
-        return $this->step_result('failed', $durable_state, $request_result['reason'], $request_result['detail']);
+        $this->fail($request_result['reason'], $request_result['detail']);
+        return true;
     }
 
     /**
@@ -1311,7 +1335,6 @@ final class PushFilesSender
 
     /**
      * Atomically stores the complete active state.
-     *
      */
     private function store_state(array $state): void
     {
@@ -1373,21 +1396,15 @@ final class PushFilesSender
     }
 
     /**
-     * Builds one workflow result without changing durable state.
+     * Stops the sender after a failed step.
      *
-     * @param 'continue'|'failed' $status Step disposition.
-     * @param string|null $reason Machine-readable classification.
-     * @param string|null $detail Human-readable condition.
-     * @return array{status:'continue'|'failed',phase:string,push_session_id:string,reason:string|null,detail:string|null}
+     * @param string|null $reason Machine-readable failure classification.
+     * @param string|null $detail Human-readable failure explanation.
      */
-    private function step_result(string $status, array $state, ?string $reason, ?string $detail): array
+    private function fail(?string $reason, ?string $detail): void
     {
-        return [
-            'status' => $status,
-            'phase' => $state['phase'],
-            'push_session_id' => $state['push_session_id'],
-            'reason' => $reason,
-            'detail' => $detail,
-        ];
+        $this->status = 'failed';
+        $this->reason = $reason;
+        $this->detail = $detail;
     }
 }

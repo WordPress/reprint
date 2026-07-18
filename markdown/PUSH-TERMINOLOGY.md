@@ -126,7 +126,9 @@ sender reads them from `push_status`; it does not copy them into `sender.json`.
 acquire or release the lock and does not reread `sender.json`. A sender retains
 one multipart request across steps. close() finishes it and stores the confirmed
 local boundary before releasing the lock. In `pushing_paths` or
-`pushing_deletes`, one step sends at most one multipart part.
+`pushing_deletes`, one step sends at most one multipart part. `next_step()`
+returns true while another step may be performed and false when `get_status()`
+reports `complete`, `restart`, or `failed`.
 
 ## PushFilesSender names
 
@@ -144,8 +146,11 @@ Use these names verbatim inside `PushFilesSender`:
 | Upload next file chunk | `upload_next_file_chunk()` |
 | Upload next chunk of deleted paths | `upload_next_chunk_of_deleted_paths()` |
 | Request result | `$request_result` |
-| Failure result | `$failure_result` |
 | Plan result | `$plan_result` |
+| Sender status | `$status`, `get_status()` |
+| Sender phase | `get_phase()` |
+| Sender outcome classification | `$reason`, `get_reason()` |
+| Sender outcome explanation | `$detail`, `get_detail()` |
 | Receiver path status | `$receiver_path_status` |
 | Receiver path type | `$receiver_path_type` |
 | Receiver-confirmed bytes | `$receiver_confirmed_bytes` |

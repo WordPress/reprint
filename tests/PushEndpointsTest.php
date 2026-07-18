@@ -1456,12 +1456,17 @@ final class PushEndpointsTest extends TestCase {
 
         $sender = PushFilesSender::start($options);
         try {
-            $this->assertSame('planning', $sender->next_step()['phase']);
-            $this->assertSame('pushing_paths', $sender->next_step()['phase']);
-            $this->assertSame('pushing_deletes', $sender->next_step()['phase']);
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('planning', $sender->get_phase());
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('pushing_paths', $sender->get_phase());
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('pushing_deletes', $sender->get_phase());
             file_put_contents($local_docroot . '/returned.txt', 'new');
 
-            $result = $sender->next_step();
+            $this->assertTrue($sender->next_step());
+
+            $result = $this->senderResult($sender);
         } finally {
             $sender->close();
         }
@@ -1497,7 +1502,8 @@ final class PushEndpointsTest extends TestCase {
             $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
         );
         try {
-            $create_result = $sender->next_step();
+            $sender->next_step();
+            $create_result = $this->senderResult($sender);
             $this->assertSame('planning', $create_result['phase']);
             $plan = $plan_property->getValue($sender);
             $this->assertInstanceOf(PushPlan::class, $plan);
@@ -1508,13 +1514,17 @@ final class PushEndpointsTest extends TestCase {
             $state_inode = fileinode($state_path);
             $this->assertIsInt($state_inode);
 
-            $first_plan_result = $sender->next_step();
+            $sender->next_step();
+
+            $first_plan_result = $this->senderResult($sender);
             $this->assertSame('planning', $first_plan_result['phase']);
             $this->assertSame($plan, $plan_property->getValue($sender));
             clearstatcache(true, $state_path);
             $this->assertSame($state_inode, fileinode($state_path));
 
-            $second_plan_result = $sender->next_step();
+            $sender->next_step();
+
+            $second_plan_result = $this->senderResult($sender);
             $this->assertSame('planning', $second_plan_result['phase']);
             $this->assertSame($plan, $plan_property->getValue($sender));
             clearstatcache(true, $state_path);
@@ -1562,14 +1572,17 @@ final class PushEndpointsTest extends TestCase {
         $sender = PushFilesSender::start($options);
         try {
             do {
-                $planning_result = $sender->next_step();
+                $sender->next_step();
+                $planning_result = $this->senderResult($sender);
             } while ($planning_result['phase'] === 'planning');
             $this->assertSame('pushing_paths', $planning_result['phase']);
             clearstatcache(true, $push_state_directory . '/sender.json');
             $state_inode_before_upload = fileinode($push_state_directory . '/sender.json');
             $this->assertIsInt($state_inode_before_upload);
 
-            $first_file_chunk = $sender->next_step();
+            $sender->next_step();
+
+            $first_file_chunk = $this->senderResult($sender);
             $this->assertSame('pushing_paths', $first_file_chunk['phase']);
 
             $local_paths_to_push_handle = $local_paths_to_push_handle_property->getValue($sender);
@@ -1584,7 +1597,9 @@ final class PushEndpointsTest extends TestCase {
             $curl_handle = $curl_handle_property->getValue($push_stream_client);
             $this->assertNotNull($curl_handle);
 
-            $second_file_chunk = $sender->next_step();
+            $sender->next_step();
+
+            $second_file_chunk = $this->senderResult($sender);
             $this->assertSame('pushing_paths', $second_file_chunk['phase']);
             $this->assertSame($local_paths_to_push_handle, $local_paths_to_push_handle_property->getValue($sender));
             $this->assertSame($local_file_handle, $local_file_handle_property->getValue($sender));
@@ -1610,14 +1625,17 @@ final class PushEndpointsTest extends TestCase {
             $sender->next_step();
             $sender->next_step();
             $sender->next_step();
-            $first_delete_chunk = $sender->next_step();
+            $sender->next_step();
+            $first_delete_chunk = $this->senderResult($sender);
             $this->assertSame('pushing_deletes', $first_delete_chunk['phase']);
             $local_paths_to_delete_handle = $local_paths_to_delete_handle_property->getValue($sender);
             $this->assertIsResource($local_paths_to_delete_handle);
             $local_paths_to_delete_position = ftell($local_paths_to_delete_handle);
             $this->assertIsInt($local_paths_to_delete_position);
 
-            $second_delete_chunk = $sender->next_step();
+            $sender->next_step();
+
+            $second_delete_chunk = $this->senderResult($sender);
             $this->assertSame('pushing_deletes', $second_delete_chunk['phase']);
             $this->assertSame(
                 $local_paths_to_delete_handle,
@@ -1737,11 +1755,15 @@ final class PushEndpointsTest extends TestCase {
 
         $sender = PushFilesSender::start($options);
         try {
-            $this->assertSame('planning', $sender->next_step()['phase']);
-            $this->assertSame('pushing_paths', $sender->next_step()['phase']);
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('planning', $sender->get_phase());
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('pushing_paths', $sender->get_phase());
             file_put_contents($local_docroot . '/empty/child.txt', 'new');
 
-            $result = $sender->next_step();
+            $sender->next_step();
+
+            $result = $this->senderResult($sender);
         } finally {
             $sender->close();
         }
@@ -1849,8 +1871,10 @@ final class PushEndpointsTest extends TestCase {
         $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
         $sender = PushFilesSender::start($options);
         try {
-            $first = $sender->next_step();
-            $second = $sender->next_step();
+            $sender->next_step();
+            $first = $this->senderResult($sender);
+            $sender->next_step();
+            $second = $this->senderResult($sender);
             $this->assertSame('continue', $first['status']);
             $this->assertSame('continue', $second['status']);
             try {
@@ -1875,7 +1899,8 @@ final class PushEndpointsTest extends TestCase {
 
         $resumed_sender = PushFilesSender::resume($options);
         try {
-            $result_after_resume = $resumed_sender->next_step();
+            $resumed_sender->next_step();
+            $result_after_resume = $this->senderResult($resumed_sender);
             $this->assertSame('continue', $result_after_resume['status']);
             $this->assertSame('pushing_deletes', $result_after_resume['phase']);
         } finally {
@@ -2013,7 +2038,8 @@ final class PushEndpointsTest extends TestCase {
             'response_timeout' => 2,
         ]);
         try {
-            $result = $sender->next_step();
+            $this->assertFalse($sender->next_step());
+            $result = $this->senderResult($sender);
         } finally {
             $sender->close();
         }
@@ -2316,10 +2342,34 @@ final class PushEndpointsTest extends TestCase {
             ? PushFilesSender::resume($options)
             : PushFilesSender::start($options);
         try {
-            return $sender->next_step();
+            $sender->next_step();
+            return $this->senderResult($sender);
         } finally {
             $sender->close();
         }
+    }
+
+    /**
+     * Reads the current sender outcome for focused assertions.
+     *
+     * @return array {
+     *     Current sender outcome.
+     *
+     *     @type string      $status Current status.
+     *     @type string      $phase  Current durable phase.
+     *     @type string|null $reason Current classification, if any.
+     *     @type string|null $detail Current explanation, if any.
+     * }
+     * @phpstan-return array{status:string,phase:string,reason:string|null,detail:string|null}
+     */
+    private function senderResult(PushFilesSender $sender): array
+    {
+        return [
+            'status' => $sender->get_status(),
+            'phase' => $sender->get_phase(),
+            'reason' => $sender->get_reason(),
+            'detail' => $sender->get_detail(),
+        ];
     }
 
     /**
@@ -2342,9 +2392,11 @@ final class PushEndpointsTest extends TestCase {
             : PushFilesSender::start($options);
         try {
             for ($step = 0; $step < 200; ++$step) {
-                $result = $sender->next_step();
+                $has_more_steps = $sender->next_step();
+                $result = $this->senderResult($sender);
                 $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
-                if ($result['status'] !== 'continue') {
+                $this->assertSame($result['status'] === 'continue', $has_more_steps);
+                if (!$has_more_steps) {
                     return $result;
                 }
             }
