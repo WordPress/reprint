@@ -273,16 +273,14 @@ receiver and either advances past complete work or safely replays it.
 
 After positive work, each deletion step reads `work_deletes_bytes` and
 `work_deletes_complete` from `push_status`. Those receiver-owned values are the
-only work-delete cursor. A cursor beyond `local_paths_to_delete` cannot belong
-to this plan, so the sender removes the upload-only session instead of guessing
-a local offset.
+only work-delete cursor; `sender.json` does not duplicate it.
 
 The source token is its current type, size, and ctime. A changed token restarts
 the same in-flight work at offset zero, so new-version bytes are never appended
-behind an old-version prefix. A vanished selected path or impossible receiver
-work-delete cursor moves the sender to `removing`. Repeated bounded remove calls
-delete the remote upload-only session; the sender then discards the PushPlan and
-returns `restart` so the caller can produce a new fresh local index.
+behind an old-version prefix. A vanished selected path moves the sender to
+`removing`. Repeated bounded remove calls delete the remote upload-only session;
+the sender then discards the PushPlan and returns `restart` so the caller can
+produce a new fresh local index.
 
 Repeated `push_commit` calls drive the receiver to `complete`. Only then does
 `after_successful_push()` publish the plan-owned fresh local index as

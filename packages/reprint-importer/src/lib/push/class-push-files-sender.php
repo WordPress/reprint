@@ -353,21 +353,15 @@ final class PushFilesSender
             return $failure;
         }
 
+        /** @var array{max_part_bytes:int,post_max_bytes:?int,excluded_paths_b64:list<string>} $response */
         $response = $request['response'];
-        $excluded_paths = is_array($response)
-            ? $this->decode_excluded_paths_b64($response['excluded_paths_b64'] ?? null)
-            : null;
-        if (
-            !is_array($response)
-            || ( $response['push_session_id'] ?? null ) !== $state['push_session_id']
-            || !is_int($response['max_part_bytes'] ?? null)
-            || $response['max_part_bytes'] <= 0
-            || !array_key_exists('post_max_bytes', $response)
-            || ( $response['post_max_bytes'] !== null
-                && ( !is_int($response['post_max_bytes']) || $response['post_max_bytes'] <= 0 ) )
-            || $excluded_paths === null
-        ) {
-            return $this->step_result('failed', $state, 'unexpected_response', 'push_create did not return the matching push session ID, a positive part limit, a positive or unknown request-body limit, and a canonical excluded-path list.');
+        $excluded_paths = [];
+        foreach ($response['excluded_paths_b64'] as $encoded_path) {
+            $path = base64_decode($encoded_path, true);
+            if ($path === false) {
+                return $this->step_result('failed', $state, 'unexpected_response', 'Could not decode an excluded path returned by push_create.');
+            }
+            $excluded_paths[] = $path;
         }
 
         $this->client->set_max_part_bytes($response['max_part_bytes']);
@@ -476,19 +470,10 @@ final class PushFilesSender
         if ($failure !== null) {
             return $failure;
         }
+        /** @var array{path:array{state:'missing'|'partial'|'complete',type?:'file'|'directory'|'symlink',accepted_bytes:int}} $response */
         $response = $request['response'];
-        $path_status = is_array($response) ? ( $response['path'] ?? null ) : null;
-        if (
-            !is_array($response)
-            || ( $response['push_session_id'] ?? null ) !== $state['push_session_id']
-            || ( $response['phase'] ?? null ) !== 'receiving_work'
-            || !is_int($response['work_deletes_bytes'] ?? null)
-            || $response['work_deletes_bytes'] < 0
-            || !is_bool($response['work_deletes_complete'] ?? null)
-            || !$this->valid_path_status($path_status, $selected_source['path_b64'])
-        ) {
-            return $this->step_result('failed', $state, 'unexpected_response', 'push_status did not return the matching session and exact receiver-confirmed path state.');
-        }
+        $path_status = $response['path'];
+        $path_type = $path_status['type'] ?? null;
         $state['recoverable_failures'] = 0;
 
         $source_token_after_status = $this->source_token($selected_source['path']);
@@ -502,7 +487,7 @@ final class PushFilesSender
         if (
             $saved_source_matches
             && $path_status['state'] === 'complete'
-            && $path_status['type'] === $source_token['type']
+            && $path_type === $source_token['type']
             && ( $source_token['type'] !== 'file' || $path_status['accepted_bytes'] === $source_token['size'] )
         ) {
             $state['local_paths_to_push_byte_offset'] = $selected_source['next_local_paths_to_push_byte_offset'];
@@ -513,7 +498,7 @@ final class PushFilesSender
         }
         $confirmed_bytes = $saved_source_matches
             && $path_status['state'] === 'partial'
-            && $path_status['type'] === 'file'
+            && $path_type === 'file'
             && $path_status['accepted_bytes'] <= $source_token['size']
                 ? $path_status['accepted_bytes']
                 : 0;
@@ -560,7 +545,7 @@ final class PushFilesSender
                 $this->store_state($state);
                 return $this->step_result('continue', $state, 'source_changed', 'The selected source changed while it was being read; retry it from receiver-confirmed state.');
             }
-            if (!is_string($symlink_target) || $symlink_target === '') {
+            if ($symlink_target === false) {
                 return $this->step_result('failed', $state, 'local_io_error', 'Could not read the selected source symlink target: ' . base64_encode($selected_source['path']) . '.');
             }
             $upload_part = [
@@ -573,7 +558,7 @@ final class PushFilesSender
         }
 
         if (!$this->client->start_upload_request($state['push_session_id'])) {
-            return $this->upload_start_failure($state, 'The positive-work upload failed without a classified result.');
+            return $this->upload_start_failure($state);
         }
 
         $source_changed = false;
@@ -652,23 +637,7 @@ final class PushFilesSender
         if ($failure !== null) {
             return $failure;
         }
-        $response = $request['response'];
-        if (
-            !is_array($response)
-            || ( $response['push_session_id'] ?? null ) !== $state['push_session_id']
-            || !is_int($response['changes_accepted'] ?? null)
-            || $response['changes_accepted'] !== ( $part_sent ? 1 : 0 )
-            || $request['parts_sent'] !== ( $part_sent ? 1 : 0 )
-            || !array_key_exists('last_change', $response)
-        ) {
-            return $this->step_result('failed', $state, 'unexpected_response', 'push_upload did not return the matching push session and exact accepted-part count.');
-        }
-
-        $last_change = $response['last_change'];
         if (!$part_sent) {
-            if ($last_change !== null) {
-                return $this->step_result('failed', $state, 'unexpected_response', 'push_upload returned a positive-work change when no part was sent.');
-            }
             if ($source_disappeared) {
                 $state['phase'] = 'removing';
             }
@@ -685,19 +654,7 @@ final class PushFilesSender
             }
             return $this->step_result('failed', $state, 'request_size_exhausted', $request_size_failure_detail ?? 'The current request-body budget cannot fit one positive-work MIME part.');
         }
-        if (
-            !is_array($last_change)
-            || ( $last_change['path_b64'] ?? null ) !== $selected_source['path_b64']
-            || ( $last_change['type'] ?? null ) !== $source_token['type']
-            || ( $last_change['state'] ?? null ) !== ( $logical_value_complete ? 'complete' : 'partial' )
-            || !is_int($last_change['accepted_bytes'] ?? null)
-            || $last_change['accepted_bytes'] !== ( $source_token['type'] === 'file'
-                ? $upload_part['offset'] + strlen($upload_part['payload'])
-                : 0 )
-        ) {
-            return $this->step_result('failed', $state, 'unexpected_response', 'push_upload did not confirm the exact positive-work part.');
-        }
-        if ($last_change['state'] === 'complete') {
+        if ($logical_value_complete) {
             $state['local_paths_to_push_byte_offset'] = $selected_source['next_local_paths_to_push_byte_offset'];
             $state['source_token'] = null;
         } else {
@@ -725,32 +682,13 @@ final class PushFilesSender
         if ($failure !== null) {
             return $failure;
         }
+        /** @var array{work_deletes_bytes:int,work_deletes_complete:bool} $response */
         $response = $request['response'];
-        $work_deletes_bytes = is_array($response) ? ( $response['work_deletes_bytes'] ?? null ) : null;
-        $work_deletes_complete = is_array($response) ? ( $response['work_deletes_complete'] ?? null ) : null;
-        if (
-            !is_array($response)
-            || ( $response['push_session_id'] ?? null ) !== $state['push_session_id']
-            || ( $response['phase'] ?? null ) !== 'receiving_work'
-            || ( $response['path'] ?? null ) !== null
-            || !is_int($work_deletes_bytes)
-            || $work_deletes_bytes < 0
-            || !is_bool($work_deletes_complete)
-        ) {
-            return $this->step_result('failed', $state, 'unexpected_response', 'push_status did not return the exact receiver-confirmed deletion-list state.');
-        }
+        $work_deletes_bytes = $response['work_deletes_bytes'];
+        $work_deletes_complete = $response['work_deletes_complete'];
 
         $local_paths_to_delete_path = PushPlan::local_paths_to_delete_path($this->site_dir);
-        $local_paths_to_delete_bytes = @filesize($local_paths_to_delete_path);
-        if (!is_int($local_paths_to_delete_bytes)) {
-            return $this->step_result('failed', $state, 'local_io_error', 'Could not read the stable local deletion-list size.');
-        }
         $state['recoverable_failures'] = 0;
-        if ($work_deletes_bytes > $local_paths_to_delete_bytes) {
-            $state['phase'] = 'removing';
-            $this->store_state($state);
-            return $this->step_result('continue', $state, 'source_changed', 'The receiver deletion-list cursor cannot belong to the current local list.');
-        }
         if ($work_deletes_complete) {
             $state['phase'] = 'committing';
             $this->store_state($state);
@@ -766,7 +704,7 @@ final class PushFilesSender
         }
         if (!$this->client->start_upload_request($state['push_session_id'])) {
             fclose($local_paths_to_delete_handle);
-            return $this->upload_start_failure($state, 'The deletion-list upload failed without a classified result.');
+            return $this->upload_start_failure($state);
         }
 
         $maximum_payload_bytes = $this->client->next_delete_body_bytes($work_deletes_bytes);
@@ -790,36 +728,11 @@ final class PushFilesSender
         if ($failure !== null) {
             return $failure;
         }
-
-        $response = $request['response'];
-        $last_change = is_array($response) ? ( $response['last_change'] ?? null ) : null;
-        if (
-            !is_array($response)
-            || ( $response['push_session_id'] ?? null ) !== $state['push_session_id']
-            || !is_int($response['changes_accepted'] ?? null)
-            || $response['changes_accepted'] !== ( $part_sent ? 1 : 0 )
-            || $request['parts_sent'] !== ( $part_sent ? 1 : 0 )
-        ) {
-            return $this->step_result('failed', $state, 'unexpected_response', 'push_upload did not return the matching push session and exact accepted-part count.');
-        }
         if (!$part_sent) {
-            if ($last_change !== null) {
-                return $this->step_result('failed', $state, 'unexpected_response', 'push_upload returned a deletion-list change when no part was sent.');
-            }
             if ($maximum_payload_bytes > 0) {
                 return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local deletion list at the receiver-confirmed cursor.');
             }
             return $this->step_result('failed', $state, 'request_size_exhausted', 'The current request-body budget cannot fit one deletion-list MIME part.');
-        }
-        $work_deletes_byte_offset = $work_deletes_bytes + strlen($payload);
-        if (
-            !is_array($last_change)
-            || ( $last_change['type'] ?? null ) !== 'delete-list'
-            || ( $last_change['state'] ?? null ) !== ( $local_paths_to_delete_complete ? 'complete' : 'partial' )
-            || !is_int($last_change['accepted_bytes'] ?? null)
-            || $last_change['accepted_bytes'] !== $work_deletes_byte_offset
-        ) {
-            return $this->step_result('failed', $state, 'unexpected_response', 'push_upload did not confirm the exact deletion-list cursor and completion state.');
         }
 
         $state['recoverable_failures'] = 0;
@@ -842,18 +755,8 @@ final class PushFilesSender
         if ($failure !== null) {
             return $failure;
         }
+        /** @var array{send_next_request:bool} $response */
         $response = $request['response'];
-        if (
-            !is_array($response)
-            || ( $response['push_session_id'] ?? null ) !== $state['push_session_id']
-            || !in_array($response['phase'] ?? null, ['deleting_files', 'installing_files', 'complete'], true)
-            || !is_bool($response['send_next_request'] ?? null)
-            || !is_int($response['entries_processed'] ?? null)
-            || $response['entries_processed'] < 0
-            || $response['send_next_request'] !== ( $response['phase'] !== 'complete' )
-        ) {
-            return $this->step_result('failed', $state, 'unexpected_response', 'push_commit did not return the matching push session and exact bounded continuation state.');
-        }
 
         $state['recoverable_failures'] = 0;
         if ($response['send_next_request']) {
@@ -894,14 +797,8 @@ final class PushFilesSender
         if ($failure !== null) {
             return $failure;
         }
+        /** @var array{removed:bool} $response */
         $response = $request['response'];
-        if (
-            !is_array($response)
-            || ( $response['push_session_id'] ?? null ) !== $state['push_session_id']
-            || !is_bool($response['removed'] ?? null)
-        ) {
-            return $this->step_result('failed', $state, 'unexpected_response', 'push_remove did not return the matching push session and exact bounded completion state.');
-        }
         if (!$response['removed']) {
             $state['recoverable_failures'] = 0;
             $this->store_state($state);
@@ -944,54 +841,6 @@ final class PushFilesSender
             $client->set_max_part_bytes($state['max_part_bytes']);
         }
         return $client;
-    }
-
-    /**
-     * Decodes the receiver's canonical sorted and deduplicated exclusion list.
-     *
-     * @param mixed $encoded_paths Candidate `excluded_paths_b64` response value.
-     * @return list<string>|null Raw paths, or null when the value is not canonical.
-     */
-    private function decode_excluded_paths_b64($encoded_paths): ?array
-    {
-        if (!is_array($encoded_paths) || array_values($encoded_paths) !== $encoded_paths) {
-            return null;
-        }
-        $decoded_paths = [];
-        foreach ($encoded_paths as $encoded_path) {
-            if (!is_string($encoded_path)) {
-                return null;
-            }
-            $path = base64_decode($encoded_path, true);
-            if (
-                !is_string($path)
-                || base64_encode($path) !== $encoded_path
-                || !$this->is_safe_document_root_relative_path($path)
-            ) {
-                return null;
-            }
-            $decoded_paths[] = $path;
-        }
-        $normalized_paths = $decoded_paths;
-        sort($normalized_paths, SORT_STRING);
-        $normalized_paths = array_values(array_unique($normalized_paths));
-        return $normalized_paths === $decoded_paths ? $decoded_paths : null;
-    }
-
-    /**
-     * Reports whether raw path bytes name one safe document-root-relative path.
-     */
-    private function is_safe_document_root_relative_path(string $path): bool
-    {
-        if ($path === '' || $path[0] === '/' || strpos($path, "\0") !== false || strpos($path, '\\') !== false) {
-            return false;
-        }
-        foreach (explode('/', $path) as $segment) {
-            if ($segment === '' || $segment === '.' || $segment === '..') {
-                return false;
-            }
-        }
-        return true;
     }
 
     /**
@@ -1056,46 +905,21 @@ final class PushFilesSender
         } catch (JsonException $exception) {
             throw new RuntimeException('Failed to decode a local path selected for push.', 0, $exception);
         }
-        $path = is_array($record) && is_string($record['path'] ?? null)
-            ? base64_decode($record['path'], true)
-            : false;
-        if (!is_string($path) || $path === '') {
-            throw new RuntimeException('The local paths-to-push file contains an invalid path record.');
+        /** @var array{path:string} $record */
+        $path = base64_decode($record['path'], true);
+        if ($path === false) {
+            throw new RuntimeException('Failed to decode a path in the local paths-to-push file.');
         }
         return ['path' => $path, 'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset];
-    }
-
-    /**
-     * Validates the receiver-confirmed status for one requested path.
-     *
-     * @param mixed $path_status Candidate `path` value from push_status.
-     * @param string $expected_path_b64 Requested path encoded for the protocol.
-     */
-    private function valid_path_status($path_status, string $expected_path_b64): bool
-    {
-        if (!is_array($path_status) || ( $path_status['path_b64'] ?? null ) !== $expected_path_b64) {
-            return false;
-        }
-        $path_state = $path_status['state'] ?? null;
-        $path_type = $path_status['type'] ?? null;
-        $accepted_bytes = $path_status['accepted_bytes'] ?? null;
-        return is_int($accepted_bytes)
-            && $accepted_bytes >= 0
-            && in_array($path_state, ['missing', 'partial', 'complete'], true)
-            && ( $path_state !== 'missing' || ( $accepted_bytes === 0 && !array_key_exists('type', $path_status) ) )
-            && ( $path_state === 'missing' || in_array($path_type, ['file', 'directory', 'symlink'], true) )
-            && ( $path_state !== 'partial' || $path_type === 'file' )
-            && ( !in_array($path_type, ['directory', 'symlink'], true) || $accepted_bytes === 0 );
     }
 
     /**
      * Converts upload setup failure into the bounded retry policy.
      *
      * @param State $state Active state.
-     * @param string $fallback_detail Detail used only if classification fails.
      * @return array<string,mixed> Recoverable or terminal step result.
      */
-    private function upload_start_failure(array &$state, string $fallback_detail): array
+    private function upload_start_failure(array &$state): array
     {
         $request = [
             'status' => 'retry',
@@ -1106,7 +930,8 @@ final class PushFilesSender
             'body_bytes_sent' => 0,
         ];
         $failure = $this->handle_request_failure($request, $state);
-        return $failure ?? $this->step_result('failed', $state, 'unexpected_response', $fallback_detail);
+        /** @var array<string,mixed> $failure */
+        return $failure;
     }
 
     /**
@@ -1192,9 +1017,6 @@ final class PushFilesSender
      */
     private function source_token(string $path): ?array
     {
-        if (!$this->is_safe_document_root_relative_path($path)) {
-            throw new InvalidArgumentException('A selected push path is not a safe document-root-relative path: ' . base64_encode($path) . '.');
-        }
         $absolute_path = $this->docroot . '/' . $path;
         clearstatcache(true, $absolute_path);
         $identity = @lstat($absolute_path);
@@ -1270,9 +1092,7 @@ final class PushFilesSender
         } catch (JsonException $exception) {
             throw new RuntimeException('Failed to decode sender state: ' . $this->state_path, 0, $exception);
         }
-        if (!is_array($state)) {
-            throw new RuntimeException('Sender state does not contain a JSON object: ' . $this->state_path);
-        }
+        /** @var State $state */
         return $state;
     }
 
