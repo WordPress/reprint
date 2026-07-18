@@ -671,6 +671,37 @@ class MultipartPushStreamClient
     }
 
     /**
+     * Abandons the open upload request without sending its closing boundary.
+     *
+     * Parts already consumed by libcurl may have reached the target. The caller
+     * must therefore continue from target-confirmed cursors rather than treating
+     * any part from this request as accepted. The reusable connection context
+     * remains available for later requests.
+     */
+    public function cancel_request(): void
+    {
+        if ($this->curl_handle === null) {
+            return;
+        }
+        if ($this->multi_handle !== null) {
+            curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
+        }
+        curl_close($this->curl_handle);
+        $this->curl_handle = null;
+        $this->outbound_prefix = '';
+        $this->outbound_payload = '';
+        $this->outbound_suffix = '';
+        $this->outbound_payload_offset = 0;
+        $this->body_complete = false;
+        $this->curl_requested_body = false;
+        $this->transfer_finished = false;
+        $this->transfer_error = null;
+        $this->outbound_consumed_bytes = 0;
+        $this->body_bytes_sent = 0;
+        $this->parts_sent = 0;
+    }
+
+    /**
      * Sends one signed push request and decodes its JSON response.
      *
      * Push requests use a no-progress timeout rather than a total-transfer
@@ -867,13 +898,7 @@ class MultipartPushStreamClient
      */
     public function close(): void
     {
-        if ($this->curl_handle !== null) {
-            if ($this->multi_handle !== null) {
-                curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
-            }
-            curl_close($this->curl_handle);
-            $this->curl_handle = null;
-        }
+        $this->cancel_request();
         if ($this->multi_handle !== null) {
             curl_multi_close($this->multi_handle);
             $this->multi_handle = null;

@@ -1775,6 +1775,89 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * Cancels an open request before changing the durable phase to removal.
+     */
+    public function testHighLevelSenderCancelsAnOpenRequestBeforeRemovingAChangedLocalPath(): void
+    {
+        $local_docroot = $this->root . '/cancel-before-remove-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/first.txt', 'a');
+        file_put_contents($local_docroot . '/second.txt', 'b');
+        $fresh_local_index_path = $this->root . '/cancel-before-remove-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'first.txt' => $this->indexEntry($local_docroot . '/first.txt', 'file'),
+            'second.txt' => $this->indexEntry($local_docroot . '/second.txt', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/cancel-before-remove-state';
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $push_stream_client_property = new ReflectionProperty(PushFilesSender::class, 'push_stream_client');
+        $curl_handle_property = new ReflectionProperty(MultipartPushStreamClient::class, 'curl_handle');
+
+        $sender = PushFilesSender::start($options);
+        try {
+            do {
+                $sender->next_step();
+            } while ($sender->get_phase() === 'planning');
+            $this->assertSame('pushing_paths', $sender->get_phase());
+
+            $sender->next_step();
+            $push_stream_client = $push_stream_client_property->getValue($sender);
+            $this->assertNotNull($curl_handle_property->getValue($push_stream_client));
+
+            file_put_contents($local_docroot . '/second.txt', 'changed');
+            clearstatcache(true, $local_docroot . '/second.txt');
+            $sender->next_step();
+
+            $this->assertSame('removing', $sender->get_phase());
+            $this->assertSame('local_path_changed', $sender->get_reason());
+            $this->assertNull($curl_handle_property->getValue($push_stream_client));
+            $this->assertFalse($sender->next_step());
+            $this->assertSame('restart', $sender->get_status());
+        } finally {
+            $sender->close();
+        }
+    }
+
+    /**
+     * Continues from the durable boundary after the caller cancels an open request.
+     */
+    public function testHighLevelSenderContinuesAfterCancellingAnOpenRequest(): void
+    {
+        $local_docroot = $this->root . '/cancel-and-continue-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $contents = str_repeat('a', 130);
+        file_put_contents($local_docroot . '/file.bin', $contents);
+        $fresh_local_index_path = $this->root . '/cancel-and-continue-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'file.bin' => $this->indexEntry($local_docroot . '/file.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/cancel-and-continue-state';
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $sender = PushFilesSender::start($options);
+        try {
+            do {
+                $sender->next_step();
+            } while ($sender->get_phase() === 'planning');
+            $sender->next_step();
+
+            $state_before_cancel = $this->loadActiveState($push_state_directory);
+            $this->assertIsArray($state_before_cancel);
+            $this->assertSame(0, $state_before_cancel['local_paths_to_push_byte_offset']);
+            $sender->cancel();
+            $this->assertSame('continue', $sender->get_status());
+            $this->assertSame('pushing_paths', $sender->get_phase());
+        } finally {
+            $sender->close();
+        }
+
+        $result = $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $this->assertSame('complete', $result['status']);
+        $this->assertSame($contents, file_get_contents($this->docroot . '/file.bin'));
+    }
+
+    /**
      * Removes a push session when a local path to push disappears.
      */
     public function testHighLevelSenderRemovesSessionWhenLocalPathToPushDisappears(): void

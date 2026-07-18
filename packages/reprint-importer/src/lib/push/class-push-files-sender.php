@@ -36,11 +36,15 @@
  *         }
  *         $status = $sender->get_status();
  *     } finally {
+ *         if ($sender->get_status() === 'continue') {
+ *             $sender->cancel();
+ *         }
  *         $sender->close();
  *     }
  *
- * The caller may close whenever next_step() returns true. close() finishes an
- * open multipart request, stores its confirmed local boundary, and releases
+ * The caller may cancel whenever next_step() returns true. cancel() abandons an
+ * open multipart request and returns the in-memory sender to its preceding
+ * durable boundary. close() otherwise finishes the request before releasing
  * the lock. If a process stops without closing, the next process starts from
  * the preceding durable boundary and reads receiver-confirmed work before
  * sending more data.
@@ -419,6 +423,34 @@ final class PushFilesSender
     public function get_detail(): ?string
     {
         return $this->detail;
+    }
+
+    /**
+     * Cancels the open multipart request and returns to its preceding boundary.
+     *
+     * The target may have received complete parts before the connection closed,
+     * so a later step asks for target-confirmed cursors before sending them again.
+     * No request is opened or finished by this method.
+     */
+    public function cancel(): void
+    {
+        if ($this->state_before_upload_request === null) {
+            return;
+        }
+        $this->push_stream_client->cancel_request();
+        $this->state = $this->state_before_upload_request;
+        $this->state_before_upload_request = null;
+        $this->upload_request_should_finish = false;
+        $this->upload_request_has_parts = false;
+        $this->next_file_byte_offset = null;
+        $this->next_delete_list_byte_offset = null;
+        $this->local_delete_list_complete = false;
+        $this->local_path_to_push = null;
+        $this->local_path_to_delete = null;
+        $this->close_local_file_handle();
+        $this->close_local_paths_to_push_handle();
+        $this->close_local_paths_to_delete_handle();
+        $this->close_fresh_local_index_handle();
     }
 
     /**
@@ -1015,6 +1047,7 @@ final class PushFilesSender
      */
     private function start_removing_push_session_after_local_change(string $detail): void
     {
+        $this->cancel();
         $this->state['phase'] = 'removing';
         $this->store_state($this->state);
         $this->reason = 'local_path_changed';
