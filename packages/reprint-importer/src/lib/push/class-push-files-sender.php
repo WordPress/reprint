@@ -115,9 +115,6 @@ final class PushFilesSender
     /** @var State|null Active state, or null after terminal completion. */
     private ?array $state = null;
 
-    /** @var bool Whether close() has released the lock. */
-    private bool $closed = false;
-
     /** @var MultipartPushStreamClient Reusable connection and request-sizing context. */
     private MultipartPushStreamClient $push_stream_client;
 
@@ -295,7 +292,7 @@ final class PushFilesSender
      */
     public function next_step(): array
     {
-        if ($this->closed) {
+        if (!is_resource($this->lock_handle)) {
             throw new LogicException('Cannot call next_step() after close().');
         }
         if ($this->state === null) {
@@ -347,7 +344,6 @@ final class PushFilesSender
             $this->release_lock($this->lock_handle);
         }
         $this->lock_handle = null;
-        $this->closed = true;
     }
 
     /**
