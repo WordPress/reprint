@@ -137,9 +137,6 @@ final class PushFilesSender
     /** @var MultipartPushStreamClient Reusable connection and request-sizing context. */
     private MultipartPushStreamClient $push_stream_client;
 
-    /** @var bool Whether a multipart upload request is open across sender steps. */
-    private bool $upload_request_open = false;
-
     /** @var bool Whether the open upload request must finish before another part. */
     private bool $upload_request_should_finish = false;
 
@@ -376,7 +373,7 @@ final class PushFilesSender
     public function close(): void
     {
         $close_failure = null;
-        if ($this->upload_request_open && $this->state !== null) {
+        if ($this->state_before_upload_request !== null && $this->state !== null) {
             try {
                 $failure_result = $this->finish_upload_request($this->state);
                 if ($failure_result !== null) {
@@ -522,7 +519,7 @@ final class PushFilesSender
         }
         $local_path_to_push = $this->local_path_to_push;
         if ($local_path_to_push === null) {
-            if ($this->upload_request_open) {
+            if ($this->state_before_upload_request !== null) {
                 $failure_result = $this->finish_upload_request($state);
                 return $failure_result ?? $this->step_result('continue', $state, null, null);
             }
@@ -557,7 +554,7 @@ final class PushFilesSender
             return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push changed after planning; remove the upload-only push session before generating another index.');
         }
 
-        if ($this->upload_request_open) {
+        if ($this->state_before_upload_request !== null) {
             $receiver_confirmed_bytes = $this->next_file_byte_offset ?? 0;
         } else {
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
@@ -660,7 +657,7 @@ final class PushFilesSender
                 $file_byte_offset
             );
             if ($maximum_file_payload_bytes === 0) {
-                if ($this->upload_request_open && $this->upload_request_has_parts) {
+                if ($this->state_before_upload_request !== null && $this->upload_request_has_parts) {
                     $this->upload_request_should_finish = true;
                     return $this->step_result('continue', $state, null, null);
                 }
@@ -734,7 +731,7 @@ final class PushFilesSender
             $upload_completes_local_path = $file_byte_offset + strlen($payload) === $local_path_type_size_and_ctime['size'];
         }
 
-        if (!$this->upload_request_open) {
+        if ($this->state_before_upload_request === null) {
             $this->state_before_upload_request = $state;
             if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
                 $this->state_before_upload_request = null;
@@ -745,7 +742,6 @@ final class PushFilesSender
                     $this->push_stream_client->get_last_error()
                 );
             }
-            $this->upload_request_open = true;
             $this->upload_request_has_parts = false;
         }
 
@@ -793,7 +789,7 @@ final class PushFilesSender
             return $failure_result ?? $this->step_result('continue', $state, null, null);
         }
 
-        if ($this->upload_request_open) {
+        if ($this->state_before_upload_request !== null) {
             $work_deletes_bytes = $this->next_delete_list_byte_offset ?? 0;
         } else {
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
@@ -832,7 +828,7 @@ final class PushFilesSender
         }
         $maximum_delete_list_payload_bytes = $this->push_stream_client->next_delete_body_bytes($work_deletes_bytes);
         if ($maximum_delete_list_payload_bytes === 0) {
-            if ($this->upload_request_open && $this->upload_request_has_parts) {
+            if ($this->state_before_upload_request !== null && $this->upload_request_has_parts) {
                 $this->upload_request_should_finish = true;
                 return $this->step_result('continue', $state, null, null);
             }
@@ -879,7 +875,7 @@ final class PushFilesSender
         }
         $local_delete_list_complete = $payload === '';
 
-        if (!$this->upload_request_open) {
+        if ($this->state_before_upload_request === null) {
             $this->state_before_upload_request = $state;
             if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
                 $this->state_before_upload_request = null;
@@ -890,7 +886,6 @@ final class PushFilesSender
                     $this->push_stream_client->get_last_error()
                 );
             }
-            $this->upload_request_open = true;
             $this->upload_request_has_parts = false;
         }
 
@@ -928,7 +923,6 @@ final class PushFilesSender
     {
         $request_result = $this->push_stream_client->finish_request();
         $failure_result = $this->handle_request_failure($request_result, $state);
-        $this->upload_request_open = false;
         $this->upload_request_should_finish = false;
         $this->upload_request_has_parts = false;
         $this->next_file_byte_offset = null;
