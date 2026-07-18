@@ -295,6 +295,13 @@ class MultipartPushStreamClient
             CURLOPT_HTTPHEADER => $header_lines,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
+            CURLOPT_HEADERFUNCTION => function ($curl_handle, string $header): int {
+                if ($this->response_header_exceeds_limit($header)) {
+                    $this->response_too_large = true;
+                    return 0;
+                }
+                return strlen($header);
+            },
             CURLOPT_WRITEFUNCTION => function ($curl_handle, string $bytes): int {
                 if (strlen($this->response_body) + strlen($bytes) > self::MAX_RESPONSE_BYTES) {
                     $this->response_too_large = true;
@@ -798,6 +805,13 @@ class MultipartPushStreamClient
             CURLOPT_HTTPHEADER => $lines,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
+            CURLOPT_HEADERFUNCTION => function ($handle, string $header) use (&$response_too_large): int {
+                if ($this->response_header_exceeds_limit($header)) {
+                    $response_too_large = true;
+                    return 0;
+                }
+                return strlen($header);
+            },
             CURLOPT_WRITEFUNCTION => function ($handle, string $bytes) use (&$response_body, &$response_too_large): int {
                 if (strlen($response_body) + strlen($bytes) > self::MAX_RESPONSE_BYTES) {
                     $response_too_large = true;
@@ -954,6 +968,20 @@ class MultipartPushStreamClient
             curl_multi_close($this->multi_handle);
             $this->multi_handle = null;
         }
+    }
+
+    /**
+     * Reports whether a Content-Length header declares an oversized response.
+     *
+     * The body callback remains the limit for responses without a declared
+     * length. Rejecting a declared oversized response here avoids receiving
+     * bytes which cannot be retained.
+     */
+    private function response_header_exceeds_limit(string $header): bool
+    {
+        $matches = [];
+        return preg_match('/^Content-Length:\s*([0-9]+)\s*$/i', trim($header), $matches) === 1
+            && (float) $matches[1] > self::MAX_RESPONSE_BYTES;
     }
 
     /**
