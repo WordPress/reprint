@@ -438,19 +438,26 @@ final class PushFilesSender
             return $this->step_result('failed', $state, 'local_io_error', 'Could not open the local paths selected for push.');
         }
 
-        $local_paths_to_push_byte_offset = $state['local_paths_to_push_byte_offset'];
         try {
-            $selected_source = $this->next_selected_source(
+            $selected_path = $this->read_selected_path(
                 $local_paths_to_push_handle,
-                $local_paths_to_push_byte_offset
+                $state['local_paths_to_push_byte_offset']
             );
+            $selected_source = $selected_path === null
+                ? null
+                : [
+                    'path' => $selected_path['path'],
+                    'path_b64' => base64_encode($selected_path['path']),
+                    'local_paths_to_push_byte_offset' => $state['local_paths_to_push_byte_offset'],
+                    'next_local_paths_to_push_byte_offset' => $selected_path['next_local_paths_to_push_byte_offset'],
+                    'source_token' => $this->source_token($selected_path['path']),
+                ];
         } catch (RuntimeException $exception) {
             fclose($local_paths_to_push_handle);
             return $this->step_result('failed', $state, 'local_io_error', $exception->getMessage());
         }
         fclose($local_paths_to_push_handle);
         if ($selected_source === null) {
-            $state['local_paths_to_push_byte_offset'] = $local_paths_to_push_byte_offset;
             $state['source_token'] = null;
             $state['phase'] = 'pushing_deletes';
             $this->store_state($state);
@@ -841,40 +848,6 @@ final class PushFilesSender
             $client->set_max_part_bytes($state['max_part_bytes']);
         }
         return $client;
-    }
-
-    /**
-     * Finds the next selected source that still represents sendable work.
-     *
-     * A directory selected as empty may have gained children after the index
-     * was written. Its descendants belong to a later plan, so this skips the
-     * directory instead of sending an empty-directory operation which could
-     * remove them. A null source token is returned rather than skipped because
-     * a vanished selected path requires the remote session to be removed.
-     *
-     * @param resource $local_paths_to_push_handle Open local_paths_to_push file.
-     * @param int $local_paths_to_push_byte_offset Byte offset updated past skipped directories.
-     * @return SelectedSource|null Selected source, or null at the end of the path list.
-     */
-    private function next_selected_source(
-        $local_paths_to_push_handle,
-        int &$local_paths_to_push_byte_offset
-    ): ?array
-    {
-        $selected_path = $this->read_selected_path(
-            $local_paths_to_push_handle,
-            $local_paths_to_push_byte_offset
-        );
-        if ($selected_path === null) {
-            return null;
-        }
-        return [
-            'path' => $selected_path['path'],
-            'path_b64' => base64_encode($selected_path['path']),
-            'local_paths_to_push_byte_offset' => $local_paths_to_push_byte_offset,
-            'next_local_paths_to_push_byte_offset' => $selected_path['next_local_paths_to_push_byte_offset'],
-            'source_token' => $this->source_token($selected_path['path']),
-        ];
     }
 
     /**
