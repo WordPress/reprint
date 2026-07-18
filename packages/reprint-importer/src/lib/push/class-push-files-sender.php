@@ -88,7 +88,8 @@
  * ## Streaming and durability
  *
  * Each local-path upload or deletion step sends at most one multipart part and
- * holds at most one bounded payload string. A deletion part contains one path.
+ * holds at most one bounded payload string. A deletion part contains one path,
+ * except for the empty part which marks the deletion list complete.
  * Multipart bytes leave for the network before `send_part()` returns. One
  * request carries successive parts until its request-body budget is spent or
  * the current path phase ends. An open sender retains that request, its
@@ -424,9 +425,12 @@ final class PushFilesSender
     }
 
     /**
-     * Returns the current durable sender phase.
+     * Returns the sender phase retained in memory.
      *
-     * @return string Current phase.
+     * After terminal cleanup removes sender.json, this remains the last phase
+     * performed by the open sender.
+     *
+     * @return string Current phase, or the last phase after terminal cleanup.
      */
     public function get_phase(): string
     {

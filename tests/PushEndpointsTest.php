@@ -2695,7 +2695,7 @@ final class PushEndpointsTest extends TestCase {
      *     Current sender outcome.
      *
      *     @type string      $status Current status.
-     *     @type string      $phase  Current durable phase.
+     *     @type string      $phase  Current or last sender phase.
      *     @type string|null $reason Current classification, if any.
      *     @type string|null $detail Current explanation, if any.
      * }
