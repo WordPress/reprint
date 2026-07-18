@@ -155,24 +155,41 @@ class PushPlan
      */
     public static function resume(string $push_state_directory): self
     {
-        $plan = new self($push_state_directory);
-        $cursor = $plan->load_cursor();
-        if ($cursor === null) {
-            throw new LogicException("Cannot resume a push plan without an unfinished plan: {$plan->cursor_file}");
-        }
+        $plan = self::load_retained($push_state_directory);
         if (!is_file($plan->fresh_local_index)) {
             throw new RuntimeException("Cannot resume the push plan, the retained fresh local index is missing: {$plan->fresh_local_index}");
         }
 
-        $plan->cursor = $cursor;
-        foreach ($cursor["excluded_paths_b64"] as $excluded_path_b64) {
+        foreach ($plan->cursor["excluded_paths_b64"] as $excluded_path_b64) {
             $excluded_path = base64_decode($excluded_path_b64, true);
             if ($excluded_path === false) {
                 throw new RuntimeException("The push plan cursor contains an invalid excluded path: {$plan->cursor_file}");
             }
             $plan->excluded_paths[] = $excluded_path;
         }
+        $plan->closed = false;
         $plan->open_plan_files();
+        return $plan;
+    }
+
+    /**
+     * Loads a retained plan without opening files used only while planning.
+     *
+     * The returned plan is closed. It can publish a successful push or be
+     * discarded without opening and immediately closing all planning handles.
+     *
+     * @param string $push_state_directory Local push state directory containing the retained plan.
+     * @return self Closed plan loaded from its durable cursor.
+     */
+    public static function load_retained(string $push_state_directory): self
+    {
+        $plan = new self($push_state_directory);
+        $cursor = $plan->load_cursor();
+        if ($cursor === null) {
+            throw new LogicException("Cannot load a push plan without a retained plan: {$plan->cursor_file}");
+        }
+        $plan->cursor = $cursor;
+        $plan->closed = true;
         return $plan;
     }
 

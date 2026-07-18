@@ -866,9 +866,8 @@ final class PushFilesSender
         // completed but stopped before it removed sender.json.
         if (PushPlan::has_plan($this->push_state_directory)) {
             if (!isset($this->plan)) {
-                $this->plan = PushPlan::resume($this->push_state_directory);
+                $this->plan = PushPlan::load_retained($this->push_state_directory);
             }
-            $this->plan->close();
             $this->plan->after_successful_push();
         }
         $push_session_id = $state['push_session_id'];
@@ -908,9 +907,8 @@ final class PushFilesSender
         // stopped before it removed sender.json.
         if (PushPlan::has_plan($this->push_state_directory)) {
             if (!isset($this->plan)) {
-                $this->plan = PushPlan::resume($this->push_state_directory);
+                $this->plan = PushPlan::load_retained($this->push_state_directory);
             }
-            $this->plan->close();
             $this->plan->discard();
         }
         $push_session_id = $state['push_session_id'];

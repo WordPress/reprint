@@ -607,6 +607,30 @@ final class PushPlanTest extends TestCase
         $this->assertCount(2001, $this->indexEntries($this->planPath('fresh_local_index.jsonl')));
     }
 
+    public function testLoadRetainedLeavesPlanningFilesClosed(): void
+    {
+        $freshLocalIndex = $this->writeIndex(['value.txt' => [1, 5, 'file']]);
+        $plan = $this->startPlan($freshLocalIndex);
+        $this->planToCompletion($plan);
+
+        $loaded = PushPlan::load_retained($this->planDirectory());
+        foreach ([
+            'fresh_local_index_handle',
+            'local_index_at_previous_push_handle',
+            'local_paths_to_push_handle',
+            'local_paths_to_delete_handle',
+        ] as $property_name) {
+            $property = new ReflectionProperty(PushPlan::class, $property_name);
+            $this->assertNull($property->getValue($loaded));
+        }
+
+        $loaded->after_successful_push();
+        $this->assertSame(
+            file_get_contents($freshLocalIndex),
+            file_get_contents($this->planPath('local_index_at_previous_push.jsonl'))
+        );
+    }
+
     public function testSavedOffsetsAndCompletedEofAreIdempotentAfterRestart(): void
     {
         $current = $this->writeIndex($this->manyFileEntries(1001));
