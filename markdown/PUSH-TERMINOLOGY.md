@@ -137,6 +137,9 @@ Use these names verbatim inside `PushFilesSender`:
 | Meaning | Name |
 | --- | --- |
 | Local path to push | `LocalPathToPush`, `$local_path_to_push`, `read_local_path_to_push()` |
+| Local path to delete | `LocalPathToDelete`, `$local_path_to_delete`, `read_local_path_to_delete()` |
+| Fresh local index deletion check | `next_planned_local_path_check()` |
+| Fresh local index byte offset | `$fresh_local_index_byte_offset` |
 | Push stream client | `$push_stream_client`, `create_push_stream_client()` |
 | Push stream client options | `$push_stream_client_options` |
 | Request sizer options | `request_sizer_options`, `$request_sizer_options` |

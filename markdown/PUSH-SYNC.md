@@ -268,8 +268,9 @@ begins until both indexes have been consumed and the two path lists are stable.
 
 `sender.json` contains no second planning checkpoint and no copied receiver
 cursor. It records only the push session and phase, the next byte offset in
-`local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
-sizing state. Its phases are `creating`, `planning`,
+`local_paths_to_push.jsonl`, the fresh-local-index offset used while checking
+deletion paths, the receiver part limit, and learned request-body sizing state.
+Its phases are `creating`, `planning`,
 `pushing_paths`, `pushing_deletes`, `committing`, and `removing`.
 
 Each local path to push carries the type, size, and ctime from the index used to
@@ -283,8 +284,11 @@ work or safely replays it.
 After all local paths are pushed, each deletion step reads
 `work_deletes_bytes` and `work_deletes_complete` from `push_status`. Those
 receiver-owned values are the only work-delete cursor; `sender.json` does not
-duplicate it. Each uploaded deletion-list part ends after a complete local path,
-and every path in that part must remain absent or match its planned replacement.
+duplicate it. Each uploaded deletion-list part contains one complete local path.
+Before sending it, each sender step checks at most one fresh local index entry;
+the durable fresh-local-index offset lets a later process continue that check.
+The live path must match its planned type, size, and ctime, including planned
+absence.
 
 A changed type, size, or ctime, a vanished path, or a directory that is no
 longer empty moves the sender to `removing`. Repeated bounded remove calls
@@ -300,11 +304,12 @@ index; exclusions suppress remote work rather than creating a second retained
 index representation.
 
 Each local-path upload or deletion step sends at most one multipart part. A file
-or deletion-list part contains one bounded chunk; a directory or symlink part
-contains one complete value. The sender retains one multipart request across
-successive steps until its body budget is spent or the caller closes the
-sender. close() finishes that request and stores the confirmed local boundary.
-The sender derives Content-Length from the bytes actually read and never reads
+part contains one bounded chunk, a deletion-list part contains one complete
+path, and a directory or symlink part contains one complete value. The sender
+retains one multipart request across successive steps until its body budget is
+spent or the caller closes the sender. close() finishes that request and stores
+the confirmed local boundary. The sender derives Content-Length from the bytes
+actually read and never reads
 another local path to push until the current one is complete. Receiver
 contention, offset gaps, and transport failures end the current sender run. The
 caller may run the push command again; it resumes from the last durable local
