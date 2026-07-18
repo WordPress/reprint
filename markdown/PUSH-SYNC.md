@@ -99,11 +99,13 @@ read a line, decode its JSON, or decode its base64 path. This keeps schema
 ownership with the indexer instead of partially validating the same index entry in
 the push plan.
 
-A push plan has one lifecycle:
+A push plan is an internal part of the sender lifecycle:
 
-1. `PushPlan::start()` copies the fresh local index into the local push state
-   directory and writes a cursor containing the excluded paths.
-2. Each `next_step()` merges one path until it reports `complete`. It
+1. The sender stores at most 100 target exclusions once in
+   `excluded_paths.json`. `PushPlan::start()` reads that file, copies the fresh
+   local index into the local push state directory, and writes its cursor.
+2. Each `next_step()` merges one path. It returns true while another planning
+   step remains and false when both indexes reach EOF. It
    writes files, symlinks, and empty directories with their planned type, size,
    and ctime to
    `local_paths_to_push.jsonl`, and writes raw NUL-delimited paths to
@@ -115,7 +117,8 @@ A push plan has one lifecycle:
 Each step flushes both path lists before atomically publishing the cursor with
 the two index offsets, two output byte offsets, path counts, and active
 deleted-directory ranges. A later process calls `PushPlan::resume()` with only
-the local push state directory. Resume uses the retained index and exclusions, discards
+the local push state directory. Resume uses the retained index and
+`excluded_paths.json`, discards
 bytes beyond the durable output offsets, and continues from the durable index
 offsets.
 
@@ -232,6 +235,7 @@ An active push keeps these files under `<state-dir>/push/<site>/`:
 
 ```text
 fresh_local_index.jsonl             plan-owned fresh local index
+excluded_paths.json                 target exclusions for the active push
 local_index_at_previous_push.jsonl  index published after the previous commit
 local_paths_to_push.jsonl           local paths to push
 local_paths_to_delete               raw NUL-delimited local paths to delete

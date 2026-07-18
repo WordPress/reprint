@@ -227,7 +227,15 @@ function normalize_excluded_paths(array $excluded_paths): array
         $normalized_excluded_paths[] = $path;
     }
     sort($normalized_excluded_paths, SORT_STRING);
-    return array_values(array_unique($normalized_excluded_paths));
+    $normalized_excluded_paths = array_values(array_unique($normalized_excluded_paths));
+    if (count($normalized_excluded_paths) > 100) {
+        throw new InvalidArgumentException(
+            'Push supports at most 100 excluded paths; received '
+            . count($normalized_excluded_paths)
+            . ' after normalization.'
+        );
+    }
+    return $normalized_excluded_paths;
 }
 // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 

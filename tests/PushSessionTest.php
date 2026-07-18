@@ -46,6 +46,22 @@ final class PushSessionTest extends TestCase {
         $this->assertArrayNotHasKey('version', $push_metadata);
     }
 
+    public function testPushSessionRejectsMoreThanOneHundredExcludedPaths(): void {
+        $excluded_paths = [];
+        for ($index = 0; $index < 101; ++$index) {
+            $excluded_paths[] = 'excluded-' . $index;
+        }
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('at most 100 excluded paths; received 101');
+        Site_Export_Push_Session::create(
+            $this->reprint_directory,
+            $this->docroot,
+            $excluded_paths,
+            '11111111111111111111111111111110'
+        );
+    }
+
     public function testInFlightFileProgressComesFromTheDataFileAndOffsetZeroRestartsIt(): void {
         $push_session = $this->push_session('11111111111111111111111111111111');
         $this->push_parts($push_session, [[

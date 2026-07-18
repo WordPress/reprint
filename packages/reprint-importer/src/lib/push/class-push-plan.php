@@ -51,7 +51,7 @@
  * ranges needed to suppress redundant descendant deletions. It never loads an
  * index or path list in full.
  *
- * @phpstan-type PushPlanCursor array{byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int,local_paths_to_delete_count:int,seen_deleted_directories:list<string>,excluded_paths_b64:list<string>}
+ * @phpstan-type PushPlanCursor array{byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int,local_paths_to_delete_count:int,seen_deleted_directories:list<string>}
  */
 class PushPlan
 {
@@ -69,6 +69,9 @@ class PushPlan
 
     /** @var string Path to the durable PushPlan cursor. */
     private string $cursor_file;
+
+    /** @var string Sender-owned excluded paths retained for the active push. */
+    private string $excluded_paths_file;
 
     /** @var list<string> Receiver-owned paths that the plan must not push or delete. */
     private array $excluded_paths = [];
@@ -112,13 +115,11 @@ class PushPlan
      *
      * @param string       $push_state_directory   Local push state directory.
      * @param string       $fresh_local_index_path Path to the path-sorted fresh local index.
-     * @param list<string> $excluded_paths         Receiver-owned paths that the plan must not push or delete.
      * @return self Open plan positioned at the initial cursor.
      */
     public static function start(
         string $push_state_directory,
-        string $fresh_local_index_path,
-        array $excluded_paths = []
+        string $fresh_local_index_path
     ): self {
         $plan = new self($push_state_directory);
         if (is_file($plan->cursor_file)) {
@@ -129,7 +130,7 @@ class PushPlan
         }
 
         $plan->atomic_copy($fresh_local_index_path, $plan->fresh_local_index);
-        $plan->excluded_paths = $excluded_paths;
+        $plan->excluded_paths = $plan->load_excluded_paths();
         $plan->cursor = [
             "byte_offset_in_fresh_index" => 0,
             "byte_offset_in_previous_index" => 0,
@@ -138,7 +139,6 @@ class PushPlan
             "local_paths_to_push_count" => 0,
             "local_paths_to_delete_count" => 0,
             "seen_deleted_directories" => [],
-            "excluded_paths_b64" => array_map("base64_encode", $excluded_paths),
         ];
         $plan->save_cursor($plan->cursor);
         $plan->open_plan_files();
@@ -162,13 +162,7 @@ class PushPlan
             throw new RuntimeException("Cannot resume the push plan, the retained fresh local index is missing: {$plan->fresh_local_index}");
         }
 
-        foreach ($plan->cursor["excluded_paths_b64"] as $excluded_path_b64) {
-            $excluded_path = base64_decode($excluded_path_b64, true);
-            if ($excluded_path === false) {
-                throw new RuntimeException("The push plan cursor contains an invalid excluded path: {$plan->cursor_file}");
-            }
-            $plan->excluded_paths[] = $excluded_path;
-        }
+        $plan->excluded_paths = $plan->load_excluded_paths();
         $plan->closed = false;
         $plan->complete = false;
         $plan->open_plan_files();
@@ -246,6 +240,7 @@ class PushPlan
         $this->local_paths_to_delete = self::local_paths_to_delete_path($push_state_directory);
         $this->fresh_local_index = $push_state_directory . "/fresh_local_index.jsonl";
         $this->cursor_file = $push_state_directory . "/cursor.json";
+        $this->excluded_paths_file = $push_state_directory . "/excluded_paths.json";
     }
 
     /**
@@ -536,7 +531,6 @@ class PushPlan
             "local_paths_to_push_count" => $local_paths_to_push_count,
             "local_paths_to_delete_count" => $local_paths_to_delete_count,
             "seen_deleted_directories" => $seen_deleted_directories,
-            "excluded_paths_b64" => $this->cursor["excluded_paths_b64"],
         ];
         $this->save_cursor($cursor_after_step);
         $this->cursor = $cursor_after_step;
@@ -749,6 +743,34 @@ class PushPlan
     }
 
     /**
+     * Loads the sender-owned exclusions used throughout one planning run.
+     *
+     * @return list<string> Decoded document-root-relative excluded paths.
+     */
+    private function load_excluded_paths(): array
+    {
+        $contents = file_get_contents($this->excluded_paths_file);
+        if (!is_string($contents)) {
+            throw new RuntimeException("Failed to read excluded paths: {$this->excluded_paths_file}");
+        }
+        try {
+            $excluded_paths_b64 = json_decode($contents, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new RuntimeException("Failed to decode excluded paths: {$this->excluded_paths_file}", 0, $exception);
+        }
+        /** @var list<string> $excluded_paths_b64 */
+        $excluded_paths = [];
+        foreach ($excluded_paths_b64 as $excluded_path_b64) {
+            $excluded_path = base64_decode($excluded_path_b64, true);
+            if ($excluded_path === false) {
+                throw new RuntimeException("Failed to decode an excluded path: {$this->excluded_paths_file}");
+            }
+            $excluded_paths[] = $excluded_path;
+        }
+        return $excluded_paths;
+    }
+
+    /**
      * Reads and decodes the next local index entry.
      *
      * A null handle represents the missing local index at the previous push.
@@ -814,7 +836,6 @@ class PushPlan
      *     @type int      $local_paths_to_push_count                 Number of local paths to push written so far.
      *     @type int      $local_paths_to_delete_count               Number of local paths to delete written so far.
      *     @type string[] $seen_deleted_directories                  Decoded deleted-directory paths with active ranges.
-     *     @type string[] $excluded_paths_b64                        Base64-encoded receiver-owned paths.
      * }
      * @phpstan-return PushPlanCursor|null
      */
@@ -867,7 +888,6 @@ class PushPlan
      *     @type int      $local_paths_to_push_count                 Number of local paths to push written so far.
      *     @type int      $local_paths_to_delete_count               Number of local paths to delete written so far.
      *     @type string[] $seen_deleted_directories                  Decoded deleted-directory paths with active ranges.
-     *     @type string[] $excluded_paths_b64                        Base64-encoded receiver-owned paths.
      * }
      * @phpstan-param PushPlanCursor $cursor
      */

@@ -580,7 +580,6 @@ final class PushPlanTest extends TestCase
             'local_paths_to_push_count',
             'local_paths_to_delete_count',
             'seen_deleted_directories',
-            'excluded_paths_b64',
         ], array_keys($cursor));
         $this->assertSame(
             filesize($this->planPath('local_paths_to_push.jsonl')),
@@ -769,7 +768,17 @@ final class PushPlanTest extends TestCase
                 file_put_contents($freshLocalIndexPath, '');
             }
         }
-        return PushPlan::start($this->planDirectory(), $freshLocalIndexPath, $excludedPaths);
+        if (!is_dir($this->planDirectory())) {
+            mkdir($this->planDirectory(), 0755, true);
+        }
+        file_put_contents(
+            $this->planPath('excluded_paths.json'),
+            json_encode(
+                array_map('base64_encode', $excludedPaths),
+                JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+            )
+        );
+        return PushPlan::start($this->planDirectory(), $freshLocalIndexPath);
     }
 
     private function resumePlan(): PushPlan

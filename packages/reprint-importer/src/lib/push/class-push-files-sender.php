@@ -105,6 +105,9 @@ final class PushFilesSender
     /** @var string Advisory lock file for one open lifecycle. */
     private string $lock_path;
 
+    /** @var string Target exclusions stored once for the active push. */
+    private string $excluded_paths_path;
+
     /** @var resource|null Exclusive lock held from start() or resume() through close(). */
     private $lock_handle = null;
 
@@ -335,6 +338,7 @@ final class PushFilesSender
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->state_path = $this->push_state_directory . '/sender.json';
         $this->lock_path = $this->push_state_directory . '/sender.lock';
+        $this->excluded_paths_path = $this->push_state_directory . '/excluded_paths.json';
         $this->request_sizer_options = $request_sizer_options;
         $this->push_stream_client_options = $push_stream_client_options;
     }
@@ -505,15 +509,21 @@ final class PushFilesSender
 
         /** @var array{max_part_bytes:int,post_max_bytes:?int,excluded_paths_b64:list<string>} $response */
         $response = $request_result['response'];
-        $excluded_paths = [];
+        if (count($response['excluded_paths_b64']) > 100) {
+            $this->fail(
+                'unexpected_response',
+                'push_create returned ' . count($response['excluded_paths_b64']) . ' excluded paths; the maximum is 100.'
+            );
+            return;
+        }
         foreach ($response['excluded_paths_b64'] as $encoded_path) {
             $path = base64_decode($encoded_path, true);
             if ($path === false) {
                 $this->fail('unexpected_response', 'Could not decode an excluded path returned by push_create.');
                 return;
             }
-            $excluded_paths[] = $path;
         }
+        $this->store_excluded_paths($response['excluded_paths_b64']);
 
         $this->push_stream_client->set_max_part_bytes($response['max_part_bytes']);
         $this->push_stream_client->apply_reported_limits([$response['post_max_bytes']]);
@@ -531,8 +541,7 @@ final class PushFilesSender
         } else {
             $this->plan = PushPlan::start(
                 $this->push_state_directory,
-                $this->fresh_local_index_path,
-                $excluded_paths
+                $this->fresh_local_index_path
             );
         }
 
@@ -1481,6 +1490,27 @@ final class PushFilesSender
         }
         if (!rename($temporary_path, $this->state_path)) {
             throw new RuntimeException('Failed to move active state into place: ' . $this->state_path);
+        }
+    }
+
+    /**
+     * Atomically stores the target exclusions for the active push.
+     *
+     * @param list<string> $excluded_paths_b64 Base64-encoded excluded paths.
+     */
+    private function store_excluded_paths(array $excluded_paths_b64): void
+    {
+        try {
+            $json = json_encode($excluded_paths_b64, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new RuntimeException('Failed to encode excluded paths.', 0, $exception);
+        }
+        $temporary_path = $this->excluded_paths_path . '.tmp';
+        if (file_put_contents($temporary_path, $json) !== strlen($json)) {
+            throw new RuntimeException('Failed to write excluded paths: ' . $temporary_path);
+        }
+        if (!rename($temporary_path, $this->excluded_paths_path)) {
+            throw new RuntimeException('Failed to move excluded paths into place: ' . $this->excluded_paths_path);
         }
     }
 

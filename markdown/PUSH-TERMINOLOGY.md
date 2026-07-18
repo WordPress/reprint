@@ -97,14 +97,17 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
 | Local push state directory | `push_state_directory`, `$push_state_directory` |
 | PushPlan cursor | `cursor.json`, `$cursor_file` |
+| Excluded paths | `excluded_paths.json`, `$excluded_paths_path` |
 | Active state | `sender.json`, `$state_path` |
 | Lifecycle lock file | `sender.lock`, `$lock_path` |
 | Open lifecycle lock | `$lock_handle` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
-`cursor.json` owns planning offsets, output offsets and counts, active deleted
-directory ranges, and `excluded_paths_b64`. `sender.json` does not repeat them.
+`cursor.json` owns planning offsets, output offsets and counts, and active
+deleted-directory ranges. `excluded_paths.json` stores the target exclusions
+once for the active push, with a maximum of 100 paths. `sender.json` does not
+repeat either value.
 Its phases are `creating`, `planning`, `pushing_paths`, `pushing_deletes`,
 `committing`, and `removing`. It records the push session ID, selected path-list
 cursor, receiver part limit, and request-sizing state.

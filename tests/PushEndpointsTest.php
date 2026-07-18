@@ -2036,6 +2036,13 @@ final class PushEndpointsTest extends TestCase {
         $result = $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory);
 
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $stored_excluded_paths = json_decode(
+            (string) file_get_contents($push_state_directory . '/excluded_paths.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertContains(base64_encode('preserved'), $stored_excluded_paths);
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
         $this->assertSame('public-change', file_get_contents($this->docroot . '/public.txt'));
         $this->assertSame(
