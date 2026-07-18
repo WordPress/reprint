@@ -124,8 +124,10 @@ When a local path to push changes, or a local path to delete reappears, the
 sender reports `local_path_changed` and moves to `removing`. After removal it
 requests a new fresh local index.
 
-Receiver-confirmed file and work-delete cursors remain receiver state. The
-sender reads them from `push_status`; it does not copy them into `sender.json`.
+Receiver-confirmed file and work-delete cursors remain receiver state. A newly
+opened sender reads them from `push_status`, while a successful upload retains
+them in memory for later steps in the same lifecycle. It does not copy them into
+`sender.json`.
 `push.json` remains the receiver-owned push identity and policy, while
 `commit.json` and `$commit_state` remain the receiver commit checkpoint.
 

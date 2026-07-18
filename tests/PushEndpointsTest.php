@@ -1400,6 +1400,74 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * Continues a partial file from the successful upload response without another status request.
+     */
+    public function testHighLevelSenderRetainsReceiverConfirmedFileOffsetWhileOpen(): void
+    {
+        $local_docroot = $this->root . '/retained-file-offset-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/large.bin', str_repeat('A', 6000));
+        $fresh_local_index_path = $this->root . '/retained-file-offset-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'large.bin' => $this->indexEntry($local_docroot . '/large.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/retained-file-offset-state';
+        $sender = PushFilesSender::start(
+            $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+        );
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+            $finished_requests = $this->countEndpointRequests('push_upload');
+            for ($step = 0; $step < 100; ++$step) {
+                $this->assertTrue($sender->next_step(), (string) json_encode($this->senderResult($sender)));
+                if ($this->countEndpointRequests('push_upload') > $finished_requests) {
+                    break;
+                }
+            }
+            $this->assertGreaterThan($finished_requests, $this->countEndpointRequests('push_upload'));
+            $this->assertSame(1, $this->countEndpointRequests('push_status'));
+
+            $this->assertTrue($sender->next_step());
+
+            $this->assertSame(1, $this->countEndpointRequests('push_status'));
+        } finally {
+            $sender->cancel();
+            $sender->close();
+        }
+    }
+
+    /**
+     * Continues deleted paths and their completion from successful upload responses.
+     */
+    public function testHighLevelSenderRetainsReceiverConfirmedDeletedPathsWhileOpen(): void
+    {
+        $local_docroot = $this->root . '/retained-deleted-paths-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/retained-deleted-paths-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, []);
+        $previous_local_index_path = $this->root . '/retained-deleted-paths-previous-index.jsonl';
+        $previous_entries = [];
+        for ($index = 0; $index < 60; ++$index) {
+            $previous_entries[sprintf('delete-%02d.txt', $index)] = [1, 1, 'file'];
+        }
+        $this->writeIndex($previous_local_index_path, $previous_entries);
+        $push_state_directory = $this->root . '/retained-deleted-paths-state';
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+        $sender = PushFilesSender::start(
+            $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+        );
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_deletes');
+            $this->takeSenderStepsUntilPhase($sender, 'committing');
+
+            $this->assertGreaterThan(1, $this->countEndpointRequests('push_upload'));
+            $this->assertSame(1, $this->countEndpointRequests('push_status'));
+        } finally {
+            $sender->close();
+        }
+    }
+
+    /**
      * Sends one local path to delete and returns before reading the next one.
      */
     public function testHighLevelSenderSendsOneDeletionListPartPerStep(): void
@@ -1888,9 +1956,13 @@ final class PushEndpointsTest extends TestCase {
             $state_before_cancel = $this->loadActiveState($push_state_directory);
             $this->assertIsArray($state_before_cancel);
             $this->assertSame(0, $state_before_cancel['local_paths_to_push_byte_offset']);
+            $this->assertSame(1, $this->countEndpointRequests('push_status'));
             $sender->cancel();
             $this->assertSame('continue', $sender->get_status());
             $this->assertSame('pushing_paths', $sender->get_phase());
+            $this->assertTrue($sender->next_step());
+            $this->assertSame(2, $this->countEndpointRequests('push_status'));
+            $sender->cancel();
         } finally {
             $sender->close();
         }
@@ -2578,6 +2650,7 @@ final class PushEndpointsTest extends TestCase {
             'REPRINT_PUSH_TEST_DOCROOT_CONFIG' => $this->docroot_configuration_path,
             'REPRINT_PUSH_TEST_DIRECTORY_CONFIG' => $this->reprint_configuration_path,
             'REPRINT_PUSH_TEST_EXCLUDED_PATHS_CONFIG' => $this->excluded_paths_configuration_path,
+            'REPRINT_PUSH_TEST_REQUEST_LOG' => $this->root . '/request.log',
         ]);
         $server_log_path = $this->root . '/server-' . $post_max_bytes . '-' . bin2hex(random_bytes(4)) . '.log';
         $descriptors = [
@@ -2714,6 +2787,26 @@ final class PushEndpointsTest extends TestCase {
         $this->fail(
             "The sender reached {$sender->get_phase()} instead of the requested {$phase} phase."
         );
+    }
+
+    /**
+     * Counts completed requests for one endpoint in the local server log.
+     */
+    private function countEndpointRequests(string $endpoint): int
+    {
+        $request_log_path = $this->root . '/request.log';
+        if (!is_file($request_log_path)) {
+            return 0;
+        }
+        $request_endpoints = file($request_log_path, FILE_IGNORE_NEW_LINES);
+        $this->assertIsArray($request_endpoints);
+        $request_count = 0;
+        foreach ($request_endpoints as $request_endpoint) {
+            if ($request_endpoint === $endpoint) {
+                ++$request_count;
+            }
+        }
+        return $request_count;
     }
 
     /**

@@ -74,12 +74,13 @@
  * upload-only push session, because its work and the planned local index no
  * longer describe the same local tree.
  *
- * The deletion cursor is never copied into active state. Each step reads it
- * from `push_status` and sends complete planned paths only while they remain
- * absent or match the replacement in the fresh local index. If a selected path
- * changes, the sender removes the upload-only push session, discards the plan,
- * and changes the sender status to `restart` so the caller can produce a new
- * local index.
+ * Receiver-confirmed file and deletion-list positions are never copied into
+ * active state. A newly opened sender reads them from `push_status`; a
+ * successful upload keeps them in memory for later steps in the same lifecycle.
+ * The sender sends complete planned deletion paths only while they remain absent
+ * or match the replacement in the fresh local index. If a selected path changes,
+ * the sender removes the upload-only push session, discards the plan, and changes
+ * the sender status to `restart` so the caller can produce a new local index.
  *
  * ## Streaming and durability
  *
@@ -208,6 +209,15 @@ final class PushFilesSender
 
     /** @var int|null Next deletion-list byte offset within the open upload request. */
     private ?int $next_delete_list_byte_offset = null;
+
+    /** @var int|null Local file byte offset confirmed by the receiver during this lifecycle. */
+    private ?int $receiver_confirmed_file_byte_offset = null;
+
+    /** @var int|null Deleted-paths byte offset confirmed by the receiver during this lifecycle. */
+    private ?int $receiver_confirmed_deleted_paths_byte_offset = null;
+
+    /** @var bool|null Whether the receiver confirmed the complete deleted-paths list during this lifecycle. */
+    private ?bool $receiver_confirmed_deleted_paths_complete = null;
 
     /** @var array<string,mixed> Options used to construct the PushRequestSizer. */
     private array $request_sizer_options;
@@ -495,6 +505,9 @@ final class PushFilesSender
         $this->upload_request_has_parts = false;
         $this->next_file_byte_offset = null;
         $this->next_delete_list_byte_offset = null;
+        $this->receiver_confirmed_file_byte_offset = null;
+        $this->receiver_confirmed_deleted_paths_byte_offset = null;
+        $this->receiver_confirmed_deleted_paths_complete = null;
         $this->local_delete_list_complete = false;
         $this->local_path_to_push = null;
         $this->local_path_to_delete = null;
@@ -699,6 +712,7 @@ final class PushFilesSender
             }
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
+            $this->receiver_confirmed_file_byte_offset = null;
             $this->state['phase'] = 'pushing_deletes';
             $this->store_state($this->state);
             return;
@@ -733,6 +747,8 @@ final class PushFilesSender
 
         if ($this->state_before_upload_request !== null) {
             $receiver_confirmed_bytes = $this->next_file_byte_offset ?? 0;
+        } elseif ($this->receiver_confirmed_file_byte_offset !== null) {
+            $receiver_confirmed_bytes = $this->receiver_confirmed_file_byte_offset;
         } else {
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
                 'push_session_id' => $this->state['push_session_id'],
@@ -762,8 +778,9 @@ final class PushFilesSender
                 && $receiver_path_status['accepted_bytes'] <= $local_path_type_size_and_ctime['size']
                     ? $receiver_path_status['accepted_bytes']
                     : 0;
-            $this->next_file_byte_offset = $receiver_confirmed_bytes;
+            $this->receiver_confirmed_file_byte_offset = $receiver_confirmed_bytes;
         }
+        $this->next_file_byte_offset = $receiver_confirmed_bytes;
 
         $upload_part = null;
         $upload_completes_local_path = false;
@@ -964,18 +981,24 @@ final class PushFilesSender
             if ($this->state_before_upload_request !== null) {
                 $delete_list_byte_offset = $this->next_delete_list_byte_offset ?? 0;
             } else {
-                $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
-                    'push_session_id' => $this->state['push_session_id'],
-                ], ['accepted']);
-                if ($this->handle_request_failure($request_result)) {
-                    return;
+                if ($this->receiver_confirmed_deleted_paths_byte_offset === null) {
+                    $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
+                        'push_session_id' => $this->state['push_session_id'],
+                    ], ['accepted']);
+                    if ($this->handle_request_failure($request_result)) {
+                        return;
+                    }
+                    /** @var array{work_deletes_bytes:int,work_deletes_complete:bool} $response */
+                    $response = $request_result['response'];
+                    $this->receiver_confirmed_deleted_paths_byte_offset = $response['work_deletes_bytes'];
+                    $this->receiver_confirmed_deleted_paths_complete = $response['work_deletes_complete'];
                 }
-                /** @var array{work_deletes_bytes:int,work_deletes_complete:bool} $response */
-                $response = $request_result['response'];
-                $delete_list_byte_offset = $response['work_deletes_bytes'];
-                if ($response['work_deletes_complete']) {
+                $delete_list_byte_offset = $this->receiver_confirmed_deleted_paths_byte_offset;
+                if ($this->receiver_confirmed_deleted_paths_complete) {
                     $this->close_local_paths_to_delete_handle();
                     $this->close_fresh_local_index_handle();
+                    $this->receiver_confirmed_deleted_paths_byte_offset = null;
+                    $this->receiver_confirmed_deleted_paths_complete = null;
                     $this->state['phase'] = 'committing';
                     $this->store_state($this->state);
                     return;
@@ -1123,8 +1146,20 @@ final class PushFilesSender
      */
     private function finish_upload_request(): void
     {
+        $request_phase = $this->state_before_upload_request['phase'];
+        $request_had_parts = $this->upload_request_has_parts;
         $request_result = $this->push_stream_client->finish_request();
         $request_failed = $this->handle_request_failure($request_result);
+        if ($request_failed) {
+            $this->receiver_confirmed_file_byte_offset = null;
+            $this->receiver_confirmed_deleted_paths_byte_offset = null;
+            $this->receiver_confirmed_deleted_paths_complete = null;
+        } elseif ($request_had_parts && $request_phase === 'pushing_paths') {
+            $this->receiver_confirmed_file_byte_offset = $this->next_file_byte_offset ?? 0;
+        } elseif ($request_had_parts && $request_phase === 'pushing_deletes') {
+            $this->receiver_confirmed_deleted_paths_byte_offset = $this->next_delete_list_byte_offset ?? 0;
+            $this->receiver_confirmed_deleted_paths_complete = $this->local_delete_list_complete;
+        }
         $this->upload_request_should_finish = false;
         $this->upload_request_has_parts = false;
         $this->next_file_byte_offset = null;

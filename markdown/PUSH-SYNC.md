@@ -302,15 +302,18 @@ lengths. A completed cursor remains until commit and local publication finish,
 or until `discarding_plan` follows confirmed target removal.
 
 Each local path to push carries the type, size, and ctime from the index used to
-plan it. The sender compares the live path with those values before asking
-`push_status` what the receiver has accepted, and again after reading a file,
-symlink, or directory. A partial file resumes only while it still matches the
-plan. A lost upload response leaves the earlier local path-list boundary in
-place; the next process checks the receiver and either advances past complete
-work or safely replays it.
+plan it. When the receiver position is unknown, the sender compares the live
+path with those values before asking `push_status` what the receiver has
+accepted, and again after reading a file, symlink, or directory. A successful
+upload retains the receiver-confirmed position for later steps in the same
+lifecycle. A partial file resumes only while it still matches the plan. A lost
+upload response leaves the earlier local path-list boundary in place; the next
+process checks the receiver and either advances past complete work or safely
+replays it.
 
-After all local paths are pushed, each deletion step reads
-`work_deletes_bytes` and `work_deletes_complete` from `push_status`. Those
+After all local paths are pushed, a newly opened sender reads
+`work_deletes_bytes` and `work_deletes_complete` from `push_status`. Successful
+uploads retain those values in memory for later deletion steps. Those
 receiver-owned values are the only work-delete cursor; `sender.json` does not
 duplicate it. Each uploaded deletion-list part contains one complete local path.
 Before sending it, each sender step checks at most one fresh local index entry;

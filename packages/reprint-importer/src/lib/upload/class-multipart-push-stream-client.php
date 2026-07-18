@@ -524,8 +524,9 @@ class MultipartPushStreamClient
         foreach ($headers as $name => $value) {
             $overhead += strlen($name) + 2 + strlen($value) + 2;
         }
+        $body_bytes_sent = $this->curl_handle === null ? 0 : $this->body_bytes_sent;
         $remaining = $this->request_sizer->request_body_bytes()
-            - $this->body_bytes_sent
+            - $body_bytes_sent
             - $overhead
             - $this->closing_boundary_bytes();
         return max(0, min($this->chunk_bytes, $this->max_part_bytes, $remaining));
