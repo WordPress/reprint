@@ -446,10 +446,8 @@ final class PushFilesSender
      */
     private function create_push_session(): void
     {
-        /** @var State $state */
-        $state =& $this->state;
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_create', [
-            'push_session_id' => $state['push_session_id'],
+            'push_session_id' => $this->state['push_session_id'],
         ], ['created']);
         if ($this->handle_request_failure($request_result)) {
             return;
@@ -469,8 +467,8 @@ final class PushFilesSender
 
         $this->push_stream_client->set_max_part_bytes($response['max_part_bytes']);
         $this->push_stream_client->apply_reported_limits([$response['post_max_bytes']]);
-        $state['max_part_bytes'] = $response['max_part_bytes'];
-        $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
+        $this->state['max_part_bytes'] = $response['max_part_bytes'];
+        $this->state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         clearstatcache(true, $this->fresh_local_index_path);
         if (!is_file($this->fresh_local_index_path)) {
             $this->start_removing_push_session_after_local_change(
@@ -488,8 +486,8 @@ final class PushFilesSender
             );
         }
 
-        $state['phase'] = 'planning';
-        $this->store_state($state);
+        $this->state['phase'] = 'planning';
+        $this->store_state($this->state);
     }
 
     /**
@@ -497,13 +495,11 @@ final class PushFilesSender
      */
     private function next_plan_step(): void
     {
-        /** @var State $state */
-        $state =& $this->state;
         $plan_result = $this->plan->next_step();
         if ($plan_result['status'] === 'complete') {
             $this->plan->close();
-            $state['phase'] = 'pushing_paths';
-            $this->store_state($state);
+            $this->state['phase'] = 'pushing_paths';
+            $this->store_state($this->state);
         }
     }
 
@@ -516,8 +512,6 @@ final class PushFilesSender
      */
     private function upload_next_file_chunk(): void
     {
-        /** @var State $state */
-        $state =& $this->state;
         if ($this->upload_request_should_finish) {
             $this->finish_upload_request();
             return;
@@ -533,12 +527,12 @@ final class PushFilesSender
         }
 
         if ($this->local_path_to_push === null) {
-            if ($this->local_paths_to_push_byte_offset !== $state['local_paths_to_push_byte_offset']) {
-                if (fseek($this->local_paths_to_push_handle, $state['local_paths_to_push_byte_offset']) !== 0) {
+            if ($this->local_paths_to_push_byte_offset !== $this->state['local_paths_to_push_byte_offset']) {
+                if (fseek($this->local_paths_to_push_handle, $this->state['local_paths_to_push_byte_offset']) !== 0) {
                     $this->fail('local_io_error', 'Failed to seek to the active byte offset in the local paths to push.');
                     return;
                 }
-                $this->local_paths_to_push_byte_offset = $state['local_paths_to_push_byte_offset'];
+                $this->local_paths_to_push_byte_offset = $this->state['local_paths_to_push_byte_offset'];
             }
             try {
                 $this->local_path_to_push = $this->read_local_path_to_push($this->local_paths_to_push_handle);
@@ -558,8 +552,8 @@ final class PushFilesSender
             }
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
-            $state['phase'] = 'pushing_deletes';
-            $this->store_state($state);
+            $this->state['phase'] = 'pushing_deletes';
+            $this->store_state($this->state);
             return;
         }
 
@@ -594,7 +588,7 @@ final class PushFilesSender
             $receiver_confirmed_bytes = $this->next_file_byte_offset ?? 0;
         } else {
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
-                'push_session_id' => $state['push_session_id'],
+                'push_session_id' => $this->state['push_session_id'],
                 'path_b64' => $local_path_to_push['path_b64'],
             ], ['accepted']);
             if ($this->handle_request_failure($request_result)) {
@@ -611,9 +605,9 @@ final class PushFilesSender
                 && ( $local_path_type_size_and_ctime['type'] !== 'file' || $receiver_path_status['accepted_bytes'] === $local_path_type_size_and_ctime['size'] )
             ) {
                 $this->close_local_file_handle();
-                $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
+                $this->state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
                 $this->local_path_to_push = null;
-                $this->store_state($state);
+                $this->store_state($this->state);
                 return;
             }
             $receiver_confirmed_bytes = $receiver_path_status['state'] === 'partial'
@@ -774,8 +768,8 @@ final class PushFilesSender
         }
 
         if ($this->state_before_upload_request === null) {
-            $this->state_before_upload_request = $state;
-            if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
+            $this->state_before_upload_request = $this->state;
+            if (!$this->push_stream_client->start_upload_request($this->state['push_session_id'])) {
                 $this->state_before_upload_request = null;
                 $this->fail('request_failed', $this->push_stream_client->get_last_error());
                 return;
@@ -800,7 +794,7 @@ final class PushFilesSender
         $this->upload_request_has_parts = true;
         if ($upload_completes_local_path) {
             $this->close_local_file_handle();
-            $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
+            $this->state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
             $this->next_file_byte_offset = null;
             $this->local_path_to_push = null;
         } else {
@@ -814,8 +808,6 @@ final class PushFilesSender
      */
     private function upload_next_chunk_of_deleted_paths(): void
     {
-        /** @var State $state */
-        $state =& $this->state;
         if ($this->upload_request_should_finish) {
             $this->finish_upload_request();
             return;
@@ -825,7 +817,7 @@ final class PushFilesSender
             $work_deletes_bytes = $this->next_delete_list_byte_offset ?? 0;
         } else {
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
-                'push_session_id' => $state['push_session_id'],
+                'push_session_id' => $this->state['push_session_id'],
             ], ['accepted']);
             if ($this->handle_request_failure($request_result)) {
                 return;
@@ -836,8 +828,8 @@ final class PushFilesSender
             if ($response['work_deletes_complete']) {
                 $this->close_local_paths_to_delete_handle();
                 $this->close_fresh_local_index_handle();
-                $state['phase'] = 'committing';
-                $this->store_state($state);
+                $this->state['phase'] = 'committing';
+                $this->store_state($this->state);
                 return;
             }
             $this->next_delete_list_byte_offset = $work_deletes_bytes;
@@ -915,8 +907,8 @@ final class PushFilesSender
         $local_delete_list_complete = $payload === '';
 
         if ($this->state_before_upload_request === null) {
-            $this->state_before_upload_request = $state;
-            if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
+            $this->state_before_upload_request = $this->state;
+            if (!$this->push_stream_client->start_upload_request($this->state['push_session_id'])) {
                 $this->state_before_upload_request = null;
                 $this->fail('request_failed', $this->push_stream_client->get_last_error());
                 return;
@@ -953,8 +945,6 @@ final class PushFilesSender
      */
     private function finish_upload_request(): void
     {
-        /** @var State $state */
-        $state =& $this->state;
         $request_result = $this->push_stream_client->finish_request();
         $request_failed = $this->handle_request_failure($request_result);
         $this->upload_request_should_finish = false;
@@ -962,8 +952,8 @@ final class PushFilesSender
         $this->next_file_byte_offset = null;
         $this->next_delete_list_byte_offset = null;
         if (!$request_failed) {
-            $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
-            $this->store_state($state);
+            $this->state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
+            $this->store_state($this->state);
         }
         $this->state_before_upload_request = null;
     }
@@ -1034,10 +1024,8 @@ final class PushFilesSender
      */
     private function commit_push(): void
     {
-        /** @var State $state */
-        $state =& $this->state;
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_commit', [
-            'push_session_id' => $state['push_session_id'],
+            'push_session_id' => $this->state['push_session_id'],
         ], ['accepted']);
         if ($this->handle_request_failure($request_result)) {
             return;
@@ -1066,10 +1054,8 @@ final class PushFilesSender
      */
     private function remove_push_session(): void
     {
-        /** @var State $state */
-        $state =& $this->state;
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_remove', [
-            'push_session_id' => $state['push_session_id'],
+            'push_session_id' => $this->state['push_session_id'],
         ], ['accepted']);
         if ($this->handle_request_failure($request_result)) {
             return;
@@ -1291,12 +1277,10 @@ final class PushFilesSender
      */
     private function handle_request_failure(array $request_result): bool
     {
-        /** @var State $state */
-        $state =& $this->state;
         if ($request_result['status'] === 'complete') {
             return false;
         }
-        $durable_state = $this->state_before_upload_request ?? $state;
+        $durable_state = $this->state_before_upload_request ?? $this->state;
         $request_sizer_state = $this->push_stream_client->get_request_sizer_state();
         if ($durable_state['request_sizer_state'] !== $request_sizer_state) {
             $durable_state['request_sizer_state'] = $request_sizer_state;
