@@ -284,8 +284,8 @@ handle when its phase or file ends and closes any remaining handles before
 
 `push_create` supplies the receiver exclusion policy. The sender stores it and
 copies the fresh local index before `PushPlan::start()`; each `planning` step
-then merges one path. PushPlan owns the merge offsets, output lengths and
-counts, deleted-directory ranges, and exclusions in `cursor.json`. No upload
+then merges one path. PushPlan owns the merge offsets, output lengths,
+deleted-directory ranges, and exclusions in `cursor.json`. No upload
 begins until both indexes have been consumed and the two path lists are stable.
 
 `sender.json` contains no second planning checkpoint and no copied receiver

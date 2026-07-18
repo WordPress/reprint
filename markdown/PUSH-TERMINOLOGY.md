@@ -105,8 +105,8 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
-`cursor.json` owns planning offsets, output offsets and counts, and the active
-byte offset in `deleted_directories_stack.jsonl`. The stack file is append-only;
+`cursor.json` owns planning offsets, output offsets, and the active byte offset
+in `deleted_directories_stack.jsonl`. The stack file is append-only;
 each entry links to the preceding active directory. `excluded_paths.json` stores
 the target exclusions once for the active push, with a maximum of 100 paths.
 `sender.json` does not repeat those values. Its phases are `creating`,

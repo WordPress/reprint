@@ -52,7 +52,7 @@
  * deleted-directory stack needed to suppress redundant descendant deletions. It
  * never loads an index, path list, or the stack in full.
  *
- * @phpstan-type PushPlanCursor array{byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int,local_paths_to_delete_count:int,deleted_directory_stack_top_byte_offset:int|null,complete:bool}
+ * @phpstan-type PushPlanCursor array{byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_stack_top_byte_offset:int|null,complete:bool}
  * @phpstan-type DeletedDirectoryStackEntry array{path:string,previous_byte_offset:int|null}
  */
 class PushPlan
@@ -146,8 +146,6 @@ class PushPlan
             "byte_offset_in_previous_index" => 0,
             "byte_offset_in_local_paths_to_push" => 0,
             "byte_offset_in_local_paths_to_delete" => 0,
-            "local_paths_to_push_count" => 0,
-            "local_paths_to_delete_count" => 0,
             "deleted_directory_stack_top_byte_offset" => null,
             "complete" => false,
         ];
@@ -159,9 +157,9 @@ class PushPlan
     /**
      * Resumes the unfinished push plan retained in local push state.
      *
-     * Reuses the plan-owned fresh local index and the offsets, counts, and
-     * deleted-directory ranges in the durable cursor. Excluded paths are the
-     * ones originally passed to start().
+     * Reuses the plan-owned fresh local index, offsets, and deleted-directory
+     * ranges in the durable cursor. Excluded paths are the ones originally
+     * passed to start().
      *
      * @param string $push_state_directory Local push state directory containing the unfinished plan.
      * @return self Open plan positioned at its last durable cursor.
@@ -388,8 +386,6 @@ class PushPlan
 
         $byte_offset_in_fresh_index = $this->cursor["byte_offset_in_fresh_index"];
         $byte_offset_in_previous_index = $this->cursor["byte_offset_in_previous_index"];
-        $local_paths_to_push_count = $this->cursor["local_paths_to_push_count"];
-        $local_paths_to_delete_count = $this->cursor["local_paths_to_delete_count"];
         $deleted_directory_stack_top_byte_offset = $this->cursor["deleted_directory_stack_top_byte_offset"];
         $local_paths_to_push_changed = false;
         $local_paths_to_delete_changed = false;
@@ -457,7 +453,6 @@ class PushPlan
                 ) {
                     $this->append_local_path_to_push($entry_fresh_index);
                     $local_paths_to_push_changed = true;
-                    ++$local_paths_to_push_count;
                 }
             } elseif ($path_comparison > 0) {
                 // A deleted non-empty directory emits one root. Its later
@@ -471,7 +466,6 @@ class PushPlan
                 ) {
                     $this->append_local_path_to_delete($entry_previous_index["path"]);
                     $local_paths_to_delete_changed = true;
-                    ++$local_paths_to_delete_count;
                     if ($local_index_at_previous_push_shape === "non_empty_directory") {
                         $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
                             $entry_previous_index["path"],
@@ -511,7 +505,6 @@ class PushPlan
                 ) {
                     $this->append_local_path_to_delete($entry_previous_index["path"]);
                     $local_paths_to_delete_changed = true;
-                    ++$local_paths_to_delete_count;
                     if ($local_index_at_previous_push_shape === "non_empty_directory") {
                         $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
                             $entry_previous_index["path"],
@@ -523,7 +516,6 @@ class PushPlan
                 if ($needs_push && !$path_is_excluded) {
                     $this->append_local_path_to_push($entry_fresh_index);
                     $local_paths_to_push_changed = true;
-                    ++$local_paths_to_push_count;
                 }
             }
 
@@ -558,8 +550,6 @@ class PushPlan
             "byte_offset_in_previous_index" => $byte_offset_in_previous_index,
             "byte_offset_in_local_paths_to_push" => ftell($this->local_paths_to_push_handle),
             "byte_offset_in_local_paths_to_delete" => ftell($this->local_paths_to_delete_handle),
-            "local_paths_to_push_count" => $local_paths_to_push_count,
-            "local_paths_to_delete_count" => $local_paths_to_delete_count,
             "deleted_directory_stack_top_byte_offset" => $deleted_directory_stack_top_byte_offset,
             "complete" => $complete,
         ];
@@ -923,8 +913,6 @@ class PushPlan
      *     @type int      $byte_offset_in_previous_index             Consumed bytes in the local index at the previous push.
      *     @type int      $byte_offset_in_local_paths_to_push        Durable bytes in the local paths to push output.
      *     @type int      $byte_offset_in_local_paths_to_delete      Durable bytes in the local paths to delete output.
-     *     @type int      $local_paths_to_push_count                 Number of local paths to push written so far.
-     *     @type int      $local_paths_to_delete_count               Number of local paths to delete written so far.
      *     @type int|null $deleted_directory_stack_top_byte_offset   Active stack entry, or null for an empty stack.
      *     @type bool     $complete                                  Whether both indexes reached EOF.
      * }
@@ -967,8 +955,6 @@ class PushPlan
      *     @type int      $byte_offset_in_previous_index             Consumed bytes in the local index at the previous push.
      *     @type int      $byte_offset_in_local_paths_to_push        Durable bytes in the local paths to push output.
      *     @type int      $byte_offset_in_local_paths_to_delete      Durable bytes in the local paths to delete output.
-     *     @type int      $local_paths_to_push_count                 Number of local paths to push written so far.
-     *     @type int      $local_paths_to_delete_count               Number of local paths to delete written so far.
      *     @type int|null $deleted_directory_stack_top_byte_offset   Active stack entry, or null for an empty stack.
      *     @type bool     $complete                                  Whether both indexes reached EOF.
      * }
