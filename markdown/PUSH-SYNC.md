@@ -87,30 +87,40 @@ each successful commit:
     <state-dir>/push/<site>/local_index_at_previous_push.jsonl
     <state-dir>/push/<site>/previously_pushed_rows.jsonl   (phase two)
 
-`local_index_at_previous_push.jsonl` is a copy of the `fresh_local_index.jsonl`
-selected for the completed push. It uses the file-index record shape — one JSON
-object per line, sorted by path — with a boolean `empty` field on every
-directory the indexer could inspect. The indexer records physical emptiness
-while it observes the directory; the later planner never reopens the live tree
-to classify it.
+`PushPlan` derives the local paths to push and delete by merging a path-sorted
+fresh local index with `local_index_at_previous_push.jsonl`. It never reopens
+the live tree. The indexer records physical emptiness while it observes each
+directory, so a completed index distinguishes empty directories from non-empty
+ones. Files and symlinks change when their `type`, `ctime`, or `size` changes;
+unrelated index fields do not select a path for upload.
 
-`PushPlan::start()` copies its fresh local index argument to the per-site
-`fresh_local_index.jsonl` and retains the excluded paths in `cursor.json`.
-`next_step()` merges that retained copy with
-`local_index_at_previous_push.jsonl` in bounded steps. It writes changed files,
-symlinks, and empty directories to `local_paths_to_push.jsonl`, and raw
-NUL-delimited paths to `local_paths_to_delete`. The plan atomically retains a
-cursor with both index offsets and both committed output lengths.
+The index reader trusts the indexer's entry fields. It handles only failures to
+read a line, decode its JSON, or decode its base64 path. This keeps schema
+ownership with the indexer instead of partially validating the same record in
+the push plan.
 
-The caller passes the per-site directory, fresh local index, and excluded paths
-to `PushPlan::start()`, calls `next_step()` until it completes, and explicitly
-closes the plan. A new process calls `PushPlan::resume()` with only the per-site
-directory. It uses the retained index and excluded paths, truncates output after
-the retained lengths, and continues from the retained offsets.
+A push plan has one lifecycle:
+
+1. `PushPlan::start()` copies the fresh local index into the per-site plan
+   directory and writes a cursor containing the excluded paths.
+2. `next_step()` performs bounded merge steps until it reports `complete`. It
+   writes files, symlinks, and empty directories to
+   `local_paths_to_push.jsonl`, and writes raw NUL-delimited paths to
+   `local_paths_to_delete`.
+3. The caller closes the plan before consuming those two files.
+4. After the receiver commits successfully, `after_successful_push()` publishes
+   the retained fresh local index as `local_index_at_previous_push.jsonl`.
+
+Each step flushes both path lists before atomically publishing the cursor with
+the two index offsets, two output byte offsets, path counts, and active
+deleted-directory ranges. A later process calls `PushPlan::resume()` with only
+the per-site directory. Resume uses the retained index and exclusions, discards
+bytes beyond the durable output offsets, and continues from the durable index
+offsets.
 
 The first push to a site has no local index from a previous push or previously
-pushed rows: every current local file counts as changed, and no local deletion
-can be detected yet.
+pushed rows. Every current file, symlink, and empty directory is selected, and
+no local deletion can be detected yet.
 
 Push is intentionally local-wins. If a developer edited the remote site
 outside Reprint, a later push of the same path or row overwrites that remote
@@ -269,7 +279,7 @@ The database is pushed as a diff — INSERT, UPDATE, DELETE — never as a dump
 that replaces tables. The mechanics mirror the file design:
 
 - A **row index** — `(table, primary key, row hash)` — plays the role
-  `(path, ctime, size)` plays for files. The local machine keeps the row
+  `(path, type, ctime, size)` plays for files. The local machine keeps the row
   index from the last push as `previously_pushed_rows`; diffing against it
   yields the upsert and delete sets.
 - Push is local-wins for rows too. Rows changed on the remote outside Reprint
@@ -307,8 +317,9 @@ Files first, database second, each PR small and stacked in this order:
    the closed #298).
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
    the configured storage path; web guards for inside-docroot placement.
-5. **Push plan and local diff** — per-site local index at the previous push,
-   update logic, local change and deletion detection.
+5. **Push plan and local diff** — per-site retained indexes, explicit start and
+   resume lifecycle, bounded local change and deletion detection, and durable
+   path lists for the sender.
 6. **Push stream endpoint** — the store's HTTP surface plus a sender that
    streams framed chunks for many files through one authenticated request;
    deletion work received; `--force-http` with honest help text (the first
