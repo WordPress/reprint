@@ -1417,6 +1417,9 @@ final class PushEndpointsTest extends TestCase {
         );
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+            $state_path = $push_state_directory . '/sender.json';
+            $state_inode_before_upload = fileinode($state_path);
+            $this->assertIsInt($state_inode_before_upload);
             $finished_requests = $this->countEndpointRequests('push_upload');
             for ($step = 0; $step < 100; ++$step) {
                 $this->assertTrue($sender->next_step(), (string) json_encode($this->senderResult($sender)));
@@ -1426,6 +1429,8 @@ final class PushEndpointsTest extends TestCase {
             }
             $this->assertGreaterThan($finished_requests, $this->countEndpointRequests('push_upload'));
             $this->assertSame(1, $this->countEndpointRequests('push_status'));
+            clearstatcache(true, $state_path);
+            $this->assertSame($state_inode_before_upload, fileinode($state_path));
 
             $this->assertTrue($sender->next_step());
 
@@ -1846,7 +1851,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertFalse(is_resource($local_file_handle));
         $this->assertNull($curl_handle_property->getValue($push_stream_client));
         clearstatcache(true, $push_state_directory . '/sender.json');
-        $this->assertNotSame($state_inode_before_upload, fileinode($push_state_directory . '/sender.json'));
+        $this->assertSame($state_inode_before_upload, fileinode($push_state_directory . '/sender.json'));
 
         $sender = PushFilesSender::resume($options);
         try {

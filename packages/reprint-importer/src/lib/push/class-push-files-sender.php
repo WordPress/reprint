@@ -1142,7 +1142,7 @@ final class PushFilesSender
     }
 
     /**
-     * Finishes the retained upload request and publishes its local boundary.
+     * Finishes the retained upload request and publishes any changed local boundary.
      */
     private function finish_upload_request(): void
     {
@@ -1167,7 +1167,9 @@ final class PushFilesSender
         $this->local_delete_list_complete = false;
         if (!$request_failed) {
             $this->state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
-            $this->store_state($this->state);
+            if ($this->state !== $this->state_before_upload_request) {
+                $this->store_state($this->state);
+            }
         }
         $this->state_before_upload_request = null;
     }
