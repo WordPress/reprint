@@ -598,18 +598,18 @@ final class PushFilesSender
                             'rb'
                         );
                     }
-                    if (
-                        !is_resource($this->local_file_handle)
-                        || fseek($this->local_file_handle, $file_byte_offset) !== 0
-                    ) {
+                    if (!is_resource($this->local_file_handle)) {
+                        $local_io_failure_detail = 'Could not open the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
+                    } elseif (fseek($this->local_file_handle, $file_byte_offset) !== 0) {
                         $this->close_local_file_handle();
+                        $local_io_failure_detail = 'Could not seek to the receiver-confirmed cursor in the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
+                    }
+                    if ($local_io_failure_detail !== null) {
                         $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
                         if ($local_path_type_size_and_ctime_after_read === null) {
                             $local_path_disappeared = true;
                         } elseif ($local_path_type_size_and_ctime_after_read !== $local_path_type_size_and_ctime) {
                             $local_path_changed = true;
-                        } else {
-                            $local_io_failure_detail = 'Could not open the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.';
                         }
                     } else {
                         $payload = fread($this->local_file_handle, $maximum_file_payload_bytes);
@@ -718,13 +718,13 @@ final class PushFilesSender
         if (!is_resource($this->local_paths_to_delete_handle)) {
             $local_paths_to_delete_path = PushPlan::local_paths_to_delete_path($this->push_state_directory);
             $this->local_paths_to_delete_handle = fopen($local_paths_to_delete_path, 'rb');
+            if (!is_resource($this->local_paths_to_delete_handle)) {
+                return $this->step_result('failed', $state, 'local_io_error', 'Could not open the local deletion list.');
+            }
         }
-        if (
-            !is_resource($this->local_paths_to_delete_handle)
-            || fseek($this->local_paths_to_delete_handle, $work_deletes_bytes) !== 0
-        ) {
+        if (fseek($this->local_paths_to_delete_handle, $work_deletes_bytes) !== 0) {
             $this->close_local_paths_to_delete_handle();
-            return $this->step_result('failed', $state, 'local_io_error', 'Could not open the local deletion list at the receiver-confirmed cursor.');
+            return $this->step_result('failed', $state, 'local_io_error', 'Could not seek to the receiver-confirmed cursor in the local deletion list.');
         }
         if (!$this->push_stream_client->start_upload_request($state['push_session_id'])) {
             return $this->step_result(
@@ -914,7 +914,7 @@ final class PushFilesSender
     private function read_local_path_to_push($local_paths_to_push_handle, int $local_paths_to_push_byte_offset): ?array
     {
         if (fseek($local_paths_to_push_handle, $local_paths_to_push_byte_offset) !== 0) {
-            throw new RuntimeException('The local paths-to-push cursor is outside the local paths to push list.');
+            throw new RuntimeException('Failed to seek to the active byte offset in the local paths to push.');
         }
         $line = fgets($local_paths_to_push_handle);
         if ($line === false) {
