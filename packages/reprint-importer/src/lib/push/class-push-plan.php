@@ -11,7 +11,7 @@
  *
  * PushFilesSender is the only caller-visible processor. It owns the lifecycle
  * lock, top-level phase, transport, result, commit, restart, and removal.
- * PushPlan only merges the two indexes, publishes its planning cursor, and
+ * PushPlan only merges the two indexes, saves its planning cursor, and
  * produces the local paths to push and local paths to delete.
  *
  * ## Durable boundary
@@ -41,8 +41,9 @@
  *
  * ## Durability and memory
  *
- * `start()` copies the fresh local index into plan-owned state. Each step
- * merges one path, flushes both path lists, and atomically publishes the next cursor.
+ * The sender copies the fresh local index into plan-owned state before
+ * `start()`. Each step merges one path, flushes both path lists, and atomically
+ * publishes the next cursor.
  * `resume()` discards bytes written beyond the saved output offsets and
  * continues from the saved index offsets, so an interrupted step cannot leave
  * duplicate durable entries.
@@ -51,7 +52,7 @@
  * deleted-directory stack needed to suppress redundant descendant deletions. It
  * never loads an index, path list, or the stack in full.
  *
- * @phpstan-type PushPlanCursor array{byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int,local_paths_to_delete_count:int,deleted_directory_stack_top_byte_offset:int|null}
+ * @phpstan-type PushPlanCursor array{byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int,local_paths_to_delete_count:int,deleted_directory_stack_top_byte_offset:int|null,complete:bool}
  * @phpstan-type DeletedDirectoryStackEntry array{path:string,previous_byte_offset:int|null}
  */
 class PushPlan
@@ -118,27 +119,24 @@ class PushPlan
     /**
      * Starts a push plan from a fresh local index.
      *
-     * Copies the fresh local index into plan-owned state and writes the
-     * initial cursor before opening the plan files. An existing cursor is
-     * rejected so an unfinished plan cannot be overwritten.
+     * The owning sender has already copied the fresh local index into this
+     * plan's directory. This method writes the initial cursor and opens the
+     * planning files. An existing cursor is rejected so unfinished work cannot
+     * be overwritten.
      *
-     * @param string       $push_state_directory   Local push state directory.
-     * @param string       $fresh_local_index_path Path to the path-sorted fresh local index.
+     * @param string $push_state_directory Local push state directory.
      * @return self Open plan positioned at the initial cursor.
      */
-    public static function start(
-        string $push_state_directory,
-        string $fresh_local_index_path
-    ): self {
+    public static function start(string $push_state_directory): self
+    {
         $plan = new self($push_state_directory);
         if (is_file($plan->cursor_file)) {
             throw new LogicException("Cannot start a push plan while an unfinished plan exists: {$plan->cursor_file}");
         }
-        if (!is_file($fresh_local_index_path)) {
-            throw new RuntimeException("Cannot plan local files, the fresh local index file is missing: {$fresh_local_index_path}");
+        if (!is_file($plan->fresh_local_index)) {
+            throw new RuntimeException("Cannot plan local files, the fresh local index file is missing: {$plan->fresh_local_index}");
         }
 
-        $plan->atomic_copy($fresh_local_index_path, $plan->fresh_local_index);
         $plan->excluded_paths = $plan->load_excluded_paths();
         if (file_put_contents($plan->deleted_directories_stack, '') !== 0) {
             throw new RuntimeException("Failed to initialize the deleted-directory stack: {$plan->deleted_directories_stack}");
@@ -151,6 +149,7 @@ class PushPlan
             "local_paths_to_push_count" => 0,
             "local_paths_to_delete_count" => 0,
             "deleted_directory_stack_top_byte_offset" => null,
+            "complete" => false,
         ];
         $plan->save_cursor($plan->cursor);
         $plan->open_plan_files();
@@ -176,7 +175,7 @@ class PushPlan
 
         $plan->excluded_paths = $plan->load_excluded_paths();
         $plan->closed = false;
-        $plan->complete = false;
+        $plan->complete = $plan->cursor["complete"];
         $plan->open_plan_files();
         return $plan;
     }
@@ -234,6 +233,26 @@ class PushPlan
     }
 
     /**
+     * Returns the plan-owned fresh local index path.
+     *
+     * @param string $push_state_directory Local push state directory.
+     */
+    public static function fresh_local_index_path(string $push_state_directory): string
+    {
+        return rtrim($push_state_directory, "/") . "/fresh_local_index.jsonl";
+    }
+
+    /**
+     * Returns the local index published after the previous successful push.
+     *
+     * @param string $push_state_directory Local push state directory.
+     */
+    public static function local_index_at_previous_push_path(string $push_state_directory): string
+    {
+        return rtrim($push_state_directory, "/") . "/local_index_at_previous_push.jsonl";
+    }
+
+    /**
      * Initializes the files in one local push state directory.
      *
      * Creates the directory when it does not already exist. Plan
@@ -247,10 +266,10 @@ class PushPlan
         if (!is_dir($push_state_directory) && !@mkdir($push_state_directory, 0755, true) && !is_dir($push_state_directory)) {
             throw new RuntimeException("Failed to create the push plan directory: {$push_state_directory}");
         }
-        $this->local_index_at_previous_push = $push_state_directory . "/local_index_at_previous_push.jsonl";
+        $this->local_index_at_previous_push = self::local_index_at_previous_push_path($push_state_directory);
         $this->local_paths_to_push = self::local_paths_to_push_path($push_state_directory);
         $this->local_paths_to_delete = self::local_paths_to_delete_path($push_state_directory);
-        $this->fresh_local_index = $push_state_directory . "/fresh_local_index.jsonl";
+        $this->fresh_local_index = self::fresh_local_index_path($push_state_directory);
         $this->cursor_file = $push_state_directory . "/cursor.json";
         $this->excluded_paths_file = $push_state_directory . "/excluded_paths.json";
         $this->deleted_directories_stack = $push_state_directory . "/deleted_directories_stack.jsonl";
@@ -310,48 +329,24 @@ class PushPlan
     }
 
     /**
-     * Publishes the fresh local index after a successful push.
+     * Removes the planning cursor after the sender publishes a successful push.
      *
-     * Only a closed plan whose cursor consumed both indexes can publish its
-     * fresh local index. From then on, "changed locally" means "different from
-     * the local index at the previous push".
-     *
-     * The copy is atomic (temporary file plus rename), and the fresh local
-     * index is left untouched. A killed process therefore leaves the previous
-     * complete file in effect rather than publishing a truncated replacement.
+     * Only a closed, completed plan can remove its cursor. The sender owns
+     * commit and publishes the fresh local index in its own bounded phase
+     * before calling this method.
      */
     public function after_successful_push(): void
     {
         if (!$this->closed) {
-            throw new LogicException("Close the push plan before recording a successful push.");
+            throw new LogicException("Close the push plan before finishing a successful push.");
         }
         if (!is_file($this->fresh_local_index)) {
-            throw new RuntimeException("Cannot record a successful push, the fresh local index is missing: {$this->fresh_local_index}");
+            throw new RuntimeException("Cannot finish a successful push, the fresh local index is missing: {$this->fresh_local_index}");
+        }
+        if (!$this->cursor["complete"]) {
+            throw new LogicException("Cannot finish a successful push before the plan is complete.");
         }
 
-        $fresh_local_index_bytes = filesize($this->fresh_local_index);
-        if (!is_int($fresh_local_index_bytes)) {
-            throw new RuntimeException("Failed to determine the fresh local index length: {$this->fresh_local_index}");
-        }
-        $previous_index_bytes = 0;
-        if (is_file($this->local_index_at_previous_push)) {
-            $previous_index_bytes = filesize($this->local_index_at_previous_push);
-            if (!is_int($previous_index_bytes)) {
-                throw new RuntimeException("Failed to determine the previous local index length: {$this->local_index_at_previous_push}");
-            }
-        }
-        if (
-            $this->cursor["byte_offset_in_fresh_index"] !== $fresh_local_index_bytes
-            || $this->cursor["byte_offset_in_previous_index"] !== $previous_index_bytes
-        ) {
-            throw new LogicException(
-                "Cannot record a successful push before the plan is complete: "
-                . "the fresh local index is at {$this->cursor["byte_offset_in_fresh_index"]} of {$fresh_local_index_bytes} bytes "
-                . "and the previous local index is at {$this->cursor["byte_offset_in_previous_index"]} of {$previous_index_bytes} bytes."
-            );
-        }
-
-        $this->atomic_copy($this->fresh_local_index, $this->local_index_at_previous_push);
         $this->remove_cursor();
     }
 
@@ -462,7 +457,7 @@ class PushPlan
                 }
             } elseif ($path_comparison > 0) {
                 // A deleted non-empty directory emits one root. Its later
-                // descendant entries are already covered by that record.
+                // descendant entries are already covered by that path.
                 if (
                     !$this->path_conflicts_with_excluded_paths($entry_previous_index["path"])
                     && !$this->deleted_directory_stack_covers_path(
@@ -487,7 +482,7 @@ class PushPlan
                 $empty_directory_needs_push = $current_shape === "empty_directory"
                     && $local_index_at_previous_push_shape !== "empty_directory";
                 // File and symlink changes are defined by type, ctime, and
-                // size. Other index fields do not select a path for upload.
+                // size. Other index values do not select a path for upload.
                 $changed_file_or_symlink_needs_push = $current_is_file_or_symlink
                     && (
                         $entry_fresh_index["ctime"] !== $entry_previous_index["ctime"]
@@ -557,6 +552,7 @@ class PushPlan
             "local_paths_to_push_count" => $local_paths_to_push_count,
             "local_paths_to_delete_count" => $local_paths_to_delete_count,
             "deleted_directory_stack_top_byte_offset" => $deleted_directory_stack_top_byte_offset,
+            "complete" => $complete,
         ];
         $this->save_cursor($cursor_after_step);
         $this->cursor = $cursor_after_step;
@@ -640,7 +636,7 @@ class PushPlan
      * positioning the handle at an invalid plan boundary.
      *
      * @param resource $handle      Open index handle to position.
-     * @param int      $byte_offset Durable byte offset recorded in the cursor.
+     * @param int      $byte_offset Durable byte offset saved in the cursor.
      * @param string   $description Human-readable index name used in failures.
      */
     private function safe_seek($handle, int $byte_offset, string $description): void
@@ -721,8 +717,8 @@ class PushPlan
      */
     private function append_local_path_to_delete(string $path): void
     {
-        $record = $path . "\0";
-        if (fwrite($this->local_paths_to_delete_handle, $record) !== strlen($record)) {
+        $path_with_nul = $path . "\0";
+        if (fwrite($this->local_paths_to_delete_handle, $path_with_nul) !== strlen($path_with_nul)) {
             throw new RuntimeException("Short write on local paths to delete {$this->local_paths_to_delete}, is the disk full?");
         }
     }
@@ -921,6 +917,7 @@ class PushPlan
      *     @type int      $local_paths_to_push_count                 Number of local paths to push written so far.
      *     @type int      $local_paths_to_delete_count               Number of local paths to delete written so far.
      *     @type int|null $deleted_directory_stack_top_byte_offset   Active stack entry, or null for an empty stack.
+     *     @type bool     $complete                                  Whether both indexes reached EOF.
      * }
      * @phpstan-return PushPlanCursor|null
      */
@@ -964,6 +961,7 @@ class PushPlan
      *     @type int      $local_paths_to_push_count                 Number of local paths to push written so far.
      *     @type int      $local_paths_to_delete_count               Number of local paths to delete written so far.
      *     @type int|null $deleted_directory_stack_top_byte_offset   Active stack entry, or null for an empty stack.
+     *     @type bool     $complete                                  Whether both indexes reached EOF.
      * }
      * @phpstan-param PushPlanCursor $cursor
      */
@@ -992,27 +990,4 @@ class PushPlan
         }
     }
 
-    /**
-     * Replaces a destination file atomically with a complete copy.
-     *
-     * The copy is written beside the destination and renamed into place so
-     * readers observe either the previous complete file or the new complete
-     * file.
-     *
-     * @param string $file_to_copy Existing file to copy.
-     * @param string $destination File path to replace atomically.
-     */
-    private function atomic_copy(string $file_to_copy, string $destination): void
-    {
-        if (!is_file($file_to_copy)) {
-            throw new RuntimeException("Cannot copy to {$destination}, the file to copy is missing: {$file_to_copy}");
-        }
-        $tmp = $destination . ".tmp";
-        if (!copy($file_to_copy, $tmp)) {
-            throw new RuntimeException("Failed to copy {$file_to_copy} to the temporary file {$tmp}.");
-        }
-        if (!rename($tmp, $destination)) {
-            throw new RuntimeException("Failed to move the temporary file into place: {$destination}");
-        }
-    }
 }

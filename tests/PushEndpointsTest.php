@@ -1364,7 +1364,11 @@ final class PushEndpointsTest extends TestCase {
             if (
                 !$removed_caller_index
                 && is_array($state)
-                && !in_array($state['phase'], ['creating', 'planning'], true)
+                && !in_array(
+                    $state['phase'],
+                    ['creating', 'copying_fresh_local_index', 'starting_plan', 'planning'],
+                    true
+                )
             ) {
                 unlink($fresh_local_index_path);
                 $removed_caller_index = true;
@@ -1456,7 +1460,7 @@ final class PushEndpointsTest extends TestCase {
 
         $sender = PushFilesSender::start($options);
         try {
-            $this->assertTrue($sender->next_step());
+            $this->takeSenderStepsUntilPhase($sender, 'planning');
             $this->assertSame('planning', $sender->get_phase());
             $this->assertTrue($sender->next_step());
             $this->assertSame('pushing_paths', $sender->get_phase());
@@ -1612,7 +1616,7 @@ final class PushEndpointsTest extends TestCase {
             $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
         );
         try {
-            $sender->next_step();
+            $this->takeSenderStepsUntilPhase($sender, 'planning');
             $create_result = $this->senderResult($sender);
             $this->assertSame('planning', $create_result['phase']);
             $plan = $plan_property->getValue($sender);
@@ -1644,6 +1648,61 @@ final class PushEndpointsTest extends TestCase {
         }
 
         $this->assertFalse(is_resource($fresh_local_index_handle));
+    }
+
+    /**
+     * Copies a large fresh local index in bounded steps and resumes its exact offset.
+     */
+    public function testHighLevelSenderCopiesALargeFreshLocalIndexInBoundedSteps(): void
+    {
+        $local_docroot = $this->root . '/large-index-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/large-index.jsonl';
+        $index_bytes = 4 * 1024 * 1024 + 37;
+        file_put_contents($fresh_local_index_path, str_repeat('x', $index_bytes));
+        $push_state_directory = $this->root . '/large-index-state';
+        $temporary_index_path = $push_state_directory . '/fresh_local_index.jsonl.tmp';
+        $retained_index_path = $push_state_directory . '/fresh_local_index.jsonl';
+        $index_to_copy_handle_property = new ReflectionProperty(
+            PushFilesSender::class,
+            'index_to_copy_handle'
+        );
+        $index_copy_handle_property = new ReflectionProperty(
+            PushFilesSender::class,
+            'index_copy_handle'
+        );
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $sender = PushFilesSender::start($options);
+        try {
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('copying_fresh_local_index', $sender->get_phase());
+
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('copying_fresh_local_index', $sender->get_phase());
+            $state = $this->loadActiveState($push_state_directory);
+            $this->assertIsArray($state);
+            $this->assertSame(4 * 1024 * 1024, $state['fresh_local_index_copy_byte_offset']);
+            $this->assertSame(4 * 1024 * 1024, filesize($temporary_index_path));
+            $this->assertIsResource($index_to_copy_handle_property->getValue($sender));
+            $this->assertIsResource($index_copy_handle_property->getValue($sender));
+        } finally {
+            $sender->close();
+        }
+        $this->assertNull($index_to_copy_handle_property->getValue($sender));
+        $this->assertNull($index_copy_handle_property->getValue($sender));
+
+        $sender = PushFilesSender::resume($options);
+        try {
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('starting_plan', $sender->get_phase());
+        } finally {
+            $sender->close();
+        }
+
+        $this->assertFileDoesNotExist($temporary_index_path);
+        $this->assertSame($index_bytes, filesize($retained_index_path));
+        $this->assertSame(hash_file('sha256', $fresh_local_index_path), hash_file('sha256', $retained_index_path));
     }
 
     /**
@@ -1685,10 +1744,8 @@ final class PushEndpointsTest extends TestCase {
         $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
         $sender = PushFilesSender::start($options);
         try {
-            do {
-                $sender->next_step();
-                $planning_result = $this->senderResult($sender);
-            } while ($planning_result['phase'] === 'planning');
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+            $planning_result = $this->senderResult($sender);
             $this->assertSame('pushing_paths', $planning_result['phase']);
             clearstatcache(true, $push_state_directory . '/sender.json');
             $state_inode_before_upload = fileinode($push_state_directory . '/sender.json');
@@ -1795,9 +1852,7 @@ final class PushEndpointsTest extends TestCase {
 
         $sender = PushFilesSender::start($options);
         try {
-            do {
-                $sender->next_step();
-            } while ($sender->get_phase() === 'planning');
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
             $this->assertSame('pushing_paths', $sender->get_phase());
 
             $sender->next_step();
@@ -1811,6 +1866,8 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame('removing', $sender->get_phase());
             $this->assertSame('local_path_changed', $sender->get_reason());
             $this->assertNull($curl_handle_property->getValue($push_stream_client));
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('discarding_plan', $sender->get_phase());
             $this->assertFalse($sender->next_step());
             $this->assertSame('restart', $sender->get_status());
         } finally {
@@ -1836,9 +1893,7 @@ final class PushEndpointsTest extends TestCase {
 
         $sender = PushFilesSender::start($options);
         try {
-            do {
-                $sender->next_step();
-            } while ($sender->get_phase() === 'planning');
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
             $sender->next_step();
 
             $state_before_cancel = $this->loadActiveState($push_state_directory);
@@ -1960,7 +2015,7 @@ final class PushEndpointsTest extends TestCase {
 
         $sender = PushFilesSender::start($options);
         try {
-            $this->assertTrue($sender->next_step());
+            $this->takeSenderStepsUntilPhase($sender, 'planning');
             $this->assertSame('planning', $sender->get_phase());
             $this->assertTrue($sender->next_step());
             $this->assertSame('pushing_paths', $sender->get_phase());
@@ -2085,7 +2140,7 @@ final class PushEndpointsTest extends TestCase {
         try {
             $sender->next_step();
             $first = $this->senderResult($sender);
-            $sender->next_step();
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
             $second = $this->senderResult($sender);
             $this->assertSame('continue', $first['status']);
             $this->assertSame('continue', $second['status']);
@@ -2584,6 +2639,24 @@ final class PushEndpointsTest extends TestCase {
             'reason' => $sender->get_reason(),
             'detail' => $sender->get_detail(),
         ];
+    }
+
+    /**
+     * Takes bounded sender steps until one requested durable phase is current.
+     */
+    private function takeSenderStepsUntilPhase(PushFilesSender $sender, string $phase): void
+    {
+        for ($step = 0; $step < 300; ++$step) {
+            if ($sender->get_phase() === $phase) {
+                return;
+            }
+            if (!$sender->next_step()) {
+                break;
+            }
+        }
+        $this->fail(
+            "The sender reached {$sender->get_phase()} instead of the requested {$phase} phase."
+        );
     }
 
     /**

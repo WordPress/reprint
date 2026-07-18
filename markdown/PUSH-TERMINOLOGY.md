@@ -109,10 +109,12 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 byte offset in `deleted_directories_stack.jsonl`. The stack file is append-only;
 each entry links to the preceding active directory. `excluded_paths.json` stores
 the target exclusions once for the active push, with a maximum of 100 paths.
-`sender.json` does not repeat those values.
-Its phases are `creating`, `planning`, `pushing_paths`, `pushing_deletes`,
-`committing`, and `removing`. It records the push session ID, selected path-list
-cursor, receiver part limit, and request-sizing state.
+`sender.json` does not repeat those values. Its phases are `creating`,
+`copying_fresh_local_index`, `starting_plan`, `planning`, `pushing_paths`,
+`pushing_deletes`, `committing`, `publishing_local_index`, `completing`,
+`removing`, and `discarding_plan`. It stores the push session ID, bounded index
+copy offsets, selected path-list cursor, receiver part limit, and request-sizing
+state.
 
 A request failure ends the current sender run. The active state remains in
 place so a later push command can resume from the last durable boundary.
@@ -129,8 +131,10 @@ sender reads them from `push_status`; it does not copy them into `sender.json`.
 `PushFilesSender::start()` and `PushFilesSender::resume()` acquire
 `sender.lock`; `PushFilesSender::close()` releases it. `next_step()` does not
 acquire or release the lock and does not reread `sender.json`. A sender retains
-one multipart request across steps. close() finishes it and stores the confirmed
-local boundary before releasing the lock. In `pushing_paths` or
+one multipart request across steps. A caller stopping between steps calls
+`cancel()` to discard that request and return to the preceding durable
+boundary, then calls `close()` to release the lock. Without cancellation,
+`close()` finishes the request and stores its confirmed local boundary. In `pushing_paths` or
 `pushing_deletes`, one step sends at most one multipart part. `next_step()`
 returns true while another step may be performed and false when `get_status()`
 reports `complete`, `restart`, or `failed`.

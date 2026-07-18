@@ -92,9 +92,9 @@ fresh local index with `local_index_at_previous_push.jsonl`. It never reopens
 the live tree. The indexer records physical emptiness while it observes each
 directory, so a completed index distinguishes empty directories from non-empty
 ones. Files and symlinks change when their `type`, `ctime`, or `size` changes;
-unrelated index fields do not select a path for upload.
+unrelated index values do not select a path for upload.
 
-The index reader trusts the indexer's entry fields. It handles only failures to
+The index reader trusts the indexer's entry values. It handles only failures to
 read a line, decode its JSON, or decode its base64 path. This keeps schema
 ownership with the indexer instead of partially validating the same index entry in
 the push plan.
@@ -102,17 +102,19 @@ the push plan.
 A push plan is an internal part of the sender lifecycle:
 
 1. The sender stores at most 100 target exclusions once in
-   `excluded_paths.json`. `PushPlan::start()` reads that file, copies the fresh
-   local index into the local push state directory, and writes its cursor.
+   `excluded_paths.json`, copies the fresh local index into the local push state
+   directory in chunks of at most 4 MiB, and then calls `PushPlan::start()`.
+   The plan reads the stored exclusions and writes its initial cursor.
 2. Each `next_step()` merges one path. It returns true while another planning
    step remains and false when both indexes reach EOF. It
    writes files, symlinks, and empty directories with their planned type, size,
    and ctime to
    `local_paths_to_push.jsonl`, and writes raw NUL-delimited paths to
    `local_paths_to_delete`.
-3. The caller closes the plan before consuming those two files.
-4. After the receiver commits successfully, `after_successful_push()` publishes
-   the retained fresh local index as `local_index_at_previous_push.jsonl`.
+3. The sender closes the plan before consuming those two files.
+4. After the receiver commits successfully, the sender publishes the retained
+   fresh local index as `local_index_at_previous_push.jsonl` in chunks of at
+   most 4 MiB. It then asks the closed plan to remove its cursor.
 
 Each step flushes both path lists and the append-only deleted-directory stack
 before atomically publishing the cursor with the two index offsets, two output
@@ -247,18 +249,21 @@ sender.json                         active push state
 sender.lock                         lifecycle lock
 ```
 
-The sender has an explicit open/close lifecycle. `PushFilesSender::start()`
-rejects unfinished active state, writes the initial `creating` state, and
-acquires `sender.lock`. `PushFilesSender::resume()` acquires the same lock and
-reads the unfinished state once. The returned sender keeps that state in memory
-while `next_step()` performs bounded work. `close()` finishes an open multipart
-request, stores its confirmed local boundary, and releases the lock. A second
-local process cannot start or resume the same sender until the open sender is
-closed. `next_step()` returns true while another step may be performed and false
-after completion, restart, or failure; the caller reads that outcome from the
-sender. The caller may stop after any true return and close the sender. If the
-process stops without closing, the next process uses the preceding sender
-boundary and receiver-confirmed cursors to account for later remote work.
+The sender has an explicit start/step/cancel/close lifecycle.
+`PushFilesSender::start()` rejects unfinished active state, writes the initial
+`creating` state, and acquires `sender.lock`. `PushFilesSender::resume()`
+acquires the same lock and reads the unfinished state once. The returned sender
+keeps that state in memory while `next_step()` performs bounded work. When the
+caller stops between steps, `cancel()` discards an open multipart request and
+returns to the preceding durable boundary. `close()` then releases the lock.
+Without cancellation, `close()` finishes the request and stores its confirmed
+local boundary. A second local process cannot start or resume the same sender
+until the open sender is closed. `next_step()` returns true while another step
+may be performed and false after completion, restart, or failure; the caller
+reads that outcome from the sender. The caller may stop after any true return
+and close the sender. If the process stops without closing, the next process
+uses the preceding sender boundary and receiver-confirmed cursors to account
+for later remote work.
 
 The open sender lazily opens `local_paths_to_push.jsonl`,
 `local_paths_to_delete`, and the current local file. It retains those handles
@@ -267,18 +272,25 @@ only when a newly opened or receiver-confirmed offset differs. It closes each
 handle when its phase or file ends and closes any remaining handles before
 `close()` releases the lifecycle lock.
 
-`push_create` supplies the receiver exclusion policy. The sender passes that
-policy to `PushPlan::start()`, then each `planning` step merges one path.
-PushPlan owns the fresh index, merge offsets, output lengths and
+`push_create` supplies the receiver exclusion policy. The sender stores it and
+copies the fresh local index before `PushPlan::start()`; each `planning` step
+then merges one path. PushPlan owns the merge offsets, output lengths and
 counts, deleted-directory ranges, and exclusions in `cursor.json`. No upload
 begins until both indexes have been consumed and the two path lists are stable.
 
 `sender.json` contains no second planning checkpoint and no copied receiver
-cursor. It records only the push session and phase, the next byte offset in
-`local_paths_to_push.jsonl`, the fresh-local-index offset used while checking
-deletion paths, the receiver part limit, and learned request-body sizing state.
-Its phases are `creating`, `planning`,
-`pushing_paths`, `pushing_deletes`, `committing`, and `removing`.
+cursor. It stores the push session and phase, bounded index copy offsets, the
+next byte offset in `local_paths_to_push.jsonl`, the fresh-local-index offset
+used while checking deletion paths, the receiver part limit, and learned
+request-body sizing state.
+Its phases are `creating`, `copying_fresh_local_index`, `starting_plan`,
+`planning`, `pushing_paths`, `pushing_deletes`, `committing`,
+`publishing_local_index`, `completing`, `removing`, and `discarding_plan`.
+The separate start, publication, completion, removal, and discard phases ensure
+that a process stop between durable actions repeats only the current action.
+During `planning`, `cursor.json` alone owns the merge position and output
+lengths. A completed cursor remains until commit and local publication finish,
+or until `discarding_plan` follows confirmed target removal.
 
 Each local path to push carries the type, size, and ctime from the index used to
 plan it. The sender compares the live path with those values before asking
@@ -299,28 +311,33 @@ absence.
 
 A changed type, size, or ctime, a vanished path, or a directory that is no
 longer empty moves the sender to `removing`. Repeated bounded remove calls
-delete the upload-only push session; the sender then discards the PushPlan and
-changes its status to `restart` so the caller can produce a new fresh local
-index. The remote work and published local index therefore always describe the
-same planned tree.
+delete the upload-only push session; the sender enters `discarding_plan`,
+removes the PushPlan cursor, and changes its status to `restart` so the caller
+can produce a new fresh local index. The remote work and published local index
+therefore always describe the same planned tree.
 
 Repeated `push_commit` calls drive the receiver to `complete`. Only then does
-`after_successful_push()` publish the plan-owned fresh local index as
-`local_index_at_previous_push.jsonl`. Excluded entries remain in that complete
-index; exclusions suppress remote work rather than creating a second retained
-index representation.
+the sender enter `publishing_local_index` and copy the plan-owned fresh local
+index to `local_index_at_previous_push.jsonl`. Excluded entries remain in that
+complete index; exclusions suppress remote work rather than creating a second
+retained index representation.
 
 Each local-path upload or deletion step sends at most one multipart part. A file
 part contains one bounded chunk, a deletion-list part contains one complete
 path, and a directory or symlink part contains one complete value. The sender
 retains one multipart request across successive steps until its body budget is
-spent or the caller closes the sender. close() finishes that request and stores
-the confirmed local boundary. The sender derives Content-Length from the bytes
-actually read and never reads
-another local path to push until the current one is complete. Receiver
+spent or the caller explicitly cancels it. Without cancellation, close()
+finishes that request and stores the confirmed local boundary. The sender
+derives Content-Length from the bytes actually read and never reads another
+local path to push until the current one is complete. Receiver
 contention, offset gaps, and transport failures end the current sender run. The
 caller may run the push command again; it resumes from the last durable local
 boundary and reads receiver-confirmed progress before sending more work.
+
+There is no overall sender deadline. The caller checks its own time and memory
+budget before each step. Network operations have connect, no-progress, and
+response-wait limits, but a connection that continues moving bytes may take as
+long as needed.
 
 The local path type, size, and ctime have one honest timestamp-resolution gap: a
 same-size edit that keeps the same ctime second leaves all three unchanged and
