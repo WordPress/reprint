@@ -680,12 +680,13 @@ final class PushFilesSender
             return;
         }
 
-        // Prefer tentative progress in the open request, then target-confirmed progress
-        // cached during this run. Ask the target only when neither cursor is available.
+        // Continue at the tentative byte offset in an open request, then at the
+        // target-confirmed offset cached during this run. Ask the target only
+        // when neither byte offset is available.
         if ($this->state_before_upload_request !== null) {
-            $receiver_confirmed_bytes = $this->next_file_byte_offset ?? 0;
+            $file_byte_offset = $this->next_file_byte_offset ?? 0;
         } elseif ($this->receiver_confirmed_file_byte_offset !== null) {
-            $receiver_confirmed_bytes = $this->receiver_confirmed_file_byte_offset;
+            $file_byte_offset = $this->receiver_confirmed_file_byte_offset;
         } else {
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
                 'push_session_id' => $this->state['push_session_id'],
@@ -710,14 +711,14 @@ final class PushFilesSender
                 $this->store_state($this->state);
                 return;
             }
-            $receiver_confirmed_bytes = $receiver_path_status['state'] === 'partial'
+            $file_byte_offset = $receiver_path_status['state'] === 'partial'
                 && $receiver_path_type === 'file'
                 && $receiver_path_status['accepted_bytes'] <= $local_path_type_size_and_ctime['size']
                     ? $receiver_path_status['accepted_bytes']
                     : 0;
-            $this->receiver_confirmed_file_byte_offset = $receiver_confirmed_bytes;
+            $this->receiver_confirmed_file_byte_offset = $file_byte_offset;
         }
-        $this->next_file_byte_offset = $receiver_confirmed_bytes;
+        $this->next_file_byte_offset = $file_byte_offset;
 
         $upload_part = null;
         $upload_completes_local_path = false;
@@ -789,7 +790,6 @@ final class PushFilesSender
 
         // A file contributes at most one bounded chunk during this call and remains open for the next.
         if ($local_path_type_size_and_ctime['type'] === 'file') {
-            $file_byte_offset = $receiver_confirmed_bytes;
             $maximum_file_payload_bytes = $this->push_stream_client->next_file_body_bytes(
                 $local_path_to_push['path'],
                 $local_path_type_size_and_ctime['size'],
@@ -910,7 +910,7 @@ final class PushFilesSender
             $this->next_file_byte_offset = null;
             $this->local_path_to_push = null;
         } else {
-            $this->next_file_byte_offset = $receiver_confirmed_bytes + strlen($upload_part['payload']);
+            $this->next_file_byte_offset = $file_byte_offset + strlen($upload_part['payload']);
         }
         $this->upload_request_should_finish = $this->push_stream_client->should_finish_request();
     }

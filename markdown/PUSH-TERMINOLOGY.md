@@ -170,7 +170,7 @@ Use these names verbatim inside `PushFilesSender`:
 | Sender outcome explanation | `$detail`, `get_detail()` |
 | Receiver path status | `$receiver_path_status` |
 | Receiver path type | `$receiver_path_type` |
-| Receiver-confirmed bytes | `$receiver_confirmed_bytes` |
+| File byte offset for the next part | `$file_byte_offset` |
 | Whether this upload completes the local path | `$upload_completes_local_path` |
 | Maximum file payload bytes | `$maximum_file_payload_bytes` |
 | Maximum delete-list payload bytes | `$maximum_delete_list_payload_bytes` |
