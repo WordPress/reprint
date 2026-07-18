@@ -301,9 +301,10 @@ Each local-path upload or deletion step sends at most one multipart part. A file
 or deletion-list part contains one bounded chunk; a directory or symlink part
 contains one complete value. The sender derives Content-Length from the
 bytes actually read, closes work deletes explicitly, and never reads another
-local path to push until the current one is complete. Recoverable target
-contention, offset gaps, and ambiguous transport failures are retried at a fixed
-bounded count; exhaustion returns a terminal failure rather than a final retry.
+local path to push until the current one is complete. Receiver
+contention, offset gaps, and transport failures end the current sender run. The
+caller may run the push command again; it resumes from the last durable local
+boundary and reads receiver-confirmed progress before sending more work.
 
 The local path type, size, and ctime have one honest timestamp-resolution gap: a
 same-size edit that keeps the same ctime second leaves all three unchanged and
