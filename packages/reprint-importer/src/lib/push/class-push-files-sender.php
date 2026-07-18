@@ -61,10 +61,10 @@
  * longer describe the same local tree.
  *
  * The deletion cursor is never copied into active state. Each step reads it
- * from `push_status` and checks that it belongs to the plan's stable deletion
- * list. If a local path to push disappears, the sender removes the upload-only
- * push session, discards the plan, and returns `restart` so the caller can
- * produce a new local index.
+ * from `push_status` and sends only complete planned paths that remain absent
+ * locally. If a selected path changes, the sender removes the upload-only push
+ * session, discards the plan, and returns `restart` so the caller can produce a
+ * new local index.
  *
  * ## Streaming and durability
  *
@@ -78,6 +78,7 @@
  * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'directory'|'symlink',size:int,ctime:int}
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
+ * @phpstan-type FreshLocalIndexEntry array{path:string,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
  */
 final class PushFilesSender
@@ -108,6 +109,12 @@ final class PushFilesSender
 
     /** @var resource|null Open local file retained while pushing its chunks. */
     private $local_file_handle = null;
+
+    /** @var resource|null Open fresh local index retained while checking planned replacements. */
+    private $fresh_local_index_handle = null;
+
+    /** @var FreshLocalIndexEntry|null Next fresh local index entry during deletion checks. */
+    private ?array $fresh_local_index_entry = null;
 
     /** @var PushPlan Plan retained while its bounded steps run. */
     private PushPlan $plan;
@@ -344,6 +351,7 @@ final class PushFilesSender
         $this->close_local_file_handle();
         $this->close_local_paths_to_push_handle();
         $this->close_local_paths_to_delete_handle();
+        $this->close_fresh_local_index_handle();
         if (is_resource($this->lock_handle)) {
             $this->release_lock($this->lock_handle);
         }
@@ -697,6 +705,7 @@ final class PushFilesSender
 
         if ($work_deletes_complete) {
             $this->close_local_paths_to_delete_handle();
+            $this->close_fresh_local_index_handle();
             $state['phase'] = 'committing';
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
@@ -720,6 +729,39 @@ final class PushFilesSender
         $payload = fread($this->local_paths_to_delete_handle, $maximum_delete_list_payload_bytes);
         if (!is_string($payload) || ( $payload === '' && !feof($this->local_paths_to_delete_handle) )) {
             return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local deletion list at the receiver-confirmed cursor.');
+        }
+        if ($payload !== '') {
+            $last_path_end = strrpos($payload, "\0");
+            if ($last_path_end === false) {
+                return $this->step_result('failed', $state, 'request_size_exhausted', 'The current request-body budget cannot fit one complete local path to delete.');
+            }
+            $payload = substr($payload, 0, $last_path_end + 1);
+            if (fseek($this->local_paths_to_delete_handle, $work_deletes_bytes + strlen($payload)) !== 0) {
+                $this->close_local_paths_to_delete_handle();
+                return $this->step_result('failed', $state, 'local_io_error', 'Could not position the local deletion list after the next complete paths.');
+            }
+            $local_paths_to_delete = explode("\0", $payload);
+            array_pop($local_paths_to_delete);
+            foreach ($local_paths_to_delete as $local_path_to_delete) {
+                $local_path_type_size_and_ctime = $this->stat_local_path($local_path_to_delete);
+                if ($local_path_type_size_and_ctime === null) {
+                    continue;
+                }
+                try {
+                    $planned_local_path_type_size_and_ctime = $this->get_planned_local_path_type_size_and_ctime(
+                        $local_path_to_delete
+                    );
+                } catch (RuntimeException $exception) {
+                    return $this->step_result('failed', $state, 'local_io_error', $exception->getMessage());
+                }
+                if ($local_path_type_size_and_ctime !== $planned_local_path_type_size_and_ctime) {
+                    $this->close_local_paths_to_delete_handle();
+                    $this->close_fresh_local_index_handle();
+                    $state['phase'] = 'removing';
+                    $this->store_state($state);
+                    return $this->step_result('continue', $state, 'local_path_changed', 'A local path selected for deletion now exists; remove the upload-only push session before generating another index.');
+                }
+            }
         }
         $local_delete_list_complete = $payload === '';
 
@@ -783,6 +825,18 @@ final class PushFilesSender
             fclose($this->local_paths_to_delete_handle);
         }
         $this->local_paths_to_delete_handle = null;
+    }
+
+    /**
+     * Closes the fresh local index used to distinguish replacements from reappeared paths.
+     */
+    private function close_fresh_local_index_handle(): void
+    {
+        if (is_resource($this->fresh_local_index_handle)) {
+            fclose($this->fresh_local_index_handle);
+        }
+        $this->fresh_local_index_handle = null;
+        $this->fresh_local_index_entry = null;
     }
 
     /**
@@ -934,6 +988,70 @@ final class PushFilesSender
                 'ctime' => $decoded_local_path['ctime'],
             ],
         ];
+    }
+
+    /**
+     * Returns planned type, size, and ctime when the fresh local index contains the path.
+     *
+     * Deletion paths are sorted, so one retained index handle only moves
+     * forward while replacement paths are checked.
+     *
+     * @param string $path Raw document-root-relative path.
+     * @return LocalPathTypeSizeAndCtime|null Planned values, or null when the path was absent during planning.
+     */
+    private function get_planned_local_path_type_size_and_ctime(string $path): ?array
+    {
+        if (!is_resource($this->fresh_local_index_handle)) {
+            $this->fresh_local_index_handle = fopen(
+                $this->push_state_directory . '/fresh_local_index.jsonl',
+                'rb'
+            );
+            if (!is_resource($this->fresh_local_index_handle)) {
+                throw new RuntimeException('Could not open the fresh local index while checking a planned replacement.');
+            }
+        }
+
+        while (true) {
+            if ($this->fresh_local_index_entry === null) {
+                $line = fgets($this->fresh_local_index_handle);
+                if ($line === false) {
+                    if (feof($this->fresh_local_index_handle)) {
+                        return null;
+                    }
+                    throw new RuntimeException('Could not read the fresh local index while checking a planned replacement.');
+                }
+                try {
+                    $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+                } catch (JsonException $exception) {
+                    throw new RuntimeException('Could not decode the fresh local index while checking a planned replacement.', 0, $exception);
+                }
+                /** @var array{path:string,type:'file'|'link'|'dir',size:int,ctime:int} $entry */
+                $entry_path = base64_decode($entry['path'], true);
+                if ($entry_path === false) {
+                    throw new RuntimeException('Could not decode a path in the fresh local index while checking a planned replacement.');
+                }
+                $this->fresh_local_index_entry = [
+                    'path' => $entry_path,
+                    'local_path_type_size_and_ctime' => [
+                        'type' => $entry['type'] === 'link' ? 'symlink' : ($entry['type'] === 'dir' ? 'directory' : 'file'),
+                        'size' => $entry['size'],
+                        'ctime' => $entry['ctime'],
+                    ],
+                ];
+            }
+
+            $path_comparison = strcmp($this->fresh_local_index_entry['path'], $path);
+            if ($path_comparison < 0) {
+                $this->fresh_local_index_entry = null;
+                continue;
+            }
+            if ($path_comparison > 0) {
+                return null;
+            }
+            $local_path_type_size_and_ctime = $this->fresh_local_index_entry['local_path_type_size_and_ctime'];
+            $this->fresh_local_index_entry = null;
+            return $local_path_type_size_and_ctime;
+        }
     }
 
     /**

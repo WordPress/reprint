@@ -1433,8 +1433,42 @@ final class PushEndpointsTest extends TestCase {
             self::SECRET
         );
         $status_response = json_decode($status['body'], true, 512, JSON_THROW_ON_ERROR);
-        $this->assertSame(64, $status_response['work_deletes_bytes']);
+        $this->assertSame(56, $status_response['work_deletes_bytes']);
         $this->assertFalse($status_response['work_deletes_complete']);
+    }
+
+    /**
+     * Removes a push session when a planned deletion reappears locally.
+     */
+    public function testHighLevelSenderDoesNotDeleteAPathThatReappearedAfterPlanning(): void
+    {
+        $local_docroot = $this->root . '/reappeared-delete-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/reappeared-delete-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, []);
+        $previous_local_index_path = $this->root . '/reappeared-delete-previous-index.jsonl';
+        $this->writeIndex($previous_local_index_path, [
+            'returned.txt' => [1, 3, 'file'],
+        ]);
+        $push_state_directory = $this->root . '/reappeared-delete-state';
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $sender = PushFilesSender::start($options);
+        try {
+            $this->assertSame('planning', $sender->next_step()['phase']);
+            $this->assertSame('pushing_paths', $sender->next_step()['phase']);
+            $this->assertSame('pushing_deletes', $sender->next_step()['phase']);
+            file_put_contents($local_docroot . '/returned.txt', 'new');
+
+            $result = $sender->next_step();
+        } finally {
+            $sender->close();
+        }
+
+        $this->assertSame('continue', $result['status']);
+        $this->assertSame('removing', $result['phase']);
+        $this->assertSame('local_path_changed', $result['reason']);
     }
 
     /**

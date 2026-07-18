@@ -112,9 +112,9 @@ cursor, receiver part limit, and request-sizing state.
 A request failure ends the current sender run. The active state remains in
 place so a later push command can resume from the last durable boundary.
 
-When a local path to push disappears or changes while being read, the sender
-reports `local_path_changed` and moves to `removing`. After removal it requests
-a new fresh local index.
+When a local path to push changes, or a local path to delete reappears, the
+sender reports `local_path_changed` and moves to `removing`. After removal it
+requests a new fresh local index.
 
 Receiver-confirmed file and work-delete cursors remain receiver state. The
 sender reads them from `push_status`; it does not copy them into `sender.json`.
