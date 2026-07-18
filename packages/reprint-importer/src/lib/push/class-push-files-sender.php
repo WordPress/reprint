@@ -579,9 +579,7 @@ final class PushFilesSender
         $request_size_failure_detail = null;
 
         if ($local_path_type_size_and_ctime['type'] === 'file') {
-            $file_byte_offset = $receiver_confirmed_bytes <= $local_path_type_size_and_ctime['size']
-                ? $receiver_confirmed_bytes
-                : 0;
+            $file_byte_offset = $receiver_confirmed_bytes;
             $maximum_file_payload_bytes = $this->push_stream_client->next_file_body_bytes(
                 $local_path_to_push['path'],
                 $local_path_type_size_and_ctime['size'],
