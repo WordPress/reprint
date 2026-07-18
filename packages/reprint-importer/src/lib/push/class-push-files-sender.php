@@ -382,21 +382,8 @@ final class PushFilesSender
         $this->push_stream_client->apply_reported_limits([$response['post_max_bytes']]);
         $state['max_part_bytes'] = $response['max_part_bytes'];
         $state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
-        try {
-            if (PushPlan::has_plan($this->push_state_directory)) {
-                $this->plan = PushPlan::resume($this->push_state_directory);
-            } else {
-                $this->plan = PushPlan::start(
-                    $this->push_state_directory,
-                    $this->fresh_local_index_path,
-                    $excluded_paths
-                );
-            }
-        } catch (RuntimeException $exception) {
-            clearstatcache(true, $this->fresh_local_index_path);
-            if (is_file($this->fresh_local_index_path)) {
-                throw $exception;
-            }
+        clearstatcache(true, $this->fresh_local_index_path);
+        if (!is_file($this->fresh_local_index_path)) {
             $state['phase'] = 'removing';
             $this->store_state($state);
             return $this->step_result(
@@ -404,6 +391,15 @@ final class PushFilesSender
                 $state,
                 'local_path_changed',
                 'The fresh local index disappeared before planning began; remove the upload-only push session before generating another index.'
+            );
+        }
+        if (PushPlan::has_plan($this->push_state_directory)) {
+            $this->plan = PushPlan::resume($this->push_state_directory);
+        } else {
+            $this->plan = PushPlan::start(
+                $this->push_state_directory,
+                $this->fresh_local_index_path,
+                $excluded_paths
             );
         }
 
