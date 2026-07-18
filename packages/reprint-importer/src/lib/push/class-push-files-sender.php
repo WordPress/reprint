@@ -596,11 +596,13 @@ final class PushFilesSender
      */
     private function upload_next_file_chunk(): void
     {
+        // Confirm a request after the transfer ends or its remaining budget cannot fit more work.
         if ($this->upload_request_should_finish) {
             $this->finish_upload_request();
             return;
         }
 
+        // Keep the planned-path list open across calls while this phase is active.
         if (!is_resource($this->local_paths_to_push_handle)) {
             $local_paths_to_push_path = PushPlan::local_paths_to_push_path($this->push_state_directory);
             $this->local_paths_to_push_handle = fopen($local_paths_to_push_path, 'rb');
@@ -610,6 +612,7 @@ final class PushFilesSender
             }
         }
 
+        // Select one planned path and retain it while its file chunks are prepared.
         if ($this->local_path_to_push === null) {
             if ($this->local_paths_to_push_byte_offset !== $this->state['local_paths_to_push_byte_offset']) {
                 if (fseek($this->local_paths_to_push_handle, $this->state['local_paths_to_push_byte_offset']) !== 0) {
@@ -629,6 +632,8 @@ final class PushFilesSender
             }
         }
         $local_path_to_push = $this->local_path_to_push;
+
+        // End this phase only after any request containing its final paths is confirmed.
         if ($local_path_to_push === null) {
             if ($this->state_before_upload_request !== null) {
                 $this->finish_upload_request();
@@ -644,6 +649,8 @@ final class PushFilesSender
 
         $planned_local_path_type_size_and_ctime = $local_path_to_push['planned_local_path_type_size_and_ctime'];
         $local_path_type_size_and_ctime = $this->stat_local_path($local_path_to_push['path']);
+
+        // A path which disappeared belongs in a newly generated plan, not this upload-only session.
         if ($local_path_type_size_and_ctime === null) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
@@ -652,6 +659,8 @@ final class PushFilesSender
             );
             return;
         }
+
+        // A type the protocol cannot send requires a new plan rather than partial progress.
         if ($local_path_type_size_and_ctime['type'] === 'unsupported') {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
@@ -660,6 +669,8 @@ final class PushFilesSender
             );
             return;
         }
+
+        // Changed type, size, or ctime means this push no longer describes the completed plan.
         if ($local_path_type_size_and_ctime !== $planned_local_path_type_size_and_ctime) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
@@ -669,6 +680,8 @@ final class PushFilesSender
             return;
         }
 
+        // Prefer tentative progress in the open request, then target-confirmed progress
+        // cached during this run. Ask the target only when neither cursor is available.
         if ($this->state_before_upload_request !== null) {
             $receiver_confirmed_bytes = $this->next_file_byte_offset ?? 0;
         } elseif ($this->receiver_confirmed_file_byte_offset !== null) {
@@ -709,6 +722,7 @@ final class PushFilesSender
         $upload_part = null;
         $upload_completes_local_path = false;
 
+        // Directory and symlink values each fit in one MIME part and need no byte cursor.
         if ($local_path_type_size_and_ctime['type'] === 'directory') {
             $directory_is_empty = $this->directory_is_empty($local_path_to_push['path']);
             if ($directory_is_empty === null) {
@@ -773,6 +787,7 @@ final class PushFilesSender
             $upload_completes_local_path = true;
         }
 
+        // A file contributes at most one bounded chunk during this call and remains open for the next.
         if ($local_path_type_size_and_ctime['type'] === 'file') {
             $file_byte_offset = $receiver_confirmed_bytes;
             $maximum_file_payload_bytes = $this->push_stream_client->next_file_body_bytes(
@@ -855,6 +870,8 @@ final class PushFilesSender
             $upload_completes_local_path = $file_byte_offset + strlen($payload) === $local_path_type_size_and_ctime['size'];
         }
 
+        // Open a request only after its first part is ready. The snapshot lets
+        // cancellation return to the last target-confirmed sender boundary.
         if ($this->state_before_upload_request === null) {
             $this->state_before_upload_request = $this->state;
             if (!$this->push_stream_client->start_upload_request($this->state['push_session_id'])) {
@@ -867,6 +884,9 @@ final class PushFilesSender
 
         /** @var array<string,mixed> $upload_part */
         $part_sent = $this->push_stream_client->send_part($upload_part);
+
+        // Confirm an existing request before retrying this part in a new one.
+        // An empty request which cannot fit the part cannot make progress.
         if (!$part_sent) {
             if ($this->upload_request_has_parts) {
                 $this->upload_request_should_finish = true;
@@ -880,6 +900,9 @@ final class PushFilesSender
             return;
         }
         $this->upload_request_has_parts = true;
+
+        // The next path may be prepared once this path is complete in the open request.
+        // Its list cursor remains tentative until the target confirms that request.
         if ($upload_completes_local_path) {
             $this->close_local_file_handle();
             $this->state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
