@@ -488,17 +488,15 @@ final class MultipartPushStreamClientTest extends TestCase {
                 'response_timeout' => 2,
             ]);
             if ($case === 'redirect') {
-                try {
-                    $client->send_push_request('POST', 'push_create', [
-                        'push_session_id' => str_repeat('8', 32),
-                    ], ['created']);
-                    $this->fail('A redirected push request was accepted.');
-                } catch (\RuntimeException $exception) {
-                    $this->assertSame(
-                        'The target redirected to http://example.test/final. Use that address as the push base_url.',
-                        $exception->getMessage()
-                    );
-                }
+                $result = $client->send_push_request('POST', 'push_create', [
+                    'push_session_id' => str_repeat('8', 32),
+                ], ['created']);
+                $this->assertSame('failed', $result['status']);
+                $this->assertSame('redirected', $result['reason']);
+                $this->assertSame(
+                    'The target redirected to http://example.test/final. Use that address as the push base_url.',
+                    $result['detail']
+                );
             } else {
                 $result = $client->send_push_request('POST', 'push_create', [
                     'push_session_id' => str_repeat('9', 32),

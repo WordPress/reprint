@@ -364,7 +364,7 @@ final class PushFilesSender
      */
     private function create_push_session(array &$state): array
     {
-        $request_result = $this->send_push_request('POST', 'push_create', [
+        $request_result = $this->push_stream_client->send_push_request('POST', 'push_create', [
             'push_session_id' => $state['push_session_id'],
         ], ['created']);
         $failure_result = $this->handle_request_failure($request_result, $state);
@@ -477,7 +477,7 @@ final class PushFilesSender
             return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
         }
 
-        $request_result = $this->send_push_request('GET', 'push_status', [
+        $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
             'push_session_id' => $state['push_session_id'],
             'path_b64' => $local_path_to_push['path_b64'],
         ], ['accepted']);
@@ -708,7 +708,7 @@ final class PushFilesSender
      */
     private function upload_next_chunk_of_deleted_paths(array &$state): array
     {
-        $request_result = $this->send_push_request('GET', 'push_status', [
+        $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
             'push_session_id' => $state['push_session_id'],
         ], ['accepted']);
         $failure_result = $this->handle_request_failure($request_result, $state);
@@ -818,7 +818,7 @@ final class PushFilesSender
      */
     private function commit_push(array &$state): array
     {
-        $request_result = $this->send_push_request('POST', 'push_commit', [
+        $request_result = $this->push_stream_client->send_push_request('POST', 'push_commit', [
             'push_session_id' => $state['push_session_id'],
         ], ['accepted']);
         $failure_result = $this->handle_request_failure($request_result, $state);
@@ -861,7 +861,7 @@ final class PushFilesSender
      */
     private function remove_push(array &$state): array
     {
-        $request_result = $this->send_push_request('POST', 'push_remove', [
+        $request_result = $this->push_stream_client->send_push_request('POST', 'push_remove', [
             'push_session_id' => $state['push_session_id'],
         ], ['accepted']);
         $failure_result = $this->handle_request_failure($request_result, $state);
@@ -955,49 +955,6 @@ final class PushFilesSender
             'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
             'local_path_type_size_and_ctime' => $this->stat_local_path($path),
         ];
-    }
-
-    /**
-     * Sends a signed push request and classifies transport exceptions.
-     *
-     * Redirects and malformed JSON are terminal. A missing response is
-     * recoverable within the fixed retry bound because create, status,
-     * commit, and remove requests are idempotent.
-     *
-     * @param string $method GET or POST.
-     * @param string $endpoint Push protocol endpoint.
-     * @param array<string,mixed> $parameters Request-target parameters.
-     * @param list<string> $expected_statuses Successful response statuses.
-     * @return array{status:'complete'|'retry'|'failed',reason:string|null,detail:string|null,response:array<string,mixed>|null,parts_sent:int,body_bytes_sent:int}
-     */
-    private function send_push_request(string $method, string $endpoint, array $parameters, array $expected_statuses): array
-    {
-        try {
-            return $this->push_stream_client->send_push_request($method, $endpoint, $parameters, $expected_statuses);
-        } catch (RuntimeException $exception) {
-            $message = $exception->getMessage();
-            if (strpos($message, 'The target redirected') === 0) {
-                $status = 'failed';
-                $reason = 'redirected';
-            } elseif (strpos($message, 'Push request returned invalid JSON') === 0) {
-                $status = 'failed';
-                $reason = 'malformed_response';
-            } elseif (strpos($message, 'Push request failed:') === 0) {
-                $status = 'retry';
-                $reason = 'request_failed';
-            } else {
-                $status = 'failed';
-                $reason = 'client_error';
-            }
-            return [
-                'status' => $status,
-                'reason' => $reason,
-                'detail' => $message,
-                'response' => null,
-                'parts_sent' => 0,
-                'body_bytes_sent' => 0,
-            ];
-        }
     }
 
     /**

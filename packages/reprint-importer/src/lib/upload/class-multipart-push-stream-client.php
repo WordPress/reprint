@@ -701,13 +701,12 @@ class MultipartPushStreamClient
      *     status:'complete'|'retry'|'failed',
      *     reason:?string,
      *     detail:?string,
-     *     response:array<string,mixed>,
+     *     response:?array<string,mixed>,
      *     parts_sent:int,
      *     body_bytes_sent:int
      * }
      *
      * @throws InvalidArgumentException If the method is unsupported.
-     * @throws RuntimeException If transport, redirect, or JSON decoding fails.
      */
     public function send_push_request(string $method, string $endpoint, array $parameters, array $expected_statuses): array
     {
@@ -752,14 +751,35 @@ class MultipartPushStreamClient
         $redirect_url = (string) curl_getinfo($handle, CURLINFO_REDIRECT_URL);
         curl_close($handle);
         if (in_array($http_code, [301, 302, 303, 307, 308], true)) {
-            throw new RuntimeException('The target redirected to ' . ($redirect_url === '' ? 'another address' : $redirect_url) . '. Use that address as the push base_url.');
+            return [
+                'status' => 'failed',
+                'reason' => 'redirected',
+                'detail' => 'The target redirected to ' . ($redirect_url === '' ? 'another address' : $redirect_url) . '. Use that address as the push base_url.',
+                'response' => null,
+                'parts_sent' => 0,
+                'body_bytes_sent' => 0,
+            ];
         }
         if (!is_string($body)) {
-            throw new RuntimeException('Push request failed: ' . ($error === '' ? 'no response' : $error) . '.');
+            return [
+                'status' => 'failed',
+                'reason' => 'request_failed',
+                'detail' => 'Push request failed: ' . ($error === '' ? 'no response' : $error) . '.',
+                'response' => null,
+                'parts_sent' => 0,
+                'body_bytes_sent' => 0,
+            ];
         }
         $decoded = json_decode($body, true);
         if (!is_array($decoded)) {
-            throw new RuntimeException('Push request returned invalid JSON (HTTP ' . $http_code . '): ' . substr($body, 0, 160));
+            return [
+                'status' => 'failed',
+                'reason' => 'malformed_response',
+                'detail' => 'Push request returned invalid JSON (HTTP ' . $http_code . '): ' . substr($body, 0, 160),
+                'response' => null,
+                'parts_sent' => 0,
+                'body_bytes_sent' => 0,
+            ];
         }
         $decoded['http_code'] = $http_code;
         return $this->classify_response($decoded, $expected_statuses);
