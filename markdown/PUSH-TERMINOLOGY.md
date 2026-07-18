@@ -101,16 +101,15 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Lifecycle lock file | `sender.lock`, `$lock_path` |
 | Open lifecycle lock | `$lock_handle` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
-| Local path change fields | `local_path_change_fields`, `$local_path_change_fields` |
+| Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `read_local_path_type_size_and_ctime()` |
 | Consecutive recoverable failures | `consecutive_recoverable_failures`, `MAXIMUM_CONSECUTIVE_RECOVERABLE_FAILURES` |
 
 `cursor.json` owns planning offsets, output offsets and counts, active deleted
 directory ranges, and `excluded_paths_b64`. `sender.json` does not repeat them.
 Its phases are `creating`, `planning`, `pushing_paths`, `pushing_deletes`,
 `committing`, and `removing`. It records the push session ID, selected path-list
-cursor, local path change fields for a partial file, consecutive recoverable-
-failure count, target part limit, and request-sizing state. The local path
-change fields are the path's type, size, and ctime.
+cursor, local path type, size, and ctime for a partial file, consecutive recoverable-
+failure count, target part limit, and request-sizing state.
 
 When a local path to push disappears or changes while being read, the sender
 reports `local_path_changed` and moves to `removing`. After removal it requests
@@ -139,6 +138,7 @@ Use these names verbatim inside `PushFilesSender`:
 | Push stream client options | `$push_stream_client_options` |
 | Request sizer options | `request_sizer_options`, `$request_sizer_options` |
 | Push request | `send_push_request()` |
+| Create push session | `create_push_session()` |
 | Upload next file chunk | `upload_next_file_chunk()` |
 | Upload next chunk of deleted paths | `upload_next_chunk_of_deleted_paths()` |
 | Request result | `$request_result` |

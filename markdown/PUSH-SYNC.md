@@ -272,23 +272,22 @@ request-body sizing state. Its phases are `creating`, `planning`,
 
 Before sending the local path to push, the sender asks `push_status`
 what the receiver has accepted for that path. A partial file resumes only when
-its current type, size, and ctime equal the local path change fields saved after
-the prior accepted part. Otherwise the sender starts that path at offset zero,
-so bytes from different local file versions cannot be joined. A lost upload
-response leaves the earlier local path-list boundary in place; the next process
-checks the receiver and either advances past complete work or safely replays it.
+its current type, size, and ctime match those saved after the prior accepted
+part. Otherwise the sender starts that path at offset zero, so bytes from
+different local file versions cannot be joined. A lost upload response leaves
+the earlier local path-list boundary in place; the next process checks the
+receiver and either advances past complete work or safely replays it.
 
 After all local paths are pushed, each deletion step reads
 `work_deletes_bytes` and `work_deletes_complete` from `push_status`. Those
 receiver-owned values are the only work-delete cursor; `sender.json` does not
 duplicate it.
 
-The local path change fields are its current type, size, and ctime. Changed
-fields restart the same in-flight work at offset zero, so new-version bytes are
-never appended behind an old-version prefix. A vanished local path to push
-moves the sender to `removing`. Repeated bounded remove calls delete the
-upload-only push session; the sender then discards the PushPlan and returns
-`restart` so the caller can produce a new fresh local index.
+A changed type, size, or ctime restarts the same in-flight work at offset zero,
+so new-version bytes are never appended behind an old-version prefix. A
+vanished local path to push moves the sender to `removing`. Repeated bounded
+remove calls delete the upload-only push session; the sender then discards the
+PushPlan and returns `restart` so the caller can produce a new fresh local index.
 
 Repeated `push_commit` calls drive the receiver to `complete`. Only then does
 `after_successful_push()` publish the plan-owned fresh local index as
@@ -304,8 +303,8 @@ local path to push until the current one is complete. Recoverable target
 contention, offset gaps, and ambiguous transport failures are retried at a fixed
 bounded count; exhaustion returns a terminal failure rather than a final retry.
 
-The local path change fields have one honest timestamp-resolution gap: a
-same-size edit that keeps the same ctime second leaves the fields unchanged and
+The local path type, size, and ctime have one honest timestamp-resolution gap: a
+same-size edit that keeps the same ctime second leaves all three unchanged and
 remains invisible when a freshly generated index contains the same size, ctime,
 and type values. Other drift remains detectable by the next local-index diff.
 Push streaming requires PHP 8.1 or newer because older PHP cURL bindings can

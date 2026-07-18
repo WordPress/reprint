@@ -27,8 +27,11 @@ final class PushTerminologyTest extends TestCase {
             'push_stream_client_options',
             'request_sizer_options',
             'send_push_request',
+            'create_push_session',
             'upload_next_file_chunk',
             'upload_next_chunk_of_deleted_paths',
+            'local_path_type_size_and_ctime',
+            'read_local_path_type_size_and_ctime',
             'request_result',
             'failure_result',
             'plan_result',
@@ -89,6 +92,9 @@ final class PushTerminologyTest extends TestCase {
             '/\bclear_state\b/',
             '/\bnext_local_path_upload_part\b/',
             '/\bnext_delete_list_upload_part\b/',
+            '/\bcreate_push\b/',
+            '/local[_ ]path[_ ]change[_ ]fields/i',
+            '/\bLocalPathChangeFields\b/',
             '/remote[_ -]?session/i',
             '/remote[_ -]?workflow/i',
             '/site[_ -]?lock/i',
@@ -105,6 +111,8 @@ final class PushTerminologyTest extends TestCase {
             '/\$directory\b/',
             '/\$identity\b/',
             '/\$kind\b/',
+            '/record/i',
+            '/field/i',
         ];
 
         foreach ($paths as $path) {

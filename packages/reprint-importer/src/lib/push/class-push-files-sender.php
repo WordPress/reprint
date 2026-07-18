@@ -76,9 +76,9 @@
  * Active state and PushPlan's cursor are written atomically, and the lifecycle
  * lock permits only one open sender at a time.
  *
- * @phpstan-type LocalPathChangeFields array{type:'file'|'directory'|'symlink',size:int,ctime:int}
- * @phpstan-type LocalPathToPush array{path:string,path_b64:string,local_paths_to_push_byte_offset:int,next_local_paths_to_push_byte_offset:int,local_path_change_fields:LocalPathChangeFields|null}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,local_path_change_fields:LocalPathChangeFields|null,consecutive_recoverable_failures:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
+ * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'directory'|'symlink',size:int,ctime:int}
+ * @phpstan-type LocalPathToPush array{path:string,path_b64:string,local_paths_to_push_byte_offset:int,next_local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'removing',local_paths_to_push_byte_offset:int,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime|null,consecutive_recoverable_failures:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null,growth_holdoff_remaining:int}}
  */
 final class PushFilesSender
 {
@@ -174,7 +174,7 @@ final class PushFilesSender
                 'push_session_id' => bin2hex(random_bytes(16)),
                 'phase' => 'creating',
                 'local_paths_to_push_byte_offset' => 0,
-                'local_path_change_fields' => null,
+                'local_path_type_size_and_ctime' => null,
                 'consecutive_recoverable_failures' => 0,
                 'max_part_bytes' => null,
                 'request_sizer_state' => $sender->push_stream_client->get_request_sizer_state(),
@@ -300,7 +300,7 @@ final class PushFilesSender
 
         switch ($this->state['phase']) {
             case 'creating':
-                $result = $this->create_push($this->state);
+                $result = $this->create_push_session($this->state);
                 break;
             case 'planning':
                 $result = $this->next_plan_step($this->state);
@@ -356,7 +356,7 @@ final class PushFilesSender
      * @param State $state Active state.
      * @return array<string,mixed> Durable result after the create request.
      */
-    private function create_push(array &$state): array
+    private function create_push_session(array &$state): array
     {
         $request_result = $this->send_push_request('POST', 'push_create', [
             'push_session_id' => $state['push_session_id'],
@@ -454,31 +454,22 @@ final class PushFilesSender
         }
 
         try {
-            $local_path_record = $this->read_local_path_to_push(
+            $local_path_to_push = $this->read_local_path_to_push(
                 $this->local_paths_to_push_handle,
                 $state['local_paths_to_push_byte_offset']
             );
-            $local_path_to_push = $local_path_record === null
-                ? null
-                : [
-                    'path' => $local_path_record['path'],
-                    'path_b64' => base64_encode($local_path_record['path']),
-                    'local_paths_to_push_byte_offset' => $state['local_paths_to_push_byte_offset'],
-                    'next_local_paths_to_push_byte_offset' => $local_path_record['next_local_paths_to_push_byte_offset'],
-                    'local_path_change_fields' => $this->read_local_path_change_fields($local_path_record['path']),
-                ];
         } catch (RuntimeException $exception) {
             return $this->step_result('failed', $state, 'local_io_error', $exception->getMessage());
         }
         if ($local_path_to_push === null) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
-            $state['local_path_change_fields'] = null;
+            $state['local_path_type_size_and_ctime'] = null;
             $state['phase'] = 'pushing_deletes';
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
-        if ($local_path_to_push['local_path_change_fields'] === null) {
+        if ($local_path_to_push['local_path_type_size_and_ctime'] === null) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
             $state['phase'] = 'removing';
@@ -500,60 +491,60 @@ final class PushFilesSender
         $receiver_path_type = $receiver_path_status['type'] ?? null;
         $state['consecutive_recoverable_failures'] = 0;
 
-        $local_path_change_fields = $this->read_local_path_change_fields($local_path_to_push['path']);
-        if ($local_path_change_fields === null) {
+        $local_path_type_size_and_ctime = $this->read_local_path_type_size_and_ctime($local_path_to_push['path']);
+        if ($local_path_type_size_and_ctime === null) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
             $state['phase'] = 'removing';
             $this->store_state($state);
             return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
         }
-        $saved_change_fields_match = $state['local_path_change_fields'] === $local_path_change_fields;
-        if (!$saved_change_fields_match) {
+        $saved_type_size_and_ctime_matches = $state['local_path_type_size_and_ctime'] === $local_path_type_size_and_ctime;
+        if (!$saved_type_size_and_ctime_matches) {
             $this->close_local_file_handle();
         }
         if (
-            $saved_change_fields_match
+            $saved_type_size_and_ctime_matches
             && $receiver_path_status['state'] === 'complete'
-            && $receiver_path_type === $local_path_change_fields['type']
-            && ( $local_path_change_fields['type'] !== 'file' || $receiver_path_status['accepted_bytes'] === $local_path_change_fields['size'] )
+            && $receiver_path_type === $local_path_type_size_and_ctime['type']
+            && ( $local_path_type_size_and_ctime['type'] !== 'file' || $receiver_path_status['accepted_bytes'] === $local_path_type_size_and_ctime['size'] )
         ) {
             $this->close_local_file_handle();
             $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
-            $state['local_path_change_fields'] = null;
+            $state['local_path_type_size_and_ctime'] = null;
             $state['consecutive_recoverable_failures'] = 0;
             $this->store_state($state);
             return $this->step_result('continue', $state, null, null);
         }
-        $receiver_confirmed_bytes = $saved_change_fields_match
+        $receiver_confirmed_bytes = $saved_type_size_and_ctime_matches
             && $receiver_path_status['state'] === 'partial'
             && $receiver_path_type === 'file'
-            && $receiver_path_status['accepted_bytes'] <= $local_path_change_fields['size']
+            && $receiver_path_status['accepted_bytes'] <= $local_path_type_size_and_ctime['size']
                 ? $receiver_path_status['accepted_bytes']
                 : 0;
 
         $upload_part = null;
         $upload_completes_local_path = false;
 
-        if ($local_path_change_fields['type'] === 'directory') {
+        if ($local_path_type_size_and_ctime['type'] === 'directory') {
             $directory_is_empty = $this->directory_is_empty($local_path_to_push['path']);
             if ($directory_is_empty === null) {
                 return $this->step_result('failed', $state, 'local_io_error', 'Could not read the local directory to push: ' . base64_encode($local_path_to_push['path']) . '.');
             }
-            $local_path_change_fields_after_read = $this->read_local_path_change_fields($local_path_to_push['path']);
-            if ($local_path_change_fields_after_read === null) {
+            $local_path_type_size_and_ctime_after_read = $this->read_local_path_type_size_and_ctime($local_path_to_push['path']);
+            if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
                 $state['phase'] = 'removing';
                 $this->store_state($state);
                 return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
             }
-            if ($local_path_change_fields_after_read !== $local_path_change_fields) {
+            if ($local_path_type_size_and_ctime_after_read !== $local_path_type_size_and_ctime) {
                 $this->store_state($state);
                 return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while it was being read; retry it from receiver-confirmed state.');
             }
             if (!$directory_is_empty) {
                 $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
-                $state['local_path_change_fields'] = null;
+                $state['local_path_type_size_and_ctime'] = null;
                 $this->store_state($state);
                 return $this->step_result('continue', $state, null, null);
             }
@@ -563,16 +554,16 @@ final class PushFilesSender
                 'payload' => '',
             ];
             $upload_completes_local_path = true;
-        } elseif ($local_path_change_fields['type'] === 'symlink') {
+        } elseif ($local_path_type_size_and_ctime['type'] === 'symlink') {
             $symlink_target = @readlink($this->docroot . '/' . $local_path_to_push['path']);
-            $local_path_change_fields_after_read = $this->read_local_path_change_fields($local_path_to_push['path']);
-            if ($local_path_change_fields_after_read === null) {
+            $local_path_type_size_and_ctime_after_read = $this->read_local_path_type_size_and_ctime($local_path_to_push['path']);
+            if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
                 $state['phase'] = 'removing';
                 $this->store_state($state);
                 return $this->step_result('continue', $state, 'local_path_changed', 'A local path to push disappeared; remove the upload-only push session before generating another index.');
             }
-            if ($local_path_change_fields_after_read !== $local_path_change_fields) {
+            if ($local_path_type_size_and_ctime_after_read !== $local_path_type_size_and_ctime) {
                 $this->store_state($state);
                 return $this->step_result('continue', $state, 'local_path_changed', 'The local path to push changed while it was being read; retry it from receiver-confirmed state.');
             }
@@ -597,20 +588,20 @@ final class PushFilesSender
         $local_io_failure_detail = null;
         $request_size_failure_detail = null;
 
-        if ($local_path_change_fields['type'] === 'file') {
-            $file_byte_offset = $receiver_confirmed_bytes <= $local_path_change_fields['size']
+        if ($local_path_type_size_and_ctime['type'] === 'file') {
+            $file_byte_offset = $receiver_confirmed_bytes <= $local_path_type_size_and_ctime['size']
                 ? $receiver_confirmed_bytes
                 : 0;
             $maximum_file_payload_bytes = $this->push_stream_client->next_file_body_bytes(
                 $local_path_to_push['path'],
-                $local_path_change_fields['size'],
+                $local_path_type_size_and_ctime['size'],
                 $file_byte_offset
             );
             if ($maximum_file_payload_bytes === 0) {
                 $request_size_failure_detail = 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.';
             } else {
                 $payload = '';
-                if ($local_path_change_fields['size'] > 0) {
+                if ($local_path_type_size_and_ctime['size'] > 0) {
                     if (!is_resource($this->local_file_handle)) {
                         $this->local_file_handle = fopen(
                             $this->docroot . '/' . $local_path_to_push['path'],
@@ -622,35 +613,35 @@ final class PushFilesSender
                         || fseek($this->local_file_handle, $file_byte_offset) !== 0
                     ) {
                         $this->close_local_file_handle();
-                        $local_path_change_fields_after_read = $this->read_local_path_change_fields($local_path_to_push['path']);
-                        if ($local_path_change_fields_after_read === null) {
+                        $local_path_type_size_and_ctime_after_read = $this->read_local_path_type_size_and_ctime($local_path_to_push['path']);
+                        if ($local_path_type_size_and_ctime_after_read === null) {
                             $local_path_disappeared = true;
-                        } elseif ($local_path_change_fields_after_read !== $local_path_change_fields) {
+                        } elseif ($local_path_type_size_and_ctime_after_read !== $local_path_type_size_and_ctime) {
                             $local_path_changed = true;
                         } else {
                             $local_io_failure_detail = 'Could not open the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.';
                         }
                     } else {
                         $payload = fread($this->local_file_handle, $maximum_file_payload_bytes);
-                        $local_path_change_fields_after_read = $this->read_local_path_change_fields($local_path_to_push['path']);
-                        if ($local_path_change_fields_after_read === null) {
+                        $local_path_type_size_and_ctime_after_read = $this->read_local_path_type_size_and_ctime($local_path_to_push['path']);
+                        if ($local_path_type_size_and_ctime_after_read === null) {
                             $this->close_local_file_handle();
                             $local_path_disappeared = true;
-                        } elseif ($local_path_change_fields_after_read !== $local_path_change_fields) {
+                        } elseif ($local_path_type_size_and_ctime_after_read !== $local_path_type_size_and_ctime) {
                             $this->close_local_file_handle();
                             $local_path_changed = true;
-                        } elseif (!is_string($payload) || ( $payload === '' && $file_byte_offset < $local_path_change_fields['size'] )) {
+                        } elseif (!is_string($payload) || ( $payload === '' && $file_byte_offset < $local_path_type_size_and_ctime['size'] )) {
                             $this->close_local_file_handle();
                             $local_io_failure_detail = 'Could not read the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.';
                         } else {
                             $upload_part = [
                                 'type' => 'file',
                                 'path' => $local_path_to_push['path'],
-                                'total_bytes' => $local_path_change_fields['size'],
+                                'total_bytes' => $local_path_type_size_and_ctime['size'],
                                 'offset' => $file_byte_offset,
                                 'payload' => $payload,
                             ];
-                            $upload_completes_local_path = $file_byte_offset + strlen($payload) === $local_path_change_fields['size'];
+                            $upload_completes_local_path = $file_byte_offset + strlen($payload) === $local_path_type_size_and_ctime['size'];
                         }
                     }
                 } else {
@@ -697,10 +688,10 @@ final class PushFilesSender
         if ($upload_completes_local_path) {
             $this->close_local_file_handle();
             $state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
-            $state['local_path_change_fields'] = null;
+            $state['local_path_type_size_and_ctime'] = null;
         } else {
             $state['local_paths_to_push_byte_offset'] = $local_path_to_push['local_paths_to_push_byte_offset'];
-            $state['local_path_change_fields'] = $local_path_change_fields;
+            $state['local_path_type_size_and_ctime'] = $local_path_type_size_and_ctime;
         }
 
         $state['consecutive_recoverable_failures'] = 0;
@@ -919,11 +910,11 @@ final class PushFilesSender
     }
 
     /**
-     * Reads one local-path-to-push JSONL record at an exact durable byte offset.
+     * Reads one local path to push at an exact durable byte offset.
      *
      * @param resource $local_paths_to_push_handle Open local_paths_to_push file.
-     * @param int $local_paths_to_push_byte_offset Byte offset of the record to read.
-     * @return array{path:string,next_local_paths_to_push_byte_offset:int}|null Decoded path record, or null at EOF.
+     * @param int $local_paths_to_push_byte_offset Byte offset of the path to read.
+     * @return LocalPathToPush|null Local path to push, or null at EOF.
      */
     private function read_local_path_to_push($local_paths_to_push_handle, int $local_paths_to_push_byte_offset): ?array
     {
@@ -942,16 +933,22 @@ final class PushFilesSender
             throw new RuntimeException('Failed to determine the next byte offset in the local paths to push.');
         }
         try {
-            $record = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+            $decoded_local_path = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException $exception) {
             throw new RuntimeException('Failed to decode a local path to push.', 0, $exception);
         }
-        /** @var array{path:string} $record */
-        $path = base64_decode($record['path'], true);
+        /** @var array{path:string} $decoded_local_path */
+        $path = base64_decode($decoded_local_path['path'], true);
         if ($path === false) {
             throw new RuntimeException('Failed to decode a path in the local paths-to-push file.');
         }
-        return ['path' => $path, 'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset];
+        return [
+            'path' => $path,
+            'path_b64' => base64_encode($path),
+            'local_paths_to_push_byte_offset' => $local_paths_to_push_byte_offset,
+            'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
+            'local_path_type_size_and_ctime' => $this->read_local_path_type_size_and_ctime($path),
+        ];
     }
 
     /**
@@ -1046,17 +1043,17 @@ final class PushFilesSender
     }
 
     /**
-     * Reads the fields used to decide whether a local path to push changed.
+     * Reads the type, size, and ctime used to detect a changed local path.
      *
      * Regular files, directories, and symlinks are the only sendable types.
-     * The type, size, and ctime fields match PushPlan's file-change fields.
+     * The type, size, and ctime match PushPlan's file-change comparison.
      * A same-size edit within one ctime second remains the timestamp-resolution
      * gap documented for local change detection.
      *
      * @param string $path Raw document-root-relative path.
-     * @return LocalPathChangeFields|null Current fields, or null when absent or unsupported.
+     * @return LocalPathTypeSizeAndCtime|null Current type, size, and ctime, or null when absent or unsupported.
      */
-    private function read_local_path_change_fields(string $path): ?array
+    private function read_local_path_type_size_and_ctime(string $path): ?array
     {
         $absolute_path = $this->docroot . '/' . $path;
         clearstatcache(true, $absolute_path);
@@ -1114,7 +1111,7 @@ final class PushFilesSender
      * Loads the active state from its atomic JSON file.
      *
      * The writer owns the schema. Reading retains only file and JSON failure
-     * handling rather than maintaining a second field-by-field validator.
+     * handling rather than maintaining a second schema validator.
      *
      * @return State|null Active state, or null when none exists.
      */

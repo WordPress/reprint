@@ -1375,7 +1375,7 @@ final class PushEndpointsTest extends TestCase {
                 !$changed_partial_local_file
                 && is_array($state)
                 && $state['phase'] === 'pushing_paths'
-                && is_array($state['local_path_change_fields'])
+                && is_array($state['local_path_type_size_and_ctime'])
             ) {
                 $status = $this->sendPushRequestWithHeaders(
                     'GET',
@@ -1566,7 +1566,7 @@ final class PushEndpointsTest extends TestCase {
             $result = $this->nextSenderStep($local_docroot, $fresh_local_index_path, $push_state_directory);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
             $state = $this->loadActiveState($push_state_directory);
-            if (is_array($state) && $state['phase'] === 'pushing_paths' && is_array($state['local_path_change_fields'])) {
+            if (is_array($state) && $state['phase'] === 'pushing_paths' && is_array($state['local_path_type_size_and_ctime'])) {
                 break;
             }
         }
