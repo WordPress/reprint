@@ -9,8 +9,8 @@
  *
  * PushFilesSender owns the only caller-visible lifecycle. It holds the lock,
  * creates and removes the target push session, drives its internal PushPlan,
- * streams the selected paths, commits the push, and publishes the completed
- * local index. The target owns the upload cursor for every path and for the
+ * streams the selected paths, commits the push, and saves the completed fresh
+ * local index as the local index at the previous push. The target owns the upload cursor for every path and for the
  * deletion list. Durable sender state retains the top-level phase, selected
  * path-list cursor, and learned request limits needed after a process restart.
  *
@@ -48,14 +48,15 @@
  * the preceding durable boundary and reads receiver-confirmed work before
  * sending more data.
  *
- * A new push first calls `push_create` to learn target-owned exclusions, then
- * copies the fresh local index through a swap file before starting PushPlan
- * with that policy. After planning completes, local files, symlinks, and empty
+ * Before start() returns, the sender copies the completed fresh local index
+ * through a swap file into plan-owned state. A new push then calls `push_create`
+ * to learn target-owned exclusions before starting PushPlan with that policy.
+ * After planning completes, local files, symlinks, and empty
  * directories stream through multipart requests. The raw deletion list
  * follows, and repeated `push_commit` calls let the target install the work in
- * bounded steps. A confirmed commit enters another phase which publishes the
- * fresh local index as the local index at the previous push through a swap file.
- * Starting and completing the plan, publishing the index, and discarding a
+ * bounded steps. A confirmed commit enters another phase which saves the fresh
+ * local index as the local index at the previous push through a swap file.
+ * Starting and completing the plan, saving that index, and discarding a
  * removed plan have separate durable phases. A stopped process therefore
  * repeats only an idempotent boundary action rather than a group of unrelated
  * transitions.
@@ -63,7 +64,7 @@
  * sender.json owns the top-level phase. During `planning`, cursor.json owns the
  * exact merge position and output lengths; sender.json does not duplicate
  * them. A completed plan cursor remains until the target commit and local index
- * publication have both finished. A removed target session enters
+ * save have both finished. A removed target session enters
  * `discarding_plan` before that cursor is deleted.
  *
  * ## Resume after local changes
@@ -97,8 +98,8 @@
  * roughly 150 MB. Even a 10 MiB/s drive copies that in about 15 seconds. Keeping
  * two copy cursors, two retained handles, and per-chunk state writes for larger
  * installations is not justified until measurements show otherwise. PHP's
- * copy() streams the bytes through a swap file, and rename() atomically publishes
- * the completed path. This accepts that a 1 MiB/s drive reaches 30 seconds at
+ * copy() streams the bytes through a swap file, and rename() atomically moves
+ * the completed copy into place. This accepts that a 1 MiB/s drive reaches 30 seconds at
  * roughly 200,000 paths. A stopped copy is simply repeated by the next process.
  *
  * The sender has no overall time limit. The caller decides whether to take
@@ -110,15 +111,12 @@
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
  * @phpstan-type FreshLocalIndexEntry array{path:string,local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime,next_fresh_local_index_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'copying_fresh_local_index'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'publishing_local_index'|'completing'|'removing'|'discarding_plan',local_paths_to_push_byte_offset:int,fresh_local_index_byte_offset:int,fresh_local_index_bytes:int,fresh_local_index_ctime:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index_at_previous_push'|'completing'|'removing'|'discarding_plan',local_paths_to_push_byte_offset:int,fresh_local_index_byte_offset:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
     /** @var string Local document root whose local paths to push are sent. */
     private string $docroot;
-
-    /** @var string Fresh path-sorted local index used to start a PushPlan. */
-    private string $fresh_local_index_path;
 
     /** @var string Local push state directory shared with PushPlan. */
     private string $push_state_directory;
@@ -228,15 +226,16 @@ final class PushFilesSender
     /**
      * Starts a new sender and acquires exclusive ownership of its push state.
      *
-     * The initial `creating` state is written before this method returns. An
-     * existing active state is rejected so unfinished work cannot be replaced.
-     * The returned sender retains its lock until close().
+     * The completed fresh local index is copied into plan-owned state before
+     * the initial `creating` state is written. An existing active state is
+     * rejected so unfinished work cannot be replaced. The returned sender
+     * retains its lock until close().
      *
      * @param array $options {
      *     Push, transport, and local-file options.
      *
      *     @type string                  $docroot                Required local document-root directory.
-     *     @type string                  $fresh_local_index_path Required fresh local index path.
+     *     @type string                  $fresh_local_index_path Completed fresh local index required by start().
      *     @type string                  $push_state_directory    Required local push state directory.
      *     @type string                  $base_url                Required exporter API URL.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
@@ -265,18 +264,14 @@ final class PushFilesSender
                     . $sender->state_path
                 );
             }
-            clearstatcache(true, $sender->fresh_local_index_path);
-            if (!is_file($sender->fresh_local_index_path)) {
-                throw new InvalidArgumentException(
-                    'PushFilesSender requires an existing fresh_local_index_path when starting a sender.'
-                );
+            $fresh_local_index_path = $options['fresh_local_index_path'] ?? null;
+            if (!is_string($fresh_local_index_path) || $fresh_local_index_path === '') {
+                throw new InvalidArgumentException('PushFilesSender requires a fresh_local_index_path when starting a sender.');
             }
-            $fresh_local_index_size_and_ctime = $sender->fresh_local_index_size_and_ctime();
-            if ($fresh_local_index_size_and_ctime === null) {
-                throw new InvalidArgumentException(
-                    'PushFilesSender requires fresh_local_index_path to name a regular file.'
-                );
-            }
+            $sender->copy_index_through_swap_file(
+                $fresh_local_index_path,
+                PushPlan::fresh_local_index_path($sender->push_state_directory)
+            );
 
             $sender->push_stream_client = $sender->create_push_stream_client(null);
             $sender->state = [
@@ -284,8 +279,6 @@ final class PushFilesSender
                 'phase' => 'creating',
                 'local_paths_to_push_byte_offset' => 0,
                 'fresh_local_index_byte_offset' => 0,
-                'fresh_local_index_bytes' => $fresh_local_index_size_and_ctime['size'],
-                'fresh_local_index_ctime' => $fresh_local_index_size_and_ctime['ctime'],
                 'max_part_bytes' => null,
                 'request_sizer_state' => $sender->push_stream_client->get_request_sizer_state(),
             ];
@@ -301,10 +294,11 @@ final class PushFilesSender
      * Resumes an unfinished sender while holding its exclusive lifecycle lock.
      *
      * The active state is read once under the acquired lock. next_step() then
-     * works from that in-memory state, publishing each later durable boundary
+     * works from that in-memory state, storing each later durable boundary
      * without reopening sender.json.
      *
-     * @param array<string,mixed> $options Options documented by start().
+     * @param array<string,mixed> $options Options documented by start(). The
+     *     fresh_local_index_path option is not needed when resuming.
      * @return self Open sender at its last durable state.
      */
     public static function resume(array $options): self
@@ -347,13 +341,9 @@ final class PushFilesSender
     private function __construct(array $options)
     {
         $docroot = $options['docroot'] ?? null;
-        $fresh_local_index_path = $options['fresh_local_index_path'] ?? null;
         $push_state_directory = $options['push_state_directory'] ?? null;
         if (!is_string($docroot) || !is_dir($docroot) || is_link($docroot)) {
             throw new InvalidArgumentException('PushFilesSender requires a real docroot directory.');
-        }
-        if (!is_string($fresh_local_index_path) || $fresh_local_index_path === '') {
-            throw new InvalidArgumentException('PushFilesSender requires a fresh_local_index_path.');
         }
         if (!is_string($push_state_directory) || $push_state_directory === '') {
             throw new InvalidArgumentException('PushFilesSender requires a push_state_directory.');
@@ -375,7 +365,6 @@ final class PushFilesSender
         }
 
         $this->docroot = rtrim($docroot, '/');
-        $this->fresh_local_index_path = $fresh_local_index_path;
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->state_path = $this->push_state_directory . '/sender.json';
         $this->lock_path = $this->push_state_directory . '/sender.lock';
@@ -411,9 +400,6 @@ final class PushFilesSender
             case 'creating':
                 $this->create_push_session();
                 break;
-            case 'copying_fresh_local_index':
-                $this->copy_fresh_local_index();
-                break;
             case 'starting_plan':
                 $this->start_plan();
                 break;
@@ -429,8 +415,8 @@ final class PushFilesSender
             case 'committing':
                 $this->commit_push();
                 break;
-            case 'publishing_local_index':
-                $this->publish_local_index();
+            case 'saving_local_index_at_previous_push':
+                $this->save_local_index_at_previous_push();
                 break;
             case 'completing':
                 $this->complete_push();
@@ -589,50 +575,6 @@ final class PushFilesSender
         $this->push_stream_client->apply_reported_limits([$response['post_max_bytes']]);
         $this->state['max_part_bytes'] = $response['max_part_bytes'];
         $this->state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
-        $this->state['phase'] = 'copying_fresh_local_index';
-        $this->store_state($this->state);
-    }
-
-    /**
-     * Copies the complete fresh local index into plan-owned state.
-     *
-     * This deliberately uses one streaming copy instead of a resumable chunk
-     * cursor. At roughly 150 bytes per entry, an index needs about one million
-     * paths to reach 150 MB, which takes about 15 seconds even at 10 MiB/s. The
-     * swap file keeps a partial copy private. This accepts that a 1 MiB/s drive
-     * reaches 30 seconds at roughly 200,000 paths; a later process safely repeats
-     * the copy if this one stops before publishing the next phase.
-     */
-    private function copy_fresh_local_index(): void
-    {
-        $fresh_local_index_size_and_ctime = $this->fresh_local_index_size_and_ctime();
-        if (
-            $fresh_local_index_size_and_ctime === null
-            || $fresh_local_index_size_and_ctime['size'] !== $this->state['fresh_local_index_bytes']
-            || $fresh_local_index_size_and_ctime['ctime'] !== $this->state['fresh_local_index_ctime']
-        ) {
-            $this->start_removing_push_session_after_local_change(
-                'The fresh local index changed before planning began; remove the upload-only push session before generating another index.'
-            );
-            return;
-        }
-
-        $retained_fresh_local_index = PushPlan::fresh_local_index_path($this->push_state_directory);
-        try {
-            $this->copy_index_through_swap_file(
-                $this->fresh_local_index_path,
-                $retained_fresh_local_index
-            );
-        } catch (RuntimeException $exception) {
-            $this->fail('local_io_error', $exception->getMessage());
-            return;
-        }
-        if ($this->fresh_local_index_size_and_ctime() !== $fresh_local_index_size_and_ctime) {
-            $this->start_removing_push_session_after_local_change(
-                'The fresh local index changed while it was being copied; remove the upload-only push session before generating another index.'
-            );
-            return;
-        }
         $this->state['phase'] = 'starting_plan';
         $this->store_state($this->state);
     }
@@ -1242,24 +1184,6 @@ final class PushFilesSender
     }
 
     /**
-     * Reads the size and ctime that identify the fresh local index being copied.
-     *
-     * @return array{size:int,ctime:int}|null Current values, or null when it is not a regular file.
-     */
-    private function fresh_local_index_size_and_ctime(): ?array
-    {
-        clearstatcache(true, $this->fresh_local_index_path);
-        $index_stat = @lstat($this->fresh_local_index_path);
-        if (!is_array($index_stat) || ( $index_stat['mode'] & 0170000 ) !== 0100000) {
-            return null;
-        }
-        return [
-            'size' => (int) $index_stat['size'],
-            'ctime' => (int) $index_stat['ctime'],
-        ];
-    }
-
-    /**
      * Requests one bounded receiver commit step.
      */
     private function commit_push(): void
@@ -1276,31 +1200,23 @@ final class PushFilesSender
         if ($response['send_next_request']) {
             return;
         }
-        $this->state['phase'] = 'publishing_local_index';
+        $this->state['phase'] = 'saving_local_index_at_previous_push';
         $this->store_state($this->state);
     }
 
     /**
-     * Publishes the complete committed fresh local index through a swap file.
+     * Saves the committed fresh local index as the local index at the previous push.
      *
      * This uses the same deliberate whole-index copy as the pre-plan snapshot.
      * If the process stops before the next phase is stored, repeating the copy
      * is safe and leaves readers on either the old or complete new index.
      */
-    private function publish_local_index(): void
+    private function save_local_index_at_previous_push(): void
     {
         $fresh_local_index = PushPlan::fresh_local_index_path($this->push_state_directory);
         $local_index_at_previous_push = PushPlan::local_index_at_previous_push_path(
             $this->push_state_directory
         );
-        clearstatcache(true, $fresh_local_index);
-        if (
-            !is_file($fresh_local_index)
-            || filesize($fresh_local_index) !== $this->state['fresh_local_index_bytes']
-        ) {
-            $this->fail('local_io_error', 'The committed fresh local index is missing or has an unexpected size.');
-            return;
-        }
         try {
             $this->copy_index_through_swap_file(
                 $fresh_local_index,
@@ -1315,7 +1231,7 @@ final class PushFilesSender
     }
 
     /**
-     * Copies one complete index through a swap file and publishes its path.
+     * Copies one complete index through a swap file and moves it into place.
      *
      * copy() streams without holding the complete index in memory. Only the
      * final rename is atomic: interruption during copy leaves the existing
@@ -1331,12 +1247,12 @@ final class PushFilesSender
             throw new RuntimeException('Failed to copy the index to its swap file: ' . $swap_index);
         }
         if (!@rename($swap_index, $copied_index)) {
-            throw new RuntimeException('Failed to publish the copied index: ' . $copied_index);
+            throw new RuntimeException('Failed to move the copied index into place: ' . $copied_index);
         }
     }
 
     /**
-     * Removes local planning state after the committed index is published.
+     * Removes local planning state after saving the committed index.
      */
     private function complete_push(): void
     {

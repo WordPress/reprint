@@ -110,12 +110,14 @@ in `deleted_directories_stack.jsonl`. The stack file is append-only;
 each entry links to the preceding active directory. `excluded_paths.json` stores
 the target exclusions once for the active push, with a maximum of 100 paths.
 `sender.json` does not repeat those values. Its phases are `creating`,
-`copying_fresh_local_index`, `starting_plan`, `planning`, `pushing_paths`,
-`pushing_deletes`, `committing`, `publishing_local_index`, `completing`,
+`starting_plan`, `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
+`saving_local_index_at_previous_push`, `completing`,
 `removing`, and `discarding_plan`. It stores the push session ID, selected
 path-list cursor, receiver part limit, and request-sizing state. Complete local
-indexes are copied through a `.swap` file and published with `rename()`; their
-copy progress is not part of sender state.
+indexes are copied through a `.swap` file and moved into place with `rename()`;
+their copy progress is not part of sender state. `start()` completes the fresh
+local index copy before storing `sender.json`, so later steps depend only on the
+plan-owned index.
 
 A request failure ends the current sender run. The active state remains in
 place so a later push command can resume from the last durable boundary. Only
