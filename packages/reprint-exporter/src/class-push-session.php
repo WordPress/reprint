@@ -908,7 +908,7 @@ final class Site_Export_Push_Session {
      * crash before publication from a crash after the data-file rename. When the
      * fixed data file remains it is authoritative and is renamed into work/files.
      * When it has already been consumed, the completed value is checked as the
-     * durable evidence of publication. Only then is the in-flight metadata
+     * durable record of publication. Only then is the in-flight metadata
      * removed.
      *
      * @return void
@@ -1500,7 +1500,8 @@ final class Site_Export_Push_Session {
              * A checkpoint may survive either side of a rename or work ancestor
              * directory cleanup. The work value may still be present and need
              * retrying, or it may already be consumed and require verification
-             * in the document root. Resolve that evidence before selecting any new work.
+             * in the document root. Resolve that checkpoint before selecting
+             * any new work.
              */
             $current_work_files_descendant = $commit_state['current_work_files_descendant'];
             $path = $this->decode_commit_path($current_work_files_descendant['path_b64'], 'current installing_files');

@@ -100,7 +100,7 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Lifecycle lock file | `sender.lock`, `$lock_path` |
 | Open lifecycle lock | `$lock_handle` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
-| Partial-file source evidence | `$source_token` |
+| Partial-file source token | `$source_token` |
 
 `cursor.json` owns planning offsets, output offsets and counts, active deleted
 directory ranges, and `excluded_paths_b64`. `sender.json` does not repeat them.

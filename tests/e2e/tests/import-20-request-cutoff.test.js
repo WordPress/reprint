@@ -93,7 +93,7 @@ describe('Import: Request Cutoff', () => {
 
     it('audit log shows the crash and recovery', () => {
         const audit = readAuditLog(tempDir);
-        // Should contain evidence of the failed request and the successful resume
+        // Should record the failed request and the successful resume
         assert.ok(
             audit.includes('START') || audit.includes('RESUME'),
             'Expected START or RESUME in audit log'

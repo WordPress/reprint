@@ -24,8 +24,8 @@
  *   without end. The in-memory unit is the much smaller chunk the client
  *   reads per frame; that is unrelated to this class.
  * - Accepted requests double the size toward the ceiling.
- * - The two rejection kinds back off differently because they carry different
- *   evidence. A rejection known to be size-related — HTTP 413 or a structured
+ * - The two rejection kinds back off differently because they mean different
+ *   things. A rejection known to be size-related — HTTP 413 or a structured
  *   "request too large" response — caps the session ceiling permanently, so
  *   growth never retries a size the server already refused. An HTTP
  *   request failure (timeout, reset, empty response) may have nothing to do

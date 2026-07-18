@@ -11,7 +11,7 @@
  * bounded steps and owns the local index from which that selection was made.
  * The target owns the upload cursor for every path and for the deletion list.
  * This class retains only the remote session phase, the next selected-path
- * offset, source evidence for a partial file, retry count, and learned request
+ * offset, the source token for a partial file, retry count, and learned request
  * limits needed to join those protocols after a process restart.
  *
  * ## Usage
@@ -831,7 +831,7 @@ final class PushFilesSender
     }
 
     /**
-     * Builds a streaming client from the sizing evidence in durable state.
+     * Builds a streaming client from the sizing state in the durable checkpoint.
      *
      * @param State|null $state Current state, or null before a push starts.
      */
@@ -978,15 +978,15 @@ final class PushFilesSender
     }
 
     /**
-     * Returns the source evidence used to decide file resume versus restart.
+     * Returns the source token used to decide file resume versus restart.
      *
      * Regular files, directories, and symlinks are the only sendable types.
-     * The type, size, and ctime fields match PushPlan's file-change evidence.
+     * The type, size, and ctime fields match PushPlan's file-change fields.
      * A same-size edit within one ctime second remains the timestamp-resolution
      * gap documented for local change detection.
      *
      * @param string $path Raw document-root-relative path.
-     * @return SourceToken|null Current evidence, or null when absent or unsupported.
+     * @return SourceToken|null Current token, or null when absent or unsupported.
      */
     private function source_token(string $path): ?array
     {
@@ -1017,7 +1017,7 @@ final class PushFilesSender
      * Converts a failed request into a bounded workflow result.
      *
      * @param array{status:'complete'|'retry'|'failed',reason:string|null,detail:string|null,response:array<string,mixed>|null,parts_sent:int,body_bytes_sent:int} $request Classified request result.
-     * @param State $state Active state, persisted when evidence changes.
+     * @param State $state Active state, persisted when retry state changes.
      * @return array<string,mixed>|null Null when the request completed successfully.
      */
     private function handle_request_failure(array $request, array &$state): ?array
@@ -1070,7 +1070,7 @@ final class PushFilesSender
     }
 
     /**
-     * Atomically stores the complete state and current sizing evidence.
+     * Atomically stores the complete state and current sizing state.
      *
      * @param State $state Active state.
      */

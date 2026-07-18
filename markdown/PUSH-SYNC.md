@@ -133,7 +133,7 @@ Local deletions since the last push come from paths present in
 `local_index_at_previous_push.jsonl` but absent from the fresh local index. They
 travel as NUL-delimited document-root-relative paths in `work/deletes`. Commit
 records its byte offset before and after every destructive mutation, so a later
-request can resume from durable evidence instead of repeating a delete.
+request can resume from a durable checkpoint instead of repeating a delete.
 
 ## The push session
 
@@ -235,7 +235,7 @@ local_index_at_previous_push.jsonl  index published after the previous commit
 local_paths_to_push.jsonl           positive-work paths
 local_paths_to_delete               raw NUL-delimited local paths to delete
 cursor.json                         PushPlan cursor
-sender.json                         remote sender phase and resume evidence
+sender.json                         remote sender phase and resume state
 sender.lock                         per-site sender lifecycle lock
 ```
 
@@ -258,7 +258,7 @@ begins until both indexes have been consumed and the two path lists are stable.
 
 `sender.json` contains no second planning checkpoint and no copied receiver
 cursor. It records only the push session and phase, the next byte offset in
-`local_paths_to_push.jsonl`, source evidence for a partial file, the bounded
+`local_paths_to_push.jsonl`, the source token for a partial file, the bounded
 recoverable-failure count, the target part limit, and learned request-body
 sizing state. Its phases are `creating`, `planning`, `pushing_paths`,
 `pushing_deletes`, `committing`, and `removing`.
@@ -298,7 +298,7 @@ bounded count; exhaustion returns a terminal failure rather than a final retry.
 
 The token has one honest timestamp-resolution gap: a same-size edit that keeps
 the same ctime second is not detected by the token, and remains invisible when
-a freshly generated index contains the same size/ctime/type evidence. Other
+a freshly generated index contains the same size, ctime, and type values. Other
 drift remains detectable by the next local-index diff. Push streaming requires
 PHP 8.1 or newer because older PHP cURL bindings can truncate a paused upload;
 pull remains PHP 7.4-compatible.

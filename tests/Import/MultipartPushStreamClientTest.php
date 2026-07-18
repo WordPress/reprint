@@ -295,7 +295,7 @@ final class MultipartPushStreamClientTest extends TestCase {
     }
 
     /**
-     * Shows that an accepted empty upload is not request-size evidence.
+     * Shows that an accepted empty upload does not establish a safe request size.
      *
      * The target has accepted only a MIME close, so the sender still knows
      * nothing about whether a larger decoded entity body would pass its stack.

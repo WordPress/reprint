@@ -541,8 +541,8 @@ class MultipartPushStreamClient
      *
      * A 413 permanently lowers the learned sizing ceiling. Other ambiguous
      * request failures shrink temporarily. An accepted request records sizing
-     * success only if at least one part was sent; an accepted empty request is
-     * not evidence that a larger body would succeed.
+     * success only if at least one part was sent; an accepted empty request
+     * does not show that a larger body would succeed.
      *
      * The result contains these keys:
      *

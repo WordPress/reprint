@@ -53,9 +53,9 @@ them with near-synonyms.
   php.ini values seed the ceiling — plus learning from rejections (413s cap
   it permanently). Web-server limits PHP cannot introspect are learned,
   never assumed.
-- Adaptive learning needs evidence: an accepted empty request proves
-  nothing about a size being safe to grow from, so it must not record a
-  success.
+- Adaptive learning needs a size-bearing success: an accepted empty request
+  proves nothing about a size being safe to grow from, so it must not record
+  a success.
 
 ## Timeouts
 
@@ -132,7 +132,7 @@ them with near-synonyms.
 - Before adding defensive production code, recovery logic, or a PR
   justification, prove that the failure is reachable from a valid production
   state. Write the causal sequence. Every transition must name its actor and
-  evidence: the production code path which performs it, a documented concurrent
+  basis: the production code path which performs it, a documented concurrent
   or external actor, or the exact syscall/API failure allowed by the system
   contract.
 - A test helper, operator, or hypothetical process which unlinks, rewrites,
@@ -191,6 +191,10 @@ them with near-synonyms.
 
 ## Writing
 
+- Never use the noun spelled by joining `evid` and `ence` anywhere in code,
+  comments, documentation, tests, plans, commit messages, pull requests, or
+  replies. Name the concrete proof, signal, record, state, observation, or
+  confirmation instead.
 - Comments state the mundane real reason, tightly, and must match actual
   behavior — a docblock that prescribes a courtesy no caller performs is a
   defect. Update docs in the same commit as the behavior they describe,
