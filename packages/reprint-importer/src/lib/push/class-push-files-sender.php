@@ -61,10 +61,10 @@
  * longer describe the same local tree.
  *
  * The deletion cursor is never copied into active state. Each step reads it
- * from `push_status` and sends only complete planned paths that remain absent
- * locally. If a selected path changes, the sender removes the upload-only push
- * session, discards the plan, and returns `restart` so the caller can produce a
- * new local index.
+ * from `push_status` and sends complete planned paths only while they remain
+ * absent or match the replacement in the fresh local index. If a selected path
+ * changes, the sender removes the upload-only push session, discards the plan,
+ * and returns `restart` so the caller can produce a new local index.
  *
  * ## Streaming and durability
  *

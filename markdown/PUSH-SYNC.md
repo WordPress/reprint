@@ -282,7 +282,7 @@ After all local paths are pushed, each deletion step reads
 `work_deletes_bytes` and `work_deletes_complete` from `push_status`. Those
 receiver-owned values are the only work-delete cursor; `sender.json` does not
 duplicate it. Each uploaded deletion-list part ends after a complete local path,
-and every path in that part must still be absent from the local tree.
+and every path in that part must remain absent or match its planned replacement.
 
 A changed type, size, or ctime, a vanished path, or a directory that is no
 longer empty moves the sender to `removing`. Repeated bounded remove calls
