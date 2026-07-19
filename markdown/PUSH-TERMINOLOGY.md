@@ -13,7 +13,7 @@ messages, or pull-request descriptions.
   change.
 - **Work files**, **in-flight work**, and **work deletes** are the only durable
   work owned by a push session. Work files are complete values. In-flight work
-  is the one value currently being received or published.
+  is the one value currently being received or completed.
 - **Commit** consumes work deletes and work files; it does not create or remove
   a push session.
 - **Remove** deletes a push directory in bounded calls.
@@ -64,8 +64,8 @@ the live push directory and while performing one tombstone cleanup step, so
 create cannot recreate the same push session until that cleanup finishes.
 
 `inflight.json` records the path and type of the one in-flight work value.
-File records use `preparing`, `receiving`, or `publishing` and also contain
-`total_bytes`. Directory and symlink records use `preparing` or `publishing`;
+File records use `preparing`, `receiving`, or `completing` and also contain
+`total_bytes`. Directory and symlink records use `preparing` or `completing`;
 symlink records also contain `target_b64`. `inflight.data` contains in-flight
 file bytes, and its actual size is the receiver-confirmed cursor. Both paths
 are absent when no work is in flight.
@@ -83,6 +83,109 @@ failure key is `non_recoverable_commit_failure`.
 
 These JSON records are unversioned while their schemas are still under
 development. There are no compatibility aliases or migration paths.
+
+## Local push state
+
+The local machine keeps planning and active state outside the receiver push
+directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
+
+| Surface | Name |
+| --- | --- |
+| Plan-owned fresh local index | `fresh_local_index.jsonl`, `$fresh_local_index` |
+| Local index at the previous push | `local_index_at_previous_push.jsonl`, `$local_index_at_previous_push` |
+| Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
+| Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
+| Local push state directory | `push_state_directory`, `$push_state_directory` |
+| PushPlan cursor | `cursor.json`, `$cursor_file` |
+| Excluded paths | `excluded_paths.json`, `$excluded_paths_path` |
+| Deleted-directory stack | `deleted_directories_stack.jsonl`, `$deleted_directories_stack` |
+| Active state | `sender.json`, `$state_path` |
+| Lifecycle lock file | `sender.lock`, `$lock_path` |
+| Open lifecycle lock | `$lock_handle` |
+| Selected path-list cursor | `$local_paths_to_push_byte_offset` |
+| Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
+
+`cursor.json` owns planning offsets, output offsets, and the active byte offset
+in `deleted_directories_stack.jsonl`. The stack file is append-only;
+each entry links to the preceding active directory. `excluded_paths.json` stores
+the target exclusions once for the active push, with a maximum of 100 paths.
+`sender.json` does not repeat those values. Its phases are `creating`,
+`starting_plan`, `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
+`saving_local_index_at_previous_push`, `completing`,
+`removing`, and `discarding_plan`. It stores the push session ID, selected
+path-list cursor, receiver part limit, and request-sizing state. Complete local
+indexes are copied through a `.swap` file and moved into place with `rename()`;
+their copy progress is not part of sender state. `start()` completes the fresh
+local index copy before storing `sender.json`, so later steps depend only on the
+plan-owned index.
+
+A request failure ends the current sender run. The active state remains in
+place so a later push command can resume from the last durable boundary. Only
+an explicit `request_too_large` failure lowers future request sizes.
+
+When a local path to push changes, the sender reports `local_path_changed` and
+moves to `removing`. After removal it requests a new fresh local index. The
+sender trusts the completed deletion plan without checking the live local tree;
+changes after planning belong to the next push.
+
+Receiver-confirmed file and work-delete cursors remain receiver state. A newly
+opened sender reads them from `push_status`, while a successful upload retains
+them in memory for later steps in the same lifecycle. It does not copy them into
+`sender.json`.
+`push.json` remains the receiver-owned push identity and policy, while
+`commit.json` and `$commit_state` remain the receiver commit checkpoint.
+
+`PushFilesSender::start()` and `PushFilesSender::resume()` acquire
+`sender.lock`; `PushFilesSender::close()` releases it. `next_step()` does not
+acquire or release the lock and does not reread `sender.json`. A sender retains
+one multipart request across steps. A caller stopping between steps calls
+`cancel()` to discard that request and return to the preceding durable
+boundary, then calls `close()` to release resources and the lock. `close()`
+never finishes an open request. In `pushing_paths` or
+`pushing_deletes`, one step sends at most one multipart part. `next_step()`
+returns true while another step may be performed and false when `get_status()`
+reports `complete`, `restart`, or `failed`.
+
+## PushFilesSender names
+
+Use these names verbatim inside `PushFilesSender`:
+
+| Meaning | Name |
+| --- | --- |
+| Local path to push | `LocalPathToPush`, `$local_path_to_push`, `read_next_local_path_to_push()` |
+| Local path to delete | `LocalPathToDelete`, `$local_path_to_delete`, `read_next_local_path_to_delete()` |
+| Push stream client | `$push_stream_client`, `create_push_stream_client()` |
+| Push stream client options | `$push_stream_client_options` |
+| Request sizer options | `request_sizer_options`, `$request_sizer_options` |
+| Push request | `send_push_request()` |
+| Open upload request stage | `$upload_request_stage`: `closed`, `sending_parts`, or `finishing` |
+| Whether the open request has sent parts | `MultipartPushStreamClient::has_sent_parts()` |
+| Create push session | `create_push_session()` |
+| Remove push session | `remove_push_session()` |
+| Upload next file chunk | `upload_next_file_chunk()` |
+| Upload next chunk of deleted paths | `upload_next_chunk_of_deleted_paths()` |
+| Request result | `$request_result` |
+| Plan result | `$plan_result` |
+| Sender status | `$status`, `get_status()` |
+| Sender phase | `get_phase()` |
+| Sender outcome classification | `$reason`, `get_reason()` |
+| Sender outcome explanation | `$detail`, `get_detail()` |
+| Receiver path status | `$receiver_path_status` |
+| Receiver path type | `$receiver_path_type` |
+| File byte offset for the next part | `$file_byte_offset` |
+| Whether this upload completes the local path | `$upload_completes_local_path` |
+| Maximum file payload bytes | `$maximum_file_payload_bytes` |
+| Maximum delete-list payload bytes | `$maximum_delete_list_payload_bytes` |
+| Local I/O failure detail | `$local_io_failure_detail` |
+| Whether the local delete list is complete | `$local_delete_list_complete` |
+| Copy through a swap file | `copy_through_swap_file()`, `$source_path`, `$target_path` |
+| Open directory handle | `$directory_handle` |
+| Open local paths-to-push handle | `$local_paths_to_push_handle` |
+| Open local paths-to-delete handle | `$local_paths_to_delete_handle` |
+| Open local file handle | `$local_file_handle` |
+| Local path stat result | `$path_stat` |
+| File type bits | `$file_type_bits` |
+| Delete active state | `delete_state()` |
 
 ## Protocol names
 

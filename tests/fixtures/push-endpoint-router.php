@@ -6,6 +6,20 @@
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound
 
+$reprint_push_test_request_log = (string) getenv('REPRINT_PUSH_TEST_REQUEST_LOG');
+$reprint_push_test_endpoint = filter_input(INPUT_GET, 'endpoint', FILTER_UNSAFE_RAW);
+if ($reprint_push_test_request_log !== '' && is_string($reprint_push_test_endpoint)) {
+    register_shutdown_function(
+        static function () use ($reprint_push_test_request_log, $reprint_push_test_endpoint): void {
+            file_put_contents(
+                $reprint_push_test_request_log,
+                $reprint_push_test_endpoint . "\n",
+                FILE_APPEND | LOCK_EX
+            );
+        }
+    );
+}
+
 $reprint_push_test_docroot_configuration = json_decode(
     (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_DOCROOT_CONFIG') ),
     true

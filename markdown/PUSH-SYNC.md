@@ -13,7 +13,7 @@ the end maps it to a PR stack.
 2. It shows a summary of local uploads and deletions. The user confirms that
    local should win for those paths and rows.
 3. It transfers everything into a private push directory on the remote — file bytes,
-   a deletion manifest, and (phase two) the database diff. The transfer is
+   the work-delete stream, and (phase two) the database diff. The transfer is
    resumable at byte granularity.
 4. It drives the commit step with repeated commands until done. The remote
    moves work files into place, executes deletions, and commits the database
@@ -48,8 +48,8 @@ limits replay.
 
 Every request carries an HMAC signature over exactly four values — the
 HTTP method, the URL's path and query, a timestamp, and a random nonce. Payloads are not signed and not hashed: TLS already
-guarantees their integrity, and signing streams was the single biggest source
-of buffering pain. Signing cost is constant per request regardless of payload
+guarantees their integrity, and signing streams was the single biggest cause of
+buffering pain. Signing cost is constant per request regardless of payload
 size. The secret travels in no URL and no body, so it never lands in an
 access log.
 
@@ -92,29 +92,49 @@ fresh local index with `local_index_at_previous_push.jsonl`. It never reopens
 the live tree. The indexer records physical emptiness while it observes each
 directory, so a completed index distinguishes empty directories from non-empty
 ones. Files and symlinks change when their `type`, `ctime`, or `size` changes;
-unrelated index fields do not select a path for upload.
+unrelated index values do not select a path for upload.
 
-The index reader trusts the indexer's entry fields. It handles only failures to
+The index reader trusts the indexer's entry values. It handles only failures to
 read a line, decode its JSON, or decode its base64 path. This keeps schema
-ownership with the indexer instead of partially validating the same record in
+ownership with the indexer instead of partially validating the same index entry in
 the push plan.
 
-A push plan has one lifecycle:
+A push plan is an internal part of the sender lifecycle:
 
-1. `PushPlan::start()` copies the fresh local index into the per-site plan
-   directory and writes a cursor containing the excluded paths.
-2. `next_step()` performs bounded merge steps until it reports `complete`. It
-   writes files, symlinks, and empty directories to
+1. `PushFilesSender::start()` copies the completed fresh local index into the
+   local push state directory through a `.swap` file, atomically renames the
+   completed copy, and then stores `sender.json`.
+2. `push_create` returns at most 100 target exclusions. The sender stores them
+   once in `excluded_paths.json` and calls `PushPlan::start()`. The plan reads
+   those exclusions and writes its initial cursor.
+3. Each `next_step()` merges one path. It returns true while another planning
+   step remains and false when both indexes reach EOF. It
+   writes files, symlinks, and empty directories with their planned type, size,
+   and ctime to
    `local_paths_to_push.jsonl`, and writes raw NUL-delimited paths to
    `local_paths_to_delete`.
-3. The caller closes the plan before consuming those two files.
-4. After the receiver commits successfully, `after_successful_push()` publishes
-   the retained fresh local index as `local_index_at_previous_push.jsonl`.
+4. The sender closes the plan before consuming those two files.
+5. After the receiver commits successfully, the sender saves the retained fresh
+   local index as `local_index_at_previous_push.jsonl` through the same swap-file
+   copy. It then asks the closed plan to remove its cursor.
 
-Each step flushes both path lists before atomically publishing the cursor with
-the two index offsets, two output byte offsets, path counts, and active
-deleted-directory ranges. A later process calls `PushPlan::resume()` with only
-the per-site directory. Resume uses the retained index and exclusions, discards
+The complete index copy is a deliberate exception to bounded sender steps. A
+representative index entry is about 150 bytes, so one million paths produce
+roughly 150 MB, which takes about 15 seconds even at 10 MiB/s. PHP `copy()`
+streams the index without loading it into memory, and only the final rename
+moves the completed copy into place. This accepts that a 1 MiB/s drive reaches
+30 seconds at roughly 200,000 paths. A stopped initial copy leaves no
+`sender.json`, so a later start repeats it. This stays
+simpler than two copy cursors, retained handles, and per-chunk state writes
+until measurements from materially larger installations justify that machinery.
+
+Each step flushes both path lists and the append-only deleted-directory stack
+before atomically storing the cursor with the two index offsets, two output
+byte offsets, path counts, and active stack byte offset. Each stack entry links
+to the preceding active directory, so resume reads only the top entry. A later
+process calls `PushPlan::resume()` with only
+the local push state directory. Resume uses the retained index and
+`excluded_paths.json`, discards
 bytes beyond the durable output offsets, and continues from the durable index
 offsets.
 
@@ -133,7 +153,7 @@ Local deletions since the last push come from paths present in
 `local_index_at_previous_push.jsonl` but absent from the fresh local index. They
 travel as NUL-delimited document-root-relative paths in `work/deletes`. Commit
 records its byte offset before and after every destructive mutation, so a later
-request can resume from durable evidence instead of repeating a delete.
+request can resume from a durable checkpoint instead of repeating a delete.
 
 ## The push session
 
@@ -144,17 +164,18 @@ push identity and policy plus whether the work-delete stream is complete.
 and validated against the current schema.
 
 `work/files/` contains completed work values only. A single `work/inflight.json`
-record identifies the value currently being received or published, and
+record identifies the value currently being received or completed, and
 `work/inflight.data` contains in-flight file bytes. Its actual size is the
 receiver-confirmed cursor. A file replayed from byte zero restarts the same
-path; a continuation must begin at that confirmed cursor. Another positive-work
-path is rejected until the in-flight work is complete. `work/deletes` is the
-corresponding durable delete queue.
+path; a continuation must begin at that confirmed cursor. An upload for another
+local path is rejected until the in-flight work is complete. `work/deletes` is
+the corresponding durable delete queue.
 
-Publication records its phase before it creates work-file parents or replaces
-the completed value. A status, upload, or commit request can therefore finish
-a publication after a lost response. Commit refuses to begin while work is
-still being prepared or received, so it traverses completed work files only.
+The `completing` phase is stored before the receiver creates work-file parents
+or replaces the completed value. A status, upload, or commit request can
+therefore finish that work after a lost response. Commit refuses to begin while
+work is still being prepared or received, so it traverses completed work files
+only.
 
 `remove()` renames a removable push directory to
 `.removing-<push-session-id>/` before bounded cleanup. A false return means
@@ -163,10 +184,10 @@ not removable; its next commit request resumes the durable cursor instead.
 
 ## Push HTTP operations
 
-The production exporter router exposes five authenticated operations. Control
-and upload requests use the envelope signature described above, so
-`push_upload` passes `php://input` directly to the multipart processor instead
-of reading the complete request for authentication.
+The production exporter router exposes five authenticated push operations.
+Every request uses the envelope signature described above. `push_upload` passes
+`php://input` directly to the multipart processor instead of reading the
+complete request for authentication.
 
 - `POST push_create` creates or reopens the caller's 32-character lowercase
   hexadecimal `push_session_id`. A successful response contains `status`,
@@ -205,7 +226,10 @@ the request starts is too late for PHP's own `post_max_size` warning.
 request it returns a classified push JSON failure, but PHP or the web server
 may reject a request before the exporter runs and that response need not use
 the push JSON protocol. The sender therefore also treats a bare HTTP 413 as
-`request_too_large` and learns a smaller request ceiling.
+`request_too_large` and learns a smaller request ceiling. Timeouts, connection
+resets, empty responses, and malformed responses end the current sender run
+without changing request sizing. A later push command reconciles the receiver
+cursor before continuing.
 
 The WordPress plugin passes the platform-supplied `docroot` to push endpoints,
 defaulting to the web server's `DOCUMENT_ROOT`. A platform supplies the complete
@@ -224,6 +248,124 @@ physical target outside the document root. A platform hook or embedding router
 must choose its document root, reprint directory, and excluded paths as server
 configuration; request parameters cannot select any of them.
 
+## Local files sender
+
+`PushFilesSender` joins the durable `PushPlan` to the receiver's push session.
+An active push keeps these files under `<state-dir>/push/<site>/`:
+
+```text
+fresh_local_index.jsonl             plan-owned fresh local index
+excluded_paths.json                 target exclusions for the active push
+deleted_directories_stack.jsonl     append-only planning stack
+local_index_at_previous_push.jsonl  index saved after the previous commit
+local_paths_to_push.jsonl           local paths to push
+local_paths_to_delete               raw NUL-delimited local paths to delete
+cursor.json                         PushPlan cursor
+sender.json                         active push state
+sender.lock                         lifecycle lock
+```
+
+The sender has an explicit start/step/cancel/close lifecycle.
+`PushFilesSender::start()` rejects unfinished active state, writes the initial
+`creating` state, and acquires `sender.lock`. `PushFilesSender::resume()`
+acquires the same lock and reads the unfinished state once. The returned sender
+keeps that state in memory while `next_step()` performs bounded work. When the
+caller stops between steps, `cancel()` discards an open multipart request and
+returns to the preceding durable boundary. `close()` then releases the lock.
+Without cancellation, `close()` finishes the request and stores its confirmed
+local boundary. A second local process cannot start or resume the same sender
+until the open sender is closed. `next_step()` returns true while another step
+may be performed and false after completion, restart, or failure; the caller
+reads that outcome from the sender. The caller may stop after any true return
+and close the sender. If the process stops without closing, the next process
+uses the preceding sender boundary and receiver-confirmed cursors to account
+for later remote work.
+
+The open sender lazily opens `local_paths_to_push.jsonl`,
+`local_paths_to_delete`, and the current local file. It retains those handles
+across `next_step()` calls, lets each handle advance with the work, and seeks
+only when a newly opened or receiver-confirmed offset differs. It closes each
+handle when its phase or file ends and closes any remaining handles before
+`close()` releases the lifecycle lock.
+
+`start()` copies the completed fresh local index into plan-owned state before
+storing `sender.json` or returning the sender. `push_create` then supplies the
+receiver exclusion policy, and each `planning` step merges one path. PushPlan
+owns the merge offsets, output lengths,
+deleted-directory ranges, and exclusions in `cursor.json`. No upload
+begins until both indexes have been consumed and the two path lists are stable.
+
+`sender.json` contains no second planning checkpoint and no copied receiver
+cursor. It stores the push session and phase, the next byte offset in
+`local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
+sizing state.
+Its phases are `creating`, `starting_plan`, `planning`, `pushing_paths`,
+`pushing_deletes`, `committing`, `saving_local_index_at_previous_push`,
+`completing`, `removing`, and `discarding_plan`.
+The separate start, index-save, completion, removal, and discard phases ensure
+that a process stop between durable actions repeats only the current action.
+During `planning`, `cursor.json` alone owns the merge position and output
+lengths. A completed cursor remains until commit and the local index save
+finishes,
+or until `discarding_plan` follows confirmed target removal.
+
+Each local path to push carries the type, size, and ctime from the index used to
+plan it. When the receiver position is unknown, the sender compares the live
+path with those values before asking `push_status` what the receiver has
+accepted, and again after reading a file, symlink, or directory. A successful
+upload retains the receiver-confirmed position for later steps in the same
+lifecycle. A partial file resumes only while it still matches the plan. A lost
+upload response leaves the earlier local path-list boundary in place; the next
+process checks the receiver and either advances past complete work or safely
+replays it.
+
+After all local paths are pushed, a newly opened sender reads
+`work_deletes_bytes` and `work_deletes_complete` from `push_status`. Successful
+uploads retain those values in memory for later deletion steps. Those
+receiver-owned values are the only work-delete cursor; `sender.json` does not
+duplicate it. Each uploaded deletion-list part contains one complete local path.
+The sender trusts this completed, immutable plan without consulting the fresh
+local index or live local tree again. If a deleted path reappears after planning,
+the current push may delete it on the target and the next push will send it.
+
+A changed local path to push, a vanished path to push, or a directory to push
+that is no longer empty moves the sender to `removing`. Repeated bounded remove
+calls delete the upload-only push session; the sender enters `discarding_plan`,
+removes the PushPlan cursor, and changes its status to `restart` so the caller
+can produce a new fresh local index. Deletions deliberately retain the tree
+captured by the completed fresh local index rather than attempting to describe
+the live tree at commit time.
+
+Repeated `push_commit` calls drive the receiver to `complete`. Only then does
+the sender enter `saving_local_index_at_previous_push` and copy the plan-owned
+fresh local index to `local_index_at_previous_push.jsonl`. Excluded entries
+remain in that complete index; exclusions suppress remote work rather than
+creating a second retained index representation.
+
+Each local-path upload or deletion step sends at most one multipart part. A file
+part contains one bounded chunk, a deletion-list part contains one complete
+path, and a directory or symlink part contains one complete value. The sender
+retains one multipart request across successive steps until its body budget is
+spent or the caller explicitly cancels it. Without cancellation, close()
+finishes that request and stores the confirmed local boundary. The sender
+derives Content-Length from the bytes actually read and never reads another
+local path to push until the current one is complete. Receiver
+contention, offset gaps, and transport failures end the current sender run. The
+caller may run the push command again; it resumes from the last durable local
+boundary and reads receiver-confirmed progress before sending more work.
+
+There is no overall sender deadline. The caller checks its own time and memory
+budget before each step. Network operations have connect, no-progress, and
+response-wait limits, but a connection that continues moving bytes may take as
+long as needed.
+
+The local path type, size, and ctime have one honest timestamp-resolution gap: a
+same-size edit that keeps the same ctime second leaves all three unchanged and
+remains invisible when a freshly generated index contains the same size, ctime,
+and type values. Other drift remains detectable by the next local-index diff.
+Push streaming requires PHP 8.1 or newer because older PHP cURL bindings can
+truncate a paused upload; pull remains PHP 7.4-compatible.
+
 ## Where reprint stores its own data on the remote
 
 The remote is configured with one storage path for everything reprint keeps:
@@ -240,7 +382,7 @@ Remote-side, journaled, idempotent, driven by repeated commands until done.
 Order:
 
 1. **Receive work, outside maintenance:** multipart requests write one bounded
-   chunk at a time into `work/inflight.data` and publish complete values in
+   chunk at a time into `work/inflight.data` and move complete values into
    `work/files`. The site runs normally throughout receipt.
 2. **Maintenance on.** Commit writes the `.maintenance` file itself, and since
    WordPress executes that file, ours whitelists reprint API requests
@@ -317,18 +459,18 @@ Files first, database second, each PR small and stacked in this order:
    the closed #298).
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
    the configured storage path; web guards for inside-docroot placement.
-5. **Push plan and local diff** — per-site retained indexes, explicit start and
+5. **Push plan and local diff** — retained indexes in local push state, explicit start and
    resume lifecycle, bounded local change and deletion detection, and durable
    path lists for the sender.
 6. **Push stream endpoint** — the store's HTTP surface plus a sender that
-   streams framed chunks for many files through one authenticated request;
-   deletion work received; `--force-http` with honest help text (the first
+   sends one resumable multipart part per step; deletion work received;
+   `--force-http` with honest help text (the first
    push networking this flag can gate). Decisions this slice locked in:
    sending streams through libcurl's pause mechanism, which PHP's curl
    extension supports from 8.1 — so `reprint push` requires PHP 8.1+ (pull
    keeps 7.4+; the full story is
    https://github.com/WordPress/reprint/issues/327) — and paths
-   travel base64-encoded in frames, response cursors, and control-plane
+   travel base64-encoded in MIME headers, response cursors, and push request
    parameters, because file paths are arbitrary bytes and JSON strings must
    be UTF-8.
 7. **Package unification** — importer and exporter become one Reprint

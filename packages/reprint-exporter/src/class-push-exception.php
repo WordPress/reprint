@@ -30,9 +30,9 @@ final class Site_Export_Push_Exception extends RuntimeException {
      * Structured observations which describe the failure.
      *
      * These values are deliberately separate from the message so commit can
-     * persist non-recoverable evidence and callers can inspect it without
-     * parsing prose. An HTTP endpoint must choose its public fields explicitly;
-     * exception context is not a response schema.
+     * persist non-recoverable failure details and callers can inspect them
+     * without parsing prose. An HTTP endpoint must choose its public fields
+     * explicitly; exception context is not a response schema.
      *
      * @var array<string,mixed>
      */

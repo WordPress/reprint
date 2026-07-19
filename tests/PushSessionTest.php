@@ -46,6 +46,22 @@ final class PushSessionTest extends TestCase {
         $this->assertArrayNotHasKey('version', $push_metadata);
     }
 
+    public function testPushSessionRejectsMoreThanOneHundredExcludedPaths(): void {
+        $excluded_paths = [];
+        for ($index = 0; $index < 101; ++$index) {
+            $excluded_paths[] = 'excluded-' . $index;
+        }
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('at most 100 excluded paths; received 101');
+        Site_Export_Push_Session::create(
+            $this->reprint_directory,
+            $this->docroot,
+            $excluded_paths,
+            '11111111111111111111111111111110'
+        );
+    }
+
     public function testInFlightFileProgressComesFromTheDataFileAndOffsetZeroRestartsIt(): void {
         $push_session = $this->push_session('11111111111111111111111111111111');
         $this->push_parts($push_session, [[
@@ -833,7 +849,7 @@ final class PushSessionTest extends TestCase {
         $this->assertStringNotContainsString('work/partial', $source);
         $this->assertStringNotContainsString('work_partial', $source);
         $this->assertStringNotContainsString('first_tree_entry', $source);
-        foreach (['read_inflight', 'finish_published_inflight'] as $method) {
+        foreach (['read_inflight', 'finish_inflight_completion'] as $method) {
             $this->assertGreaterThanOrEqual(2, substr_count($source, '$this->' . $method . '('), $method . ' must remain shared by multiple callers.');
         }
     }
@@ -1211,7 +1227,7 @@ final class PushSessionTest extends TestCase {
         $this->assertFileDoesNotExist($this->reprint_directory . '/.reprint/push/commit-state');
     }
 
-    public function testFilePublicationRecoversAtBothDurableBoundaries(): void {
+    public function testFileCompletionRecoversAtBothDurableBoundaries(): void {
         $push_session = $this->push_session('34343434343434343434343434343434');
         $work_directory = $push_session->get_push_directory() . '/work';
         $this->push_file($push_session, 'same-size.txt', 'old');
@@ -1256,7 +1272,7 @@ final class PushSessionTest extends TestCase {
     }
 
     /**
-     * Applies the process umask when directory publication resumes after a failure.
+     * Applies the process umask when directory completion resumes after a failure.
      *
      * 0777 is the pre-umask ceiling, so a 0027 umask creates both normal and
      * recovered directories as 0750. Commit preserves that mode when it renames
@@ -1301,7 +1317,7 @@ final class PushSessionTest extends TestCase {
         }
     }
 
-    public function testDirectoryAndSymlinkPublicationRecoverBeforeAndAfterLeafCreation(): void {
+    public function testDirectoryAndSymlinkCompletionRecoverBeforeAndAfterLeafCreation(): void {
         foreach (['directory', 'symlink'] as $type_index => $type) {
             foreach (['create', 'clear'] as $boundary_index => $boundary) {
                 $push_session = $this->push_session(sprintf('%032x', 800 + ( $type_index * 10 ) + $boundary_index));
@@ -1536,7 +1552,7 @@ final class PushSessionTest extends TestCase {
         string $path_suffix
     ): array {
         if (!in_array(PHP_OS_FAMILY, ['Linux', 'Darwin'], true)) {
-            $this->markTestSkipped('Filesystem publication fault tests require libc interposition on Linux or macOS.');
+            $this->markTestSkipped('Filesystem completion fault tests require libc interposition on Linux or macOS.');
         }
 
         $source_path = __DIR__ . '/fixtures/push-session-filesystem-fault.c';

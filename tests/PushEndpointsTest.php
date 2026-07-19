@@ -227,7 +227,7 @@ final class PushEndpointsTest extends TestCase {
     {
         $client = $this->newClient(self::SECRET);
         $push_session_id = str_repeat('6', 32);
-        $create = $client->control_request('POST', 'push_create', [
+        $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
@@ -271,7 +271,7 @@ final class PushEndpointsTest extends TestCase {
     {
         $client = $this->newClient(self::SECRET);
         $push_session_id = str_repeat('7', 32);
-        $create = $client->control_request('POST', 'push_create', [
+        $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
@@ -295,7 +295,7 @@ final class PushEndpointsTest extends TestCase {
 
         $commit_before_revocation = null;
         for ($request = 0; $request < 10; ++$request) {
-            $commit_before_revocation = $client->control_request('POST', 'push_commit', [
+            $commit_before_revocation = $client->send_push_request('POST', 'push_commit', [
                 'push_session_id' => $push_session_id,
             ], ['accepted']);
             $this->assertSame('complete', $commit_before_revocation['status'], (string) json_encode($commit_before_revocation));
@@ -310,7 +310,7 @@ final class PushEndpointsTest extends TestCase {
 
         file_put_contents($this->push_authorization_configuration_path, '');
         do {
-            $commit = $client->control_request('POST', 'push_commit', [
+            $commit = $client->send_push_request('POST', 'push_commit', [
                 'push_session_id' => $push_session_id,
             ], ['accepted']);
             $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
@@ -326,7 +326,7 @@ final class PushEndpointsTest extends TestCase {
         $client = $this->newClient(self::SECRET);
         $push_session_id = str_repeat('a', 32);
 
-        $create = $client->control_request('POST', 'push_create', [
+        $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
@@ -394,7 +394,7 @@ final class PushEndpointsTest extends TestCase {
             'http_code' => 200,
         ], $upload['response']);
 
-        $status = $client->control_request('GET', 'push_status', [
+        $status = $client->send_push_request('GET', 'push_status', [
             'push_session_id' => $push_session_id,
             'path_b64' => base64_encode('nested/file.bin'),
         ], ['accepted']);
@@ -416,7 +416,7 @@ final class PushEndpointsTest extends TestCase {
 
         $commit_requests = 0;
         do {
-            $commit = $client->control_request('POST', 'push_commit', [
+            $commit = $client->send_push_request('POST', 'push_commit', [
                 'push_session_id' => $push_session_id,
             ], ['accepted']);
             $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
@@ -452,7 +452,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(dirname($this->docroot), dirname($this->reprint_directory));
 
         do {
-            $remove = $client->control_request('POST', 'push_remove', [
+            $remove = $client->send_push_request('POST', 'push_remove', [
                 'push_session_id' => $push_session_id,
             ], ['accepted']);
             $this->assertSame('complete', $remove['status'], (string) json_encode($remove));
@@ -472,7 +472,7 @@ final class PushEndpointsTest extends TestCase {
     {
         $client = $this->newClient(self::SECRET);
         $push_session_id = str_repeat('c', 32);
-        $create = $client->control_request('POST', 'push_create', [
+        $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
@@ -481,7 +481,7 @@ final class PushEndpointsTest extends TestCase {
         $lock_process = $this->startLockProcess($push_sessions_directory . '/push-create.lock');
 
         try {
-            $remove = $client->control_request('POST', 'push_remove', [
+            $remove = $client->send_push_request('POST', 'push_remove', [
                 'push_session_id' => $push_session_id,
             ], ['accepted']);
         } finally {
@@ -500,7 +500,7 @@ final class PushEndpointsTest extends TestCase {
     {
         $client = $this->newClient(self::SECRET);
         $push_session_id = str_repeat('d', 32);
-        $create = $client->control_request('POST', 'push_create', [
+        $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
@@ -523,7 +523,7 @@ final class PushEndpointsTest extends TestCase {
         $push_directory = $this->reprint_directory . '/.reprint/push/' . $push_session_id;
         $push_sessions_directory = dirname($push_directory);
         $tombstone = $push_sessions_directory . '/.removing-' . $push_session_id;
-        $first_remove = $client->control_request('POST', 'push_remove', [
+        $first_remove = $client->send_push_request('POST', 'push_remove', [
             'push_session_id' => $push_session_id,
         ], ['accepted']);
         $this->assertSame('complete', $first_remove['status'], (string) json_encode($first_remove));
@@ -538,7 +538,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_directory);
         $this->assertDirectoryExists($tombstone);
 
-        $blocked_create = $client->control_request('POST', 'push_create', [
+        $blocked_create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('retry', $blocked_create['status'], (string) json_encode($blocked_create));
@@ -551,7 +551,7 @@ final class PushEndpointsTest extends TestCase {
 
         $lock_process = $this->startLockProcess($push_sessions_directory . '/push-create.lock');
         try {
-            $blocked_remove = $client->control_request('POST', 'push_remove', [
+            $blocked_remove = $client->send_push_request('POST', 'push_remove', [
                 'push_session_id' => $push_session_id,
             ], ['accepted']);
         } finally {
@@ -565,7 +565,7 @@ final class PushEndpointsTest extends TestCase {
 
         $remove_requests = 0;
         do {
-            $remove = $client->control_request('POST', 'push_remove', [
+            $remove = $client->send_push_request('POST', 'push_remove', [
                 'push_session_id' => $push_session_id,
             ], ['accepted']);
             ++$remove_requests;
@@ -579,7 +579,7 @@ final class PushEndpointsTest extends TestCase {
             ], $remove['response']);
         } while (!$remove['response']['removed']);
 
-        $repeated_remove = $client->control_request('POST', 'push_remove', [
+        $repeated_remove = $client->send_push_request('POST', 'push_remove', [
             'push_session_id' => $push_session_id,
         ], ['accepted']);
         $this->assertSame('complete', $repeated_remove['status'], (string) json_encode($repeated_remove));
@@ -592,7 +592,7 @@ final class PushEndpointsTest extends TestCase {
         clearstatcache(true, $tombstone);
         $this->assertDirectoryDoesNotExist($tombstone);
 
-        $recreated = $client->control_request('POST', 'push_create', [
+        $recreated = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $recreated['status'], (string) json_encode($recreated));
@@ -618,10 +618,10 @@ final class PushEndpointsTest extends TestCase {
         $client = $this->newClient(self::SECRET);
         $push_session_id = str_repeat('1', 32);
 
-        $created = $client->control_request('POST', 'push_create', [
+        $created = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
-        $reopened = $client->control_request('POST', 'push_create', [
+        $reopened = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
 
@@ -650,7 +650,7 @@ final class PushEndpointsTest extends TestCase {
     {
         $client = $this->newClient(self::SECRET);
         $push_session_id = str_repeat('b', 32);
-        $create = $client->control_request('POST', 'push_create', [
+        $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
@@ -676,7 +676,7 @@ final class PushEndpointsTest extends TestCase {
             'http_code' => 200,
         ], $upload['response']);
 
-        $status = $client->control_request('GET', 'push_status', [
+        $status = $client->send_push_request('GET', 'push_status', [
             'push_session_id' => $push_session_id,
             'path_b64' => base64_encode('missing.txt'),
         ], ['accepted']);
@@ -729,7 +729,7 @@ final class PushEndpointsTest extends TestCase {
     {
         $client = $this->newClient(self::SECRET);
         $push_session_id = str_repeat('f', 32);
-        $create = $client->control_request('POST', 'push_create', [
+        $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
@@ -773,7 +773,7 @@ final class PushEndpointsTest extends TestCase {
         try {
             $client = $this->newClient(self::SECRET, $base_url);
             $clean_push_session_id = str_repeat('0', 32);
-            $clean_create = $client->control_request('POST', 'push_create', [
+            $clean_create = $client->send_push_request('POST', 'push_create', [
                 'push_session_id' => $clean_push_session_id,
             ], ['created']);
             $this->assertSame('complete', $clean_create['status'], (string) json_encode($clean_create));
@@ -805,7 +805,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame('accepted', $clean_upload['response']['status']);
 
             $over_limit_push_session_id = str_repeat('1', 32);
-            $over_limit_create = $client->control_request('POST', 'push_create', [
+            $over_limit_create = $client->send_push_request('POST', 'push_create', [
                 'push_session_id' => $over_limit_push_session_id,
             ], ['created']);
             $this->assertSame('complete', $over_limit_create['status'], (string) json_encode($over_limit_create));
@@ -830,7 +830,7 @@ final class PushEndpointsTest extends TestCase {
         try {
             $client = $this->newClient(self::SECRET, $base_url);
             $trailing_byte_push_session_id = str_repeat('2', 32);
-            $create = $client->control_request('POST', 'push_create', [
+            $create = $client->send_push_request('POST', 'push_create', [
                 'push_session_id' => $trailing_byte_push_session_id,
             ], ['created']);
             $this->assertSame('complete', $create['status'], (string) json_encode($create));
@@ -915,7 +915,7 @@ final class PushEndpointsTest extends TestCase {
 
     public function testInvalidBase64CursorReturnsInvalidRequestBeforePushDispatch(): void
     {
-        $response = $this->newClient(self::SECRET)->control_request('POST', 'push_create', [
+        $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => str_repeat('9', 32),
             'cursor' => 'not-base64',
         ], ['created']);
@@ -957,7 +957,7 @@ final class PushEndpointsTest extends TestCase {
 
         $configured_reprint_directory = $this->docroot . '/router-reprint-directory';
         file_put_contents($this->reprint_configuration_path, $configured_reprint_directory);
-        $response = $this->newClient(self::SECRET)->control_request('POST', 'push_create', [
+        $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => str_repeat('e', 32),
         ], ['created']);
         $this->assertSame('failed', $response['status']);
@@ -979,7 +979,7 @@ final class PushEndpointsTest extends TestCase {
             'document_root' => $this->root . '/missing-document-root',
         ]);
 
-        $response = $this->newClient(self::SECRET)->control_request('POST', 'push_create', [
+        $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => str_repeat('4', 32),
         ], ['created']);
 
@@ -994,7 +994,7 @@ final class PushEndpointsTest extends TestCase {
         $this->writeDocrootConfiguration([]);
         $push_session_id = str_repeat('a', 32);
 
-        $response = $this->newClient(self::SECRET)->control_request('POST', 'push_create', [
+        $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
 
@@ -1019,7 +1019,7 @@ final class PushEndpointsTest extends TestCase {
         ]);
         $push_session_id = str_repeat('5', 32);
 
-        $response = $this->newClient(self::SECRET)->control_request('POST', 'push_create', [
+        $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
 
@@ -1043,7 +1043,7 @@ final class PushEndpointsTest extends TestCase {
             'document_root' => $document_root_link,
         ]);
         $push_session_id = str_repeat('7', 32);
-        $response = $this->newClient(self::SECRET)->control_request('POST', 'push_create', [
+        $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
 
@@ -1064,7 +1064,7 @@ final class PushEndpointsTest extends TestCase {
     public function testParentSegmentInExcludedPathReturnsNotConfigured(): void
     {
         $this->writeExcludedPaths(['../bad']);
-        $response = $this->newClient(self::SECRET)->control_request('POST', 'push_create', [
+        $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => str_repeat('8', 32),
         ], ['created']);
 
@@ -1103,7 +1103,7 @@ final class PushEndpointsTest extends TestCase {
         $client = $this->newClient(self::SECRET);
         $push_session_id = str_repeat('6', 32);
 
-        $create = $client->control_request('POST', 'push_create', [
+        $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
@@ -1163,7 +1163,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('complete', $upload_sibling['status'], (string) json_encode($upload_sibling));
         $this->assertSame(2, $upload_sibling['parts_sent']);
         do {
-            $commit = $client->control_request('POST', 'push_commit', [
+            $commit = $client->send_push_request('POST', 'push_commit', [
                 'push_session_id' => $push_session_id,
             ], ['accepted']);
             $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
@@ -1200,12 +1200,12 @@ final class PushEndpointsTest extends TestCase {
     public function testSuccessfulPushResponseSendsNoCacheHeaders(): void
     {
         $push_session_id = str_repeat('2', 32);
-        $create = $this->newClient(self::SECRET)->control_request('POST', 'push_create', [
+        $create = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
 
-        $status = $this->sendControlRequestWithHeaders('GET', 'push_status', [
+        $status = $this->sendPushRequestWithHeaders('GET', 'push_status', [
             'push_session_id' => $push_session_id,
         ], self::SECRET);
 
@@ -1223,7 +1223,7 @@ final class PushEndpointsTest extends TestCase {
 
     public function testPushAuthenticationFailureSendsNoCacheHeaders(): void
     {
-        $authentication_failure = $this->sendControlRequestWithHeaders('POST', 'push_create', [
+        $authentication_failure = $this->sendPushRequestWithHeaders('POST', 'push_create', [
             'push_session_id' => str_repeat('3', 32),
         ], 'incorrect-secret');
 
@@ -1237,7 +1237,7 @@ final class PushEndpointsTest extends TestCase {
         $push_session_id = str_repeat('b', 32);
         $client = $this->newClient(self::SECRET);
 
-        $wrong_method = $client->control_request('GET', 'push_create', [
+        $wrong_method = $client->send_push_request('GET', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('failed', $wrong_method['status']);
@@ -1245,21 +1245,21 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('Push endpoint requires POST; observed GET.', $wrong_method['detail']);
 
         $wrong_secret = $this->newClient('not-the-server-secret');
-        $authentication = $wrong_secret->control_request('POST', 'push_create', [
+        $authentication = $wrong_secret->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('failed', $authentication['status']);
         $this->assertSame('auth_failed', $authentication['reason']);
         $this->assertStringContainsString('HMAC signature verification failed', $authentication['detail']);
 
-        $create = $client->control_request('POST', 'push_create', [
+        $create = $client->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('complete', $create['status']);
         $push_lock = fopen($this->reprint_directory . '/.reprint/push/' . $push_session_id . '/push.lock', 'c+b');
         $this->assertIsResource($push_lock);
         $this->assertTrue(flock($push_lock, LOCK_EX | LOCK_NB));
-        $lock_contention = $client->control_request('GET', 'push_status', [
+        $lock_contention = $client->send_push_request('GET', 'push_status', [
             'push_session_id' => $push_session_id,
         ], ['accepted']);
         $this->assertSame('retry', $lock_contention['status']);
@@ -1315,6 +1315,1143 @@ final class PushEndpointsTest extends TestCase {
         $response = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
         $this->assertSame('invalid_request', $response['reason']);
         $this->assertStringContainsString('multipart body ended before', $response['detail']);
+    }
+
+    /**
+     * Completes mixed local work while reopening at each durable boundary.
+     *
+     * Each open sender carries one multipart request at most and the next
+     * sender continues from the boundary confirmed for that request.
+     */
+    public function testHighLevelSenderStreamsAndResumesFromDurableBoundaries(): void
+    {
+        $local_docroot = $this->root . '/local-docroot';
+        mkdir($local_docroot . '/nested', 0700, true);
+        mkdir($local_docroot . '/empty-directory', 0700, true);
+        file_put_contents($local_docroot . '/nested/large.bin', str_repeat('A', 2000));
+        file_put_contents($local_docroot . '/same-size.txt', 'new!');
+        symlink('nested/large.bin', $local_docroot . '/file-link');
+        file_put_contents($this->docroot . '/same-size.txt', 'old!');
+        mkdir($this->docroot . '/replace-directory');
+        file_put_contents($this->docroot . '/replace-directory/old.txt', 'old');
+        file_put_contents($local_docroot . '/replace-directory', 'replacement');
+
+        $fresh_local_index_path = $this->root . '/fresh-local-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'empty-directory' => $this->indexEntry($local_docroot . '/empty-directory', 'dir', true),
+            'file-link' => $this->indexEntry($local_docroot . '/file-link', 'link'),
+            'nested' => $this->indexEntry($local_docroot . '/nested', 'dir', false),
+            'nested/large.bin' => $this->indexEntry($local_docroot . '/nested/large.bin', 'file'),
+            'replace-directory' => $this->indexEntry($local_docroot . '/replace-directory', 'file'),
+            'same-size.txt' => $this->indexEntry($local_docroot . '/same-size.txt', 'file'),
+        ]);
+        $previous_local_index_path = $this->root . '/previous-local-index.jsonl';
+        $this->writeIndex($previous_local_index_path, [
+            'remove.txt' => [1, 3, 'file'],
+            'replace-directory' => [1, 0, 'dir', false],
+            'replace-directory/old.txt' => [1, 3, 'file'],
+            'same-size.txt' => [1, 4, 'file'],
+        ]);
+        $push_state_directory = $this->root . '/sender-state';
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+
+        $removed_caller_index = false;
+        $commit_advances = 0;
+        for ($step = 0; $step < 200; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (
+                !$removed_caller_index
+                && is_array($state)
+            ) {
+                unlink($fresh_local_index_path);
+                $removed_caller_index = true;
+            }
+            if (is_array($state) && $state['phase'] === 'committing') {
+                ++$commit_advances;
+            }
+            if ($result['status'] !== 'continue') {
+                break;
+            }
+        }
+
+        $this->assertTrue($removed_caller_index, 'PushFilesSender must own the fresh index before start() returns.');
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertGreaterThan(1, $commit_advances, 'The endpoint work budget must require repeated commit requests.');
+        $this->assertSame(str_repeat('A', 2000), file_get_contents($this->docroot . '/nested/large.bin'));
+        $this->assertSame('new!', file_get_contents($this->docroot . '/same-size.txt'));
+        $this->assertSame('replacement', file_get_contents($this->docroot . '/replace-directory'));
+        $this->assertDirectoryExists($this->docroot . '/empty-directory');
+        $this->assertTrue(is_link($this->docroot . '/file-link'));
+        $this->assertFileDoesNotExist($this->docroot . '/remove.txt');
+        $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
+        $this->assertNull($this->loadActiveState($push_state_directory));
+        $this->assertFileDoesNotExist($push_state_directory . '/cursor.json');
+        $this->assertSame(
+            file_get_contents($push_state_directory . '/fresh_local_index.jsonl'),
+            file_get_contents($push_state_directory . '/local_index_at_previous_push.jsonl')
+        );
+    }
+
+    /**
+     * Continues a partial file from the successful upload response without another status request.
+     */
+    public function testHighLevelSenderRetainsReceiverConfirmedFileOffsetWhileOpen(): void
+    {
+        $local_docroot = $this->root . '/retained-file-offset-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/large.bin', str_repeat('A', 6000));
+        $fresh_local_index_path = $this->root . '/retained-file-offset-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'large.bin' => $this->indexEntry($local_docroot . '/large.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/retained-file-offset-state';
+        $sender = PushFilesSender::start(
+            $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+        );
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+            $state_path = $push_state_directory . '/sender.json';
+            $state_inode_before_upload = fileinode($state_path);
+            $this->assertIsInt($state_inode_before_upload);
+            $finished_requests = $this->countEndpointRequests('push_upload');
+            for ($step = 0; $step < 100; ++$step) {
+                $this->assertTrue($sender->next_step(), (string) json_encode($this->senderResult($sender)));
+                if ($this->countEndpointRequests('push_upload') > $finished_requests) {
+                    break;
+                }
+            }
+            $this->assertGreaterThan($finished_requests, $this->countEndpointRequests('push_upload'));
+            $this->assertSame(1, $this->countEndpointRequests('push_status'));
+            clearstatcache(true, $state_path);
+            $this->assertSame($state_inode_before_upload, fileinode($state_path));
+
+            $this->assertTrue($sender->next_step());
+
+            $this->assertSame(1, $this->countEndpointRequests('push_status'));
+        } finally {
+            $sender->cancel();
+            $sender->close();
+        }
+    }
+
+    /**
+     * Continues deleted paths and their completion from successful upload responses.
+     */
+    public function testHighLevelSenderRetainsReceiverConfirmedDeletedPathsWhileOpen(): void
+    {
+        $local_docroot = $this->root . '/retained-deleted-paths-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/retained-deleted-paths-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, []);
+        $previous_local_index_path = $this->root . '/retained-deleted-paths-previous-index.jsonl';
+        $previous_entries = [];
+        for ($index = 0; $index < 60; ++$index) {
+            $previous_entries[sprintf('delete-%02d.txt', $index)] = [1, 1, 'file'];
+        }
+        $this->writeIndex($previous_local_index_path, $previous_entries);
+        $push_state_directory = $this->root . '/retained-deleted-paths-state';
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+        $sender = PushFilesSender::start(
+            $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+        );
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_deletes');
+            $this->takeSenderStepsUntilPhase($sender, 'committing');
+
+            $this->assertGreaterThan(1, $this->countEndpointRequests('push_upload'));
+            $this->assertSame(1, $this->countEndpointRequests('push_status'));
+        } finally {
+            $sender->close();
+        }
+    }
+
+    /**
+     * Sends one local path to delete and returns before reading the next one.
+     */
+    public function testHighLevelSenderSendsOneDeletionListPartPerStep(): void
+    {
+        $local_docroot = $this->root . '/single-delete-part-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/single-delete-part-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, []);
+        $previous_local_index_path = $this->root . '/single-delete-part-previous-index.jsonl';
+        $previous_entries = [];
+        for ($index = 0; $index < 20; ++$index) {
+            $previous_entries[sprintf('delete-%02d.txt', $index)] = [1, 1, 'file'];
+        }
+        $this->writeIndex($previous_local_index_path, $previous_entries);
+        $push_state_directory = $this->root . '/single-delete-part-state';
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+
+        for ($step = 0; $step < 30; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (is_array($state) && $state['phase'] === 'pushing_deletes') {
+                break;
+            }
+        }
+        $this->assertIsArray($state);
+
+        $local_paths_to_delete_handle_property = new ReflectionProperty(
+            PushFilesSender::class,
+            'local_paths_to_delete_handle'
+        );
+        $sender = PushFilesSender::resume(
+            $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+        );
+        try {
+            $this->assertTrue($sender->next_step());
+            $local_paths_to_delete_handle = $local_paths_to_delete_handle_property->getValue($sender);
+            $this->assertIsResource($local_paths_to_delete_handle);
+            $this->assertSame(14, ftell($local_paths_to_delete_handle));
+
+            $this->assertTrue($sender->next_step());
+            $this->assertSame(28, ftell($local_paths_to_delete_handle));
+        } finally {
+            if ($sender->get_status() === 'continue') {
+                $sender->cancel();
+            }
+            $sender->close();
+        }
+    }
+
+    /**
+     * Uses the completed deletion plan when a deleted path reappears locally.
+     */
+    public function testHighLevelSenderUsesCompletedDeletionPlanWhenPathReappearsLocally(): void
+    {
+        $local_docroot = $this->root . '/reappeared-delete-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($this->docroot . '/returned.txt', 'old');
+        $fresh_local_index_path = $this->root . '/reappeared-delete-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, []);
+        $previous_local_index_path = $this->root . '/reappeared-delete-previous-index.jsonl';
+        $this->writeIndex($previous_local_index_path, [
+            'returned.txt' => [1, 3, 'file'],
+        ]);
+        $push_state_directory = $this->root . '/reappeared-delete-state';
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $sender = PushFilesSender::start($options);
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_deletes');
+            file_put_contents($local_docroot . '/returned.txt', 'new');
+        } finally {
+            $sender->close();
+        }
+        $result = $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('new', file_get_contents($local_docroot . '/returned.txt'));
+        $this->assertFileDoesNotExist($this->docroot . '/returned.txt');
+    }
+
+    /**
+     * Uses the completed deletion plan after a pushed replacement disappears locally.
+     */
+    public function testHighLevelSenderUsesCompletedDeletionPlanAfterPushedReplacementDisappearsLocally(): void
+    {
+        $local_docroot = $this->root . '/disappeared-replacement-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/replace.txt', 'new');
+        mkdir($this->docroot . '/replace.txt');
+        file_put_contents($this->docroot . '/replace.txt/old.txt', 'old');
+        $fresh_local_index_path = $this->root . '/disappeared-replacement-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'replace.txt' => $this->indexEntry($local_docroot . '/replace.txt', 'file'),
+        ]);
+        $previous_local_index_path = $this->root . '/disappeared-replacement-previous-index.jsonl';
+        $this->writeIndex($previous_local_index_path, [
+            'replace.txt' => [1, 0, 'dir', false],
+            'replace.txt/old.txt' => [1, 3, 'file'],
+        ]);
+        $push_state_directory = $this->root . '/disappeared-replacement-state';
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+
+        for ($step = 0; $step < 30; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (is_array($state) && $state['phase'] === 'pushing_deletes') {
+                break;
+            }
+        }
+        $this->assertIsArray($state);
+        unlink($local_docroot . '/replace.txt');
+
+        $result = $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('new', file_get_contents($this->docroot . '/replace.txt'));
+    }
+
+    /**
+     * Retains one open PushPlan and leaves sender state untouched while planning continues.
+     */
+    public function testHighLevelSenderRetainsPushPlanAcrossPlanningSteps(): void
+    {
+        $local_docroot = $this->root . '/retained-plan-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/retained-plan-index.jsonl';
+        $index_entries = [];
+        for ($index = 0; $index < 2500; ++$index) {
+            $index_entries[sprintf('file-%04d.txt', $index)] = [1, 1, 'file'];
+        }
+        $this->writeIndex($fresh_local_index_path, $index_entries);
+        $push_state_directory = $this->root . '/retained-plan-state';
+        $state_path = $push_state_directory . '/sender.json';
+        $plan_property = new ReflectionProperty(PushFilesSender::class, 'plan');
+        $fresh_local_index_handle_property = new ReflectionProperty(
+            PushPlan::class,
+            'fresh_local_index_handle'
+        );
+        $fresh_local_index_handle = null;
+
+        $sender = PushFilesSender::start(
+            $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+        );
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'planning');
+            $create_result = $this->senderResult($sender);
+            $this->assertSame('planning', $create_result['phase']);
+            $plan = $plan_property->getValue($sender);
+            $this->assertInstanceOf(PushPlan::class, $plan);
+            $fresh_local_index_handle = $fresh_local_index_handle_property->getValue($plan);
+            $this->assertIsResource($fresh_local_index_handle);
+
+            clearstatcache(true, $state_path);
+            $state_inode = fileinode($state_path);
+            $this->assertIsInt($state_inode);
+
+            $sender->next_step();
+
+            $first_plan_result = $this->senderResult($sender);
+            $this->assertSame('planning', $first_plan_result['phase']);
+            $this->assertSame($plan, $plan_property->getValue($sender));
+            clearstatcache(true, $state_path);
+            $this->assertSame($state_inode, fileinode($state_path));
+
+            $sender->next_step();
+
+            $second_plan_result = $this->senderResult($sender);
+            $this->assertSame('planning', $second_plan_result['phase']);
+            $this->assertSame($plan, $plan_property->getValue($sender));
+            clearstatcache(true, $state_path);
+            $this->assertSame($state_inode, fileinode($state_path));
+        } finally {
+            $sender->close();
+        }
+
+        $this->assertFalse(is_resource($fresh_local_index_handle));
+    }
+
+    /**
+     * Copies a large fresh local index into plan-owned state before start() returns.
+     */
+    public function testHighLevelSenderCopiesALargeFreshLocalIndexThroughSwapFile(): void
+    {
+        $local_docroot = $this->root . '/large-index-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/large-index.jsonl';
+        $index_bytes = 4 * 1024 * 1024 + 37;
+        file_put_contents($fresh_local_index_path, str_repeat('x', $index_bytes));
+        $push_state_directory = $this->root . '/large-index-state';
+        $swap_index_path = $push_state_directory . '/fresh_local_index.jsonl.swap';
+        $retained_index_path = $push_state_directory . '/fresh_local_index.jsonl';
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $sender = PushFilesSender::start($options);
+        try {
+            $this->assertSame('creating', $sender->get_phase());
+            $this->assertFileDoesNotExist($swap_index_path);
+            $this->assertSame($index_bytes, filesize($retained_index_path));
+            $this->assertSame(hash_file('sha256', $fresh_local_index_path), hash_file('sha256', $retained_index_path));
+
+            unlink($fresh_local_index_path);
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('starting_plan', $sender->get_phase());
+            $state = $this->loadActiveState($push_state_directory);
+            $this->assertIsArray($state);
+            $this->assertArrayNotHasKey('fresh_local_index_path', $state);
+            $this->assertArrayNotHasKey('fresh_local_index_bytes', $state);
+            $this->assertArrayNotHasKey('fresh_local_index_ctime', $state);
+            $this->assertArrayNotHasKey('fresh_local_index_copy_byte_offset', $state);
+            $this->assertArrayNotHasKey('local_index_at_previous_push_copy_byte_offset', $state);
+        } finally {
+            $sender->close();
+        }
+
+        unset($options['fresh_local_index_path']);
+        $sender = PushFilesSender::resume($options);
+        try {
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('planning', $sender->get_phase());
+        } finally {
+            $sender->close();
+        }
+
+        $this->assertFileDoesNotExist($swap_index_path);
+    }
+
+    /**
+     * Retains the path lists and current local file until close().
+     */
+    public function testHighLevelSenderRetainsOpenFilesUntilClose(): void
+    {
+        $local_docroot = $this->root . '/retained-handles-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/file.bin', str_repeat('A', 130));
+        $fresh_local_index_path = $this->root . '/retained-handles-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'file.bin' => $this->indexEntry($local_docroot . '/file.bin', 'file'),
+        ]);
+        $previous_local_index_path = $this->root . '/retained-handles-previous-index.jsonl';
+        $previous_entries = [];
+        for ($index = 0; $index < 20; ++$index) {
+            $previous_entries[sprintf('delete-%02d.txt', $index)] = [1, 1, 'file'];
+        }
+        $this->writeIndex($previous_local_index_path, $previous_entries);
+        $push_state_directory = $this->root . '/retained-handles-state';
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+
+        $local_paths_to_push_handle_property = new ReflectionProperty(
+            PushFilesSender::class,
+            'local_paths_to_push_handle'
+        );
+        $local_file_handle_property = new ReflectionProperty(PushFilesSender::class, 'local_file_handle');
+        $local_paths_to_delete_handle_property = new ReflectionProperty(
+            PushFilesSender::class,
+            'local_paths_to_delete_handle'
+        );
+        $push_stream_client_property = new ReflectionProperty(PushFilesSender::class, 'push_stream_client');
+        $curl_handle_property = new ReflectionProperty(MultipartPushStreamClient::class, 'curl_handle');
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $sender = PushFilesSender::start($options);
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+            $planning_result = $this->senderResult($sender);
+            $this->assertSame('pushing_paths', $planning_result['phase']);
+            clearstatcache(true, $push_state_directory . '/sender.json');
+            $state_inode_before_upload = fileinode($push_state_directory . '/sender.json');
+            $this->assertIsInt($state_inode_before_upload);
+
+            $sender->next_step();
+
+            $first_file_chunk = $this->senderResult($sender);
+            $this->assertSame('pushing_paths', $first_file_chunk['phase']);
+
+            $local_paths_to_push_handle = $local_paths_to_push_handle_property->getValue($sender);
+            $local_file_handle = $local_file_handle_property->getValue($sender);
+            $this->assertIsResource($local_paths_to_push_handle);
+            $this->assertIsResource($local_file_handle);
+            $local_file_position = ftell($local_file_handle);
+            $this->assertIsInt($local_file_position);
+            $local_paths_to_push_position = ftell($local_paths_to_push_handle);
+            $this->assertIsInt($local_paths_to_push_position);
+            $push_stream_client = $push_stream_client_property->getValue($sender);
+            $curl_handle = $curl_handle_property->getValue($push_stream_client);
+            $this->assertNotNull($curl_handle);
+
+            $sender->next_step();
+
+            $second_file_chunk = $this->senderResult($sender);
+            $this->assertSame('pushing_paths', $second_file_chunk['phase']);
+            $this->assertSame($local_paths_to_push_handle, $local_paths_to_push_handle_property->getValue($sender));
+            $this->assertSame($local_file_handle, $local_file_handle_property->getValue($sender));
+            $this->assertGreaterThan($local_file_position, ftell($local_file_handle));
+            $this->assertSame($local_paths_to_push_position, ftell($local_paths_to_push_handle));
+            $this->assertSame($curl_handle, $curl_handle_property->getValue($push_stream_client));
+            clearstatcache(true, $push_state_directory . '/sender.json');
+            $this->assertSame($state_inode_before_upload, fileinode($push_state_directory . '/sender.json'));
+            $finished_upload_requests_before_close = $this->countEndpointRequests('push_upload');
+
+        } finally {
+            $sender->close();
+        }
+        $this->assertNull($local_paths_to_push_handle_property->getValue($sender));
+        $this->assertNull($local_file_handle_property->getValue($sender));
+        $this->assertFalse(is_resource($local_paths_to_push_handle));
+        $this->assertFalse(is_resource($local_file_handle));
+        $this->assertNull($curl_handle_property->getValue($push_stream_client));
+        $this->assertSame($finished_upload_requests_before_close, $this->countEndpointRequests('push_upload'));
+        clearstatcache(true, $push_state_directory . '/sender.json');
+        $this->assertSame($state_inode_before_upload, fileinode($push_state_directory . '/sender.json'));
+
+        $sender = PushFilesSender::resume($options);
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_deletes');
+            $sender->next_step();
+            $first_delete_chunk = $this->senderResult($sender);
+            $this->assertSame('pushing_deletes', $first_delete_chunk['phase']);
+            $local_paths_to_delete_handle = $local_paths_to_delete_handle_property->getValue($sender);
+            $this->assertIsResource($local_paths_to_delete_handle);
+            $local_paths_to_delete_position = ftell($local_paths_to_delete_handle);
+            $this->assertIsInt($local_paths_to_delete_position);
+
+            $sender->next_step();
+
+            $second_delete_chunk = $this->senderResult($sender);
+            $this->assertSame('pushing_deletes', $second_delete_chunk['phase']);
+            $this->assertSame(
+                $local_paths_to_delete_handle,
+                $local_paths_to_delete_handle_property->getValue($sender)
+            );
+            $this->assertGreaterThan(
+                $local_paths_to_delete_position,
+                ftell($local_paths_to_delete_handle)
+            );
+        } finally {
+            $sender->close();
+        }
+        $this->assertNull($local_paths_to_delete_handle_property->getValue($sender));
+        $this->assertFalse(is_resource($local_paths_to_delete_handle));
+    }
+
+    /**
+     * Cancels an open request before changing the durable phase to removal.
+     */
+    public function testHighLevelSenderCancelsAnOpenRequestBeforeRemovingAChangedLocalPath(): void
+    {
+        $local_docroot = $this->root . '/cancel-before-remove-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/first.txt', 'a');
+        file_put_contents($local_docroot . '/second.txt', 'b');
+        $fresh_local_index_path = $this->root . '/cancel-before-remove-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'first.txt' => $this->indexEntry($local_docroot . '/first.txt', 'file'),
+            'second.txt' => $this->indexEntry($local_docroot . '/second.txt', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/cancel-before-remove-state';
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $push_stream_client_property = new ReflectionProperty(PushFilesSender::class, 'push_stream_client');
+        $curl_handle_property = new ReflectionProperty(MultipartPushStreamClient::class, 'curl_handle');
+
+        $sender = PushFilesSender::start($options);
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+            $this->assertSame('pushing_paths', $sender->get_phase());
+
+            $sender->next_step();
+            $push_stream_client = $push_stream_client_property->getValue($sender);
+            $this->assertNotNull($curl_handle_property->getValue($push_stream_client));
+
+            file_put_contents($local_docroot . '/second.txt', 'changed');
+            clearstatcache(true, $local_docroot . '/second.txt');
+            $sender->next_step();
+
+            $this->assertSame('removing', $sender->get_phase());
+            $this->assertSame('local_path_changed', $sender->get_reason());
+            $this->assertNull($curl_handle_property->getValue($push_stream_client));
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('discarding_plan', $sender->get_phase());
+            $this->assertFalse($sender->next_step());
+            $this->assertSame('restart', $sender->get_status());
+        } finally {
+            $sender->close();
+        }
+    }
+
+    /**
+     * Continues from the durable boundary after the caller cancels an open request.
+     */
+    public function testHighLevelSenderContinuesAfterCancellingAnOpenRequest(): void
+    {
+        $local_docroot = $this->root . '/cancel-and-continue-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $contents = str_repeat('a', 130);
+        file_put_contents($local_docroot . '/file.bin', $contents);
+        $fresh_local_index_path = $this->root . '/cancel-and-continue-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'file.bin' => $this->indexEntry($local_docroot . '/file.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/cancel-and-continue-state';
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $upload_request_stage_property = new ReflectionProperty(PushFilesSender::class, 'upload_request_stage');
+
+        $sender = PushFilesSender::start($options);
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+            $sender->next_step();
+            $this->assertSame('sending_parts', $upload_request_stage_property->getValue($sender));
+
+            $state_before_cancel = $this->loadActiveState($push_state_directory);
+            $this->assertIsArray($state_before_cancel);
+            $this->assertSame(0, $state_before_cancel['local_paths_to_push_byte_offset']);
+            $this->assertSame(1, $this->countEndpointRequests('push_status'));
+            $sender->cancel();
+            $this->assertSame('closed', $upload_request_stage_property->getValue($sender));
+            $this->assertSame('continue', $sender->get_status());
+            $this->assertSame('pushing_paths', $sender->get_phase());
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('sending_parts', $upload_request_stage_property->getValue($sender));
+            $this->assertSame(2, $this->countEndpointRequests('push_status'));
+            $sender->cancel();
+            $this->assertSame('closed', $upload_request_stage_property->getValue($sender));
+        } finally {
+            $sender->close();
+        }
+
+        $result = $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $this->assertSame('complete', $result['status']);
+        $this->assertSame($contents, file_get_contents($this->docroot . '/file.bin'));
+    }
+
+    /**
+     * Continues from the last durable boundary after a process dies with a request open.
+     */
+    public function testHighLevelSenderContinuesAfterProcessDeathWithAnOpenRequest(): void
+    {
+        if (
+            !function_exists('pcntl_fork')
+            || !function_exists('posix_kill')
+            || !defined('SIGKILL')
+        ) {
+            $this->markTestSkipped('Open-request process-death coverage requires pcntl and posix.');
+        }
+        $local_docroot = $this->root . '/killed-request-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $contents = str_repeat('k', 130);
+        file_put_contents($local_docroot . '/file.bin', $contents);
+        $fresh_local_index_path = $this->root . '/killed-request-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'file.bin' => $this->indexEntry($local_docroot . '/file.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/killed-request-state';
+        $request_open_marker = $this->root . '/request-open';
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child === 0) {
+            $sender = PushFilesSender::start($options);
+            for ($step = 0; $step < 300 && $sender->get_phase() !== 'pushing_paths'; ++$step) {
+                if (!$sender->next_step()) {
+                    exit(2);
+                }
+            }
+            if ($sender->get_phase() !== 'pushing_paths' || !$sender->next_step()) {
+                exit(3);
+            }
+            $push_stream_client_property = new ReflectionProperty(
+                PushFilesSender::class,
+                'push_stream_client'
+            );
+            $curl_handle_property = new ReflectionProperty(
+                MultipartPushStreamClient::class,
+                'curl_handle'
+            );
+            $push_stream_client = $push_stream_client_property->getValue($sender);
+            if ($curl_handle_property->getValue($push_stream_client) === null) {
+                exit(4);
+            }
+            file_put_contents($request_open_marker, 'open');
+            posix_kill(getmypid(), SIGKILL);
+            exit(5);
+        }
+
+        pcntl_waitpid($child, $child_status);
+        $this->assertTrue(pcntl_wifsignaled($child_status));
+        $this->assertSame(SIGKILL, pcntl_wtermsig($child_status));
+        $this->assertFileExists($request_open_marker);
+        $state = $this->loadActiveState($push_state_directory);
+        $this->assertIsArray($state);
+        $this->assertSame('pushing_paths', $state['phase']);
+        $this->assertSame(0, $state['local_paths_to_push_byte_offset']);
+
+        $result = $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $this->assertSame('complete', $result['status']);
+        $this->assertSame($contents, file_get_contents($this->docroot . '/file.bin'));
+    }
+
+    /**
+     * Removes a push session when a local path to push disappears.
+     */
+    public function testHighLevelSenderRemovesSessionWhenLocalPathToPushDisappears(): void
+    {
+        $local_docroot = $this->root . '/deleted-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/large.bin', str_repeat('A', 2000));
+        $fresh_local_index_path = $this->root . '/deleted-local-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'large.bin' => $this->indexEntry($local_docroot . '/large.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/deleted-local-state';
+
+        for ($step = 0; $step < 30; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (is_array($state) && $state['phase'] === 'pushing_paths' && $step >= 2) {
+                break;
+            }
+        }
+        $this->assertIsArray($state);
+        $push_session_id = $state['push_session_id'];
+        unlink($local_docroot . '/large.bin');
+
+        for (; $step < 60; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            if ($result['status'] !== 'continue') {
+                break;
+            }
+        }
+        $this->assertSame('restart', $result['status'], (string) json_encode($result));
+        $this->assertSame('local_path_changed', $result['reason']);
+        $this->assertNull($this->loadActiveState($push_state_directory));
+        $this->assertFileDoesNotExist($push_state_directory . '/cursor.json');
+        $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
+    }
+
+    /**
+     * Removes work selected from an older local-file version.
+     */
+    public function testHighLevelSenderRemovesSessionWhenPlannedFileChangesDuringUpload(): void
+    {
+        $local_docroot = $this->root . '/changed-planned-file-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/large.bin', str_repeat('A', 2000));
+        $fresh_local_index_path = $this->root . '/changed-planned-file-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'large.bin' => $this->indexEntry($local_docroot . '/large.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/changed-planned-file-state';
+
+        for ($step = 0; $step < 30; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (is_array($state) && $state['phase'] === 'pushing_paths' && $step >= 2) {
+                break;
+            }
+        }
+        $this->assertIsArray($state);
+        $push_session_id = $state['push_session_id'];
+
+        sleep(1);
+        file_put_contents($local_docroot . '/large.bin', str_repeat('B', 2000));
+        clearstatcache(true, $local_docroot . '/large.bin');
+
+        $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $this->assertSame('continue', $result['status']);
+        $this->assertSame('removing', $result['phase']);
+        $this->assertSame('local_path_changed', $result['reason']);
+
+        for (; $step < 60; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            if ($result['status'] !== 'continue') {
+                break;
+            }
+        }
+        $this->assertSame('restart', $result['status']);
+        $this->assertNull($this->loadActiveState($push_state_directory));
+        $this->assertFileDoesNotExist($push_state_directory . '/cursor.json');
+        $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
+    }
+
+    /**
+     * Rejects an empty-directory selection after that directory gains a child.
+     */
+    public function testHighLevelSenderRemovesSessionWhenPlannedEmptyDirectoryChanges(): void
+    {
+        $local_docroot = $this->root . '/changed-empty-directory-docroot';
+        mkdir($local_docroot . '/empty', 0700, true);
+        $fresh_local_index_path = $this->root . '/changed-empty-directory-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'empty' => $this->indexEntry($local_docroot . '/empty', 'dir', true),
+        ]);
+        $push_state_directory = $this->root . '/changed-empty-directory-state';
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $sender = PushFilesSender::start($options);
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'planning');
+            $this->assertSame('planning', $sender->get_phase());
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('pushing_paths', $sender->get_phase());
+            file_put_contents($local_docroot . '/empty/child.txt', 'new');
+
+            $sender->next_step();
+
+            $result = $this->senderResult($sender);
+        } finally {
+            $sender->close();
+        }
+
+        $this->assertSame('continue', $result['status']);
+        $this->assertSame('removing', $result['phase']);
+        $this->assertSame('local_path_changed', $result['reason']);
+    }
+
+    /**
+     * Distinguishes an unpushable local file type from a path that disappeared.
+     */
+    public function testHighLevelSenderReportsWhenLocalPathChangesToUnsupportedType(): void
+    {
+        if (!function_exists('posix_mkfifo')) {
+            $this->markTestSkipped('posix_mkfifo() is unavailable.');
+        }
+
+        $local_docroot = $this->root . '/unsupported-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.bin', str_repeat('A', 2000));
+        $fresh_local_index_path = $this->root . '/unsupported-local-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'value.bin' => $this->indexEntry($local_docroot . '/value.bin', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/unsupported-local-state';
+
+        for ($step = 0; $step < 30; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (is_array($state) && $state['phase'] === 'pushing_paths' && $step >= 2) {
+                break;
+            }
+        }
+        $this->assertIsArray($state);
+
+        unlink($local_docroot . '/value.bin');
+        $this->assertTrue(posix_mkfifo($local_docroot . '/value.bin', 0600));
+
+        $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $this->assertSame('continue', $result['status']);
+        $this->assertSame('removing', $result['phase']);
+        $this->assertSame('local_path_changed', $result['reason']);
+        $this->assertStringContainsString('file type that cannot be pushed', $result['detail']);
+    }
+
+    /**
+     * Applies receiver exclusions without maintaining a second baseline model.
+     */
+    public function testHighLevelSenderUsesReceiverExclusionsInPushPlan(): void
+    {
+        $local_docroot = $this->root . '/excluded-local-docroot';
+        mkdir($local_docroot . '/preserved', 0700, true);
+        file_put_contents($local_docroot . '/preserved/value.txt', 'local-change');
+        file_put_contents($local_docroot . '/public.txt', 'public-change');
+        $fresh_local_index_path = $this->root . '/excluded-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'preserved' => $this->indexEntry($local_docroot . '/preserved', 'dir', false),
+            'preserved/value.txt' => $this->indexEntry($local_docroot . '/preserved/value.txt', 'file'),
+            'public.txt' => $this->indexEntry($local_docroot . '/public.txt', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/excluded-state';
+
+        $result = $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $stored_excluded_paths = json_decode(
+            (string) file_get_contents($push_state_directory . '/excluded_paths.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertContains(base64_encode('preserved'), $stored_excluded_paths);
+        $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
+        $this->assertSame('public-change', file_get_contents($this->docroot . '/public.txt'));
+        $this->assertSame(
+            file_get_contents($push_state_directory . '/fresh_local_index.jsonl'),
+            file_get_contents($push_state_directory . '/local_index_at_previous_push.jsonl'),
+            'Exclusions suppress remote work but do not create a parallel retained-index representation.'
+        );
+    }
+
+    /**
+     * Holds the lifecycle lock while open and resumes the last returned boundary.
+     */
+    public function testHighLevelSenderOwnsLifecycleLockAndResumesAfterClose(): void
+    {
+        $local_docroot = $this->root . '/locked-local-docroot';
+        $push_state_directory = $this->root . '/locked-state';
+        mkdir($local_docroot, 0700, true);
+        mkdir($push_state_directory, 0700, true);
+        $fresh_local_index_path = $this->root . '/locked-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, []);
+        $lock = fopen($push_state_directory . '/sender.lock', 'c+');
+        $this->assertIsResource($lock);
+        $this->assertTrue(flock($lock, LOCK_EX | LOCK_NB));
+        try {
+            try {
+                PushFilesSender::start(
+                    $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+                );
+                $this->fail('Starting a sender must fail while another process owns its lock.');
+            } catch (RuntimeException $exception) {
+                $this->assertStringContainsString('another process holds its lock', $exception->getMessage());
+            }
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+
+        $options = $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory);
+        $sender = PushFilesSender::start($options);
+        try {
+            $sender->next_step();
+            $first = $this->senderResult($sender);
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+            $second = $this->senderResult($sender);
+            $this->assertSame('continue', $first['status']);
+            $this->assertSame('continue', $second['status']);
+            try {
+                PushFilesSender::resume($options);
+                $this->fail('Resuming a sender must fail until the open sender is closed.');
+            } catch (RuntimeException $exception) {
+                $this->assertStringContainsString('another process holds its lock', $exception->getMessage());
+            }
+        } finally {
+            $sender->close();
+        }
+        $state_at_caller_stop = $this->loadActiveState($push_state_directory);
+        $this->assertIsArray($state_at_caller_stop);
+        $this->assertSame('pushing_paths', $state_at_caller_stop['phase']);
+
+        try {
+            $sender->next_step();
+            $this->fail('A closed sender must reject another step.');
+        } catch (LogicException $exception) {
+            $this->assertStringContainsString('after close()', $exception->getMessage());
+        }
+
+        $resumed_sender = PushFilesSender::resume($options);
+        try {
+            $resumed_sender->next_step();
+            $result_after_resume = $this->senderResult($resumed_sender);
+            $this->assertSame('continue', $result_after_resume['status']);
+            $this->assertSame('pushing_deletes', $result_after_resume['phase']);
+        } finally {
+            $resumed_sender->close();
+        }
+
+        try {
+            PushFilesSender::start($options);
+            $this->fail('Starting a sender must not replace unfinished active state.');
+        } catch (LogicException $exception) {
+            $this->assertStringContainsString('unfinished active state exists', $exception->getMessage());
+        }
+
+        $this->assertSame(
+            'complete',
+            $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory)['status']
+        );
+    }
+
+    /**
+     * Leaves a missing push state directory absent when there is nothing to resume.
+     */
+    public function testHighLevelSenderDoesNotCreateStateDirectoryWhenResumeHasNoState(): void
+    {
+        $local_docroot = $this->root . '/missing-state-local-docroot';
+        $push_state_directory = $this->root . '/missing-state';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/missing-state-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, []);
+
+        try {
+            PushFilesSender::resume(
+                $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+            );
+            $this->fail('Resuming without active state must fail.');
+        } catch (LogicException $exception) {
+            $this->assertStringContainsString('without unfinished active state', $exception->getMessage());
+        }
+
+        $this->assertDirectoryDoesNotExist($push_state_directory);
+    }
+
+    /**
+     * Leaves active state for a later command after a request failure.
+     */
+    public function testHighLevelSenderLeavesRequestFailureForTheNextCommand(): void
+    {
+        $local_docroot = $this->root . '/retry-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.txt', 'value');
+        $fresh_local_index_path = $this->root . '/retry-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'value.txt' => $this->indexEntry($local_docroot . '/value.txt', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/retry-state';
+
+        for ($step = 0; $step < 20; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (is_array($state) && $state['phase'] === 'pushing_paths') {
+                break;
+            }
+        }
+        $this->assertIsArray($state);
+        $push_lock = fopen(
+            $this->reprint_directory . '/.reprint/push/' . $state['push_session_id'] . '/push.lock',
+            'r+b'
+        );
+        $this->assertIsResource($push_lock);
+        $this->assertTrue(flock($push_lock, LOCK_EX | LOCK_NB));
+        try {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+        } finally {
+            flock($push_lock, LOCK_UN);
+            fclose($push_lock);
+        }
+
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame('lock_acquisition_failure', $result['reason']);
+        $this->assertIsArray($this->loadActiveState($push_state_directory));
+        $this->assertSame(
+            'complete',
+            $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory)['status']
+        );
+    }
+
+    /**
+     * Treats a complete non-JSON push response as a terminal protocol error.
+     */
+    public function testHighLevelSenderTreatsMalformedPushResponseAsTerminal(): void
+    {
+        if (!function_exists('pcntl_fork')) {
+            $this->markTestSkipped('Malformed push-response coverage requires pcntl.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $error_number, $error_message);
+        $this->assertNotFalse($listener, $error_message);
+        $address = stream_socket_get_name($listener, false);
+        $this->assertIsString($address);
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child === 0) {
+            $connection = stream_socket_accept($listener, 3);
+            if ($connection === false) {
+                exit(2);
+            }
+            $request_head = '';
+            while (strpos($request_head, "\r\n\r\n") === false && !feof($connection)) {
+                $piece = fread($connection, 4096);
+                if (!is_string($piece) || $piece === '') {
+                    break;
+                }
+                $request_head .= $piece;
+            }
+            $body = '<html>not a push response</html>';
+            fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Length: " . strlen($body) . "\r\nConnection: close\r\n\r\n" . $body);
+            fclose($connection);
+            fclose($listener);
+            exit(0);
+        }
+
+        $local_docroot = $this->root . '/malformed-local-docroot';
+        $push_state_directory = $this->root . '/malformed-state';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/malformed-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, []);
+        $sender = PushFilesSender::start([
+            'docroot' => $local_docroot,
+            'fresh_local_index_path' => $fresh_local_index_path,
+            'push_state_directory' => $push_state_directory,
+            'base_url' => 'http://' . $address . '/?reprint-api=1',
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'connect_timeout' => 2,
+            'response_timeout' => 2,
+        ]);
+        try {
+            $this->assertFalse($sender->next_step());
+            $this->assertFalse($sender->next_step());
+            $result = $this->senderResult($sender);
+        } finally {
+            $sender->close();
+        }
+        $this->assertFalse($sender->next_step());
+        pcntl_waitpid($child, $status);
+        fclose($listener);
+
+        $this->assertSame('failed', $result['status'], (string) json_encode($result));
+        $this->assertSame('malformed_response', $result['reason']);
+        $this->assertIsArray($this->loadActiveState($push_state_directory));
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+    }
+
+    /**
+     * Reconciles deletion close and commit after their responses are lost.
+     */
+    public function testHighLevelSenderRepeatsDeletionAndCommitAfterLostResponses(): void
+    {
+        file_put_contents($this->docroot . '/delete-after-lost-response.txt', 'old');
+        $local_docroot = $this->root . '/lost-response-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        $fresh_local_index_path = $this->root . '/lost-response-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, []);
+        $previous_local_index_path = $this->root . '/lost-response-previous-index.jsonl';
+        $this->writeIndex($previous_local_index_path, [
+            'delete-after-lost-response.txt' => [1, 3, 'file'],
+        ]);
+        $push_state_directory = $this->root . '/lost-response-state';
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+
+        for ($step = 0; $step < 30; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (is_array($state) && $state['phase'] === 'pushing_deletes') {
+                break;
+            }
+        }
+        $this->assertIsArray($state);
+        $deletions = (string) file_get_contents($push_state_directory . '/local_paths_to_delete');
+        $this->assertSame("delete-after-lost-response.txt\0", $deletions);
+        $boundary = 'reprint-lost-delete-response';
+        $delete_body = '--' . $boundary . "\r\n"
+            . "X-Chunk-Type: delete-list\r\n"
+            . "X-Delete-Offset: 0\r\n"
+            . "Content-Type: application/octet-stream\r\n"
+            . 'Content-Length: ' . strlen($deletions) . "\r\n\r\n"
+            . $deletions . "\r\n"
+            . '--' . $boundary . "\r\n"
+            . "X-Chunk-Type: delete-list\r\n"
+            . 'X-Delete-Offset: ' . strlen($deletions) . "\r\n"
+            . "X-Delete-Complete: 1\r\n"
+            . "Content-Type: application/octet-stream\r\n"
+            . "Content-Length: 0\r\n\r\n\r\n"
+            . '--' . $boundary . "--\r\n";
+        $this->sendPostAndDiscardResponse(
+            $this->base_url . '&endpoint=push_upload&push_session_id=' . $state['push_session_id'],
+            'multipart/mixed; boundary=' . $boundary,
+            $delete_body
+        );
+
+        for (; $step < 70; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            $state = $this->loadActiveState($push_state_directory);
+            if (is_array($state) && $state['phase'] === 'committing') {
+                break;
+            }
+        }
+        $this->assertIsArray($state);
+        $this->sendPostAndDiscardResponse(
+            $this->base_url . '&endpoint=push_commit&push_session_id=' . $state['push_session_id'],
+            null,
+            ''
+        );
+
+        for (; $step < 140; ++$step) {
+            $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
+            $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+            if ($result['status'] !== 'continue') {
+                break;
+            }
+        }
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertFileDoesNotExist($this->docroot . '/delete-after-lost-response.txt');
+        $this->assertNull($this->loadActiveState($push_state_directory));
     }
 
     /**
@@ -1441,6 +2578,7 @@ final class PushEndpointsTest extends TestCase {
             'REPRINT_PUSH_TEST_DOCROOT_CONFIG' => $this->docroot_configuration_path,
             'REPRINT_PUSH_TEST_DIRECTORY_CONFIG' => $this->reprint_configuration_path,
             'REPRINT_PUSH_TEST_EXCLUDED_PATHS_CONFIG' => $this->excluded_paths_configuration_path,
+            'REPRINT_PUSH_TEST_REQUEST_LOG' => $this->root . '/request.log',
         ]);
         $server_log_path = $this->root . '/server-' . $post_max_bytes . '-' . bin2hex(random_bytes(4)) . '.log';
         $descriptors = [
@@ -1476,6 +2614,224 @@ final class PushEndpointsTest extends TestCase {
         $server_log = file_get_contents($server_log_path);
         $this->stopServer($process, $pipes);
         $this->fail('Push endpoint test server did not start: ' . $server_log);
+    }
+
+    /**
+     * Builds the production sender options used at each lifecycle boundary.
+     *
+     * @return array<string,mixed> PushFilesSender start or resume options.
+     */
+    private function senderOptions(
+        string $local_docroot,
+        string $fresh_local_index_path,
+        string $push_state_directory
+    ): array
+    {
+        $this->writeDocrootConfiguration([
+            'document_root' => $this->docroot,
+            'maximum_part_bytes' => 64,
+        ]);
+        return [
+            'docroot' => $local_docroot,
+            'fresh_local_index_path' => $fresh_local_index_path,
+            'push_state_directory' => $push_state_directory,
+            'base_url' => $this->base_url,
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'chunk_bytes' => 64,
+            'request_sizer_options' => [
+                'floor_bytes' => 2048,
+                'start_bytes' => 2048,
+                'max_bytes' => 2048,
+            ],
+            'connect_timeout' => 3,
+            'stall_timeout' => 3,
+            'response_timeout' => 5,
+        ];
+    }
+
+    /**
+     * Starts or resumes one sender and stops after its next durable boundary.
+     *
+     * Multipart steps remain in one open sender until their request is
+     * confirmed. Other phases still take exactly one step.
+     *
+     * @return array<string,mixed> Result at the next durable boundary.
+     */
+    private function nextSenderDurableBoundary(
+        string $local_docroot,
+        string $fresh_local_index_path,
+        string $push_state_directory
+    ): array {
+        $options = $this->senderOptions(
+            $local_docroot,
+            $fresh_local_index_path,
+            $push_state_directory
+        );
+        $sender = is_file($push_state_directory . '/sender.json')
+            ? PushFilesSender::resume($options)
+            : PushFilesSender::start($options);
+        $upload_request_stage_property = new ReflectionProperty(PushFilesSender::class, 'upload_request_stage');
+        try {
+            do {
+                $sender->next_step();
+            } while (
+                $sender->get_status() === 'continue'
+                && $upload_request_stage_property->getValue($sender) !== 'closed'
+            );
+            return $this->senderResult($sender);
+        } finally {
+            if ($sender->get_status() === 'continue') {
+                $sender->cancel();
+            }
+            $sender->close();
+        }
+    }
+
+    /**
+     * Reads the current sender outcome for focused assertions.
+     *
+     * @return array {
+     *     Current sender outcome.
+     *
+     *     @type string      $status Current status.
+     *     @type string      $phase  Current or last sender phase.
+     *     @type string|null $reason Current classification, if any.
+     *     @type string|null $detail Current explanation, if any.
+     * }
+     * @phpstan-return array{status:string,phase:string,reason:string|null,detail:string|null}
+     */
+    private function senderResult(PushFilesSender $sender): array
+    {
+        return [
+            'status' => $sender->get_status(),
+            'phase' => $sender->get_phase(),
+            'reason' => $sender->get_reason(),
+            'detail' => $sender->get_detail(),
+        ];
+    }
+
+    /**
+     * Takes bounded sender steps until one requested durable phase is current.
+     */
+    private function takeSenderStepsUntilPhase(PushFilesSender $sender, string $phase): void
+    {
+        for ($step = 0; $step < 300; ++$step) {
+            if ($sender->get_phase() === $phase) {
+                return;
+            }
+            if (!$sender->next_step()) {
+                break;
+            }
+        }
+        $this->fail(
+            "The sender reached {$sender->get_phase()} instead of the requested {$phase} phase."
+        );
+    }
+
+    /**
+     * Counts completed requests for one endpoint in the local server log.
+     */
+    private function countEndpointRequests(string $endpoint): int
+    {
+        $request_log_path = $this->root . '/request.log';
+        if (!is_file($request_log_path)) {
+            return 0;
+        }
+        $request_endpoints = file($request_log_path, FILE_IGNORE_NEW_LINES);
+        $this->assertIsArray($request_endpoints);
+        $request_count = 0;
+        foreach ($request_endpoints as $request_endpoint) {
+            if ($request_endpoint === $endpoint) {
+                ++$request_count;
+            }
+        }
+        return $request_count;
+    }
+
+    /**
+     * Runs sender steps until the workflow reaches a terminal result.
+     *
+     * @return array<string,mixed> Terminal sender result.
+     */
+    private function runSender(
+        string $local_docroot,
+        string $fresh_local_index_path,
+        string $push_state_directory
+    ): array {
+        $options = $this->senderOptions(
+            $local_docroot,
+            $fresh_local_index_path,
+            $push_state_directory
+        );
+        $sender = is_file($push_state_directory . '/sender.json')
+            ? PushFilesSender::resume($options)
+            : PushFilesSender::start($options);
+        try {
+            for ($step = 0; $step < 200; ++$step) {
+                $has_more_steps = $sender->next_step();
+                $result = $this->senderResult($sender);
+                $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
+                $this->assertSame($result['status'] === 'continue', $has_more_steps);
+                if (!$has_more_steps) {
+                    return $result;
+                }
+            }
+        } finally {
+            $sender->close();
+        }
+        $this->fail('The high-level sender did not reach a terminal result in 200 steps.');
+    }
+
+    /**
+     * Reads sender.json without adding a production accessor for tests.
+     *
+     * @return array<string,mixed>|null Decoded active state, or null when absent.
+     */
+    private function loadActiveState(string $push_state_directory): ?array
+    {
+        $state_path = $push_state_directory . '/sender.json';
+        clearstatcache(true, $state_path);
+        if (!is_file($state_path)) {
+            return null;
+        }
+        $json = file_get_contents($state_path);
+        $this->assertIsString($json);
+        $state = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertIsArray($state);
+        return $state;
+    }
+
+    /**
+     * Seeds PushPlan's local index at the previous successful push.
+     */
+    private function seedPreviousLocalIndex(string $push_state_directory, string $index_path): void
+    {
+        if (!is_dir($push_state_directory)) {
+            mkdir($push_state_directory, 0700, true);
+        }
+        $this->assertTrue(copy($index_path, $push_state_directory . '/local_index_at_previous_push.jsonl'));
+    }
+
+    /**
+     * Builds one index record from a real local filesystem value.
+     *
+     * @param 'file'|'dir'|'link' $type Index entry type.
+     * @return array{0:int,1:int,2:'file'|'dir'|'link',3?:bool} Index test record.
+     */
+    private function indexEntry(
+        string $absolute_path,
+        string $type,
+        ?bool $directory_is_empty = null
+    ): array
+    {
+        $identity = lstat($absolute_path);
+        $this->assertIsArray($identity);
+        $entry = [ (int) $identity['ctime'], (int) $identity['size'], $type];
+        if ($directory_is_empty !== null) {
+            $entry[] = $directory_is_empty;
+        }
+        return $entry;
     }
 
     /**
@@ -1544,7 +2900,7 @@ final class PushEndpointsTest extends TestCase {
      * @param array<string,string> $parameters Signed query parameters.
      * @return array{http_code:int,headers:array<string,list<string>>,body:string} Raw HTTP result.
      */
-    private function sendControlRequestWithHeaders(string $method, string $endpoint, array $parameters, string $secret): array
+    private function sendPushRequestWithHeaders(string $method, string $endpoint, array $parameters, string $secret): array
     {
         $query = http_build_query(
             array_merge(['endpoint' => $endpoint], $parameters),
@@ -1643,6 +2999,50 @@ final class PushEndpointsTest extends TestCase {
         ];
     }
 
+    /**
+     * Sends one complete signed POST request and discards its response.
+     *
+     * Closing the socket immediately after the terminating transfer chunk
+     * reproduces a sender that cannot know whether the target completed the
+     * operation. The caller must reconcile from target state afterward.
+     *
+     * @param string $url Exact push endpoint URL to authenticate and request.
+     * @param string|null $content_type Request Content-Type, or null when the
+     *     endpoint has no body format.
+     * @param string $body Decoded HTTP entity body.
+     */
+    private function sendPostAndDiscardResponse(string $url, ?string $content_type, string $body): void
+    {
+        $target = parse_url($url);
+        $this->assertIsArray($target);
+        $this->assertIsString($target['host'] ?? null);
+        $this->assertIsInt($target['port'] ?? null);
+        $authentication_headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_envelope_auth_headers('POST', $url);
+        $connection = stream_socket_client(
+            'tcp://' . $target['host'] . ':' . $target['port'],
+            $error_number,
+            $error_message,
+            3
+        );
+        $this->assertIsResource($connection, $error_message);
+        $request = 'POST ' . $target['path'] . '?' . $target['query'] . " HTTP/1.1\r\n"
+            . 'Host: ' . $target['host'] . ':' . $target['port'] . "\r\n"
+            . "Transfer-Encoding: chunked\r\nConnection: close\r\n";
+        if ($content_type !== null) {
+            $request .= 'Content-Type: ' . $content_type . "\r\n";
+        }
+        foreach ($authentication_headers as $header_name => $header_value) {
+            $request .= $header_name . ': ' . $header_value . "\r\n";
+        }
+        $request .= "\r\n";
+        if ($body !== '') {
+            $request .= dechex(strlen($body)) . "\r\n" . $body . "\r\n";
+        }
+        $request .= "0\r\n\r\n";
+        $this->assertSame(strlen($request), fwrite($connection, $request));
+        fclose($connection);
+    }
+
     private function removeTree(string $path): void
     {
         if (is_link($path) || is_file($path)) {
@@ -1658,5 +3058,32 @@ final class PushEndpointsTest extends TestCase {
             }
         }
         @rmdir($path);
+    }
+    /**
+     * Writes a path-sorted current index or enriched baseline JSONL.
+     *
+     * @param array<string,array{0:int,1:int,2:'file'|'dir'|'link',3?:bool}> $entries
+     *     Path to `[ctime, size, type, optional directory emptiness]` records.
+     */
+    private function writeIndex(string $path, array $entries): void
+    {
+        uksort($entries, 'strcmp');
+        $handle = fopen($path, 'wb');
+        $this->assertIsResource($handle);
+        foreach ($entries as $entry_path => $index_entry) {
+            [$ctime, $size, $type] = $index_entry;
+            $record = [
+                'path' => base64_encode($entry_path),
+                'ctime' => $ctime,
+                'size' => $size,
+                'type' => $type,
+            ];
+            if (array_key_exists(3, $index_entry)) {
+                $record['empty'] = $index_entry[3];
+            }
+            $line = json_encode($record, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+            $this->assertSame(strlen($line), fwrite($handle, $line));
+        }
+        fclose($handle);
     }
 }

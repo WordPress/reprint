@@ -10,7 +10,7 @@
  * that part. send_part() does not queue future work: when it returns true,
  * libcurl has consumed the complete MIME prefix, payload, and suffix through
  * the active transfer. The caller can then drop that one payload string, read
- * the next bounded source piece, and call send_part() again.
+ * the next bounded local file piece, and call send_part() again.
  *
  * Example:
  *
@@ -23,7 +23,7 @@
  *         if ($maximum === 0) {
  *             break;
  *         }
- *         $payload = read_source_piece($path, $offset, $maximum);
+ *         $payload = read_local_file_piece($path, $offset, $maximum);
  *         if (!$client->send_part([
  *             'type' => 'file',
  *             'path' => $path,
@@ -54,10 +54,13 @@
  * Pausing from a PHP cURL read callback is reliable only on PHP 8.1 and newer;
  * older bindings interpret CURL_READFUNC_PAUSE as end-of-body and silently
  * truncate the upload. The constructor enforces that runtime requirement while
- * this source file remains PHP 7.4 parseable for import.php's pull commands.
+ * this PHP file remains PHP 7.4 parseable for import.php's pull commands.
  */
 class MultipartPushStreamClient
 {
+    /** Maximum JSON response bytes retained from the target. */
+    private const MAX_RESPONSE_BYTES = 1024 * 1024;
+
     /** @var string Exporter API URL used as the base of every signed request target. */
     private string $base_url;
 
@@ -142,6 +145,12 @@ class MultipartPushStreamClient
 
     /** @var string|null Setup failure exposed when start_upload_request() returns false. */
     private ?string $last_error = null;
+
+    /** @var string Bounded response body for the currently open upload request. */
+    private string $response_body = '';
+
+    /** @var bool Whether the current upload response crossed MAX_RESPONSE_BYTES. */
+    private bool $response_too_large = false;
 
     /**
      * Configures one reusable connection context and its independent limits.
@@ -258,6 +267,8 @@ class MultipartPushStreamClient
         $this->body_bytes_sent = 0;
         $this->parts_sent = 0;
         $this->last_error = null;
+        $this->response_body = '';
+        $this->response_too_large = false;
 
         $request_url = $this->endpoint_url('push_upload', ['push_session_id' => $push_session_id]);
         $headers = $this->hmac_client->get_envelope_auth_headers('POST', $request_url);
@@ -282,9 +293,23 @@ class MultipartPushStreamClient
             CURLOPT_UPLOAD => true,
             CURLOPT_CUSTOMREQUEST => 'POST',
             CURLOPT_HTTPHEADER => $header_lines,
-            CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
+            CURLOPT_HEADERFUNCTION => function ($curl_handle, string $header): int {
+                if ($this->response_header_exceeds_limit($header)) {
+                    $this->response_too_large = true;
+                    return 0;
+                }
+                return strlen($header);
+            },
+            CURLOPT_WRITEFUNCTION => function ($curl_handle, string $bytes): int {
+                if (strlen($this->response_body) + strlen($bytes) > self::MAX_RESPONSE_BYTES) {
+                    $this->response_too_large = true;
+                    return 0;
+                }
+                $this->response_body .= $bytes;
+                return strlen($bytes);
+            },
             CURLOPT_READFUNCTION => function ($curl_handle, $stream, int $length) {
                 $this->curl_requested_body = true;
                 if ($this->outbound_prefix !== '') {
@@ -334,8 +359,8 @@ class MultipartPushStreamClient
     /**
      * Sends one already-read bounded multipart part over the active transfer.
      *
-     * Headers are computed from strlen($part['payload']), so a short source read
-     * produces a smaller truthful frame rather than a body shorter than its
+     * Headers are computed from strlen($part['payload']), so a short local file
+     * read produces a smaller truthful frame rather than a body shorter than its
      * declared Content-Length. The method first verifies that the complete MIME
      * part and closing delimiter fit the current request-body budget. If they do,
      * it resumes cURL and pumps until every byte of this part has been consumed
@@ -355,7 +380,7 @@ class MultipartPushStreamClient
      *         directory or symlink.
      *     @type string $path Required target-relative path for a file,
      *         directory, or symlink.
-     *     @type int $total_bytes Required complete source size for a file.
+     *     @type int $total_bytes Required complete local file size.
      *     @type int $offset Required target-confirmed byte offset for a file or
      *         delete list.
      *     @type string $target Required raw link target for a symlink. Must be
@@ -424,27 +449,34 @@ class MultipartPushStreamClient
     }
 
     /**
+     * Indicates whether the open upload request contains a complete sent part.
+     *
+     * @return bool True after send_part() succeeds for the current request.
+     */
+    public function has_sent_parts(): bool
+    {
+        return $this->curl_handle !== null && $this->parts_sent > 0;
+    }
+
+    /**
      * Returns the safe maximum for the caller's next file read.
      *
      * The result is bounded by the in-memory chunk limit, target part limit,
      * and remaining decoded entity-body budget after reserving worst-case MIME
      * headers and the closing boundary. The path, total size, and offset are
      * encoded exactly as send_part() will encode them. Zero means the caller
-     * should finish this request before reading more source bytes.
+     * should finish an open request before reading more local file bytes. When
+     * no request is open, the returned capacity is for the next request.
      *
      * @param string $path Raw target-relative file path.
-     * @param int $total_bytes Current source file size.
+     * @param int $total_bytes Current local file size.
      * @param int $offset Target-confirmed offset for the next piece.
      * @return int Maximum payload bytes to read, or zero when no part fits.
      *
      * @throws InvalidArgumentException If total or offset is inconsistent.
-     * @throws RuntimeException If no upload request is open.
      */
     public function next_file_body_bytes(string $path, int $total_bytes, int $offset): int
     {
-        if ($this->curl_handle === null) {
-            throw new RuntimeException('No upload request is open; call start_upload_request() before next_file_body_bytes().');
-        }
         if ($total_bytes < 0 || $offset < 0 || $offset > $total_bytes) {
             throw new InvalidArgumentException('File part total and offset must be non-negative and offset must not exceed total.');
         }
@@ -460,14 +492,13 @@ class MultipartPushStreamClient
     /**
      * Returns the safe maximum for the next raw delete-stream read.
      *
+     * When no request is open, the returned capacity is for the next request.
+     *
      * @param int $offset Target-confirmed raw delete-stream byte offset.
      * @return int Maximum payload bytes to read, or zero when no part fits.
      */
     public function next_delete_body_bytes(int $offset): int
     {
-        if ($this->curl_handle === null) {
-            throw new RuntimeException('No upload request is open; call start_upload_request() before next_delete_body_bytes().');
-        }
         if ($offset < 0) {
             throw new InvalidArgumentException('Delete-list offset must be non-negative.');
         }
@@ -487,7 +518,7 @@ class MultipartPushStreamClient
      *     @type string $type Required. `file` or `delete-list`.
      *     @type string $payload Required empty string used only for header sizing.
      *     @type string $path Required target-relative path for a file.
-     *     @type int $total_bytes Required complete source size for a file.
+     *     @type int $total_bytes Required complete local file size.
      *     @type int $offset Required target-confirmed byte offset.
      * }
      * @return int Maximum body bytes allowed after MIME overhead and the close.
@@ -498,12 +529,14 @@ class MultipartPushStreamClient
         // headers; the actual part is charged after send_part().
         $headers = $this->part_headers($part, 0);
         $headers['Content-Length'] = (string) PHP_INT_MAX;
-        $overhead = strlen('--' . $this->boundary . "\r\n\r\n\r\n") + 2;
+        $boundary = $this->boundary === '' ? str_repeat('x', 40) : $this->boundary;
+        $overhead = strlen('--' . $boundary . "\r\n\r\n\r\n") + 2;
         foreach ($headers as $name => $value) {
             $overhead += strlen($name) + 2 + strlen($value) + 2;
         }
+        $body_bytes_sent = $this->curl_handle === null ? 0 : $this->body_bytes_sent;
         $remaining = $this->request_sizer->request_body_bytes()
-            - $this->body_bytes_sent
+            - $body_bytes_sent
             - $overhead
             - $this->closing_boundary_bytes();
         return max(0, min($this->chunk_bytes, $this->max_part_bytes, $remaining));
@@ -541,8 +574,8 @@ class MultipartPushStreamClient
      *
      * A 413 permanently lowers the learned sizing ceiling. Other ambiguous
      * request failures shrink temporarily. An accepted request records sizing
-     * success only if at least one part was sent; an accepted empty request is
-     * not evidence that a larger body would succeed.
+     * success only if at least one part was sent; an accepted empty request
+     * does not show that a larger body would succeed.
      *
      * The result contains these keys:
      *
@@ -610,9 +643,20 @@ class MultipartPushStreamClient
 
         $http_code = (int) curl_getinfo($this->curl_handle, CURLINFO_HTTP_CODE);
         $redirect_url = (string) curl_getinfo($this->curl_handle, CURLINFO_REDIRECT_URL);
-        $body = (string) curl_multi_getcontent($this->curl_handle);
+        $body = $this->response_body;
         curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
         $this->curl_handle = null;
+
+        if ($this->response_too_large) {
+            return [
+                'status' => 'failed',
+                'reason' => 'response_too_large',
+                'detail' => 'The target response exceeded ' . self::MAX_RESPONSE_BYTES . ' bytes.',
+                'response' => null,
+                'parts_sent' => $this->parts_sent,
+                'body_bytes_sent' => $this->body_bytes_sent,
+            ];
+        }
 
         if (in_array($http_code, [301, 302, 303, 307, 308], true)) {
             return [
@@ -652,15 +696,18 @@ class MultipartPushStreamClient
                     'body_bytes_sent' => $this->body_bytes_sent,
                 ];
             }
-            $decision = $this->request_sizer->record_request_failure();
             return [
-                'status' => $decision['action'] === 'give_up' ? 'failed' : 'retry',
-                'reason' => $decision['action'] === 'give_up' ? 'request_size_exhausted' : 'request_failed',
+                'status' => 'failed',
+                'reason' => 'request_failed',
                 'detail' => $this->transfer_error ?? 'Invalid JSON response (HTTP ' . $http_code . '): ' . substr($body, 0, 160),
                 'response' => null,
                 'parts_sent' => $this->parts_sent,
                 'body_bytes_sent' => $this->body_bytes_sent,
             ];
+        }
+        if (( $decoded['reason'] ?? null ) === 'request_too_large') {
+            $reported_limit = $decoded['post_max_bytes'] ?? null;
+            $this->request_sizer->record_too_large(is_numeric($reported_limit) ? (int) $reported_limit : null);
         }
         $decoded['http_code'] = $http_code;
         $result = $this->classify_response($decoded, ['accepted']);
@@ -674,9 +721,42 @@ class MultipartPushStreamClient
     }
 
     /**
-     * Sends one signed control request and decodes its JSON response.
+     * Abandons the open upload request without sending its closing boundary.
      *
-     * Control calls use a no-progress timeout rather than a total-transfer
+     * Parts already consumed by libcurl may have reached the target. The caller
+     * must therefore continue from target-confirmed cursors rather than treating
+     * any part from this request as accepted. The reusable connection context
+     * remains available for later requests.
+     */
+    public function cancel_request(): void
+    {
+        if ($this->curl_handle === null) {
+            return;
+        }
+        if ($this->multi_handle !== null) {
+            curl_multi_remove_handle($this->multi_handle, $this->curl_handle);
+        }
+        curl_close($this->curl_handle);
+        $this->curl_handle = null;
+        $this->outbound_prefix = '';
+        $this->outbound_payload = '';
+        $this->outbound_suffix = '';
+        $this->outbound_payload_offset = 0;
+        $this->body_complete = false;
+        $this->curl_requested_body = false;
+        $this->transfer_finished = false;
+        $this->transfer_error = null;
+        $this->outbound_consumed_bytes = 0;
+        $this->body_bytes_sent = 0;
+        $this->parts_sent = 0;
+        $this->response_body = '';
+        $this->response_too_large = false;
+    }
+
+    /**
+     * Sends one signed push request and decodes its JSON response.
+     *
+     * Push requests use a no-progress timeout rather than a total-transfer
      * deadline and refuse redirects so signatures are never replayed elsewhere.
      *
      * @param string $method GET or POST.
@@ -701,22 +781,21 @@ class MultipartPushStreamClient
      *     status:'complete'|'retry'|'failed',
      *     reason:?string,
      *     detail:?string,
-     *     response:array<string,mixed>,
+     *     response:?array<string,mixed>,
      *     parts_sent:int,
      *     body_bytes_sent:int
      * }
      *
      * @throws InvalidArgumentException If the method is unsupported.
-     * @throws RuntimeException If transport, redirect, or JSON decoding fails.
      */
-    public function control_request(string $method, string $endpoint, array $parameters, array $expected_statuses): array
+    public function send_push_request(string $method, string $endpoint, array $parameters, array $expected_statuses): array
     {
         $method = strtoupper($method);
         if (!in_array($method, ['GET', 'POST'], true)) {
-            throw new InvalidArgumentException('Multipart push control method must be GET or POST.');
+            throw new InvalidArgumentException('Push request method must be GET or POST.');
         }
         if ($expected_statuses === [] || count(array_filter($expected_statuses, 'is_string')) !== count($expected_statuses)) {
-            throw new InvalidArgumentException('Multipart push control requests require one or more string success statuses.');
+            throw new InvalidArgumentException('Push requests require one or more string success statuses.');
         }
         $url = $this->endpoint_url($endpoint, $parameters);
         $headers = $this->hmac_client->get_envelope_auth_headers($method, $url);
@@ -731,35 +810,83 @@ class MultipartPushStreamClient
         if (function_exists('reprint_apply_curl_ca_bundle')) {
             reprint_apply_curl_ca_bundle($handle);
         }
+        $response_body = '';
+        $response_too_large = false;
         curl_setopt_array($handle, [
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_POST => $method === 'POST',
             CURLOPT_POSTFIELDS => $method === 'POST' ? '' : null,
             CURLOPT_HTTPHEADER => $lines,
-            CURLOPT_RETURNTRANSFER => true,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => $this->connect_timeout,
-            // A control request has a bounded response, but it must not use
+            CURLOPT_HEADERFUNCTION => function ($handle, string $header) use (&$response_too_large): int {
+                if ($this->response_header_exceeds_limit($header)) {
+                    $response_too_large = true;
+                    return 0;
+                }
+                return strlen($header);
+            },
+            CURLOPT_WRITEFUNCTION => function ($handle, string $bytes) use (&$response_body, &$response_too_large): int {
+                if (strlen($response_body) + strlen($bytes) > self::MAX_RESPONSE_BYTES) {
+                    $response_too_large = true;
+                    return 0;
+                }
+                $response_body .= $bytes;
+                return strlen($bytes);
+            },
+            // A push request has a bounded response, but it must not use
             // CURLOPT_TIMEOUT: that is a total-transfer deadline and kills
             // a slow connection that is still moving bytes. libcurl's low
             // speed timer is a stall timeout instead.
             CURLOPT_LOW_SPEED_LIMIT => 1,
             CURLOPT_LOW_SPEED_TIME => $this->response_timeout,
         ]);
-        $body = curl_exec($handle);
+        $completed = curl_exec($handle);
         $error = curl_error($handle);
         $http_code = (int) curl_getinfo($handle, CURLINFO_HTTP_CODE);
         $redirect_url = (string) curl_getinfo($handle, CURLINFO_REDIRECT_URL);
         curl_close($handle);
+        if ($response_too_large) {
+            return [
+                'status' => 'failed',
+                'reason' => 'response_too_large',
+                'detail' => 'The target response exceeded ' . self::MAX_RESPONSE_BYTES . ' bytes.',
+                'response' => null,
+                'parts_sent' => 0,
+                'body_bytes_sent' => 0,
+            ];
+        }
         if (in_array($http_code, [301, 302, 303, 307, 308], true)) {
-            throw new RuntimeException('The target redirected to ' . ($redirect_url === '' ? 'another address' : $redirect_url) . '. Use that address as the push base_url.');
+            return [
+                'status' => 'failed',
+                'reason' => 'redirected',
+                'detail' => 'The target redirected to ' . ($redirect_url === '' ? 'another address' : $redirect_url) . '. Use that address as the push base_url.',
+                'response' => null,
+                'parts_sent' => 0,
+                'body_bytes_sent' => 0,
+            ];
         }
-        if (!is_string($body)) {
-            throw new RuntimeException('Push control request failed: ' . ($error === '' ? 'no response' : $error) . '.');
+        if ($completed !== true) {
+            return [
+                'status' => 'failed',
+                'reason' => 'request_failed',
+                'detail' => 'Push request failed: ' . ($error === '' ? 'no response' : $error) . '.',
+                'response' => null,
+                'parts_sent' => 0,
+                'body_bytes_sent' => 0,
+            ];
         }
+        $body = $response_body;
         $decoded = json_decode($body, true);
         if (!is_array($decoded)) {
-            throw new RuntimeException('Push control request returned invalid JSON (HTTP ' . $http_code . '): ' . substr($body, 0, 160));
+            return [
+                'status' => 'failed',
+                'reason' => 'malformed_response',
+                'detail' => 'Push request returned invalid JSON (HTTP ' . $http_code . '): ' . substr($body, 0, 160),
+                'response' => null,
+                'parts_sent' => 0,
+                'body_bytes_sent' => 0,
+            ];
         }
         $decoded['http_code'] = $http_code;
         return $this->classify_response($decoded, $expected_statuses);
@@ -772,7 +899,6 @@ class MultipartPushStreamClient
      *
      * - `request_body_bytes`: current decoded entity-body budget.
      * - `ceiling_bytes`: learned session ceiling, or null while unknown.
-     * - `growth_holdoff_remaining`: accepted requests still required before growth.
      *
      * @return array {
      *     Serializable PushRequestSizer state.
@@ -781,13 +907,10 @@ class MultipartPushStreamClient
      *                                             budget.
      *     @type int|null $ceiling_bytes            Learned session ceiling, or
      *                                             null while unknown.
-     *     @type int      $growth_holdoff_remaining Accepted requests still
-     *                                             required before growth.
      * }
      * @phpstan-return array{
      *     request_body_bytes:int,
-     *     ceiling_bytes:?int,
-     *     growth_holdoff_remaining:int
+     *     ceiling_bytes:?int
      * }
      */
     public function get_request_sizer_state(): array
@@ -843,6 +966,35 @@ class MultipartPushStreamClient
     }
 
     /**
+     * Closes the active request, if any, and the reusable connection context.
+     *
+     * An active request is abandoned without a closing MIME boundary. Call
+     * finish_request() first when its sent parts should be confirmed.
+     */
+    public function close(): void
+    {
+        $this->cancel_request();
+        if ($this->multi_handle !== null) {
+            curl_multi_close($this->multi_handle);
+            $this->multi_handle = null;
+        }
+    }
+
+    /**
+     * Reports whether a Content-Length header declares an oversized response.
+     *
+     * The body callback remains the limit for responses without a declared
+     * length. Rejecting a declared oversized response here avoids receiving
+     * bytes which cannot be retained.
+     */
+    private function response_header_exceeds_limit(string $header): bool
+    {
+        $matches = [];
+        return preg_match('/^Content-Length:\s*([0-9]+)\s*$/i', trim($header), $matches) === 1
+            && (float) $matches[1] > self::MAX_RESPONSE_BYTES;
+    }
+
+    /**
      * Encodes and validates the protocol headers for one already-read payload.
      *
      * Paths and symlink targets are base64 because filesystem byte strings are
@@ -854,7 +1006,7 @@ class MultipartPushStreamClient
      *
      * - `type`: required `file`, `directory`, `symlink`, or `delete-list`.
      * - `path`: required for file, directory, and symlink parts.
-     * - `total_bytes`: required complete source size for a file.
+     * - `total_bytes`: required complete local file size.
      * - `offset`: required target-confirmed offset for a file or delete list.
      * - `target`: required raw link target for a symlink.
      * - `complete`: optional delete-list completion declaration.
@@ -967,7 +1119,8 @@ class MultipartPushStreamClient
      */
     private function closing_boundary_bytes(): int
     {
-        return strlen('--' . $this->boundary . "--\r\n");
+        $boundary = $this->boundary === '' ? str_repeat('x', 40) : $this->boundary;
+        return strlen('--' . $boundary . "--\r\n");
     }
 
     /**
@@ -1039,7 +1192,7 @@ class MultipartPushStreamClient
     }
 
     /**
-     * Classifies every decoded upload and control response by protocol reason.
+     * Classifies every decoded upload and push response by protocol reason.
      *
      * `lock_acquisition_failure` and `offset_gap` are recoverable because a
      * later request can retry the locked operation or use the receiver-

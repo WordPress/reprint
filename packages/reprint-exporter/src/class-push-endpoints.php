@@ -292,7 +292,7 @@ final class Site_Export_Push_Endpoints {
                 ++$changes_accepted;
                 $current_change = $push_session->get_current_change();
                 if ($current_change === null) {
-                    throw new LogicException('An accepted multipart part did not publish its receiver-confirmed change.');
+                    throw new LogicException('An accepted multipart part did not set its receiver-confirmed change.');
                 }
                 $last_change = [];
                 if (array_key_exists('path_b64', $current_change)) {
