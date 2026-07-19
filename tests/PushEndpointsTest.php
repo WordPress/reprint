@@ -1844,12 +1844,15 @@ final class PushEndpointsTest extends TestCase {
             $sender->next_step();
 
             $this->assertSame('removing', $sender->get_phase());
-            $this->assertSame('local_path_changed', $sender->get_reason());
+            $this->assertSame('continue', $sender->get_status());
+            $this->assertNull($sender->get_reason());
+            $this->assertNull($sender->get_detail());
             $this->assertNull($curl_handle_property->getValue($push_stream_client));
             $this->assertTrue($sender->next_step());
             $this->assertSame('discarding_plan', $sender->get_phase());
             $this->assertFalse($sender->next_step());
             $this->assertSame('restart', $sender->get_status());
+            $this->assertSame('local_path_changed', $sender->get_reason());
         } finally {
             $sender->close();
         }
@@ -2041,7 +2044,8 @@ final class PushEndpointsTest extends TestCase {
         $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
         $this->assertSame('continue', $result['status']);
         $this->assertSame('removing', $result['phase']);
-        $this->assertSame('local_path_changed', $result['reason']);
+        $this->assertNull($result['reason']);
+        $this->assertNull($result['detail']);
 
         for (; $step < 60; ++$step) {
             $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
@@ -2051,6 +2055,7 @@ final class PushEndpointsTest extends TestCase {
             }
         }
         $this->assertSame('restart', $result['status']);
+        $this->assertSame('local_path_changed', $result['reason']);
         $this->assertNull($this->loadActiveState($push_state_directory));
         $this->assertFileDoesNotExist($push_state_directory . '/cursor.json');
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
@@ -2087,13 +2092,14 @@ final class PushEndpointsTest extends TestCase {
 
         $this->assertSame('continue', $result['status']);
         $this->assertSame('removing', $result['phase']);
-        $this->assertSame('local_path_changed', $result['reason']);
+        $this->assertNull($result['reason']);
+        $this->assertNull($result['detail']);
     }
 
     /**
-     * Distinguishes an unpushable local file type from a path that disappeared.
+     * Removes a push session when a local path changes to an unsupported type.
      */
-    public function testHighLevelSenderReportsWhenLocalPathChangesToUnsupportedType(): void
+    public function testHighLevelSenderRemovesSessionWhenLocalPathChangesToUnsupportedType(): void
     {
         if (!function_exists('posix_mkfifo')) {
             $this->markTestSkipped('posix_mkfifo() is unavailable.');
@@ -2124,8 +2130,8 @@ final class PushEndpointsTest extends TestCase {
         $result = $this->nextSenderDurableBoundary($local_docroot, $fresh_local_index_path, $push_state_directory);
         $this->assertSame('continue', $result['status']);
         $this->assertSame('removing', $result['phase']);
-        $this->assertSame('local_path_changed', $result['reason']);
-        $this->assertStringContainsString('file type that cannot be pushed', $result['detail']);
+        $this->assertNull($result['reason']);
+        $this->assertNull($result['detail']);
     }
 
     /**
@@ -2310,6 +2316,56 @@ final class PushEndpointsTest extends TestCase {
             'complete',
             $this->runSender($local_docroot, $fresh_local_index_path, $push_state_directory)['status']
         );
+    }
+
+    /**
+     * Returns in-memory sender state to its durable boundary after an upload request fails.
+     */
+    public function testHighLevelSenderReturnsToDurableStateAfterUploadRequestFailure(): void
+    {
+        $local_docroot = $this->root . '/failed-upload-state-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/first.txt', 'first');
+        file_put_contents($local_docroot . '/second.txt', 'second');
+        $fresh_local_index_path = $this->root . '/failed-upload-state-index.jsonl';
+        $this->writeIndex($fresh_local_index_path, [
+            'first.txt' => $this->indexEntry($local_docroot . '/first.txt', 'file'),
+            'second.txt' => $this->indexEntry($local_docroot . '/second.txt', 'file'),
+        ]);
+        $push_state_directory = $this->root . '/failed-upload-state';
+        $sender = PushFilesSender::start(
+            $this->senderOptions($local_docroot, $fresh_local_index_path, $push_state_directory)
+        );
+        $state_property = new ReflectionProperty(PushFilesSender::class, 'state');
+
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+            $this->assertTrue($sender->next_step());
+            $this->assertTrue($sender->next_step());
+
+            $durable_state = $this->loadActiveState($push_state_directory);
+            $this->assertIsArray($durable_state);
+            $this->assertNotSame($durable_state, $state_property->getValue($sender));
+
+            $push_lock = fopen(
+                $this->reprint_directory . '/.reprint/push/' . $durable_state['push_session_id'] . '/push.lock',
+                'r+b'
+            );
+            $this->assertIsResource($push_lock);
+            $this->assertTrue(flock($push_lock, LOCK_EX | LOCK_NB));
+            try {
+                $this->assertFalse($sender->next_step());
+            } finally {
+                flock($push_lock, LOCK_UN);
+                fclose($push_lock);
+            }
+
+            $this->assertSame('failed', $sender->get_status());
+            $this->assertSame('lock_acquisition_failure', $sender->get_reason());
+            $this->assertSame($durable_state, $state_property->getValue($sender));
+        } finally {
+            $sender->close();
+        }
     }
 
     /**

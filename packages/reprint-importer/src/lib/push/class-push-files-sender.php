@@ -122,7 +122,7 @@ final class PushFilesSender
     /** @var string Local push state directory shared with PushPlan. */
     private string $push_state_directory;
 
-    /** @var string Atomic checkpoint for the active push workflow. */
+    /** @var string Path where the serialized sender state is stored. */
     private string $state_path;
 
     /** @var string Advisory lock file for one open lifecycle. */
@@ -203,7 +203,7 @@ final class PushFilesSender
     /** @var array<string,mixed> Options used to construct the PushRequestSizer. */
     private array $request_sizer_options;
 
-    /** @var array<string,mixed> Transport options used by start() or resume(). */
+    /** @var array<string,mixed> Push stream client options used by start() or resume(). */
     private array $push_stream_client_options;
 
     /**
@@ -215,7 +215,7 @@ final class PushFilesSender
      * retains its lock until close().
      *
      * @param array $options {
-     *     Push, transport, and local-file options.
+     *     Push, push stream client, and local-file options.
      *
      *     @type string                  $docroot                Required local document-root directory.
      *     @type string                  $fresh_local_index_path Completed fresh local index required by start().
@@ -314,11 +314,11 @@ final class PushFilesSender
     }
 
     /**
-     * Configures the paths and transport options shared by start() and resume().
+     * Configures the paths and push stream client options shared by start() and resume().
      *
      * @param array<string,mixed> $options Options documented by start().
      *
-     * @throws InvalidArgumentException If local path or transport options are invalid.
+     * @throws InvalidArgumentException If local path or push stream client options are invalid.
      */
     private function __construct(array $options)
     {
@@ -493,7 +493,7 @@ final class PushFilesSender
      *
      * The caller uses cancel() first when stopping with an open multipart
      * request. Durable state remains available to resume unless next_step()
-     * already completed or discarded the workflow.
+     * already completed or discarded the lifecycle.
      */
     public function close(): void
     {
@@ -645,9 +645,7 @@ final class PushFilesSender
         if ($local_path_type_size_and_ctime === null) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
-            $this->start_removing_push_session_after_local_change(
-                'A local path to push disappeared; remove the upload-only push session before generating another index.'
-            );
+            $this->start_removing_push_session_after_local_change();
             return;
         }
 
@@ -655,9 +653,7 @@ final class PushFilesSender
         if ($local_path_type_size_and_ctime['type'] === 'unsupported') {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
-            $this->start_removing_push_session_after_local_change(
-                'A local path to push changed to a file type that cannot be pushed; remove the upload-only push session before generating another index.'
-            );
+            $this->start_removing_push_session_after_local_change();
             return;
         }
 
@@ -665,15 +661,15 @@ final class PushFilesSender
         if ($local_path_type_size_and_ctime !== $planned_local_path_type_size_and_ctime) {
             $this->close_local_file_handle();
             $this->close_local_paths_to_push_handle();
-            $this->start_removing_push_session_after_local_change(
-                'A local path to push changed after planning; remove the upload-only push session before generating another index.'
-            );
+            $this->start_removing_push_session_after_local_change();
             return;
         }
 
         // Continue at the tentative byte offset in an open request, then at the
         // target-confirmed offset cached during this run. Ask the target only
-        // when neither byte offset is available.
+        // when neither byte offset is available. The same call sends one part
+        // because target-confirmed offsets are not stored in sender state and
+        // even a caller which performs one step per process must make progress.
         if ($this->upload_request_stage !== 'closed') {
             $file_byte_offset = $this->next_file_byte_offset ?? 0;
         } elseif ($this->receiver_confirmed_file_byte_offset !== null) {
@@ -724,23 +720,17 @@ final class PushFilesSender
             $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
-                $this->start_removing_push_session_after_local_change(
-                    'A local path to push disappeared; remove the upload-only push session before generating another index.'
-                );
+                $this->start_removing_push_session_after_local_change();
                 return;
             }
             if ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
                 $this->close_local_paths_to_push_handle();
-                $this->start_removing_push_session_after_local_change(
-                    'The local path to push changed while its directory was being read; remove the upload-only push session before generating another index.'
-                );
+                $this->start_removing_push_session_after_local_change();
                 return;
             }
             if (!$directory_is_empty) {
                 $this->close_local_paths_to_push_handle();
-                $this->start_removing_push_session_after_local_change(
-                    'A directory selected as empty now contains a local path; remove the upload-only push session before generating another index.'
-                );
+                $this->start_removing_push_session_after_local_change();
                 return;
             }
             $upload_part = [
@@ -754,16 +744,12 @@ final class PushFilesSender
             $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
-                $this->start_removing_push_session_after_local_change(
-                    'A local path to push disappeared; remove the upload-only push session before generating another index.'
-                );
+                $this->start_removing_push_session_after_local_change();
                 return;
             }
             if ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
                 $this->close_local_paths_to_push_handle();
-                $this->start_removing_push_session_after_local_change(
-                    'The local path to push changed while its symlink was being read; remove the upload-only push session before generating another index.'
-                );
+                $this->start_removing_push_session_after_local_change();
                 return;
             }
             if ($symlink_target === false) {
@@ -828,17 +814,13 @@ final class PushFilesSender
                 if ($local_path_type_size_and_ctime_after_read === null) {
                     $this->close_local_file_handle();
                     $this->close_local_paths_to_push_handle();
-                    $this->start_removing_push_session_after_local_change(
-                        'A local path to push disappeared; remove the upload-only push session before generating another index.'
-                    );
+                    $this->start_removing_push_session_after_local_change();
                     return;
                 }
                 if ($local_path_type_size_and_ctime_after_read !== $planned_local_path_type_size_and_ctime) {
                     $this->close_local_file_handle();
                     $this->close_local_paths_to_push_handle();
-                    $this->start_removing_push_session_after_local_change(
-                        'The local path to push changed while its file chunk was being read; remove the upload-only push session before generating another index.'
-                    );
+                    $this->start_removing_push_session_after_local_change();
                     return;
                 }
                 if ($local_io_failure_detail !== null) {
@@ -912,15 +894,19 @@ final class PushFilesSender
      */
     private function upload_next_chunk_of_deleted_paths(): void
     {
+        // Confirm a request after the deletion list ends or its remaining budget is spent.
         if ($this->upload_request_stage === 'finishing') {
             $this->finish_upload_request();
             return;
         }
 
+        // Select one complete path at the tentative or target-confirmed list position.
         if ($this->local_path_to_delete === null && !$this->local_delete_list_complete) {
             if ($this->upload_request_stage !== 'closed') {
                 $delete_list_byte_offset = $this->next_delete_list_byte_offset ?? 0;
             } else {
+                // Without a cached position, ask how much of the list the target accepted.
+                // The same call then sends one part so even a one-step process makes progress.
                 if ($this->receiver_confirmed_deleted_paths_byte_offset === null) {
                     $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
                         'push_session_id' => $this->state['push_session_id'],
@@ -945,6 +931,7 @@ final class PushFilesSender
                 $this->next_delete_list_byte_offset = $delete_list_byte_offset;
             }
 
+            // Finish a request which cannot fit another complete deleted path.
             $maximum_delete_list_payload_bytes = $this->push_stream_client->next_delete_body_bytes(
                 $delete_list_byte_offset
             );
@@ -957,6 +944,7 @@ final class PushFilesSender
                 return;
             }
 
+            // Keep the completed deletion plan open while successive calls consume it.
             if (!is_resource($this->local_paths_to_delete_handle)) {
                 $local_paths_to_delete_path = PushPlan::local_paths_to_delete_path($this->push_state_directory);
                 $this->local_paths_to_delete_handle = fopen($local_paths_to_delete_path, 'rb');
@@ -994,6 +982,7 @@ final class PushFilesSender
             }
         }
 
+        // EOF becomes the empty part which marks the deletion list complete.
         if ($this->local_path_to_delete === null) {
             $delete_list_byte_offset = $this->next_delete_list_byte_offset ?? 0;
             $payload = '';
@@ -1013,6 +1002,7 @@ final class PushFilesSender
             }
         }
 
+        // Open a request only after the next complete part is ready.
         if ($this->upload_request_stage === 'closed') {
             $this->state_before_upload_request = $this->state;
             if (!$this->push_stream_client->start_upload_request($this->state['push_session_id'])) {
@@ -1029,6 +1019,9 @@ final class PushFilesSender
             'complete' => $this->local_delete_list_complete,
             'payload' => $payload,
         ]);
+
+        // Confirm an existing request before retrying this path in a new one.
+        // An empty request which cannot fit the part cannot make progress.
         if (!$part_sent) {
             if ($this->push_stream_client->has_sent_parts()) {
                 $this->local_path_to_delete = null;
@@ -1043,6 +1036,7 @@ final class PushFilesSender
             return;
         }
 
+        // Keep the next list position tentative until the target confirms the request.
         $this->next_delete_list_byte_offset = $delete_list_byte_offset + strlen($payload);
         $this->local_path_to_delete = null;
         if ($this->local_delete_list_complete || $this->push_stream_client->should_finish_request()) {
@@ -1060,6 +1054,10 @@ final class PushFilesSender
         $request_had_parts = $request_result['parts_sent'] > 0;
         $request_failed = $this->handle_request_failure($request_result);
         if ($request_failed) {
+            /** @var State $state_before_upload_request */
+            $state_before_upload_request = $this->state_before_upload_request;
+            $this->state = $state_before_upload_request;
+            $this->state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
             $this->receiver_confirmed_file_byte_offset = null;
             $this->receiver_confirmed_deleted_paths_byte_offset = null;
             $this->receiver_confirmed_deleted_paths_complete = null;
@@ -1084,16 +1082,12 @@ final class PushFilesSender
 
     /**
      * Moves a changed local tree to push-session removal.
-     *
-     * @param string $detail Human-readable description of the local change.
      */
-    private function start_removing_push_session_after_local_change(string $detail): void
+    private function start_removing_push_session_after_local_change(): void
     {
         $this->cancel();
         $this->state['phase'] = 'removing';
         $this->store_state($this->state);
-        $this->reason = 'local_path_changed';
-        $this->detail = $detail;
     }
 
     /**
@@ -1203,7 +1197,7 @@ final class PushFilesSender
     }
 
     /**
-     * Removes local planning state after saving the committed index.
+     * Completes the sender after removing the completed planning cursor.
      */
     private function complete_push(): void
     {
@@ -1238,7 +1232,7 @@ final class PushFilesSender
     }
 
     /**
-     * Discards local planning state after the target push session is removed.
+     * Restarts the sender after removing the discarded planning cursor.
      */
     private function discard_plan(): void
     {
@@ -1255,7 +1249,7 @@ final class PushFilesSender
     }
 
     /**
-     * Builds a streaming client from the sizing state in the durable checkpoint.
+     * Builds a streaming client from the sizing state in active sender state.
      *
      * @param State|null $state Current state, or null before a push starts.
      */
