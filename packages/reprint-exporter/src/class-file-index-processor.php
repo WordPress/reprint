@@ -1,0 +1,861 @@
+<?php
+
+// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Exporter classes use unprefixed domain names.
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Traversal failures become API or CLI values, never HTML output.
+
+/**
+ * Walks filesystem paths for the file index one resumable step at a time.
+ *
+ * The processor owns directory traversal and path inspection. Callers own
+ * what happens to the resulting index entries: the HTTP endpoint batches and
+ * encodes them, while local push indexing will write them to its JSONL file.
+ *
+ * A cursor contains the active directory stack and the last settled name in
+ * each directory. Reopening from that cursor rescans only the active
+ * directories and continues after those names. Directory names remain sorted
+ * exactly as they were in endpoint_file_index() before this extraction.
+ *
+ * One step either produces one or more index entries for one filesystem path,
+ * skips one path, reports one directory failure, or finishes one directory.
+ * Following a symlink may produce additional intermediate-symlink entries in
+ * the same step because they share the path's cursor boundary.
+ *
+ * Directory names are still read with scandir(). This deliberately preserves
+ * the endpoint's established ordering and cursor behavior. It also means one
+ * unusually wide directory is held in memory; changing that requires a
+ * separate traversal design rather than hiding it inside this extraction.
+ */
+final class FileIndexProcessor {
+
+    const STATUS_INDEXED = "indexed";
+    const STATUS_SKIPPED = "skipped";
+    const STATUS_PATH_UNAVAILABLE = "path_unavailable";
+    const STATUS_DIRECTORY_COMPLETE = "directory_complete";
+    const STATUS_DIRECTORY_ERROR = "directory_error";
+
+    const STAT_TYPE_MASK = 0170000;
+    const STAT_TYPE_LINK = 0120000;
+    const STAT_TYPE_FILE = 0100000;
+    const STAT_TYPE_DIR = 0040000;
+
+    /** @var string[] Canonical directories allowed during traversal. */
+    private $directories;
+
+    /** @var bool Whether directory symlinks may lead outside the allowed directories. */
+    private $follow_symlinks;
+
+    /** @var bool Whether generated caches and development files are included. */
+    private $include_caches;
+
+    /** @var string Canonical Reprint storage path omitted from the index, or an empty string. */
+    private $storage_path;
+
+    /** @var array[] Active directory stack, from scheduled roots to the current directory. */
+    private $directory_stack;
+
+    /** @var string Directory reported as X-Index-Dir for this traversal. */
+    private $index_directory;
+
+    /** @var array[] Intermediate symlinks emitted before a new traversal begins. */
+    private $initial_index_entries;
+
+    /** @var string[]|null Sorted names in the current directory. */
+    private $current_directory_names = null;
+
+    /** @var int Position of the next name in $current_directory_names. */
+    private $current_directory_position = 0;
+
+    /** @var string|null Current directory used for endpoint exception reporting. */
+    private $current_directory = null;
+
+    /** @var string|null Result of the most recent step. */
+    private $step_status = null;
+
+    /** @var array[] Entries produced by the most recent indexed step. */
+    private $index_entries = [];
+
+    /** @var array|null Directory failure produced by the most recent step. */
+    private $directory_error = null;
+
+    /** @var bool Whether close() has been called. */
+    private $closed = false;
+
+    /**
+     * Starts a traversal at the requested directory and schedules the other roots.
+     *
+     * @param string[] $directories      Canonical directories allowed during traversal.
+     * @param string   $index_directory Directory where traversal begins.
+     * @param bool     $follow_symlinks  Whether directory symlinks may lead outside the allowed directories.
+     * @param bool     $include_caches   Whether generated caches and development files are included.
+     * @param string   $storage_path     Reprint storage path omitted from the index, or an empty string.
+     * @return self New file-index processor.
+     */
+    public static function start(
+        array $directories,
+        string $index_directory,
+        bool $follow_symlinks,
+        bool $include_caches,
+        string $storage_path
+    ): self {
+        clearstatcache(true, $index_directory);
+        $canonical_index_directory = realpath($index_directory);
+        if ($canonical_index_directory === false || !is_dir($canonical_index_directory)) {
+            throw new InvalidArgumentException(
+                "list_dir does not exist or is not accessible: {$index_directory}"
+            );
+        }
+
+        if (!$follow_symlinks && !self::path_is_within_directories($canonical_index_directory, $directories)) {
+            throw new InvalidArgumentException(
+                "list_dir is outside of allowed roots: {$canonical_index_directory}"
+            );
+        }
+
+        $ordered_directories = [$canonical_index_directory];
+        $extra_directories = [];
+        foreach ($directories as $directory) {
+            if ($directory !== $canonical_index_directory) {
+                $extra_directories[] = $directory;
+            }
+        }
+        sort($extra_directories, SORT_STRING);
+        foreach ($extra_directories as $directory) {
+            // Parent and child roots both remain scheduled. On wp.com Atomic,
+            // for example, the document root may be a parent of the primary
+            // WordPress root while also containing a separate wp-content.
+            // Dropping the parent would hide those plugins and themes. When
+            // traversal later reaches the scheduled child, the root check
+            // prevents entering it a second time.
+            if (!in_array($directory, $ordered_directories, true)) {
+                $ordered_directories[] = $directory;
+            }
+        }
+
+        $directory_stack = [];
+        for ($i = count($ordered_directories) - 1; $i >= 0; $i--) {
+            $directory_stack[] = [
+                "dir" => $ordered_directories[$i],
+                "after" => null,
+            ];
+        }
+
+        $initial_index_entries = [];
+        if ($follow_symlinks) {
+            foreach ($ordered_directories as $directory) {
+                $initial_index_entries = array_merge(
+                    $initial_index_entries,
+                    self::find_parent_symlinks($directory)
+                );
+            }
+        }
+
+        return new self(
+            $directories,
+            $follow_symlinks,
+            $include_caches,
+            $storage_path,
+            $directory_stack,
+            $canonical_index_directory,
+            $initial_index_entries
+        );
+    }
+
+    /**
+     * Resumes traversal from a cursor returned by get_cursor().
+     *
+     * @param string[] $directories     Canonical directories allowed during traversal.
+     * @param string   $cursor_json     JSON cursor returned by the preceding request.
+     * @param bool     $follow_symlinks Whether directory symlinks may lead outside the allowed directories.
+     * @param bool     $include_caches  Whether generated caches and development files are included.
+     * @param string   $storage_path    Reprint storage path omitted from the index, or an empty string.
+     * @return self Resumed file-index processor.
+     */
+    public static function resume(
+        array $directories,
+        string $cursor_json,
+        bool $follow_symlinks,
+        bool $include_caches,
+        string $storage_path
+    ): self {
+        $cursor = json_decode($cursor_json, true);
+        if (!is_array($cursor)) {
+            throw new InvalidArgumentException("Invalid index cursor format");
+        }
+        if (!isset($cursor["stack"]) || !is_array($cursor["stack"])) {
+            throw new InvalidArgumentException("Index cursor missing stack");
+        }
+
+        $directory_stack = [];
+        foreach ($cursor["stack"] as $frame) {
+            if (!is_array($frame)) {
+                throw new InvalidArgumentException("Invalid index cursor frame");
+            }
+            $encoded_directory = isset($frame["dir"]) ? $frame["dir"] : null;
+            if (!is_string($encoded_directory) || $encoded_directory === "") {
+                throw new InvalidArgumentException("Index cursor frame missing dir");
+            }
+            $directory = base64_decode($encoded_directory, true);
+            if ($directory === false || $directory === "") {
+                throw new InvalidArgumentException("Index cursor frame has invalid dir encoding");
+            }
+
+            $encoded_after = array_key_exists("after", $frame) ? $frame["after"] : null;
+            if ($encoded_after !== null && !is_string($encoded_after)) {
+                throw new InvalidArgumentException("Index cursor frame invalid after");
+            }
+            $after = null;
+            if ($encoded_after !== null) {
+                $after = base64_decode($encoded_after, true);
+                if ($after === false) {
+                    throw new InvalidArgumentException("Index cursor frame has invalid after encoding");
+                }
+            }
+
+            $directory_stack[] = [
+                "dir" => $directory,
+                "after" => $after,
+            ];
+        }
+
+        $index_directory = !empty($directory_stack)
+            ? $directory_stack[count($directory_stack) - 1]["dir"]
+            : ( isset($directories[0]) ? $directories[0] : "/" );
+
+        return new self(
+            $directories,
+            $follow_symlinks,
+            $include_caches,
+            $storage_path,
+            $directory_stack,
+            $index_directory,
+            []
+        );
+    }
+
+    /**
+     * Performs one traversal step.
+     *
+     * @return bool Whether a current step is available. False means traversal is complete.
+     */
+    public function next_index_step(): bool
+    {
+        if ($this->closed) {
+            throw new LogicException("Cannot take a file-index step after close().");
+        }
+
+        $this->step_status = null;
+        $this->index_entries = [];
+        $this->directory_error = null;
+
+        if (!empty($this->initial_index_entries)) {
+            $this->step_status = self::STATUS_INDEXED;
+            $this->index_entries = $this->initial_index_entries;
+            $this->initial_index_entries = [];
+            return true;
+        }
+
+        if ($this->current_directory_names === null) {
+            if (!$this->open_current_directory()) {
+                return $this->step_status !== null;
+            }
+        }
+
+        if ($this->current_directory_position >= count($this->current_directory_names)) {
+            array_pop($this->directory_stack);
+            $this->forget_current_directory_names();
+            $this->step_status = self::STATUS_DIRECTORY_COMPLETE;
+            return true;
+        }
+
+        $frame_index = count($this->directory_stack) - 1;
+        $entry_name = $this->current_directory_names[$this->current_directory_position];
+        ++$this->current_directory_position;
+        // Set "after" before any skip or stat call. The cursor must move past
+        // a cache path or a path that disappears between scandir() and lstat(),
+        // or every resumed request would inspect that same name again.
+        $this->directory_stack[$frame_index]["after"] = $entry_name;
+        $path = $this->current_directory . "/" . $entry_name;
+
+        if (!$this->include_caches && self::path_is_default_skipped($path)) {
+            $this->step_status = self::STATUS_SKIPPED;
+            return true;
+        }
+        if (
+            $this->storage_path !== ""
+            && \WordPress\Reprint\Exporter\path_is_within_root($path, $this->storage_path)
+        ) {
+            $this->step_status = self::STATUS_SKIPPED;
+            return true;
+        }
+
+        clearstatcache(true, $path);
+        $stat = @lstat($path);
+        if ($stat === false) {
+            $this->step_status = self::STATUS_PATH_UNAVAILABLE;
+            return true;
+        }
+
+        $mode = $stat["mode"] & self::STAT_TYPE_MASK;
+        $type = "file";
+        $link_target = null;
+        $intermediate_symlinks = [];
+        if ($mode === self::STAT_TYPE_LINK) {
+            $type = "link";
+            $resolved_symlink = self::resolve_symlink_target($path);
+            $link_target = $resolved_symlink["target"];
+            if ($this->follow_symlinks) {
+                $intermediate_symlinks = $resolved_symlink["intermediates"];
+            }
+        } elseif ($mode === self::STAT_TYPE_DIR) {
+            $type = "dir";
+        } elseif ($mode !== self::STAT_TYPE_FILE) {
+            $type = "other";
+        }
+
+        $item = [
+            "path" => $path,
+            "ctime" => (int) ( isset($stat["ctime"]) ? $stat["ctime"] : 0 ),
+            "size" => $type === "file" ? (int) ( isset($stat["size"]) ? $stat["size"] : 0 ) : 0,
+            "type" => $type,
+        ];
+        if ($link_target !== null) {
+            $item["target"] = $link_target;
+        }
+        if ($type === "dir") {
+            // The index describes physical emptiness, not emptiness after
+            // exclusions. A cache or Reprint-storage child still makes its
+            // parent non-empty; calling that parent empty could turn an
+            // intentionally omitted descendant into destructive push work.
+            $directory_handle = @opendir($path);
+            if ($directory_handle !== false) {
+                $item["empty"] = true;
+                while (true) {
+                    $directory_entry = readdir($directory_handle);
+                    if ($directory_entry === false) {
+                        break;
+                    }
+                    if ($directory_entry !== "." && $directory_entry !== "..") {
+                        $item["empty"] = false;
+                        break;
+                    }
+                }
+                closedir($directory_handle);
+            }
+            // When the directory cannot be inspected, leave "empty" absent.
+            // Pull reports the later directory-open failure. A push index
+            // builder can stop instead of treating unknown descendants as
+            // deletions.
+        }
+
+        $this->index_entries = $intermediate_symlinks;
+        $this->index_entries[] = $item;
+        $this->step_status = self::STATUS_INDEXED;
+
+        if ($type === "dir") {
+            $canonical_directory = realpath($path);
+            if (
+                $canonical_directory === false
+                || !self::should_skip_index_root($canonical_directory, $this->directories)
+            ) {
+                $this->directory_stack[] = [
+                    "dir" => $path,
+                    "after" => null,
+                ];
+                $this->forget_current_directory_names();
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Returns what the most recent step did.
+     *
+     * @return string|null One STATUS_* value, or null before the first step and after completion.
+     */
+    public function get_step_status()
+    {
+        return $this->step_status;
+    }
+
+    /**
+     * Returns entries produced by the most recent indexed step.
+     *
+     * @return array[] File-index entries, normally containing exactly one entry.
+     */
+    public function get_index_entries(): array
+    {
+        return $this->index_entries;
+    }
+
+    /**
+     * Returns the directory failure produced by the most recent step.
+     *
+     * @return array|null {
+     *     Directory failure, or null when the current step did not report one.
+     *
+     *     @type string $error_type Protocol error type.
+     *     @type string $path       Filesystem path that could not be traversed.
+     *     @type string $message    Human-readable explanation.
+     * }
+     */
+    public function get_directory_error()
+    {
+        return $this->directory_error;
+    }
+
+    /**
+     * Returns a JSON-safe cursor for the next traversal step.
+     *
+     * @return array {
+     *     File-index cursor.
+     *
+     *     @type array[] $stack Active directories with base64-encoded path names.
+     * }
+     */
+    public function get_cursor(): array
+    {
+        $encoded_stack = [];
+        foreach ($this->directory_stack as $frame) {
+            $encoded_stack[] = [
+                "dir" => base64_encode($frame["dir"]),
+                "after" => $frame["after"] !== null ? base64_encode($frame["after"]) : null,
+            ];
+        }
+        return ["stack" => $encoded_stack];
+    }
+
+    /**
+     * Returns the directory reported by the endpoint as X-Index-Dir.
+     *
+     * @return string Index directory for this traversal.
+     */
+    public function get_index_directory(): string
+    {
+        return $this->index_directory;
+    }
+
+    /**
+     * Returns the directory active during the most recent step.
+     *
+     * @return string|null Current directory, or null before traversal begins.
+     */
+    public function get_current_directory()
+    {
+        return $this->current_directory;
+    }
+
+    /**
+     * Releases in-memory directory data without performing another step.
+     */
+    public function close(): void
+    {
+        if ($this->closed) {
+            return;
+        }
+        $this->closed = true;
+        $this->initial_index_entries = [];
+        $this->forget_current_directory_names();
+    }
+
+    /**
+     * Reports whether a path belongs to the established default skip set.
+     *
+     * @param string $path Filesystem path to classify.
+     * @return bool Whether the path should be omitted unless caches are included.
+     */
+    public static function path_is_default_skipped(string $path): bool
+    {
+        // Sentinel slashes make component matches independent of whether the
+        // component appears at the beginning, middle, or end of the path.
+        $path_with_boundaries = "/" . trim($path, "/") . "/";
+
+        // These generated directories are limited to wp-content. A directory
+        // named cache elsewhere may contain user files and remains included.
+        // wpcomsh-cache is wp.com Atomic's filesystem cache shadow; wflogs is
+        // Wordfence request and scan data which can grow to gigabytes.
+        static $cache_directories = [
+            "/wp-content/cache/",
+            "/wp-content/upgrade/",
+            "/wp-content/wpcomsh-cache/",
+            "/wp-content/wflogs/",
+        ];
+        foreach ($cache_directories as $directory) {
+            if (strpos($path_with_boundaries, $directory) !== false) {
+                return true;
+            }
+        }
+
+        // Version-control metadata and local development dependencies match
+        // complete path components. Similar names such as cache-control or
+        // node_modules-backup remain included.
+        static $skipped_components = [
+            ".git", ".svn", ".hg", ".bzr",
+            "node_modules",
+            ".idea", ".vscode",
+            ".cache", ".npm", ".yarn", ".pnpm-store",
+        ];
+        foreach ($skipped_components as $component) {
+            if (strpos($path_with_boundaries, "/" . $component . "/") !== false) {
+                return true;
+            }
+        }
+
+        // Operating-system metadata matches only the basename.
+        $basename = basename($path);
+        static $skipped_basenames = [
+            ".DS_Store", "._.DS_Store",
+            "Thumbs.db", "desktop.ini", "ehthumbs.db",
+        ];
+        if (in_array($basename, $skipped_basenames, true)) {
+            return true;
+        }
+        // Editor and merge scratch files: Emacs locks and autosaves, trailing
+        // tildes, Vim swaps, backups, and conflict leftovers.
+        if ($basename !== "" && $basename[0] === "." && isset($basename[1]) && $basename[1] === "#") {
+            return true;
+        }
+        if (strlen($basename) >= 3 && $basename[0] === "#" && substr($basename, -1) === "#") {
+            return true;
+        }
+        if (preg_match("/(?:~|\\.(?:swp|swo|swn|bak|orig|rej))$/", $basename) === 1) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Initializes common traversal state.
+     *
+     * @param string[] $directories          Canonical directories allowed during traversal.
+     * @param bool     $follow_symlinks      Whether directory symlinks may leave the allowed directories.
+     * @param bool     $include_caches       Whether generated caches and development files are included.
+     * @param string   $storage_path         Reprint storage path omitted from the index, or an empty string.
+     * @param array[]  $directory_stack      Active directory stack.
+     * @param string   $index_directory      Directory reported by the endpoint.
+     * @param array[]  $initial_index_entries Intermediate symlinks emitted before traversal.
+     */
+    private function __construct(
+        array $directories,
+        bool $follow_symlinks,
+        bool $include_caches,
+        string $storage_path,
+        array $directory_stack,
+        string $index_directory,
+        array $initial_index_entries
+    ) {
+        $this->directories = $directories;
+        $this->follow_symlinks = $follow_symlinks;
+        $this->include_caches = $include_caches;
+        $this->storage_path = self::canonical_storage_path($storage_path);
+        $this->directory_stack = $directory_stack;
+        $this->index_directory = $index_directory;
+        $this->initial_index_entries = $initial_index_entries;
+    }
+
+    /**
+     * Opens and positions the directory at the top of the traversal stack.
+     *
+     * @return bool Whether directory entries are ready for the current step.
+     */
+    private function open_current_directory(): bool
+    {
+        if (empty($this->directory_stack)) {
+            return false;
+        }
+
+        $frame_index = count($this->directory_stack) - 1;
+        $frame = $this->directory_stack[$frame_index];
+        $this->current_directory = $frame["dir"];
+
+        clearstatcache(true, $this->current_directory);
+        $canonical_directory = realpath($this->current_directory);
+        if ($canonical_directory === false || !is_dir($canonical_directory)) {
+            array_pop($this->directory_stack);
+            $this->directory_error = [
+                "error_type" => "dir_open",
+                "path" => $this->current_directory,
+                "message" => "Directory does not exist or is not accessible",
+            ];
+            $this->step_status = self::STATUS_DIRECTORY_ERROR;
+            return false;
+        }
+
+        if (
+            !$this->follow_symlinks
+            && !self::path_is_within_directories($canonical_directory, $this->directories)
+        ) {
+            array_pop($this->directory_stack);
+            $this->directory_error = [
+                "error_type" => "dir_outside_root",
+                "path" => $canonical_directory,
+                "message" => "Directory is outside allowed roots",
+            ];
+            $this->step_status = self::STATUS_DIRECTORY_ERROR;
+            return false;
+        }
+
+        // Canonical paths keep split roots and followed symlinks in one
+        // namespace, matching the endpoint's previous traversal.
+        $this->directory_stack[$frame_index]["dir"] = $canonical_directory;
+        $this->current_directory = $canonical_directory;
+
+        clearstatcache(true, $canonical_directory);
+        $directory_names = @scandir($canonical_directory, SCANDIR_SORT_ASCENDING);
+        if ($directory_names === false) {
+            array_pop($this->directory_stack);
+            $this->directory_error = [
+                "error_type" => "dir_open",
+                "path" => $canonical_directory,
+                "message" => "Failed to open directory",
+            ];
+            $this->step_status = self::STATUS_DIRECTORY_ERROR;
+            return false;
+        }
+
+        if (getenv("SITE_EXPORT_TEST_MODE") && function_exists("_e2e_call_hook")) {
+            $hook_arguments = [$canonical_directory, &$directory_names];
+            _e2e_call_hook("test_hook_during_dir_scan", $hook_arguments);
+        }
+
+        $this->current_directory_names = [];
+        foreach ($directory_names as $directory_name) {
+            if ($directory_name !== "." && $directory_name !== "..") {
+                $this->current_directory_names[] = $directory_name;
+            }
+        }
+        $this->current_directory_position = 0;
+        $after = isset($frame["after"]) ? $frame["after"] : null;
+        if ($after !== null && $after !== "") {
+            $this->current_directory_position = self::position_after_name(
+                $this->current_directory_names,
+                $after
+            );
+        }
+
+        return true;
+    }
+
+    /**
+     * Drops the cached names for the current directory.
+     */
+    private function forget_current_directory_names(): void
+    {
+        $this->current_directory_names = null;
+        $this->current_directory_position = 0;
+    }
+
+    /**
+     * Returns a canonical storage path when the configured path exists.
+     *
+     * @param string $storage_path Configured Reprint storage path.
+     * @return string Canonical or normalized storage path, or an empty string.
+     */
+    private static function canonical_storage_path(string $storage_path): string
+    {
+        // Reprint storage may live inside the document root on hosts that can
+        // write nowhere else. It must never enter an index or a push could
+        // copy or delete its own work while using it. Traversal canonicalizes
+        // directories with realpath(), so the comparison uses the same form.
+        // rtrim() also prevents a trailing slash from missing an exact match.
+        $storage_path = rtrim($storage_path, "/");
+        if ($storage_path === "") {
+            return "";
+        }
+        $canonical_storage_path = realpath($storage_path);
+        return $canonical_storage_path !== false ? $canonical_storage_path : $storage_path;
+    }
+
+    /**
+     * Reports whether a path is inside one of the allowed directories.
+     *
+     * @param string   $path        Canonical filesystem path.
+     * @param string[] $directories Canonical allowed directories.
+     * @return bool Whether the path belongs to an allowed directory.
+     */
+    private static function path_is_within_directories(string $path, array $directories): bool
+    {
+        foreach ($directories as $directory) {
+            if ($path === $directory || strpos($path, $directory . "/") === 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Reports whether traversing a directory would duplicate a scheduled root.
+     *
+     * An exact root is already scheduled. A parent of a scheduled root would
+     * expose paths outside the requested tree before entering that root again.
+     *
+     * @param string   $candidate Canonical directory considered for traversal.
+     * @param string[] $roots     Canonical scheduled roots.
+     * @return bool Whether traversal should omit this directory.
+     */
+    private static function should_skip_index_root(string $candidate, array $roots): bool
+    {
+        foreach ($roots as $root) {
+            if ($candidate === $root) {
+                return true;
+            }
+            if ($candidate === "/" || strpos($root . "/", $candidate . "/") === 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Finds the first sorted directory name after a cursor name.
+     *
+     * @param string[] $directory_names Sorted directory names.
+     * @param string   $after_name      Last settled directory name.
+     * @return int Position of the next directory name.
+     */
+    private static function position_after_name(array $directory_names, string $after_name): int
+    {
+        $low = 0;
+        $high = count($directory_names);
+        while ($low < $high) {
+            $middle = (int) ( ( $low + $high ) / 2 );
+            if (strcmp($directory_names[$middle], $after_name) <= 0) {
+                $low = $middle + 1;
+            } else {
+                $high = $middle;
+            }
+        }
+        return $low;
+    }
+
+    /**
+     * Resolves a directory symlink and finds symlinks in its unresolved path.
+     *
+     * Managed WordPress hosts often chain symlinks: /srv may point to /,
+     * /srv/wordpress may point to /wordpress, and readlink() may return a
+     * relative path containing more symlinks. realpath() gives the final
+     * canonical directory used for further indexing. File symlinks do not get
+     * a canonical target because the pull client does not traverse them.
+     *
+     * realpath() skips the intermediate links, so the unresolved readlink()
+     * path is also walked. Those intermediate entries let pull recreate the
+     * complete path rather than only its final target.
+     *
+     * @param string $path Absolute path to the symlink.
+     * @return array {
+     *     Symlink details for file indexing.
+     *
+     *     @type string|null $target        Canonical directory target, or null.
+     *     @type array[]     $intermediates Symlinks encountered before that target.
+     * }
+     */
+    private static function resolve_symlink_target(string $path): array
+    {
+        clearstatcache(true, $path);
+        $resolved_target = @realpath($path);
+        if (
+            $resolved_target === false
+            || $resolved_target === $path
+            || !is_dir($resolved_target)
+        ) {
+            return ["target" => null, "intermediates" => []];
+        }
+
+        $intermediates = [];
+        $raw_target = @readlink($path);
+        if ($raw_target !== false && $raw_target !== "") {
+            if ($raw_target[0] !== "/") {
+                $raw_target = dirname($path) . "/" . $raw_target;
+            }
+            $absolute_raw_target = self::normalize_dot_segments($raw_target);
+            if (
+                $absolute_raw_target !== ""
+                && $absolute_raw_target[0] === "/"
+                && $absolute_raw_target !== $resolved_target
+            ) {
+                $intermediates = self::find_parent_symlinks($absolute_raw_target);
+            }
+        }
+
+        return ["target" => $resolved_target, "intermediates" => $intermediates];
+    }
+
+    /**
+     * Returns symlinks found while walking the parents of an absolute path.
+     *
+     * For `/srv/wordpress/wp-content/plugins`, this inspects `/srv`, then
+     * `/srv/wordpress`, and so on. After finding a link, traversal continues
+     * from its canonical path. The walk is intentionally not recursive into
+     * the final target; pull decides whether another directory needs indexing.
+     *
+     * @param string $absolute_path Absolute filesystem path.
+     * @return array[] Intermediate symlink index entries.
+     */
+    private static function find_parent_symlinks(string $absolute_path): array
+    {
+        $entries = [];
+        $parts = explode("/", $absolute_path);
+        $current = "";
+        foreach ($parts as $part) {
+            if ($part === "") {
+                $current = "/";
+                continue;
+            }
+            $current = rtrim($current, "/") . "/" . $part;
+            if (!@is_link($current)) {
+                continue;
+            }
+
+            $target = @readlink($current);
+            if ($target !== false && $target !== "") {
+                $stat = @lstat($current);
+                $entries[] = [
+                    "path" => $current,
+                    "ctime" => (int) ( is_array($stat) && isset($stat["ctime"]) ? $stat["ctime"] : 0 ),
+                    "size" => 0,
+                    "type" => "link",
+                    "target" => $target,
+                    "intermediate" => true,
+                ];
+            }
+
+            $canonical_current = @realpath($current);
+            if ($canonical_current !== false) {
+                $current = $canonical_current;
+            }
+        }
+        return $entries;
+    }
+
+    /**
+     * Removes dot segments without following symlinks.
+     *
+     * realpath() cannot be used here because it would skip the intermediate
+     * symlinks that find_parent_symlinks() needs to inspect.
+     *
+     * @param string $path Absolute path containing optional dot segments.
+     * @return string Path with dot segments removed.
+     */
+    private static function normalize_dot_segments(string $path): string
+    {
+        $parts = explode("/", $path);
+        $normalized = [];
+        foreach ($parts as $part) {
+            if ($part === "" || $part === ".") {
+                if (empty($normalized)) {
+                    $normalized[] = "";
+                }
+                continue;
+            }
+            if ($part === "..") {
+                if (count($normalized) > 1) {
+                    array_pop($normalized);
+                }
+                continue;
+            }
+            $normalized[] = $part;
+        }
+        return implode("/", $normalized);
+    }
+}

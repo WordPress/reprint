@@ -9,6 +9,8 @@ use function WordPress\Reprint\Exporter\json_encode_or_throw;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_within_root;
 
+require_once __DIR__ . '/class-file-index-processor.php';
+
 // Capture any accidental output before headers are set so we can discard it
 // when switching to streaming mode later.
 if (!ob_get_level()) {
@@ -1204,29 +1206,6 @@ function resolve_directories(array $config): array
     }
 
     return $directories;
-}
-
-/**
- * Returns true when traversing $candidate would only duplicate or re-enter
- * one of the already-scheduled roots.
- *
- * Examples:
- * - candidate == root: duplicate root
- * - candidate is a parent of root: would expose outside-tree paths and then
- *   re-enter the scheduled root again
- */
-function should_skip_index_root(string $candidate, array $roots): bool
-{
-    foreach ($roots as $root) {
-        if ($candidate === $root) {
-            return true;
-        }
-        if ($candidate === "/" || str_starts_with($root . "/", $candidate . "/")) {
-            return true;
-        }
-    }
-
-    return false;
 }
 
 /**
@@ -2513,201 +2492,6 @@ function stream_file_producer(
 }
 
 /**
- * Encodes a file_index stack for JSON serialization.
- *
- * Paths may contain non-UTF8 bytes, so dir and after are base64-encoded.
- */
-function encode_index_stack(array $stack): array
-{
-    $encoded = [];
-    foreach ($stack as $frame) {
-        $encoded[] = [
-            "dir" => base64_encode($frame["dir"]),
-            "after" => $frame["after"] !== null ? base64_encode($frame["after"]) : null,
-        ];
-    }
-    return $encoded;
-}
-
-/**
- * Resolve "." and ".." segments in a path without resolving symlinks.
- *
- * Unlike realpath(), this only performs textual normalization — it collapses
- * "." and ".." but leaves symlink components intact.  This is useful when
- * you need a clean absolute path to inspect which components are symlinks.
- *
- * @param string $path An absolute path that may contain "." or ".." segments.
- * @return string The normalized absolute path.
- */
-function normalize_dot_segments(string $path): string
-{
-    $parts = explode("/", $path);
-    $normalized = [];
-    foreach ($parts as $p) {
-        if ($p === "" || $p === ".") {
-            if (empty($normalized)) {
-                $normalized[] = "";
-            }
-            continue;
-        }
-        if ($p === "..") {
-            if (count($normalized) > 1) {
-                array_pop($normalized);
-            }
-            continue;
-        }
-        $normalized[] = $p;
-    }
-    return implode("/", $normalized);
-}
-
-/**
- * Given a path, such as `/srv/wordpress/wp-content/plugins/akismet/assets`, returns
- * a list of all the parent paths that are symlinks. It will check `/srv`,
- * `/srv/wordpress`, `/srv/wordpress/wp-content`, etc.
- *
- * For example, given the following filesystem layout:
- *
- *     /srv/wordpress/wp-content -> /htdocs/wp-content
- *     /srv/wordpress/wp-content/plugins/akismet -> /wordpress/plugins/akismet/latest
- *     /wordpress/plugins/akismet/latest -> /wordpress/plugins/akismet/5.0.5
- *
- * Calling
- *
- *     find_parents_symlinks("/srv/wordpress/wp-content/plugins/akismet/assets")
- *
- * will return the following symlinks:
- *
- * ['path' => '/srv/wordpress/wp-content', 'target' => '/htdocs/wp-content']
- * ['path' => '/htdocs/wp-content/plugins/akismet', 'target' => '/wordpress/plugins/akismet/latest']
- *
- * Note:
- *
- * * Every found `path` is a resolved realpath(), which means that all the parents are
- *   regular directories, not symlinks.
- * * It is intentionally not recursive. That last `akismet/latest` -> `akismet/5.0.5`
- *   symlink was not returned. The client is free to recursively request the files from
- *   any additional directories outside of the initial content root based on the parent
- *   symlinks resolved by this function.
- *
- * @param string $absolute_path An absolute path to a file or directory.
- * @return array An array of symlinks found in the path.
- * Each array element is an associative array with the following keys:
- * - "path": The path to the symlink.
- * - "ctime": The creation time of the symlink.
- * - "size": The size of the symlink.
- * - "type": The type of the symlink.
- * - "target": The target of the symlink.
- * - "intermediate": Whether the symlink is an intermediate symlink.
- */
-function find_parents_symlinks(string $absolute_path): array
-{
-    $entries = [];
-    $parts = explode('/', $absolute_path);
-    $current = "";
-    // Walk through /srv, /srv/wordpress, /srv/wordpress/wp-content, etc.
-    foreach ($parts as $part) {
-        if ($part === "") {
-            $current = "/";
-            continue;
-        }
-        $current = rtrim($current, "/") . "/" . $part;
-        // If the path up to this point is not a symlink, we can just
-        // expand to the next path segment.
-        if (!@is_link($current)) {
-            continue;
-        }
-
-        // If we're looking at a valid symlink, record it.
-        $target = @readlink($current);
-        if ($target !== false && $target !== "") {
-            $stat = @lstat($current);
-            $entries[] = [
-                "path" => $current,
-                "ctime" => (int) ($stat["ctime"] ?? 0),
-                "size" => 0,
-                "type" => "link",
-                "target" => $target,
-                "intermediate" => true,
-            ];
-        }
-        // Swap the current path for the resolved realpath().
-        // e.g. if $current is a symlink at /srv/wordpress/wp-content pointing
-        // to /htdocs/wp-content, then from now on we'll use /htdocs/wp-content
-        // as our $current and append the next path segments to it.
-        $real = @realpath($current);
-        if ($real !== false) {
-            $current = $real;
-        }
-    }
-    return $entries;
-}
-
-/**
- * Resolves a symlink's target to a canonical path for the file index.
- *
- * On many WordPress hosts (wp.com, SiteGround, etc.), the filesystem
- * contains chains of symlinks.  For example, /srv might point to /,
- * /srv/wordpress might point to /wordpress, and readlink() returns
- * relative paths like "../wordpress/core/latest" that still contain
- * intermediate symlinks.  realpath() cuts through all of this and
- * returns the final canonical path — e.g. /htdocs instead of /srv/htdocs.
- *
- * The client uses symlink targets to discover additional directories to
- * index, so only directory symlinks get a resolved target.  File symlink
- * targets are ignored because the client doesn't need to recurse into them.
- *
- * Also walks the raw readlink() path to find intermediate symlinks that
- * realpath() skips.  For example, if readlink() returns a relative path
- * like "../../../wordpress/plugins/akismet/latest", the absolute form
- * might be /srv/wordpress/plugins/akismet/latest — and /srv/wordpress is
- * itself a symlink to /wordpress.  realpath() jumps straight to
- * /wordpress/..., so we'd never record the /srv/wordpress intermediate.
- * find_parents_symlinks() catches those.
- *
- * @param string $path  Absolute path to the symlink.
- * @return array {
- *     Resolved symlink target details.
- *
- *     @type string|null $target        Resolved canonical target, or null for
- *                                     file symlinks or unresolvable paths.
- *     @type array       $intermediates Intermediate symlink entries found while
- *                                     walking the raw target path.
- * }
- * @phpstan-return array{target: string|null, intermediates: array}
- */
-function resolve_symlink_target(string $path): array
-{
-    clearstatcache(true, $path);
-    $resolved_target = @realpath($path);
-
-    // Only directory symlinks matter — the client uses targets to discover
-    // additional directories to index.  Also skip unresolvable symlinks
-    // and self-referencing paths.
-    if (
-        $resolved_target === false ||
-        $resolved_target === $path ||
-        !is_dir($resolved_target)
-    ) {
-        return ['target' => null, 'intermediates' => []];
-    }
-
-    $intermediates = [];
-    $raw_target = @readlink($path);
-    if ($raw_target !== false && $raw_target !== "") {
-        if ($raw_target[0] !== "/") {
-            $raw_target = dirname($path) . "/" . $raw_target;
-        }
-        $abs_raw = normalize_dot_segments($raw_target);
-        if ($abs_raw !== "" && $abs_raw[0] === "/" && $abs_raw !== $resolved_target) {
-            $intermediates = find_parents_symlinks($abs_raw);
-        }
-    }
-
-    return ['target' => $resolved_target, 'intermediates' => $intermediates];
-}
-
-/**
  * Encodes batch items for JSON serialization, base64-encoding paths
  * to handle non-UTF8 filesystem bytes.
  */
@@ -2739,9 +2523,8 @@ function encode_index_batch(array $batch_items): array
  * Streams a directory index as gzipped JSON batches of {path, ctime, size,
  * type}, plus an `empty` boolean on every inspected directory.
  *
- * The client supplies list_dir and drives traversal depth-first by
- * enqueuing directories as they are discovered. Resumption is supported
- * via cursor containing the directory stack and last-seen entry.
+ * FileIndexProcessor owns the resumable filesystem traversal. This endpoint
+ * owns HTTP framing, batching, request budgets, and error chunks.
  */
 function endpoint_file_index(
     array $config,
@@ -2753,169 +2536,50 @@ function endpoint_file_index(
     clearstatcache(true);
 
     $directories = resolve_directories($config);
-    $batch_size = $config["batch_size"] ?? 5000;
     $batch_size = require_int_range(
         "batch_size",
-        (int) $batch_size,
+        (int) ($config["batch_size"] ?? 5000),
         100,
         100000
     );
-
-    $list_dir = $config["list_dir"] ?? null;
-    $list_dir_real = null;
-    $stack = [];
-    $ordered = [];
     $follow_symlinks = !empty($config["follow_symlinks"]);
-    $cursor_provided = isset($config["cursor"]);
-    // Default-skip generated caches, VCS metadata, OS junk, and editor
-    // scratch files unless the client explicitly opts in. See
-    // path_is_default_skipped() for the full deny-list and rationale.
     $include_caches = !empty($config["include_caches"]);
-    // Reprint's own storage (the push work area and commit bookkeeping)
-    // must never appear in an index: it can sit inside the document root on
-    // hosts that allow writing nowhere else, and indexing it would sync or
-    // delete reprint's own records mid-transfer. storage_path is the
-    // server's own setting, so it is known here for every request — a
-    // pulling peer's request does not need to mention it.
     $storage_path = isset($config["storage_path"]) && is_string($config["storage_path"])
-        ? rtrim($config["storage_path"], "/")
+        ? $config["storage_path"]
         : "";
-    if ($storage_path !== "") {
-        // The traversal canonicalizes every path with realpath() (see the
-        // wp.com note further down), so the setting must be compared in the
-        // same form. path_is_within_root() compares plain strings, and a
-        // trailing slash on the setting would make it miss — hence the
-        // rtrim above. When the directory does not exist yet there is
-        // nothing to exclude and the trimmed value stays as a harmless
-        // fallback.
-        $storage_real = realpath($storage_path);
-        if ($storage_real !== false) {
-            $storage_path = $storage_real;
-        }
-    }
 
-    // Find the starting point – either by parsing the cursor, or by
-    // sourcing it from the filesystem.
-
-    // -- Restore or initialize the directory traversal stack --
-    // On resumption, the cursor encodes the stack of directories and the
-    // last-processed entry in each. On first request, build the stack from
-    // the list_dir and any extra allowed roots.
-    if ($cursor_provided) {
-        $cursor_data = json_decode($config["cursor"], true);
-        if (!is_array($cursor_data)) {
-            throw new InvalidArgumentException("Invalid index cursor format");
-        }
-        if (!isset($cursor_data["stack"]) || !is_array($cursor_data["stack"])) {
-            throw new InvalidArgumentException("Index cursor missing stack");
-        }
-        foreach ($cursor_data["stack"] as $frame) {
-            if (!is_array($frame)) {
-                throw new InvalidArgumentException("Invalid index cursor frame");
-            }
-            $dir_encoded = $frame["dir"] ?? null;
-            if (!is_string($dir_encoded) || $dir_encoded === "") {
-                throw new InvalidArgumentException("Index cursor frame missing dir");
-            }
-            $dir = base64_decode($dir_encoded, true);
-            if ($dir === false || $dir === "") {
-                throw new InvalidArgumentException("Index cursor frame has invalid dir encoding");
-            }
-            $after_encoded = $frame["after"] ?? null;
-            if ($after_encoded !== null && !is_string($after_encoded)) {
-                throw new InvalidArgumentException("Index cursor frame invalid after");
-            }
-            $after = null;
-            if ($after_encoded !== null) {
-                $after = base64_decode($after_encoded, true);
-                if ($after === false) {
-                    throw new InvalidArgumentException("Index cursor frame has invalid after encoding");
-                }
-            }
-            $stack[] = [
-                "dir" => $dir,
-                "after" => $after,
-            ];
-        }
+    if (isset($config["cursor"])) {
+        $file_index = FileIndexProcessor::resume(
+            $directories,
+            $config["cursor"],
+            $follow_symlinks,
+            $include_caches,
+            $storage_path
+        );
     } else {
-        if (!$list_dir) {
+        $list_directory = $config["list_dir"] ?? null;
+        if (!is_string($list_directory) || $list_directory === "") {
             throw new InvalidArgumentException("list_dir is required for file_index");
         }
-
-        clearstatcache(true, $list_dir);
-        $list_dir_real = realpath($list_dir);
-        if ($list_dir_real === false || !is_dir($list_dir_real)) {
-            throw new InvalidArgumentException(
-                "list_dir does not exist or is not accessible: {$list_dir}"
-            );
-        }
-
-        $allowed = false;
-        foreach ($directories as $root) {
-            if (
-                $list_dir_real === $root ||
-                str_starts_with($list_dir_real, $root . "/")
-            ) {
-                $allowed = true;
-                break;
-            }
-        }
-        // When follow_symlinks is enabled, allow any directory that the
-        // authenticated client requests.  The client is already authenticated
-        // via HMAC, so there is no untrusted-input risk.
-        if (!$allowed && !$follow_symlinks) {
-            throw new InvalidArgumentException(
-                "list_dir is outside of allowed roots: {$list_dir_real}"
-            );
-        }
-
-        $ordered = [$list_dir_real];
-        $extra_roots = [];
-        foreach ($directories as $root) {
-            if ($root === $list_dir_real) {
-                continue;
-            }
-            $extra_roots[] = $root;
-        }
-        if (!empty($extra_roots)) {
-            sort($extra_roots, SORT_STRING);
-            foreach ($extra_roots as $root) {
-                // Skip exact duplicates of already-ordered roots.
-                // Do NOT skip parent roots — on hosts like wp.com Atomic
-                // the document root (/srv/htdocs) is a parent of the
-                // primary root (/srv/htdocs/__wp__) but contains a separate
-                // wp-content with the site's actual plugins and themes.
-                // The during-traversal dedup in the main loop already
-                // prevents re-entering child roots (i.e. when traversing
-                // /srv/htdocs we won't descend back into __wp__/).
-                if (in_array($root, $ordered, true)) {
-                    continue;
-                }
-                $ordered[] = $root;
-            }
-        }
-
-        for ($i = count($ordered) - 1; $i >= 0; $i--) {
-            $stack[] = [
-                "dir" => $ordered[$i],
-                "after" => null,
-            ];
-        }
+        $file_index = FileIndexProcessor::start(
+            $directories,
+            $list_directory,
+            $follow_symlinks,
+            $include_caches,
+            $storage_path
+        );
     }
 
-    if ($list_dir_real === null) {
-        if (!empty($stack)) {
-            $list_dir_real = $stack[count($stack) - 1]["dir"];
-        } else {
-            $list_dir_real = $directories[0] ?? "/";
-        }
+    if (getenv('SITE_EXPORT_TEST_MODE')) {
+        _e2e_load_test_hooks_if_needed($config);
     }
+
+    $list_directory = $file_index->get_index_directory();
+    $filesystem_root = $directories[0] ?? "/";
 
     prepare_streaming_response();
-
     ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();
 
-    $filesystem_root = $directories[0] ?? "/";
     $batches_emitted = 0;
     $total_entries = 0;
     $batch_items = [];
@@ -2923,425 +2587,116 @@ function endpoint_file_index(
     $aborted = false;
     $abort_payload = null;
 
-    // -- Pre-scan: discover intermediate symlinks --
-    // When following symlinks, discover intermediate symlinks along each
-    // directory path being traversed.  For example, if list_dir is
-    // /srv/wordpress/plugins/akismet/latest and /srv/wordpress is itself
-    // a symlink to /wordpress, emit that intermediate symlink so the
-    // client can recreate the full chain locally.
-    if (!$cursor_provided && $follow_symlinks) {
-        foreach ($ordered as $dir) {
-            $path_symlinks = find_parents_symlinks($dir);
-            foreach ($path_symlinks as $entry) {
-                $batch_items[] = $entry;
-            }
-        }
-    }
-
-    // -- Depth-first directory traversal --
-    // Walk the directory tree using the stack. Each directory's entries are
-    // read with scandir (sorted ascending), yielding files, symlinks, and
-    // subdirectories. Subdirectories push new frames onto the stack. Entries
-    // are batched into JSON index_batch chunks and streamed to the client.
-
-    $current_dir = $list_dir_real;
-
     try {
         $metadata = [
             "filesystem_root" => base64_encode($filesystem_root),
-            "list_dir" => base64_encode($list_dir_real),
+            "list_dir" => base64_encode($list_directory),
         ];
         $metadata_json = json_encode_or_throw($metadata);
-
         $gz->write(
             "--{$boundary}\r\n" .
             "Content-Type: application/json\r\n" .
             "Content-Length: " . strlen($metadata_json) . "\r\n" .
             "X-Chunk-Type: metadata\r\n" .
-            "X-Filesystem-Root: " . base64_encode($filesystem_root ?? "") . "\r\n" .
-            "X-Index-Dir: " . base64_encode($list_dir_real ?? "") . "\r\n" .
+            "X-Filesystem-Root: " . base64_encode($filesystem_root) . "\r\n" .
+            "X-Index-Dir: " . base64_encode($list_directory) . "\r\n" .
             "\r\n" .
             $metadata_json . "\r\n"
         );
         $gz->sync();
-        $stop = false;
 
+        $stop = false;
         while (!$stop) {
-            if (empty($stack)) {
+            if (!$file_index->next_index_step()) {
                 $status = "complete";
                 break;
             }
 
-            $frame_index = count($stack) - 1;
-            $frame = $stack[$frame_index];
-            $current_dir = $frame["dir"];
-            $current_after = $frame["after"] ?? null;
-
-            clearstatcache(true, $current_dir);
-            $current_real = realpath($current_dir);
-            if ($current_real === false || !is_dir($current_real)) {
-                $abort_payload = [
-                    "error_type" => "dir_open",
-                    "path" => base64_encode($current_dir),
-                    "message" => "Directory does not exist or is not accessible",
-                ];
-                array_pop($stack);
-                $json = json_encode_or_throw($abort_payload);
-                $cursor_json = json_encode_or_throw(
-                    ["stack" => encode_index_stack($stack)],
-                    JSON_UNESCAPED_SLASHES
-                );
-                $cursor_b64 = base64_encode($cursor_json);
-                $gz->write(
-                    "--{$boundary}\r\n" .
-                    "Content-Type: application/json\r\n" .
-                    "Content-Length: " . strlen($json) . "\r\n" .
-                    "X-Chunk-Type: error\r\n" .
-                    "X-Cursor: " . $cursor_b64 . "\r\n" .
-                    "\r\n" .
-                    $json . "\r\n"
-                );
-                $gz->sync();
-                $abort_payload = null;
-                continue;
-            }
-
-            $allowed = $follow_symlinks;
-            if (!$allowed) {
-                foreach ($directories as $root) {
-                    if (
-                        $current_real === $root ||
-                        str_starts_with($current_real, $root . "/")
-                    ) {
-                        $allowed = true;
-                        break;
+            switch ($file_index->get_step_status()) {
+                case FileIndexProcessor::STATUS_INDEXED:
+                    foreach ($file_index->get_index_entries() as $index_entry) {
+                        $batch_items[] = $index_entry;
                     }
-                }
-            }
-            if (!$allowed) {
-                $abort_payload = [
-                    "error_type" => "dir_outside_root",
-                    "path" => base64_encode($current_real),
-                    "message" => "Directory is outside allowed roots",
-                ];
-                array_pop($stack);
-                $json = json_encode_or_throw($abort_payload);
-                $cursor_json = json_encode_or_throw(
-                    ["stack" => encode_index_stack($stack)],
-                    JSON_UNESCAPED_SLASHES
-                );
-                $cursor_b64 = base64_encode($cursor_json);
-                $gz->write(
-                    "--{$boundary}\r\n" .
-                    "Content-Type: application/json\r\n" .
-                    "Content-Length: " . strlen($json) . "\r\n" .
-                    "X-Chunk-Type: error\r\n" .
-                    "X-Cursor: " . $cursor_b64 . "\r\n" .
-                    "\r\n" .
-                    $json . "\r\n"
-                );
-                $gz->sync();
-                $abort_payload = null;
-                continue;
-            }
-
-            // Use realpath() consistently for all paths. On hosts like wp.com,
-            // /srv is a symlink to / and /srv/wordpress is a symlink to
-            // /wordpress, so realpath() canonicalizes everything into one
-            // namespace: /srv/htdocs → /htdocs, /srv/wordpress/... → /wordpress/...
-            // This keeps root dirs and symlink-followed dirs consistent.
-            $stack[$frame_index]["dir"] = $current_real;
-            $current_dir = $current_real;
-
-
-
-            clearstatcache(true, $current_real);
-            $entries = @scandir($current_real, SCANDIR_SORT_ASCENDING);
-            if ($entries === false) {
-                $abort_payload = [
-                    "error_type" => "dir_open",
-                    "path" => base64_encode($current_real),
-                    "message" => "Failed to open directory",
-                ];
-                $json = json_encode_or_throw($abort_payload);
-                $cursor_json = json_encode_or_throw(
-                    ["stack" => encode_index_stack($stack)],
-                    JSON_UNESCAPED_SLASHES
-                );
-                $cursor_b64 = base64_encode($cursor_json);
-                $gz->write(
-                    "--{$boundary}\r\n" .
-                    "Content-Type: application/json\r\n" .
-                    "Content-Length: " . strlen($json) . "\r\n" .
-                    "X-Chunk-Type: error\r\n" .
-                    "X-Cursor: " . $cursor_b64 . "\r\n" .
-                    "\r\n" .
-                    $json . "\r\n"
-                );
-                $gz->sync();
-                $abort_payload = null;
-                array_pop($stack);
-                continue;
-            }
-
-            // E2E test hook: during directory scanning
-            if (getenv('SITE_EXPORT_TEST_MODE')) {
-                _e2e_load_test_hooks_if_needed($config);
-                $hook_args = [$current_real, &$entries];
-                _e2e_call_hook('test_hook_during_dir_scan', $hook_args);
-            }
-
-            $filtered = [];
-            foreach ($entries as $entry) {
-                if ($entry === "." || $entry === "..") {
-                    continue;
-                }
-                $filtered[] = $entry;
-            }
-
-            $position = 0;
-            if ($current_after !== null && $current_after !== "") {
-                $position = position_after_entry($filtered, $current_after);
-            }
-
-            while (true) {
-                if ($position >= count($filtered)) {
-                    array_pop($stack);
-                    break;
-                }
-                $entry = $filtered[$position];
-                $position++;
-
-                $stack[$frame_index]["after"] = $entry;
-                $path = $current_dir . "/" . $entry;
-                // Default deny-list. Applied before stat() to save a syscall
-                // per skipped entry, and before the traversal push so we
-                // don't recurse into skipped directories. The "after" cursor
-                // is updated above this check, so resume correctly skips
-                // past the filtered entry on the next request.
-                if (!$include_caches && path_is_default_skipped($path)) {
-                    continue;
-                }
-                // The "" guard matters: path_is_within_root() with an empty
-                // root would match every absolute path.
-                if ($storage_path !== "" && path_is_within_root($path, $storage_path)) {
-                    continue;
-                }
-                clearstatcache(true, $path);
-                $stat = @lstat($path);
-                if ($stat === false) {
-                    if (
-                        !$budget->has_remaining()
-                    ) {
-                        $status = "partial";
+                    if (count($batch_items) >= $batch_size) {
+                        emit_file_index_batch(
+                            $gz,
+                            $boundary,
+                            $batch_items,
+                            $file_index
+                        );
+                        $batches_emitted++;
+                        $total_entries += count($batch_items);
+                        $batch_items = [];
+                    }
+                    if (!$budget->has_remaining()) {
                         $stop = true;
-                        break;
                     }
-                    continue;
-                }
-
-                $mode = $stat["mode"] & STAT_TYPE_MASK;
-                $type = "file";
-                $link_target = null;
-                if ($mode === STAT_TYPE_LINK) {
-                    $type = "link";
-                    $resolved = resolve_symlink_target($path);
-                    $link_target = $resolved['target'];
-                    if ($follow_symlinks && !empty($resolved['intermediates'])) {
-                        $batch_items = array_merge($batch_items, $resolved['intermediates']);
-                    }
-                } elseif ($mode === STAT_TYPE_DIR) {
-                    $type = "dir";
-                } elseif ($mode !== STAT_TYPE_FILE) {
-                    $type = "other";
-                }
-
-                $ctime = (int) ($stat["ctime"] ?? 0);
-                $size = $type === "file" ? (int) ($stat["size"] ?? 0) : 0;
-
-                $item = [
-                    "path" => $path,
-                    "ctime" => $ctime,
-                    "size" => $size,
-                    "type" => $type,
-                ];
-                if ($link_target !== null) {
-                    $item["target"] = $link_target;
-                }
-                if ($type === "dir") {
-                    // Record physical emptiness in the source index so later
-                    // push planning compares two index files without reopening
-                    // the live source tree. Skipped or storage-owned children
-                    // still make the directory non-empty: calling it empty
-                    // could turn their omission into destructive root work.
-                    $directory_handle = @opendir($path);
-                    if ($directory_handle !== false) {
-                        $item["empty"] = true;
-                        while (true) {
-                            $directory_entry = readdir($directory_handle);
-                            if ($directory_entry === false) {
-                                break;
-                            }
-                            if ($directory_entry !== "." && $directory_entry !== "..") {
-                                $item["empty"] = false;
-                                break;
-                            }
-                        }
-                        closedir($directory_handle);
-                    }
-                    // When the directory cannot be inspected, leave `empty`
-                    // absent. Pull keeps its existing dir_open reporting, while
-                    // push planning fails closed instead of treating missing
-                    // descendants as deletions.
-                }
-                $batch_items[] = $item;
-
-                if (count($batch_items) >= $batch_size) {
-                    // E2E test hook: before index batch is emitted
-                    if (getenv('SITE_EXPORT_TEST_MODE')) {
-                        _e2e_load_test_hooks_if_needed($config);
-                        $hook_args = [&$batch_items, $stack];
-                        _e2e_call_hook('test_hook_before_index_batch', $hook_args);
-                    }
-
-                    $cursor_json = json_encode_or_throw(
-                        ["stack" => encode_index_stack($stack)],
-                        JSON_UNESCAPED_SLASHES
-                    );
-                    $cursor_b64 = base64_encode($cursor_json);
-                    $json = json_encode_or_throw(
-                        encode_index_batch($batch_items),
-                        JSON_UNESCAPED_SLASHES
-                    );
-
-                    $gz->write(
-                        "--{$boundary}\r\n" .
-                        "Content-Type: application/json\r\n" .
-                        "Content-Length: " . strlen($json) . "\r\n" .
-                        "X-Chunk-Type: index_batch\r\n" .
-                        "X-Cursor: " . $cursor_b64 . "\r\n" .
-                        "X-Batch-Size: " . count($batch_items) . "\r\n" .
-                        "\r\n"
-                    );
-                    $gz->write($json);
-                    $gz->write("\r\n");
-                    $gz->sync();
-
-                    $batches_emitted++;
-                    $total_entries += count($batch_items);
-                    $batch_items = [];
-                }
-
-                if ($type === "dir") {
-                    // Skip traversing directories whose realpath is already
-                    // covered by the configured roots (duplicate root), or is a
-                    // parent of one of them (would expose outside-tree files and
-                    // re-enter a scheduled root). O(k) where k = number of roots.
-                    $dir_real = realpath($path);
-                    if ($dir_real !== false && should_skip_index_root($dir_real, $directories)) {
-                        // Don't push — emit the entry but skip traversal
-                        continue;
-                    }
-                    $stack[] = [
-                        "dir" => $path,
-                        "after" => null,
-                    ];
                     break;
-                }
 
-                if (
-                    !$budget->has_remaining()
-                ) {
-                    $status = "partial";
-                    $stop = true;
+                case FileIndexProcessor::STATUS_PATH_UNAVAILABLE:
+                case FileIndexProcessor::STATUS_DIRECTORY_COMPLETE:
+                    if (!$budget->has_remaining()) {
+                        $stop = true;
+                    }
                     break;
-                }
-            }
 
-            if ($stop) {
-                break;
-            }
+                case FileIndexProcessor::STATUS_DIRECTORY_ERROR:
+                    $directory_error = $file_index->get_directory_error();
+                    emit_file_index_error(
+                        $gz,
+                        $boundary,
+                        $directory_error,
+                        $file_index->get_cursor()
+                    );
+                    break;
 
-            if (
-                !$budget->has_remaining()
-            ) {
-                $status = "partial";
-                break;
+                case FileIndexProcessor::STATUS_SKIPPED:
+                    // Cache, development, and Reprint-storage paths never
+                    // entered the previous endpoint's budget checks either.
+                    break;
             }
         }
     } catch (Throwable $e) {
         $aborted = true;
+        $current_directory = $file_index->get_current_directory();
         $abort_payload = [
             "error_type" => "exception",
-            "path" => base64_encode($current_dir),
+            "path" => base64_encode($current_directory ?? $list_directory),
             "message" => $e->getMessage(),
         ];
     }
 
-    // -- Flush remaining items and write completion chunk --
     if (!empty($batch_items)) {
-        $cursor_json = json_encode_or_throw(
-            ["stack" => encode_index_stack($stack)],
-            JSON_UNESCAPED_SLASHES
-        );
-        $cursor_b64 = base64_encode($cursor_json);
-        $json = json_encode_or_throw(
-            encode_index_batch($batch_items),
-            JSON_UNESCAPED_SLASHES
-        );
-
-        $gz->write(
-            "--{$boundary}\r\n" .
-            "Content-Type: application/json\r\n" .
-            "Content-Length: " . strlen($json) . "\r\n" .
-            "X-Chunk-Type: index_batch\r\n" .
-            "X-Cursor: " . $cursor_b64 . "\r\n" .
-            "X-Batch-Size: " . count($batch_items) . "\r\n" .
-            "\r\n"
-        );
-        $gz->write($json);
-        $gz->write("\r\n");
-        $gz->sync();
-
+        emit_file_index_batch($gz, $boundary, $batch_items, $file_index);
         $batches_emitted++;
         $total_entries += count($batch_items);
     }
 
     try {
         if ($abort_payload !== null) {
-            $json = json_encode_or_throw($abort_payload);
-            $cursor_json = json_encode_or_throw(
-                ["stack" => encode_index_stack($stack)],
-                JSON_UNESCAPED_SLASHES
+            emit_file_index_error(
+                $gz,
+                $boundary,
+                $abort_payload,
+                $file_index->get_cursor(),
+                true
             );
-            $cursor_b64 = base64_encode($cursor_json);
-            $gz->write(
-                "--{$boundary}\r\n" .
-                "Content-Type: application/json\r\n" .
-                "Content-Length: " . strlen($json) . "\r\n" .
-                "X-Chunk-Type: error\r\n" .
-                "X-Cursor: " . $cursor_b64 . "\r\n" .
-                "\r\n" .
-                $json . "\r\n"
-            );
-            $gz->sync();
             $status = "partial";
         }
 
         $cursor_json = json_encode_or_throw(
-            ["stack" => encode_index_stack($stack)],
+            $file_index->get_cursor(),
             JSON_UNESCAPED_SLASHES
         );
-        $cursor_b64 = base64_encode($cursor_json);
-
+        $cursor_base64 = base64_encode($cursor_json);
         $gz->write(
             "--{$boundary}\r\n" .
             "Content-Type: application/octet-stream\r\n" .
             "Content-Length: 0\r\n" .
             "X-Chunk-Type: completion\r\n" .
             "X-Status: " . ($aborted ? "partial" : $status) . "\r\n" .
-            "X-Cursor: " . $cursor_b64 . "\r\n" .
-            "X-Index-Dir: " . base64_encode($list_dir_real) . "\r\n" .
+            "X-Cursor: {$cursor_base64}\r\n" .
+            "X-Index-Dir: " . base64_encode($list_directory) . "\r\n" .
             "X-Batches-Emitted: {$batches_emitted}\r\n" .
             "X-Total-Entries: {$total_entries}\r\n" .
             "X-Memory-Used: " . memory_get_peak_usage(true) . "\r\n" .
@@ -3352,8 +2707,10 @@ function endpoint_file_index(
             "--{$boundary}--\r\n"
         );
         $gz->finish();
-    } catch (\Throwable $e) {
+    } catch (Throwable $e) {
         error_log("Export: failed to write completion chunk: " . $e->getMessage());
+    } finally {
+        $file_index->close();
     }
 
     return [
@@ -3365,6 +2722,101 @@ function endpoint_file_index(
             "time_elapsed" => microtime(true) - $budget->start_time,
         ],
     ];
+}
+
+/**
+ * Writes one file-index batch with the processor's current cursor.
+ *
+ * @param object             $gzip_stream Gzip stream returned by begin_multipart_stream().
+ * @param string             $boundary    Multipart boundary.
+ * @param array[]            $batch_items File-index entries in this batch.
+ * @param FileIndexProcessor $file_index  Active file-index processor.
+ */
+function emit_file_index_batch(
+    $gzip_stream,
+    string $boundary,
+    array &$batch_items,
+    FileIndexProcessor $file_index
+): void {
+    if (getenv('SITE_EXPORT_TEST_MODE')) {
+        $directory_stack = [];
+        foreach ($file_index->get_cursor()["stack"] as $encoded_frame) {
+            $directory_stack[] = [
+                "dir" => base64_decode($encoded_frame["dir"]),
+                "after" => $encoded_frame["after"] !== null
+                    ? base64_decode($encoded_frame["after"])
+                    : null,
+            ];
+        }
+        $hook_args = [&$batch_items, $directory_stack];
+        _e2e_call_hook('test_hook_before_index_batch', $hook_args);
+    }
+
+    $cursor_json = json_encode_or_throw(
+        $file_index->get_cursor(),
+        JSON_UNESCAPED_SLASHES
+    );
+    $cursor_base64 = base64_encode($cursor_json);
+    $json = json_encode_or_throw(
+        encode_index_batch($batch_items),
+        JSON_UNESCAPED_SLASHES
+    );
+    $gzip_stream->write(
+        "--{$boundary}\r\n" .
+        "Content-Type: application/json\r\n" .
+        "Content-Length: " . strlen($json) . "\r\n" .
+        "X-Chunk-Type: index_batch\r\n" .
+        "X-Cursor: {$cursor_base64}\r\n" .
+        "X-Batch-Size: " . count($batch_items) . "\r\n" .
+        "\r\n"
+    );
+    $gzip_stream->write($json);
+    $gzip_stream->write("\r\n");
+    $gzip_stream->sync();
+}
+
+/**
+ * Writes one file-index error with the cursor after that failure.
+ *
+ * @param object $gzip_stream    Gzip stream returned by begin_multipart_stream().
+ * @param string $boundary       Multipart boundary.
+ * @param array  $error          {
+ *     File-index error.
+ *
+ *     @type string $error_type Protocol error type.
+ *     @type string $path       Filesystem path.
+ *     @type string $message    Human-readable explanation.
+ * }
+ * @param array  $cursor         {
+ *     File-index cursor after the failure.
+ *
+ *     @type array[] $stack Active directories with base64-encoded path names.
+ * }
+ * @param bool   $path_is_base64 Whether the error path is already base64 text.
+ */
+function emit_file_index_error(
+    $gzip_stream,
+    string $boundary,
+    array $error,
+    array $cursor,
+    bool $path_is_base64 = false
+): void {
+    if (!$path_is_base64) {
+        $error["path"] = base64_encode($error["path"]);
+    }
+    $json = json_encode_or_throw($error);
+    $cursor_json = json_encode_or_throw($cursor, JSON_UNESCAPED_SLASHES);
+    $cursor_base64 = base64_encode($cursor_json);
+    $gzip_stream->write(
+        "--{$boundary}\r\n" .
+        "Content-Type: application/json\r\n" .
+        "Content-Length: " . strlen($json) . "\r\n" .
+        "X-Chunk-Type: error\r\n" .
+        "X-Cursor: {$cursor_base64}\r\n" .
+        "\r\n" .
+        $json . "\r\n"
+    );
+    $gzip_stream->sync();
 }
 
 /**
@@ -3630,101 +3082,14 @@ function path_head_looks_like_text(string $path): bool
 }
 
 /**
- * Returns true if $path is a generated cache file, version-control or
- * dev-tooling artifact, or OS-level junk that is not worth shipping in
- * a typical site migration.
+ * Reports whether a path belongs to the established default file-index skip set.
  *
- * Matching rules:
- *
- *   - Path-component-aware: a segment that *contains* a skipped name as a
- *     substring (e.g. "cache-control" or "node_modules-backup") does NOT
- *     trigger a skip. Only whole-segment matches do. This is done by
- *     wrapping `/` around both the haystack and needle and doing a
- *     substring check.
- *
- *   - Cache/upgrade dirs are matched only under `wp-content/` so a user
- *     directory literally called `cache` in some other tree doesn't
- *     silently disappear.
- *
- *   - Dotfiles that ship in real WordPress sites — `.htaccess`,
- *     `.user.ini`, `.well-known/` — are preserved. Editor/VCS dotfiles
- *     and macOS metadata are not.
- *
- * The default deny-list is conservative: false-negatives (something we
- * could have skipped but didn't) are mere wire-byte waste; false-positives
- * (something the user actually wanted) are silent data loss. Callers
- * opting in to a more aggressive filter can pass extra patterns; callers
- * who want everything can set include_caches=1 on the request.
+ * @param string $path Filesystem path to classify.
+ * @return bool Whether the path is omitted unless caches are included.
  */
 function path_is_default_skipped(string $path): bool
 {
-    // Sentinel slashes on each side make "starts-with" / "ends-with" /
-    // "anywhere-in-middle" the same str_contains() check.
-    $needle_haystack = '/' . trim($path, '/') . '/';
-
-    // Generated content under wp-content/. WordPress regenerates these
-    // on demand (cache via the page lifecycle, upgrade via wp-admin
-    // updates), so transferring them is pure waste.
-    //
-    // Notable specific entries:
-    //   - wp-content/wpcomsh-cache: wp.com Atomic's Memcached-backed
-    //     filesystem cache shadow.
-    //   - wp-content/wflogs: Wordfence's per-request scan logs; can
-    //     reach gigabytes on long-running sites.
-    static $cache_dirs = [
-        '/wp-content/cache/',
-        '/wp-content/upgrade/',
-        '/wp-content/wpcomsh-cache/',
-        '/wp-content/wflogs/',
-    ];
-    foreach ($cache_dirs as $needle) {
-        if (strpos($needle_haystack, $needle) !== false) {
-            return true;
-        }
-    }
-
-    // VCS metadata + local dev tooling. Match any path component exactly.
-    static $junk_components = [
-        '.git', '.svn', '.hg', '.bzr',
-        'node_modules',
-        '.idea', '.vscode',
-        '.cache', '.npm', '.yarn', '.pnpm-store',
-    ];
-    foreach ($junk_components as $needle) {
-        if (strpos($needle_haystack, '/' . $needle . '/') !== false) {
-            return true;
-        }
-    }
-
-    // OS junk + filesystem metadata files (basename match).
-    $basename = basename($path);
-    static $junk_basenames = [
-        '.DS_Store', '._.DS_Store',
-        'Thumbs.db', 'desktop.ini', 'ehthumbs.db',
-    ];
-    if (in_array($basename, $junk_basenames, true)) {
-        return true;
-    }
-
-    // Editor / merge scratch files (basename pattern):
-    //   `.#name`      Emacs lock
-    //   `#name#`      Emacs autosave
-    //   `name~`       Editor backup
-    //   `name.swp`    Vim swap (also .swo, .swn)
-    //   `name.bak`    generic backup
-    //   `name.orig`   merge conflict leftover
-    //   `name.rej`    merge conflict leftover
-    if ($basename !== '' && $basename[0] === '.' && isset($basename[1]) && $basename[1] === '#') {
-        return true;
-    }
-    if (strlen($basename) >= 3 && $basename[0] === '#' && substr($basename, -1) === '#') {
-        return true;
-    }
-    if (preg_match('/(?:~|\.(?:swp|swo|swn|bak|orig|rej))$/', $basename) === 1) {
-        return true;
-    }
-
-    return false;
+    return FileIndexProcessor::path_is_default_skipped($path);
 }
 
 /**
@@ -3851,25 +3216,6 @@ function require_float_range(
         );
     }
     return $value;
-}
-
-/**
- * Returns the index of the first entry lexicographically after $after (binary search).
- */
-function position_after_entry(array $entries, string $after): int
-{
-    $low = 0;
-    $high = count($entries);
-    while ($low < $high) {
-        $mid = (int) (($low + $high) / 2);
-        $entry = $entries[$mid];
-        if (strcmp($entry, $after) <= 0) {
-            $low = $mid + 1;
-        } else {
-            $high = $mid;
-        }
-    }
-    return $low;
 }
 
 /**
