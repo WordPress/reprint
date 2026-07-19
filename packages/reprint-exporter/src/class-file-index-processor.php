@@ -97,6 +97,9 @@ final class FileIndexProcessor {
         bool $include_caches,
         string $storage_path
     ): self {
+        // Anchor traversal to a real directory. All later comparisons use
+        // canonical paths so configured roots and followed links share one
+        // path namespace.
         clearstatcache(true, $index_directory);
         $canonical_index_directory = realpath($index_directory);
         if ($canonical_index_directory === false || !is_dir($canonical_index_directory)) {
@@ -105,12 +108,18 @@ final class FileIndexProcessor {
             );
         }
 
+        // An ordinary traversal must begin inside a configured root. Following
+        // links deliberately relaxes that boundary because a link target may
+        // be outside every configured root and still belong in the index.
         if (!$follow_symlinks && !self::path_is_within_directories($canonical_index_directory, $directories)) {
             throw new InvalidArgumentException(
                 "list_dir is outside of allowed roots: {$canonical_index_directory}"
             );
         }
 
+        // Visit the requested directory first, followed by every other root in
+        // stable byte order. Stable ordering makes a cursor independent of the
+        // order in which configuration discovered the additional roots.
         $ordered_directories = [$canonical_index_directory];
         $extra_directories = [];
         foreach ($directories as $directory) {
@@ -131,6 +140,8 @@ final class FileIndexProcessor {
             }
         }
 
+        // The last stack element is visited next, so reverse the desired order
+        // while constructing the depth-first traversal stack.
         $directory_stack = [];
         for ($i = count($ordered_directories) - 1; $i >= 0; $i--) {
             $directory_stack[] = [
@@ -139,6 +150,9 @@ final class FileIndexProcessor {
             ];
         }
 
+        // Keep parent-link discovery as the first traversal event. This
+        // preserves the endpoint's established ordering: any link entries
+        // found here must precede ordinary directory entries.
         $initial_index_entries = [];
         if ($follow_symlinks) {
             foreach ($ordered_directories as $directory) {
@@ -177,6 +191,8 @@ final class FileIndexProcessor {
         bool $include_caches,
         string $storage_path
     ): self {
+        // A cursor is caller-held continuation state. Reject malformed JSON or
+        // a missing stack before any filesystem work begins.
         $cursor = json_decode($cursor_json, true);
         if (!is_array($cursor)) {
             throw new InvalidArgumentException("Invalid index cursor format");
@@ -185,6 +201,9 @@ final class FileIndexProcessor {
             throw new InvalidArgumentException("Index cursor missing stack");
         }
 
+        // Paths are base64 text because filesystem names are arbitrary bytes
+        // while JSON strings must be valid UTF-8. Decode each frame back into
+        // the in-memory stack used by traversal.
         $directory_stack = [];
         foreach ($cursor["stack"] as $frame) {
             if (!is_array($frame)) {
@@ -217,6 +236,9 @@ final class FileIndexProcessor {
             ];
         }
 
+        // During continuation, the active directory is the best description
+        // of what this request is indexing. A completed cursor has no active
+        // directory, so it falls back to the first configured root.
         $index_directory = !empty($directory_stack)
             ? $directory_stack[count($directory_stack) - 1]["dir"]
             : ( isset($directories[0]) ? $directories[0] : "/" );
@@ -239,14 +261,20 @@ final class FileIndexProcessor {
      */
     public function next_index_step(): bool
     {
+        // A closed processor has discarded its retained directory names and
+        // cannot safely take another step.
         if ($this->closed) {
             throw new LogicException("Cannot take a file-index step after close().");
         }
 
+        // Step accessors describe only the current call. Clear the preceding
+        // result before deciding which traversal event comes next.
         $this->step_status = null;
         $this->index_entries = [];
         $this->directory_error = null;
 
+        // Emit the parent links discovered during start() before descendants.
+        // They share one cursor boundary because traversal has not begun yet.
         if (!empty($this->initial_index_entries)) {
             $this->step_status = self::STATUS_INDEXED;
             $this->index_entries = $this->initial_index_entries;
@@ -254,12 +282,17 @@ final class FileIndexProcessor {
             return true;
         }
 
+        // Load the directory at the top of the stack only when no sorted name
+        // list is retained. A directory failure is itself a step; an empty
+        // stack means traversal has no further event.
         if ($this->current_directory_names === null) {
             if (!$this->open_current_directory()) {
                 return $this->step_status !== null;
             }
         }
 
+        // Finishing a directory is observable so callers may stop at this
+        // exact cursor before the processor returns to its parent directory.
         if ($this->current_directory_position >= count($this->current_directory_names)) {
             array_pop($this->directory_stack);
             $this->forget_current_directory_names();
@@ -267,6 +300,8 @@ final class FileIndexProcessor {
             return true;
         }
 
+        // Select exactly one name for this step. Move the cursor first so every
+        // later outcome, including omission or disappearance, settles the name.
         $frame_index = count($this->directory_stack) - 1;
         $entry_name = $this->current_directory_names[$this->current_directory_position];
         ++$this->current_directory_position;
@@ -276,6 +311,8 @@ final class FileIndexProcessor {
         $this->directory_stack[$frame_index]["after"] = $entry_name;
         $path = $this->current_directory . "/" . $entry_name;
 
+        // Apply omissions before lstat() and before a directory can enter the
+        // stack. Omitted subtrees therefore cost no extra filesystem calls.
         if (!$this->include_caches && self::path_is_default_skipped($path)) {
             $this->step_status = self::STATUS_SKIPPED;
             return true;
@@ -288,6 +325,8 @@ final class FileIndexProcessor {
             return true;
         }
 
+        // A name returned by scandir() may disappear before inspection. Its
+        // cursor is already settled, so continuation moves to the next name.
         clearstatcache(true, $path);
         $stat = @lstat($path);
         if ($stat === false) {
@@ -295,6 +334,9 @@ final class FileIndexProcessor {
             return true;
         }
 
+        // Translate platform mode bits into the four types understood by the
+        // file index. A directory link may also reveal intermediate links that
+        // canonicalization would otherwise hide.
         $mode = $stat["mode"] & self::STAT_TYPE_MASK;
         $type = "file";
         $link_target = null;
@@ -312,6 +354,9 @@ final class FileIndexProcessor {
             $type = "other";
         }
 
+        // Build the index entry from the one successful lstat() call. Only
+        // regular-file bytes contribute a size; directories and links carry
+        // their type-specific details separately.
         $item = [
             "path" => $path,
             "ctime" => (int) ( isset($stat["ctime"]) ? $stat["ctime"] : 0 ),
@@ -347,10 +392,15 @@ final class FileIndexProcessor {
             // deletions.
         }
 
+        // Intermediate links and the inspected path belong to the same step
+        // because the cursor cannot stop between them without losing one.
         $this->index_entries = $intermediate_symlinks;
         $this->index_entries[] = $item;
         $this->step_status = self::STATUS_INDEXED;
 
+        // Depth-first traversal enters a new directory before returning to the
+        // remaining names in its parent. Configured roots are scheduled
+        // independently and must not be entered again through an ancestor.
         if ($type === "dir") {
             $canonical_directory = realpath($path);
             if (
@@ -561,14 +611,19 @@ final class FileIndexProcessor {
      */
     private function open_current_directory(): bool
     {
+        // An empty stack is normal completion, not a directory failure.
         if (empty($this->directory_stack)) {
             return false;
         }
 
+        // The top frame names the next directory and the last name settled in
+        // it. Keep the directory available for any failure reported this step.
         $frame_index = count($this->directory_stack) - 1;
         $frame = $this->directory_stack[$frame_index];
         $this->current_directory = $frame["dir"];
 
+        // A directory may disappear while it waits on the stack. Remove that
+        // frame so a later call continues with its parent or the next root.
         clearstatcache(true, $this->current_directory);
         $canonical_directory = realpath($this->current_directory);
         if ($canonical_directory === false || !is_dir($canonical_directory)) {
@@ -582,6 +637,9 @@ final class FileIndexProcessor {
             return false;
         }
 
+        // When following links is disabled, every canonical directory must
+        // remain inside a configured root. Reject one that crosses that
+        // boundary, then continue with the remaining stack.
         if (
             !$this->follow_symlinks
             && !self::path_is_within_directories($canonical_directory, $this->directories)
@@ -601,6 +659,9 @@ final class FileIndexProcessor {
         $this->directory_stack[$frame_index]["dir"] = $canonical_directory;
         $this->current_directory = $canonical_directory;
 
+        // scandir() supplies the stable byte order on which cursor resumption
+        // depends. Failure settles this directory rather than retrying it on
+        // every subsequent request.
         clearstatcache(true, $canonical_directory);
         $directory_names = @scandir($canonical_directory, SCANDIR_SORT_ASCENDING);
         if ($directory_names === false) {
@@ -614,11 +675,15 @@ final class FileIndexProcessor {
             return false;
         }
 
+        // Tests may change the scanned names to exercise traversal boundaries.
+        // Production traversal has no hook and uses scandir() results directly.
         if (getenv("SITE_EXPORT_TEST_MODE") && function_exists("_e2e_call_hook")) {
             $hook_arguments = [$canonical_directory, &$directory_names];
             _e2e_call_hook("test_hook_during_dir_scan", $hook_arguments);
         }
 
+        // Remove the two navigation names, then seek past the last settled name.
+        // Binary search keeps continuation cheap for unusually wide directories.
         $this->current_directory_names = [];
         foreach ($directory_names as $directory_name) {
             if ($directory_name !== "." && $directory_name !== "..") {
@@ -752,6 +817,9 @@ final class FileIndexProcessor {
      */
     private static function resolve_symlink_target(string $path): array
     {
+        // Only links ending at a directory need a canonical target because only
+        // directories can add more traversal work. Broken, self-referential,
+        // and file links remain ordinary link entries without a target.
         clearstatcache(true, $path);
         $resolved_target = @realpath($path);
         if (
@@ -762,6 +830,8 @@ final class FileIndexProcessor {
             return ["target" => null, "intermediates" => []];
         }
 
+        // realpath() jumps directly to the final directory. Walk the unresolved
+        // target as well so links along that path are included in the index.
         $intermediates = [];
         $raw_target = @readlink($path);
         if ($raw_target !== false && $raw_target !== "") {
@@ -797,6 +867,9 @@ final class FileIndexProcessor {
         $entries = [];
         $parts = explode("/", $absolute_path);
         $current = "";
+
+        // Inspect each accumulated parent path. After a link, continue from its
+        // canonical location so later segments refer to the path PHP will use.
         foreach ($parts as $part) {
             if ($part === "") {
                 $current = "/";
@@ -807,6 +880,8 @@ final class FileIndexProcessor {
                 continue;
             }
 
+            // Preserve the link spelling returned by readlink(); pull needs it
+            // to reconstruct the same link rather than only its final directory.
             $target = @readlink($current);
             if ($target !== false && $target !== "") {
                 $stat = @lstat($current);
@@ -820,6 +895,8 @@ final class FileIndexProcessor {
                 ];
             }
 
+            // Resolve only the parent already inspected. This keeps the walk
+            // iterative and leaves any later link visible to the next segment.
             $canonical_current = @realpath($current);
             if ($canonical_current !== false) {
                 $current = $canonical_current;
@@ -841,6 +918,9 @@ final class FileIndexProcessor {
     {
         $parts = explode("/", $path);
         $normalized = [];
+
+        // Resolve only textual dot segments. Filesystem resolution here would
+        // skip the intermediate links this path is being prepared to inspect.
         foreach ($parts as $part) {
             if ($part === "" || $part === ".") {
                 if (empty($normalized)) {
