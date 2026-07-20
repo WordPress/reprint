@@ -2246,7 +2246,7 @@ class ImportClient
      * @return array {
      *     Validated files-push command context.
      *
-     *     @type string $target_url           Target exporter API URL.
+     *     @type string $target_url           Target push URL.
      *     @type string $local_tree           Canonical local tree being sent.
      *     @type string $pair                 Target/local-tree pair key.
      *     @type string $push_state_directory Sender state directory for the pair.
@@ -13230,7 +13230,7 @@ if (
             "short" => "Push one local file tree without database work",
             "usage" => "reprint files-push <target-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
             "description" =>
-                "Sends the existing local tree at --fs-root to the target exporter API.\n" .
+                "Sends the existing local tree at --fs-root to the target push URL.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
                 "It does not require pull preflight.\n" .

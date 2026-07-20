@@ -1,16 +1,15 @@
 <?php
 /**
- * Admin interface for Reprint Exporter plugin.
+ * Admin interface for the Reprint Exporter plugin.
  *
  * This plugin provides a WordPress admin UI for configuring the export API.
- * The export API is triggered via `?reprint-api` (or the legacy
+ * The pull API is triggered via `?reprint-api` (or the legacy
  * `?site-export-api` alias) during plugin load,
  * before WordPress finishes booting. It reads the secret from a site option,
  * with secret.php supported only as an override when present.
  *
- * Authentication uses HMAC signatures: the importing side generates a secret,
- * the user enters it here, and all requests must include a valid signature
- * computed from the nonce, timestamp, and request content hash.
+ * The separate push.php route does not load WordPress. This screen grants the
+ * current connection token access to that route and shows its URL.
  */
 class Site_Export_Plugin {
 
@@ -24,6 +23,7 @@ class Site_Export_Plugin {
     }
 
     private function __construct() {
+        _site_export_sync_managed_push_config();
         add_action('init', [$this, 'register_settings']);
         add_action(
             'update_option_' . SITE_EXPORT_SECRET_OPTION,
@@ -197,6 +197,7 @@ class Site_Export_Plugin {
         $stored_secret = _site_export_get_option_secret();
         $effective_secret = _site_export_get_shared_secret() ?? '';
         $api_url = home_url('?reprint-api');
+        $push_url = plugin_dir_url(SITE_EXPORT_PLUGIN_DIR . 'index.php') . 'push.php';
         $is_configured = $effective_secret !== '';
         $has_file_override = _site_export_has_secret_file();
         $managed_push_enabled = _site_export_get_managed_push_enabled();
@@ -432,13 +433,26 @@ class Site_Export_Plugin {
 
             <?php if ($is_configured): ?>
             <div class="site-export-card">
-                <h2>API Endpoint</h2>
+                <h2>Download endpoint</h2>
                 <p class="card-desc">
-                    If your import tool asks for an endpoint URL, copy this:
+                    Use this URL to pull the site:
                 </p>
                 <div class="site-export-endpoint">
                     <code id="site-export-api-url"><?php echo esc_html($api_url); ?></code>
-                    <button type="button" class="site-export-copy-btn" onclick="siteExportCopyUrl()">Copy</button>
+                    <button type="button" class="site-export-copy-btn" onclick="siteExportCopyUrl('site-export-api-url', this)">Copy</button>
+                </div>
+            </div>
+            <?php endif; ?>
+
+            <?php if ($push_enabled): ?>
+            <div class="site-export-card">
+                <h2>Push endpoint</h2>
+                <p class="card-desc">
+                    Use this URL with <code>files-push</code>. It remains available when WordPress cannot boot.
+                </p>
+                <div class="site-export-endpoint">
+                    <code id="site-export-push-url"><?php echo esc_html($push_url); ?></code>
+                    <button type="button" class="site-export-copy-btn" onclick="siteExportCopyUrl('site-export-push-url', this)">Copy</button>
                 </div>
             </div>
             <?php endif; ?>
@@ -449,13 +463,12 @@ class Site_Export_Plugin {
             var input = document.getElementById('site_export_secret');
             input.type = input.type === 'password' ? 'text' : 'password';
         }
-        function siteExportCopyUrl() {
-            var url = document.getElementById('site-export-api-url').textContent.trim();
+        function siteExportCopyUrl(elementId, button) {
+            var url = document.getElementById(elementId).textContent.trim();
             navigator.clipboard.writeText(url).then(function() {
-                var btn = document.querySelector('.site-export-copy-btn');
-                var original = btn.textContent;
-                btn.textContent = 'Copied!';
-                setTimeout(function() { btn.textContent = original; }, 1500);
+                var original = button.textContent;
+                button.textContent = 'Copied!';
+                setTimeout(function() { button.textContent = original; }, 1500);
             });
         }
         </script>

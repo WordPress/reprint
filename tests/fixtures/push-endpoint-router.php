@@ -1,23 +1,50 @@
 <?php
 
-// This fixture supplies the WordPress functions and values the production
-// plugin entry point reads. API routing, authentication, and dispatch all run
-// through index.php and its site_export_api_options filter.
+// This fixture exposes the production push route separately from a WordPress
+// route which can be made defunct by committed files.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound
 
 $reprint_push_test_request_log = (string) getenv('REPRINT_PUSH_TEST_REQUEST_LOG');
 $reprint_push_test_endpoint = filter_input(INPUT_GET, 'endpoint', FILTER_UNSAFE_RAW);
+// phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- The router needs the raw request path to select the test route.
+$reprint_push_test_request_path = parse_url( (string) ( $_SERVER['REQUEST_URI'] ?? '' ), PHP_URL_PATH );
+$reprint_push_test_is_push_request = $reprint_push_test_request_path === '/push.php';
 if ($reprint_push_test_request_log !== '' && is_string($reprint_push_test_endpoint)) {
     register_shutdown_function(
-        static function () use ($reprint_push_test_request_log, $reprint_push_test_endpoint): void {
+        static function () use ($reprint_push_test_request_log, $reprint_push_test_endpoint, $reprint_push_test_is_push_request): void {
             file_put_contents(
                 $reprint_push_test_request_log,
-                $reprint_push_test_endpoint . "\n",
+                ( $reprint_push_test_is_push_request ? 'push:' : 'wordpress:' ) . $reprint_push_test_endpoint . "\n",
                 FILE_APPEND | LOCK_EX
             );
         }
     );
+}
+
+$reprint_push_test_wordpress_defunct_path = (string) getenv('REPRINT_PUSH_TEST_WORDPRESS_DEFUNCT_PATH');
+$reprint_push_test_wordpress_is_defunct = $reprint_push_test_wordpress_defunct_path !== ''
+    && is_file($reprint_push_test_wordpress_defunct_path)
+    && strpos(
+        (string) file_get_contents($reprint_push_test_wordpress_defunct_path),
+        'The pushed plugin broke WordPress boot.'
+    ) !== false;
+$reprint_push_test_push_session_while_wordpress_defunct_path = (string) getenv('REPRINT_PUSH_TEST_PUSH_SESSION_WHILE_WORDPRESS_DEFUNCT_PATH');
+if (
+    $reprint_push_test_is_push_request
+    && $reprint_push_test_wordpress_is_defunct
+    && $reprint_push_test_endpoint === 'push_create'
+) {
+    file_put_contents($reprint_push_test_push_session_while_wordpress_defunct_path, 'observed');
+}
+if (
+    !$reprint_push_test_is_push_request
+    && $reprint_push_test_wordpress_is_defunct
+) {
+    http_response_code(500);
+    header('Content-Type: text/plain');
+    echo 'WordPress could not boot after loading the pushed plugin.';
+    return;
 }
 
 $reprint_push_test_gate_endpoint_path = (string) getenv('REPRINT_PUSH_TEST_GATE_ENDPOINT_CONFIG');
@@ -119,6 +146,54 @@ if (trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_CUSTOM_
 $reprint_push_test_directory = trim( (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_DIRECTORY_CONFIG') ) );
 if ($reprint_push_test_directory !== '') {
     $reprint_push_test_options['reprint_directory'] = $reprint_push_test_directory;
+}
+
+if ($reprint_push_test_is_push_request) {
+    $reprint_push_test_bundled_route_configuration_path = (string) getenv('REPRINT_PUSH_TEST_BUNDLED_ROUTE_CONFIG');
+    $reprint_push_test_use_bundled_route = $reprint_push_test_bundled_route_configuration_path !== ''
+        && trim( (string) file_get_contents($reprint_push_test_bundled_route_configuration_path) ) === 'enabled';
+    if ($reprint_push_test_use_bundled_route) {
+        $_SERVER['SCRIPT_FILENAME'] = rtrim(
+            (string) $reprint_push_test_docroot_configuration['document_root'],
+            '/\\'
+        ) . '/reprint-exporter-wp/push.php';
+        require dirname(__DIR__, 2) . '/reprint-exporter-wp/push.php';
+        return;
+    }
+
+    require_once dirname(__DIR__, 2) . '/vendor/autoload.php';
+    require_once dirname(__DIR__, 2) . '/packages/reprint-exporter/src/class-http-server.php';
+    $reprint_push_test_connection_secret = trim(
+        (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_SECRET_CONFIG') )
+    );
+    $reprint_push_test_authorized_fingerprint = trim(
+        (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_AUTHORIZATION_CONFIG') )
+    );
+    $reprint_push_test_personally_authorized = hash_equals(
+        hash('sha256', $reprint_push_test_connection_secret),
+        $reprint_push_test_authorized_fingerprint
+    );
+    $reprint_push_test_push_is_authorized = $reprint_push_test_managed_state === ''
+        ? $reprint_push_test_personally_authorized
+        : $reprint_push_test_managed_state === 'true';
+    $reprint_push_test_connection_secret = $reprint_push_test_push_is_authorized
+        ? $reprint_push_test_connection_secret
+        : null;
+    $reprint_push_test_push_options = [
+        'connection_secret' => $reprint_push_test_connection_secret,
+        'docroot' => $reprint_push_test_docroot_configuration['docroot'] ?? $reprint_push_test_docroot_configuration['document_root'] ?? null,
+        'excluded_paths' => $reprint_push_test_options['excluded_paths'],
+        'maximum_part_bytes' => $reprint_push_test_options['maximum_part_bytes'],
+        'maximum_commit_entries' => $reprint_push_test_options['maximum_commit_entries'],
+    ];
+    if ($reprint_push_test_directory !== '') {
+        $reprint_push_test_push_options['reprint_directory'] = $reprint_push_test_directory;
+    }
+    if ($reprint_push_test_push_is_authorized && isset($reprint_push_test_options['authenticate'])) {
+        $reprint_push_test_push_options['authenticate'] = $reprint_push_test_options['authenticate'];
+    }
+    Site_Export_HTTP_Server::serve_push($reprint_push_test_push_options);
+    return;
 }
 
 function apply_filters(string $hook_name, $value) {

@@ -4,118 +4,180 @@ When working from this monorepo checkout, run `composer install` in
 `reprint-exporter-wp/` to populate the bundled `vendor/` directory used by the
 plugin runtime. GitHub release ZIPs already include that vendor tree.
 
-## API Routing
+## HTTP routes
 
-Many shared hosts (SiteGround, GoDaddy, etc.) block direct PHP execution inside `wp-content/plugins/` at the web server level, returning a 403 before the request ever reaches PHP. To work around this, export API requests are routed through WordPress's front controller (`index.php` at the site root), which hosts never block.
+The plugin exposes separate URLs for pull and push because they have different
+boot requirements.
 
-### How it works
+### Download route
 
-The plugin file (`index.php`) is `include`'d by WordPress during its plugin loading loop — this happens *before* the `plugins_loaded` hook fires, making it the earliest interception point available to a regular plugin.
+Many shared hosts block direct PHP execution below `wp-content/plugins/`.
+Pull requests therefore use WordPress's front controller:
 
-When a request arrives at `https://example.com/?reprint-api` (or the legacy `?site-export-api` alias, kept for backwards compatibility), the plugin:
+```text
+https://example.com/?reprint-api
+```
 
-1. Detects `$_GET['reprint-api']` or `$_GET['site-export-api']` during plugin file load
-2. Reverts WordPress error display settings (`display_errors`, `html_errors`) that `wp_debug_mode()` may have turned on
-3. Clears any output buffering WordPress started
-4. Sets up error handlers, HMAC auth, and runs the export endpoint
-5. Calls `exit` — WordPress never finishes booting
+The legacy `?site-export-api` query remains available. WordPress includes the
+plugin before `plugins_loaded`; the plugin sees the query, authenticates the
+request, dispatches it, and exits before WordPress finishes booting.
 
-This gives us a clean execution environment while using WordPress's front controller as the entry point.
-
-### Platform configuration
-
-The bundled WordPress entry point passes the result of the
-`site_export_api_options` filter to the export handler. A platform must
-register this filter before the regular Reprint Exporter plugin file loads;
-registering it on `plugins_loaded` is too late. A must-use plugin is the usual
-place to register it:
+A platform may replace the built-in authentication through an early
+`site_export_api_options` filter. Register it before regular plugins load, such
+as from a must-use plugin:
 
 ```php
 add_filter('site_export_api_options', static function (array $options): array {
-    $options['docroot'] = '/srv/www/public';
-    $options['reprint_directory'] = '/srv/www/.reprint';
+    $options['authenticate'] = static function (): void {
+        if (!my_auth_check()) {
+            _site_export_error(403, 'Unauthorized');
+        }
+    };
     return $options;
 });
 ```
 
-The supported options are:
+This filter applies to the WordPress download route only. Push does not pass
+through WordPress.
 
-- `authenticate` — a callback that authenticates every non-preflight API
-  request instead of the built-in HMAC verifier. For a push request, this
-  callback must authenticate from request metadata without reading or
-  buffering `php://input`; the endpoint streams that body after authentication.
-- `docroot` — the document root for push. It must resolve to an
-  existing directory and defaults to `$_SERVER['DOCUMENT_ROOT']`.
-- `reprint_directory` — the private push storage directory outside `docroot`.
-  It defaults to a document-root-specific sibling directory.
-- `excluded_paths` — document-root-relative paths that push must preserve. The
-  exporter plugin directory is also preserved automatically when it is below
-  `docroot`.
-- `maximum_part_bytes` — the maximum `Content-Length` accepted for one push
-  upload part. It defaults to 4 MiB.
-- `maximum_commit_entries` — the maximum number of bounded entries processed
-  by one `push_commit` request. It defaults to 256.
+### Push route
+
+Every push operation uses a standalone PHP route. This includes
+`push_create`, so `files-push` can start a new push when a prior push left
+WordPress unable to boot. The WordPress route rejects all `push_*` requests.
+
+The bundled URL is:
+
+```text
+https://example.com/wp-content/plugins/reprint-exporter/push.php
+```
+
+The exact URL is shown on the **Reprint Exporter** settings screen after push
+access is enabled. Give this URL, not `?reprint-api`, to `files-push`:
+
+```bash
+php reprint.phar files-push "https://example.com/wp-content/plugins/reprint-exporter/push.php" \
+  --state-dir="/path/to/reprint-state" \
+  --fs-root="/path/to/local-tree" \
+  --secret="the-target-connection-token"
+```
+
+`push.php` loads Reprint but does not load WordPress, `wp-load.php`, themes, or
+plugins. It reads the canonical document root from `DOCUMENT_ROOT`. Its
+private reprint directory is a document-root-specific sibling:
+
+```text
+<parent-of-document-root>/.reprint-<first-12-sha256-characters>/.reprint/
+```
+
+The route excludes its own plugin directory from push. This keeps the push
+route available even when the pushed tree would otherwise replace or delete it.
+
+The connection token used to create new push sessions is stored in:
+
+```text
+<reprint-directory>/.reprint/push-config.php
+```
+
+The file has mode 0600 and returns an array with `connection_secret`. It is
+outside the document root and prints nothing when PHP executes it. Enabling
+push access writes this file. Disabling push access or rotating the token
+removes it.
+
+`push_create` authenticates with that connection secret and returns a random
+secret scoped to the new push session. Upload, status, commit, and remove use
+the session secret at the same URL. The target stores it in the session's
+mode-0600 `push-metadata.php`; `files-push` stores its copy in the local pair's
+mode-0600 `sender.json`. Neither secret is sent in a URL or request body.
+
+Removing `push-config.php` blocks new sessions. It does not break a session
+which already has its own secret, so an in-progress commit can still finish.
+
+### Hosts which block the bundled push URL
+
+A host which blocks direct PHP below `wp-content/plugins`, or which needs a
+custom document root or reprint directory, must expose another PHP URL which
+does not load WordPress. The host owns this route and its private configuration.
+For example:
+
+```php
+<?php
+require_once '/srv/reprint-exporter/vendor/autoload.php';
+
+$connection_secret = null;
+if (($_GET['endpoint'] ?? null) === 'push_create' && is_file('/srv/reprint/push-config.php')) {
+    $connection_secret = Site_Export_HTTP_Server::load_push_connection_secret(
+        '/srv/reprint/push-config.php'
+    );
+}
+
+Site_Export_HTTP_Server::serve_push([
+    'connection_secret' => $connection_secret,
+    'docroot' => '/srv/www/public',
+    'reprint_directory' => '/srv/reprint',
+    'excluded_paths' => ['reprint-push.php'],
+]);
+```
+
+The configuration file should return an array, produce no output, and be
+readable only by the web-server account. Read it only for `push_create`;
+created sessions authenticate from their own private metadata. The document
+root, reprint directory, and excluded paths are server configuration, never
+request parameters. Give this route's URL directly to `files-push`.
+
+If the custom route is outside the document root, it does not need to exclude
+itself. If it is inside, its document-root-relative directory must be in
+`excluded_paths`.
 
 ## Push access
 
-Connection tokens authorize downloads only by default. This also applies to
-tokens that already existed when the plugin was upgraded; no migration enables
-push access. A site administrator can grant push access from the plugin settings
-page. The grant stores a fingerprint of the current connection token, so rotating
-that token revokes the grant and requires fresh consent.
+Connection tokens authorize downloads only by default, including tokens which
+predate push support. A site administrator can grant the current token push
+access from the plugin settings page. The grant stores a token fingerprint in
+WordPress and the token itself in the private PHP configuration described
+above. Rotating the token revokes the grant.
 
-Hosts can manage push access before active plugins load with an immutable boolean:
+Hosts can manage push access before active plugins load with a boolean:
 
 ```php
 define('SITE_EXPORT_PUSH_ENABLED', true);
 ```
 
-The `SITE_EXPORT_PUSH_ENABLED` environment variable accepts the same boolean
-policy. The constant wins when both are present. `true` enables push without a
-local grant; `false` hard-disables push even when a local grant exists. The sole
-recovery exception lets an authenticated caller finish a commit which already
-has a durable checkpoint, so revocation cannot strand a partially changed
-document root. It cannot start commit or use any other push operation until
-push is authorized again. Managed sites show the effective state as read-only
-in WordPress admin. Custom authentication does not bypass this authorization
-gate.
+The `SITE_EXPORT_PUSH_ENABLED` environment variable accepts the same values.
+The constant wins when both are present. Managed `true` writes the current
+token to the standalone configuration; managed `false` removes it. Managed
+sites show push access as read-only in WordPress admin.
 
-## Using as a library
+Disabling push prevents new session creation. Existing session secrets remain
+valid so their work can reach a terminal result; this avoids stranding a
+partially changed document root.
 
-The export engine can be embedded in another PHP project without the WordPress plugin wrapper. Require `lib.php` instead of `index.php` — it defines constants and functions but does not handle any HTTP requests or check any URLs.
+## Using the download route as a library
+
+The pull engine can be embedded in another PHP project without the plugin's URL
+check. Require `lib.php` instead of `index.php`; it declares functions but does
+not handle a request by itself.
 
 ```php
-// Your project must define ABSPATH before requiring lib.php.
+// lib.php expects the WordPress path constants and plugin_dir_path().
 define('ABSPATH', '/path/to/wordpress/');
 
 require_once '/path/to/reprint-exporter-wp/lib.php';
 
-// Route however you like — lib.php doesn't check URLs.
 if ($myRouter->matches('/export')) {
-    // Use default HMAC authentication (reads secret.php when present,
-    // otherwise falls back to the site option):
     _site_export_handle_api_request();
-
-    // Or supply your own authentication:
-    _site_export_handle_api_request([
-        'authenticate' => function () {
-            if (!my_auth_check()) {
-                _site_export_error(403, 'Unauthorized');
-            }
-        },
-    ]);
 }
 ```
 
-`_site_export_handle_api_request()` accepts the same options documented under
-Platform configuration. Direct `lib.php` embedders pass them as the function's
-array argument and do not use the WordPress filter.
+Supply an `authenticate` callback to `_site_export_handle_api_request()` to
+replace its built-in pull authentication. Use
+`Site_Export_HTTP_Server::serve_push()` for a standalone push route instead.
 
-`lib.php` defines these constants (using WordPress's `plugin_dir_path`):
+`lib.php` defines these constants:
 
 - `SITE_EXPORT_VERSION` — plugin version string
 - `SITE_EXPORT_PLUGIN_DIR` — absolute path to the plugin directory
-- `SITE_EXPORT_SECRET_FILE` — optional path to a PHP file that overrides the stored HMAC shared secret
-- `SITE_EXPORT_SECRET_OPTION` — WordPress site option name used for the stored HMAC shared secret
-- `SITE_EXPORT_PUSH_AUTHORIZATION_OPTION` — WordPress site option containing the token fingerprint granted personal push access
-- `SITE_EXPORT_TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)
+- `SITE_EXPORT_SECRET_FILE` — optional PHP file overriding the stored HMAC shared secret
+- `SITE_EXPORT_SECRET_OPTION` — WordPress option containing the shared secret
+- `SITE_EXPORT_PUSH_AUTHORIZATION_OPTION` — WordPress option containing the token fingerprint granted push access
+- `SITE_EXPORT_TIMESTAMP_TOLERANCE` — maximum request age in seconds

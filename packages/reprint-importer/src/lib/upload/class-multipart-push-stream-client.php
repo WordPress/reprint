@@ -61,11 +61,14 @@ class MultipartPushStreamClient
     /** Maximum JSON response bytes retained from the target. */
     private const MAX_RESPONSE_BYTES = 1024 * 1024;
 
-    /** @var string Exporter API URL used as the base of every signed request target. */
+    /** @var string Push route used for every request. */
     private string $base_url;
 
-    /** @var Site_Export_HMAC_Client Signs the exact method and URL before transfer. */
-    private Site_Export_HMAC_Client $hmac_client;
+    /** @var Site_Export_HMAC_Client Signs session creation with the connection token. */
+    private Site_Export_HMAC_Client $connection_hmac_client;
+
+    /** @var Site_Export_HMAC_Client|null Signs requests for one created push session. */
+    private ?Site_Export_HMAC_Client $push_session_hmac_client = null;
 
     /** @var PushRequestSizer Learns the decoded entity-body budget across requests. */
     private PushRequestSizer $request_sizer;
@@ -164,7 +167,7 @@ class MultipartPushStreamClient
      * @param array<string,mixed> $options {
      *     Transport, authentication, and limit options.
      *
-     *     @type string $base_url Required exporter API URL. Must use HTTPS
+     *     @type string $base_url Required push URL. Must use HTTPS
      *         unless `allow_http` is true.
      *     @type Site_Export_HMAC_Client $hmac_client Required signer for the
      *         exact method and request URL.
@@ -200,9 +203,13 @@ class MultipartPushStreamClient
         if (!is_string($base_url) || $base_url === '') {
             throw new InvalidArgumentException('MultipartPushStreamClient requires a non-empty base_url option.');
         }
-        $scheme = strtolower((string) parse_url($base_url, PHP_URL_SCHEME));
         $allow_http = $options['allow_http'] ?? false;
-        if (!is_bool($allow_http) || ($scheme !== 'https' && $scheme !== 'http') || ($scheme === 'http' && !$allow_http)) {
+        $scheme = strtolower( (string) parse_url( $base_url, PHP_URL_SCHEME ) );
+        if (
+            !is_bool($allow_http)
+            || ( $scheme !== 'https' && $scheme !== 'http' )
+            || ( $scheme === 'http' && !$allow_http )
+        ) {
             throw new InvalidArgumentException(
                 'Push base_url must be https://, unless allow_http is true for an explicit http:// target.'
             );
@@ -212,7 +219,7 @@ class MultipartPushStreamClient
             throw new InvalidArgumentException('MultipartPushStreamClient requires a Site_Export_HMAC_Client.');
         }
         $this->base_url = rtrim($base_url, '?&');
-        $this->hmac_client = $hmac_client;
+        $this->connection_hmac_client = $hmac_client;
         $this->request_sizer = $options['request_sizer'] ?? new PushRequestSizer();
         if (!$this->request_sizer instanceof PushRequestSizer) {
             throw new InvalidArgumentException('request_sizer must be a PushRequestSizer.');
@@ -254,6 +261,9 @@ class MultipartPushStreamClient
         if (preg_match('/^[a-f0-9]{32}$/D', $push_session_id) !== 1) {
             throw new InvalidArgumentException('Target push_session_id must be a 32-character lowercase hexadecimal value.');
         }
+        if ($this->push_session_hmac_client === null) {
+            throw new LogicException('Cannot start an upload request before set_push_session_hmac_client().');
+        }
         $this->boundary = 'reprint-' . bin2hex(random_bytes(16));
         $this->outbound_prefix = '';
         $this->outbound_payload = '';
@@ -271,7 +281,7 @@ class MultipartPushStreamClient
         $this->response_too_large = false;
 
         $request_url = $this->endpoint_url('push_upload', ['push_session_id' => $push_session_id]);
-        $headers = $this->hmac_client->get_envelope_auth_headers('POST', $request_url);
+        $headers = $this->push_session_hmac_client->get_envelope_auth_headers('POST', $request_url);
         $headers['Content-Type'] = 'multipart/mixed; boundary=' . $this->boundary;
         $header_lines = [];
         foreach ($headers as $name => $value) {
@@ -753,12 +763,62 @@ class MultipartPushStreamClient
         $this->response_too_large = false;
     }
 
+    /** Stores the target-issued signer for one created push session. */
+    public function set_push_session_hmac_client(Site_Export_HMAC_Client $push_session_hmac_client): void
+    {
+        $this->push_session_hmac_client = $push_session_hmac_client;
+    }
+
+    /**
+     * Sends session creation with the connection token.
+     *
+     * @param string $method GET or POST.
+     * @param string $endpoint Push endpoint name.
+     * @param array<string,mixed> $parameters Signed query parameters.
+     * @param string[] $expected_statuses Successful response statuses.
+     * @return array<string,mixed> Classified request result.
+     */
+    public function send_connection_request(string $method, string $endpoint, array $parameters, array $expected_statuses): array
+    {
+        return $this->send_control_request(
+            $this->connection_hmac_client,
+            $method,
+            $endpoint,
+            $parameters,
+            $expected_statuses
+        );
+    }
+
+    /**
+     * Sends one request authenticated for the created push session.
+     *
+     * @param string $method GET or POST.
+     * @param string $endpoint Push endpoint name.
+     * @param array<string,mixed> $parameters Signed query parameters.
+     * @param string[] $expected_statuses Successful response statuses.
+     * @return array<string,mixed> Classified request result.
+     */
+    public function send_push_session_request(string $method, string $endpoint, array $parameters, array $expected_statuses): array
+    {
+        if ($this->push_session_hmac_client === null) {
+            throw new LogicException('Cannot send a push session request before set_push_session_hmac_client().');
+        }
+        return $this->send_control_request(
+            $this->push_session_hmac_client,
+            $method,
+            $endpoint,
+            $parameters,
+            $expected_statuses
+        );
+    }
+
     /**
      * Sends one signed push request and decodes its JSON response.
      *
      * Push requests use a no-progress timeout rather than a total-transfer
      * deadline and refuse redirects so signatures are never replayed elsewhere.
      *
+     * @param Site_Export_HMAC_Client $hmac_client Signer for that route.
      * @param string $method GET or POST.
      * @param string $endpoint Protocol endpoint query value.
      * @param array<string,mixed> $parameters Endpoint-specific query parameters.
@@ -788,7 +848,13 @@ class MultipartPushStreamClient
      *
      * @throws InvalidArgumentException If the method is unsupported.
      */
-    public function send_push_request(string $method, string $endpoint, array $parameters, array $expected_statuses): array
+    private function send_control_request(
+        Site_Export_HMAC_Client $hmac_client,
+        string $method,
+        string $endpoint,
+        array $parameters,
+        array $expected_statuses
+    ): array
     {
         $method = strtoupper($method);
         if (!in_array($method, ['GET', 'POST'], true)) {
@@ -798,7 +864,7 @@ class MultipartPushStreamClient
             throw new InvalidArgumentException('Push requests require one or more string success statuses.');
         }
         $url = $this->endpoint_url($endpoint, $parameters);
-        $headers = $this->hmac_client->get_envelope_auth_headers($method, $url);
+        $headers = $hmac_client->get_envelope_auth_headers($method, $url);
         $lines = ['Accept: application/json', 'Expect:'];
         foreach ($headers as $name => $value) {
             $lines[] = $name . ': ' . $value;
@@ -1109,7 +1175,7 @@ class MultipartPushStreamClient
     private function endpoint_url(string $endpoint, array $parameters): string
     {
         $parameters = array_merge(['endpoint' => $endpoint], $parameters);
-        return $this->base_url . (strpos($this->base_url, '?') === false ? '?' : '&') . http_build_query($parameters, '', '&', PHP_QUERY_RFC3986);
+        return $this->base_url . ( strpos( $this->base_url, '?' ) === false ? '?' : '&' ) . http_build_query($parameters, '', '&', PHP_QUERY_RFC3986);
     }
 
     /**

@@ -17,6 +17,16 @@ messages, or pull-request descriptions.
 - **Commit** consumes work deletes and work files; it does not create or remove
   a push session.
 - **Remove** deletes a push directory in bounded calls.
+- The **WordPress route** is the normal exporter API route reached during
+  plugin loading. It serves pull operations only.
+- The **push route** creates a push session, receives work, reports status,
+  commits work, and removes work without booting WordPress.
+- The **connection secret** authenticates `push_create` at the push route.
+- The target-issued **push session secret** authenticates every later request
+  for one push session. It cannot create another push session.
+
+All five push operations use the push route. The WordPress route rejects the
+push namespace instead of serving any push operation as a fallback.
 
 ## PHP names
 
@@ -26,6 +36,8 @@ Use these names verbatim:
 | --- | --- |
 | Exception class and file | `Site_Export_Push_Exception`, `class-push-exception.php` |
 | Session class and file | `Site_Export_Push_Session`, `class-push-session.php` |
+| Push route entry point | `Site_Export_HTTP_Server::serve_push()` |
+| Load push connection secret | `Site_Export_HTTP_Server::load_push_connection_secret()` |
 | reprint directory | `$reprint_directory` |
 | Document root | `$docroot` |
 | Excluded paths | `$excluded_paths` |
@@ -43,7 +55,7 @@ Use these names verbatim:
 The public operations are `create()`, `open()`, `remove()`, and `commit()`.
 Use `get_push_session_id()` and `get_push_directory()` for their accessors.
 
-## Durable layout and JSON
+## Durable layout and metadata
 
 Every push directory is located at:
 
@@ -51,17 +63,26 @@ Every push directory is located at:
 <reprint-directory>/.reprint/push/<push-session-id>/
 ```
 
-It contains `push.json`, `push.lock`, optional `commit.json`, and `work/`. The
-work directory contains `files/`, optional `inflight.json` and
+It contains `push-metadata.php`, `push.lock`, optional `commit.json`, and
+`work/`. The work directory contains `files/`, optional `inflight.json` and
 `inflight.data`, `deletes`, and an optional private maintenance copy. `files/`
 is the only path-shaped work tree. The shared `.reprint/push/` directory contains
 `push-create.lock`, `commit-state`, `commit-state.lock`, and bounded removal
 tombstones named `.removing-<push-session-id>/`.
 
+The bundled push route reads
+`<reprint-directory>/.reprint/push-config.php`. This mode-0600 PHP file returns
+an array whose `connection_secret` value permits new push-session creation.
+Removing it blocks `push_create` without taking the per-session secrets away
+from push sessions which already exist.
+
 `push-create.lock` is the create/remove lock. Create and every bounded remove
 call acquire it non-blockingly. Remove holds it while inspecting and renaming
 the live push directory and while performing one tombstone cleanup step, so
 create cannot recreate the same push session until that cleanup finishes.
+The tombstone keeps `push-metadata.php` and `push.lock` until its other entries
+are gone, so every bounded remove request can authenticate and lock the same
+push session.
 
 `inflight.json` records the path and type of the one in-flight work value.
 File records use `preparing`, `receiving`, or `completing` and also contain
@@ -70,9 +91,10 @@ symlink records also contain `target_b64`. `inflight.data` contains in-flight
 file bytes, and its actual size is the receiver-confirmed cursor. Both paths
 are absent when no work is in flight.
 
-`push.json` has the keys
+`push-metadata.php` returns an array with the keys
 `push_session_id`, `docroot_b64`, `excluded_paths_b64`,
-and `work_deletes_complete`.
+`push_session_secret`, `maximum_part_bytes`, `maximum_commit_entries`, and
+`work_deletes_complete`.
 
 `commit.json` has the phases `deleting_files`,
 `installing_files`, and `complete`. Its cursor keys are
@@ -81,7 +103,7 @@ and `work_deletes_complete`.
 base64 text even where a key does not include a suffix. Its non-recoverable
 failure key is `non_recoverable_commit_failure`.
 
-These JSON records are unversioned while their schemas are still under
+These metadata records are unversioned while their schemas are still under
 development. There are no compatibility aliases or migration paths.
 
 ## Local push state
@@ -121,11 +143,13 @@ FileIndexProcessor cursor and the committed byte offset in
 output offsets, and the active byte offset in
 `deleted_directories_stack.jsonl`. The stack file is append-only; each entry
 links to the preceding active directory. The exclusions have a maximum of 100
-paths. `sender.json` phases are `creating`, `starting_plan`,
-`planning`, `pushing_paths`, `pushing_deletes`, `committing`,
+paths. `sender.json` phases are `creating`, `starting_plan`, `planning`,
+`pushing_paths`, `pushing_deletes`, `committing`,
 `saving_local_index_at_previous_push`, `completing`,
 `removing`, and `discarding_plan`. It stores the push session ID, selected
-path-list cursor, receiver part limit, and request-sizing state. The index diff
+path-list cursor, receiver part limit, push session secret, and request-sizing
+state. `sender.json` uses mode 0600 because it contains that session-scoped
+secret. The index diff
 completes before local paths are sent. The index copy after a successful commit
 has no separate copy cursor and is repeated after interruption. After the index
 is saved or the target confirms removal, the sender clears the PushPlan
@@ -146,7 +170,7 @@ Receiver-confirmed file and work-delete cursors remain receiver state. A newly
 opened sender reads them from `push_status`, while a successful upload retains
 them in memory for later steps in the same lifecycle. It does not copy them into
 `sender.json`.
-`push.json` remains the receiver-owned push identity and policy, while
+`push-metadata.php` remains the receiver-owned push identity and policy, while
 `commit.json` and `$commit_state` remain the receiver commit checkpoint.
 
 `PushFilesSender::start()` and `PushFilesSender::resume()` acquire
@@ -162,10 +186,9 @@ reports `complete`, `restart`, or `failed`.
 
 ## Files-push CLI names
 
-The low-level, files-only command is `files-push`. Its `target URL` is the
-exporter API URL, and its `local tree` is the canonical directory supplied by
-`--fs-root`. It requires `--secret=TOKEN`; `--force-http` is the explicit
-plain-HTTP opt-in.
+The low-level, files-only command is `files-push`. Its `target URL` is the push
+URL, and its `local tree` is the canonical directory supplied by `--fs-root`.
+It requires `--secret=TOKEN`; `--force-http` is the explicit plain-HTTP opt-in.
 
 The `pair key` identifies exactly one target URL and canonical local tree:
 
@@ -201,10 +224,13 @@ Use these names verbatim inside `PushFilesSender`:
 | Push stream client | `$push_stream_client`, `create_push_stream_client()` |
 | Push stream client options | `$push_stream_client_options` |
 | Request sizer options | `request_sizer_options`, `$request_sizer_options` |
-| Push request | `send_push_request()` |
+| Connection-authenticated request | `send_connection_request()` |
+| Push-session-authenticated request | `send_push_session_request()` |
+| Configure push session authentication | `set_push_session_hmac_client()` |
 | Open upload request stage | `$upload_request_stage`: `closed`, `sending_parts`, or `finishing` |
 | Whether the open request has sent parts | `MultipartPushStreamClient::has_sent_parts()` |
 | Create push session | `create_push_session()` |
+| Commit push | `commit_push()` |
 | Remove push session | `remove_push_session()` |
 | Upload next file chunk | `upload_next_file_chunk()` |
 | Upload next chunk of deleted paths | `upload_next_chunk_of_deleted_paths()` |
@@ -253,7 +279,11 @@ Use these names verbatim inside `PushPlan`:
 The work-upload endpoint is `push_upload` and its push-session parameter is
 `push_session_id`. Endpoint names and endpoint prefixes begin with `push_`.
 JSON responses use `push_session_id`, `receiving_work`, and
-`work_deletes_bytes`. Push-session failures are
+`work_deletes_bytes`. `push_create` uses the connection secret and returns
+`push_session_secret`. `push_upload`, `push_status`, `push_commit`, and
+`push_remove` use that push session secret at the same push route. Every commit
+request is idempotent, including the request which creates `commit.json`.
+Push-session failures are
 `lock_acquisition_failure`, `offset_gap`, `push_not_found`, `filesystem_error`,
 `commit_required`, `unexpected_docroot_mutation`, `corrupted_push_state`, and
 `same_device`. Authentication, authorization, and request-boundary failures

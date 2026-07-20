@@ -54,25 +54,29 @@ size. The secret travels in no URL and no body, so it never lands in an
 access log.
 
 Authentication does not grant write authority. Connection tokens are
-download-only by default, including tokens that predate push endpoints. Except
-for the bounded recovery case below, every `push_*` operation requires current
-push authorization before upload data is read, a push directory is created, or
-the document root changes; custom authentication uses the same gate.
+download-only by default, including tokens that predate push endpoints.
+`push_create` requires current push authorization, but it does not boot
+WordPress. The bundled push route reads the connection secret from a private
+PHP configuration file and authenticates the signed request itself.
 
-Revocation does not abandon durable recovery state. An authenticated caller
-may keep calling `push_commit` only when that push session already has a durable
-commit checkpoint. Those requests converge the already-started document-root
-mutation; they cannot upload more work, inspect or remove private work, or
-start commit for another push session. Other push operations return HTTP 403
-with `reason: "push_disabled"`. This keeps token rotation or a managed policy
-change from stranding a partial commit and its maintenance marker.
+`push_create` issues a random push session secret. Upload, status, commit, and
+remove requests use that secret at the same push route. The session secret
+cannot create another push session. The WordPress route accepts no push
+operation as a fallback.
 
-Personal consent stores only the current connection token's SHA-256
-fingerprint. Rotating the token therefore revokes push access. A hosting
-provider may override local consent by defining the boolean
+Revocation blocks new push sessions. It does not abandon a push session which
+already has its own secret. That session may still receive work, report status,
+commit, or be removed. A bad push can therefore stop WordPress from booting and
+a later `files-push` command can still create a fresh session and repair the
+site, as long as push access remains enabled.
+
+Personal consent stores the current connection token's SHA-256 fingerprint in
+WordPress and copies the token into the mode-0600 PHP configuration read by the
+push route. Rotating the token therefore revokes push access until the new
+token is granted access. A hosting provider may override local consent by defining the boolean
 `SITE_EXPORT_PUSH_ENABLED` constant before active plugins load or by setting
 the environment variable of the same name. Managed `true` enables push and
-managed `false` hard-disables push without abandoning durable commit recovery.
+managed `false` removes the configuration used to create new push sessions.
 
 ## Change detection: local machine compared against itself
 
@@ -103,8 +107,9 @@ the push plan.
 A push plan is an internal part of the sender lifecycle:
 
 1. `PushFilesSender::start()` enters `creating`. `push_create` returns at most
-   100 target exclusions, which the sender stores once in
-   `excluded_paths.json` after creating the active `plan/` directory.
+   100 target exclusions plus the push session secret. The sender stores them,
+   configures session authentication, and creates the active `plan/` directory
+   and `excluded_paths.json` before starting the plan.
 2. The sender starts one internal `PushPlan`. The plan copies the exclusions to
    `plan/excluded_paths.json`, then opens
    `plan/fresh_local_index.jsonl` and a `FileIndexProcessor`. Each `indexing`
@@ -176,10 +181,10 @@ request can resume from a durable checkpoint instead of repeating a delete.
 ## The push session
 
 `Site_Export_Push_Session` stores each session at
-`<reprint-directory>/.reprint/push/<push-session-id>/`. `push.json` is the
-push identity and policy plus whether the work-delete stream is complete.
-`commit.json` holds the bounded commit cursor. Both are atomically replaced
-and validated against the current schema.
+`<reprint-directory>/.reprint/push/<push-session-id>/`. `push-metadata.php`
+returns the push identity and policy array plus whether the work-delete stream
+is complete. `commit.json` holds the bounded commit cursor. Both are atomically
+replaced and validated against the current schema.
 
 `work/files/` contains completed work values only. A single `work/inflight.json`
 record identifies the value currently being received or completed, and
@@ -202,7 +207,7 @@ not removable; its next commit request resumes the durable cursor instead.
 
 ## Push HTTP operations
 
-The production exporter router exposes five authenticated push operations.
+The production push route exposes five authenticated push operations.
 Every request uses the envelope signature described above. `push_upload` passes
 `php://input` directly to the multipart processor instead of reading the
 complete request for authentication.
@@ -210,14 +215,15 @@ complete request for authentication.
 - `POST push_create` creates or reopens the caller's 32-character lowercase
   hexadecimal `push_session_id`. A successful response contains `status`,
   `push_session_id`, `max_part_bytes`, `post_max_bytes`, and
-  `excluded_paths_b64`. The two limits describe different dimensions: one
-  multipart part and the complete decoded request body. The endpoint enforces
-  the request-body limit while reading bounded fragments, including chunked
+  `excluded_paths_b64`, plus the target-issued `push_session_secret` used for
+  later requests. The two limits describe different dimensions: one multipart
+  part and the complete decoded request body. The endpoint enforces the
+  request-body limit while reading bounded fragments, including chunked
   requests without `Content-Length`. `excluded_paths_b64` is the normalized,
   sorted, immutable server policy stored for the push session; base64 preserves
-  arbitrary path bytes which JSON cannot represent directly. A sender
-  consuming this field must omit indexed paths equal to, below, or ancestors
-  of any advertised exclusion.
+  arbitrary path bytes which JSON cannot represent directly. A sender consuming
+  this field must omit indexed paths equal to, below, or ancestors of any
+  advertised exclusion.
 - `POST push_upload` accepts `multipart/mixed`. A successful response contains
   `status`, `push_session_id`, `changes_accepted`, and `last_change`. The last
   change is null for an empty request. Otherwise it contains `state`, `type`,
@@ -226,9 +232,10 @@ complete request for authentication.
   response; request memory does not grow with the number of parts.
 - `GET push_status` accepts an optional base64 `path_b64`. A successful
   response contains `status`, `push_session_id`, `phase`,
-  `work_deletes_bytes`, `work_deletes_complete`, and `path`. The path is null
-  when none was requested. Otherwise it contains `path_b64`, `state`, and
-  `accepted_bytes`; a non-missing path also contains `type`.
+  `work_deletes_bytes`, `work_deletes_complete`, `max_part_bytes`,
+  `post_max_bytes`, and `path`. The path is null when none was requested.
+  Otherwise it contains `path_b64`, `state`, and `accepted_bytes`; a
+  non-missing path also contains `type`.
 - `POST push_commit` performs one server-bounded commit call. A successful
   response contains `status`, `push_session_id`, `phase`,
   `send_next_request`, and `entries_processed`. The sender repeats it while
@@ -249,21 +256,18 @@ resets, empty responses, and malformed responses end the current sender run
 without changing request sizing. A later push command reconciles the receiver
 cursor before continuing.
 
-The WordPress plugin passes the platform-supplied `docroot` to push endpoints,
-defaulting to the web server's `DOCUMENT_ROOT`. A platform supplies the complete
-trusted API-options array through the early `site_export_api_options` filter; a
-direct embedder passes the same array to `_site_export_handle_api_request()`.
-The document-root path must resolve to an existing directory. `ABSPATH` remains
-the default only for pull endpoints because it may point at a separate shared
-WordPress core tree. Push work lives in a document-root-specific private
-directory beside the canonical document root unless server configuration
-supplies `reprint_directory`.
+The bundled push route reads the document root from the web server's
+`DOCUMENT_ROOT`. The path must resolve to an existing directory. Push work
+lives in a document-root-specific private directory beside that canonical
+document root. A custom standalone route passes its document root, reprint
+directory, and excluded paths directly to
+`Site_Export_HTTP_Server::serve_push()`.
 Configured reprint directories must remain outside the document root; the HTTP
 endpoints reject an inside path because they do not yet apply the indexing and
-web-access protections described below. The plugin always excludes its logical
-installed directory from push, including when that directory is a symlink to a
-physical target outside the document root. A platform hook or embedding router
-must choose its document root, reprint directory, and excluded paths as server
+web-access protections described below. The bundled route always excludes its
+logical installed directory from push, including when that directory is a
+symlink to a physical target outside the document root. A custom route must
+choose its document root, reprint directory, and excluded paths as server
 configuration; request parameters cannot select any of them.
 
 ## Local files sender
@@ -320,9 +324,10 @@ upload begins until both indexes have been consumed and the two path lists are
 stable.
 
 `sender.json` contains no copied receiver cursor. It stores the push session
-and phase, the PushPlan cursor, the next byte offset in
+and its secret, the phase, the PushPlan cursor, the next byte offset in
 `local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
-sizing state. Its phases are `creating`, `starting_plan`, `planning`,
+sizing state. The file uses mode 0600 because it contains the push session
+secret. Its phases are `creating`, `starting_plan`, `planning`,
 `pushing_paths`, `pushing_deletes`, `committing`,
 `saving_local_index_at_previous_push`, `completing`, `removing`, and
 `discarding_plan`.
@@ -455,11 +460,10 @@ Order:
 1. **Receive work, outside maintenance:** multipart requests write one bounded
    chunk at a time into `work/inflight.data` and move complete values into
    `work/files`. The site runs normally throughout receipt.
-2. **Maintenance on.** Commit writes the `.maintenance` file itself, and since
-   WordPress executes that file, ours whitelists reprint API requests
-   (`$upgrading = 0` for us, `time()` for everyone else). WordPress's own
+2. **Maintenance on.** Commit writes the `.maintenance` file itself. WordPress's
    rule that a `.maintenance` file older than 10 minutes is ignored stays
-   intact, so an interrupted commit can never leave the site down for good.
+   intact, so an interrupted commit cannot leave the site down for good. Push
+   requests use the standalone route and never execute this WordPress marker.
 3. **Commit:** consume `work/deletes`, then `work/files`, with the durable
    `commit.json` checkpoint written before each document-root mutation. The
    future database batch and symlink updates follow the same bounded cursor.
@@ -475,16 +479,39 @@ file after 10 minutes on its own, and the next commit request resumes from
 excluded from installs and deletes and reported as excluded in the summary.
 Updating reprint itself is a separate concern, never part of a sync.
 
-## Escape hatch: commit without booting WordPress
+## Push route
 
-Normally the endpoint runs through the WordPress boot because it is
-convenient. But a commit step can break that boot — a fatal in a partially
-committed plugin — so the same endpoint is also reachable as a standalone PHP file that
-never loads WordPress: it reads database credentials from `wp-config.php`
-directly and operates on the filesystem and database with reprint's own code.
-The driver falls back to it automatically when the normal route stops
-answering sensibly. This is what makes commit failures recoverable from the
-outside instead of requiring SSH.
+All five push operations use one standalone route. `push_create` authenticates
+with the connection secret. The other four operations load the push session
+secret from private metadata and authenticate with it. Endpoint dispatch still
+uses the existing `Site_Export_Push_Endpoints` methods; the route adds no second
+endpoint implementation.
+
+The bundled `push.php` loads the exporter runtime but not WordPress. It reads
+the document root from `DOCUMENT_ROOT`, derives a private sibling reprint
+directory, and excludes its own plugin directory from push. It never accepts a
+caller-selected document root, reprint directory, or excluded path.
+
+The connection secret lives in the mode-0600
+`<reprint-directory>/.reprint/push-config.php`. The file returns an array and
+prints nothing, so executing it through a PHP server does not send the secret.
+The bundled route reads this file only for `push_create`. Removing it disables
+new push sessions without breaking a created session.
+
+Each created session keeps its own secret in mode-0600 `push-metadata.php`.
+That file also returns an array without printing it. The sender stores its copy
+in the local pair's mode-0600 `sender.json` until the lifecycle ends. Neither
+secret appears in request URLs or request bodies.
+
+Sites using the default document root and reprint directory use the `push.php`
+URL shown in WordPress admin. A host which blocks direct PHP in the plugin
+directory, or which uses different server-owned paths, must expose
+`Site_Export_HTTP_Server::serve_push()` from another PHP route. That route must
+not load `wp-load.php`, theme code, or plugin code. It reads its connection
+secret from server configuration for `push_create`, and passes the document
+root, reprint directory, and excluded paths directly to `serve_push()`. The
+operator gives that standalone URL to `files-push`; it is not discovered
+through the WordPress route.
 
 ## Database diff (phase two)
 
@@ -548,9 +575,9 @@ Files first, database second, each PR small and stacked in this order:
    package (lite = serve-only build). Placed here because commit is the
    first piece that needs import-side code running on the remote.
 8. **Commit engine, files** — delete `work/deletes`, then rename values from
-   `work/files` into the document root with the whitelisted maintenance file
-   and resumable `commit.json` cursor.
-9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
+   `work/files` into the document root with the maintenance file and resumable
+   `commit.json` cursor.
+9. **Push route** — all push operations run without booting WordPress.
 10. **Row index and database diff** — the local row index, previously pushed
     rows, diff generation and URL rewrite, the commit batch.
 11. **`reprint files-push`** — the low-level, files-only caller that retains

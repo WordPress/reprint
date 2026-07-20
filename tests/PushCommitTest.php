@@ -816,7 +816,9 @@ final class PushCommitTest extends TestCase {
             $this->reprint_directory,
             $this->docroot,
             ['wp-content/plugins/reprint'],
-            $id
+            $id,
+            4194304,
+            256
         );
     }
 

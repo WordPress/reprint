@@ -60,7 +60,6 @@ final class Site_Export_Push_Session {
     public const ERROR_CORRUPTED_PUSH_STATE = 'corrupted_push_state';
     public const ERROR_SAME_DEVICE = 'same_device';
     public const ERROR_REQUEST_TOO_LARGE = 'request_too_large';
-    public const ERROR_PUSH_DISABLED = 'push_disabled';
 
     private const MAX_PATH_BYTES = 4096;
     private const MAX_METADATA_BYTES = 1048576;
@@ -74,6 +73,8 @@ final class Site_Export_Push_Session {
     private $push_session_id;
     /** @var list<string> */
     private $excluded_paths;
+    /** @var string|null */
+    private $expected_push_session_secret;
     /** @var string */
     private $push_directory;
     /** @var string */
@@ -87,7 +88,7 @@ final class Site_Export_Push_Session {
     /** @var string */
     private $work_deletes_path;
     /** @var string */
-    private $push_json_path;
+    private $push_metadata_path;
     /** @var string */
     private $commit_json_path;
     /** @var string */
@@ -124,11 +125,25 @@ final class Site_Export_Push_Session {
      *
      * @param list<string> $excluded_paths Document-root-relative paths which a push
      *                                      must never receive, delete, or replace.
+     * @param string|null $expected_push_session_secret Session secret already authenticated by the push route.
      */
-    private function __construct(string $reprint_directory, string $docroot, string $push_session_id, array $excluded_paths) {
+    private function __construct(
+        string $reprint_directory,
+        string $docroot,
+        string $push_session_id,
+        array $excluded_paths,
+        ?string $expected_push_session_secret = null
+    ) {
         $this->reprint_directory = rtrim($reprint_directory, '/');
         $this->docroot = $docroot === '/' ? '/' : rtrim($docroot, '/');
         $this->push_session_id = $push_session_id;
+        if (
+            $expected_push_session_secret !== null
+            && preg_match('/^[a-f0-9]{64}$/D', $expected_push_session_secret) !== 1
+        ) {
+            throw new InvalidArgumentException('Expected push session secret must be 64 lowercase hexadecimal characters.');
+        }
+        $this->expected_push_session_secret = $expected_push_session_secret;
         if ($reprint_directory === $this->docroot) {
             throw new InvalidArgumentException('The reprint directory must not be the document root itself.');
         }
@@ -141,7 +156,7 @@ final class Site_Export_Push_Session {
         }
         $this->excluded_paths = normalize_excluded_paths($excluded_paths);
         $this->push_directory = $this->reprint_directory . '/.reprint/push/' . $push_session_id;
-        $this->push_json_path = $this->push_directory . '/push.json';
+        $this->push_metadata_path = $this->push_directory . '/push-metadata.php';
         $this->commit_json_path = $this->push_directory . '/commit.json';
         $this->push_lock_path = $this->push_directory . '/push.lock';
         $this->work_dir = $this->push_directory . '/work';
@@ -171,10 +186,25 @@ final class Site_Export_Push_Session {
      * @param string $docroot Document-root directory receiving committed values.
      * @param list<string> $excluded_paths Document-root-relative paths which a push must preserve.
      * @param string $push_session_id Stable lowercase hexadecimal push session ID.
+     * @param int $maximum_part_bytes Maximum Content-Length accepted for one multipart part.
+     * @param int $maximum_commit_entries Maximum entries processed by one commit request.
      * @return self New or existing push-session handle.
      */
-    public static function create(string $reprint_directory, string $docroot, array $excluded_paths, string $push_session_id): self {
+    public static function create(
+        string $reprint_directory,
+        string $docroot,
+        array $excluded_paths,
+        string $push_session_id,
+        int $maximum_part_bytes,
+        int $maximum_commit_entries
+    ): self {
         self::require_push_session_id($push_session_id);
+        if ($maximum_part_bytes <= 0) {
+            throw new InvalidArgumentException('Maximum multipart part bytes must be greater than zero.');
+        }
+        if ($maximum_commit_entries <= 0) {
+            throw new InvalidArgumentException('Maximum commit entries must be greater than zero.');
+        }
         $reprint_directory = self::require_directory($reprint_directory, 'reprint directory', true);
         $docroot = self::require_directory($docroot, 'document root', false);
         $push_session = new self($reprint_directory, $docroot, $push_session_id, $excluded_paths);
@@ -208,10 +238,13 @@ final class Site_Export_Push_Session {
                 self::remove_tree($push_session->push_directory);
                 throw $exception;
             }
-            $push_session->write_json($push_session->push_json_path, [
+            $push_session->write_metadata($push_session->push_metadata_path, [
                 'push_session_id' => $push_session_id,
                 'docroot_b64' => base64_encode($docroot),
                 'excluded_paths_b64' => array_map('base64_encode', $push_session->excluded_paths),
+                'push_session_secret' => bin2hex(random_bytes(32)),
+                'maximum_part_bytes' => $maximum_part_bytes,
+                'maximum_commit_entries' => $maximum_commit_entries,
                 'work_deletes_complete' => false,
             ]);
             return $push_session;
@@ -233,14 +266,111 @@ final class Site_Export_Push_Session {
      * @param string $docroot Document-root directory.
      * @param string $push_session_id Lowercase hexadecimal push session ID.
      * @param list<string> $excluded_paths Document-root-relative paths which a push must preserve.
+     * @param string|null $expected_push_session_secret Session secret already authenticated by the push route.
      * @return self Push-session handle; the push session may prove missing or invalid
      *              when its first operation acquires the lock.
      */
-    public static function open(string $reprint_directory, string $docroot, string $push_session_id, array $excluded_paths): self {
+    public static function open(
+        string $reprint_directory,
+        string $docroot,
+        string $push_session_id,
+        array $excluded_paths,
+        ?string $expected_push_session_secret = null
+    ): self {
         self::require_push_session_id($push_session_id);
         $reprint_directory = self::require_directory($reprint_directory, 'reprint directory', false);
         $docroot = self::require_directory($docroot, 'document root', false);
-        return new self($reprint_directory, $docroot, $push_session_id, $excluded_paths);
+        return new self(
+            $reprint_directory,
+            $docroot,
+            $push_session_id,
+            $excluded_paths,
+            $expected_push_session_secret
+        );
+    }
+
+    /**
+     * Loads the private values needed by the push route.
+     *
+     * The route supplies the reprint directory and document root from server
+     * configuration. Excluded paths, endpoint limits, and the session-scoped
+     * secret come from the push metadata created by the authenticated
+     * `push_create` request. Reading occurs under the push lock. A removal
+     * tombstone keeps its metadata and lock until its other entries are gone,
+     * so later bounded remove requests can still authenticate.
+     *
+     * @param string $reprint_directory Durable private reprint directory.
+     * @param string $docroot Server-configured document-root directory.
+     * @param string $push_session_id Lowercase hexadecimal push session ID.
+     * @return array {
+     *     Configuration for one existing push session.
+     *
+     *     @type string       $push_session_secret    Session-scoped HMAC secret.
+     *     @type list<string> $excluded_paths         Stored excluded paths.
+     *     @type int          $maximum_part_bytes     Maximum multipart part bytes.
+     *     @type int          $maximum_commit_entries Maximum entries per commit request.
+     * }
+     * @phpstan-return array{push_session_secret:string,excluded_paths:list<string>,maximum_part_bytes:int,maximum_commit_entries:int}
+     */
+    public static function load_push_session_configuration(string $reprint_directory, string $docroot, string $push_session_id): array {
+        self::require_push_session_id($push_session_id);
+        $reprint_directory = self::require_directory($reprint_directory, 'reprint directory', false);
+        $docroot = self::require_directory($docroot, 'document root', false);
+        $push_session = new self($reprint_directory, $docroot, $push_session_id, []);
+        $push_directory_identity = $push_session->lstat_path($push_session->push_directory);
+        $push_metadata_path = $push_session->push_metadata_path;
+        $live_push_session = $push_directory_identity !== null;
+        if ($live_push_session) {
+            $lock = $push_session->acquire_push_lock();
+        } else {
+            $tombstone = $reprint_directory . '/.reprint/push/.removing-' . $push_session_id;
+            $tombstone_identity = $push_session->lstat_path($tombstone);
+            if ($tombstone_identity === null) {
+                throw new Site_Export_Push_Exception(self::ERROR_PUSH_NOT_FOUND, 'The push session does not exist: ' . $push_session_id . '.');
+            }
+            if ($tombstone_identity['type'] !== 'directory') {
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The push removal tombstone is not a real directory: ' . $tombstone . '.');
+            }
+            $push_metadata_path = $tombstone . '/push-metadata.php';
+            if ($push_session->lstat_path($push_metadata_path) === null) {
+                throw new Site_Export_Push_Exception(self::ERROR_PUSH_NOT_FOUND, 'The removed push session no longer has authentication state: ' . $push_session_id . '.');
+            }
+            $lock_path = $tombstone . '/push.lock';
+            $lock_identity = $push_session->lstat_path($lock_path);
+            if ($lock_identity === null || $lock_identity['type'] !== 'file') {
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'The push removal tombstone lock is missing or not regular: ' . $lock_path . '.');
+            }
+            $lock = @fopen($lock_path, 'r+b');
+            if ($lock === false) {
+                throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open the push removal tombstone lock.');
+            }
+            if (!flock($lock, LOCK_EX | LOCK_NB)) {
+                fclose($lock);
+                throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'Push removal cleanup is busy. Retry the request.');
+            }
+        }
+        try {
+            $push_metadata = $push_session->read_metadata($push_metadata_path);
+            $configuration = $push_session->decode_push_metadata($push_metadata);
+            if ($configuration['docroot'] !== $docroot) {
+                throw new Site_Export_Push_Exception(
+                    self::ERROR_CORRUPTED_PUSH_STATE,
+                    'Push metadata does not match the push route document root.'
+                );
+            }
+            if ($live_push_session) {
+                $push_session->require_same_device($push_session->work_files_directory, $docroot, 'receive', '');
+            }
+            return [
+                'push_session_secret' => $configuration['push_session_secret'],
+                'excluded_paths' => $configuration['excluded_paths'],
+                'maximum_part_bytes' => $configuration['maximum_part_bytes'],
+                'maximum_commit_entries' => $configuration['maximum_commit_entries'],
+            ];
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
     }
 
     /**
@@ -255,13 +385,26 @@ final class Site_Export_Push_Session {
      * @param string $docroot Currently configured document-root directory.
      * @param string $push_session_id Lowercase hexadecimal push session ID.
      * @param list<string> $excluded_paths Currently configured excluded paths.
+     * @param string|null $expected_push_session_secret Session secret already authenticated by the push route.
      * @return bool True when the push directory and any remove tombstone are gone.
      */
-    public static function remove(string $reprint_directory, string $docroot, string $push_session_id, array $excluded_paths): bool {
+    public static function remove(
+        string $reprint_directory,
+        string $docroot,
+        string $push_session_id,
+        array $excluded_paths,
+        ?string $expected_push_session_secret = null
+    ): bool {
         self::require_push_session_id($push_session_id);
         $reprint_directory = self::require_directory($reprint_directory, 'reprint directory', false);
         $docroot = self::require_directory($docroot, 'document root', false);
-        return ( new self($reprint_directory, $docroot, $push_session_id, $excluded_paths) )->remove_push_directory();
+        return ( new self(
+            $reprint_directory,
+            $docroot,
+            $push_session_id,
+            $excluded_paths,
+            $expected_push_session_secret
+        ) )->remove_push_directory();
     }
 
     /**
@@ -570,7 +713,7 @@ final class Site_Export_Push_Session {
                     $reported_path = ['path_b64' => base64_encode($path), 'state' => 'missing', 'accepted_bytes' => 0];
                 }
             }
-            $commit_state = $this->read_json($this->commit_json_path);
+            $commit_state = $this->read_metadata($this->commit_json_path);
             return [
                 'push_session_id' => $this->push_session_id,
                 'phase' => $commit_state === null ? 'receiving_work' : $commit_state['phase'],
@@ -597,9 +740,6 @@ final class Site_Export_Push_Session {
      * retry the same bounded step from the durable state.
      *
      * @param int $maximum_entries Maximum bounded commit entries to process in this call.
-     * @param string|null $commit_start_denial_detail When present, commit may
-     *     resume a durable checkpoint but may not create one. The string
-     *     describes why starting commit is denied.
      * @return array {
      *     Current bounded commit result.
      *
@@ -610,25 +750,13 @@ final class Site_Export_Push_Session {
      * }
      * @phpstan-return array{phase:'deleting_files'|'installing_files'|'complete',send_next_request:bool,entries_processed:int}
      */
-    public function commit(int $maximum_entries = 1, ?string $commit_start_denial_detail = null): array {
+    public function commit(int $maximum_entries = 1): array {
         if ($maximum_entries <= 0) {
             throw new InvalidArgumentException('The commit entry limit must be greater than zero.');
         }
-        if ($commit_start_denial_detail === '') {
-            throw new InvalidArgumentException('The commit start denial detail must be a non-empty string.');
-        }
-        return $this->with_push_lock(function () use ($maximum_entries, $commit_start_denial_detail): array {
-            $commit_state = $this->read_json($this->commit_json_path);
+        return $this->with_push_lock(function () use ($maximum_entries): array {
+            $commit_state = $this->read_metadata($this->commit_json_path);
             if ($commit_state === null) {
-                // The authorization decision and checkpoint creation share the
-                // push lock so a denied request cannot race another lifecycle
-                // operation into starting a new commit.
-                if ($commit_start_denial_detail !== null) {
-                    throw new Site_Export_Push_Exception(
-                        self::ERROR_PUSH_DISABLED,
-                        $commit_start_denial_detail
-                    );
-                }
                 if (!$this->work_deletes_are_complete()) {
                     throw new InvalidArgumentException('Commit requires an explicit completed delete upload declaration.');
                 }
@@ -658,7 +786,7 @@ final class Site_Export_Push_Session {
                     'current_work_files_descendant' => null,
                     'commit_cursor' => [],
                 ];
-                $this->write_json($this->commit_json_path, $commit_state);
+                $this->write_metadata($this->commit_json_path, $commit_state);
             }
             if (isset($commit_state['non_recoverable_commit_failure'])) {
                 throw new Site_Export_Push_Exception(
@@ -691,13 +819,7 @@ final class Site_Export_Push_Session {
                 throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'A foreign WordPress maintenance marker already exists. Retry after its owner removes it.');
             }
             $maintenance_contents = "<?php\n"
-                . "\$reprint_push_request = (isset(\$_GET['reprint-api']) || isset(\$_GET['site-export-api']))\n"
-                . "    && isset(\$_GET['endpoint']) && is_string(\$_GET['endpoint'])\n"
-                . "    && strpos(\$_GET['endpoint'], 'push_') === 0;\n"
-                . "if (!\$reprint_push_request) {\n"
-                . "    \$upgrading = " . time() . ";\n"
-                . "}\n"
-                . "unset(\$reprint_push_request);\n"
+                . "\$upgrading = " . time() . ";\n"
                 . "// reprint-push-session:" . $this->push_session_id . "\n";
             $this->write_atomic_file($this->maintenance_copy_path, $maintenance_contents, 0600);
             $this->write_atomic_file($maintenance_docroot_path, $maintenance_contents, 0644);
@@ -716,7 +838,7 @@ final class Site_Export_Push_Session {
                         'detail' => $exception->getMessage(),
                         'context' => $exception->get_context(),
                     ];
-                    $this->write_json($this->commit_json_path, $commit_state);
+                    $this->write_metadata($this->commit_json_path, $commit_state);
                 }
                 throw $exception;
             }
@@ -731,7 +853,7 @@ final class Site_Export_Push_Session {
     /**
      * Advances bounded cleanup of an upload-only or completed push directory.
      *
-     * A push session which has begun an incomplete commit remains recovery state and
+     * A push session which has begun an incomplete commit remains recoverable state and
      * cannot be removed. An eligible push session is atomically renamed to a
      * private tombstone before entries are removed, so a lost response or later
      * request resumes cleanup without making the old push session addressable again.
@@ -749,7 +871,11 @@ final class Site_Export_Push_Session {
             }
             $lock = $this->acquire_push_lock();
             try {
-                $commit_state = $this->read_json($this->commit_json_path);
+                if ($this->expected_push_session_secret !== null) {
+                    $configuration = $this->decode_push_metadata($this->read_metadata($this->push_metadata_path));
+                    $this->assert_expected_push_session_secret($configuration['push_session_secret']);
+                }
+                $commit_state = $this->read_metadata($this->commit_json_path);
                 if ($commit_state !== null && $commit_state['phase'] !== 'complete') {
                     throw new Site_Export_Push_Exception(self::ERROR_COMMIT_REQUIRED, 'Document-root mutation has begun. Resume commit instead of removing this push session.');
                 }
@@ -897,7 +1023,7 @@ final class Site_Export_Push_Session {
      * @phpstan-return InFlightWork|null
      */
     private function read_inflight(): ?array {
-        return $this->read_json($this->work_inflight_path);
+        return $this->read_metadata($this->work_inflight_path);
     }
 
     /**
@@ -1020,14 +1146,14 @@ final class Site_Export_Push_Session {
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not discard in-flight file data for restart.');
             }
             $inflight = ['phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'file', 'total_bytes' => $total_bytes];
-            $this->write_json($this->work_inflight_path, $inflight);
+            $this->write_metadata($this->work_inflight_path, $inflight);
             $handle = @fopen($this->work_inflight_data_path, 'wb');
             if ($handle === false) {
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not create in-flight file data for ' . base64_encode($path) . '.');
             }
             fclose($handle);
             $inflight['phase'] = 'receiving';
-            $this->write_json($this->work_inflight_path, $inflight);
+            $this->write_metadata($this->work_inflight_path, $inflight);
             $actual_bytes = 0;
         } else {
             if ($inflight['type'] !== 'file' || $inflight['phase'] !== 'receiving' || $inflight['total_bytes'] !== $total_bytes) {
@@ -1057,7 +1183,7 @@ final class Site_Export_Push_Session {
         $accepted_bytes = $actual_bytes + $received;
         if ($accepted_bytes === $total_bytes) {
             $inflight['phase'] = 'completing';
-            $this->write_json($this->work_inflight_path, $inflight);
+            $this->write_metadata($this->work_inflight_path, $inflight);
             $this->ensure_private_parent($complete_path);
             if (($existing = $this->lstat_path($complete_path)) !== null) {
                 $this->remove_work_path($complete_path);
@@ -1114,7 +1240,7 @@ final class Site_Export_Push_Session {
             return;
         }
         $inflight = ['phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'directory'];
-        $this->write_json($this->work_inflight_path, $inflight);
+        $this->write_metadata($this->work_inflight_path, $inflight);
         if ($this->lstat_path($this->work_inflight_data_path) !== null && !@unlink($this->work_inflight_data_path)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not discard stale in-flight file data.');
         }
@@ -1122,7 +1248,7 @@ final class Site_Export_Push_Session {
             $this->remove_work_path($target);
         }
         $inflight['phase'] = 'completing';
-        $this->write_json($this->work_inflight_path, $inflight);
+        $this->write_metadata($this->work_inflight_path, $inflight);
         $this->ensure_private_parent($target);
         if (!is_dir($target) && !@mkdir($target, 0777)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not stage explicit empty directory ' . base64_encode($path) . '.');
@@ -1184,7 +1310,7 @@ final class Site_Export_Push_Session {
             return;
         }
         $inflight = ['phase' => 'preparing', 'path_b64' => base64_encode($path), 'type' => 'symlink', 'target_b64' => base64_encode($target_value)];
-        $this->write_json($this->work_inflight_path, $inflight);
+        $this->write_metadata($this->work_inflight_path, $inflight);
         if ($this->lstat_path($this->work_inflight_data_path) !== null && !@unlink($this->work_inflight_data_path)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not discard stale in-flight file data.');
         }
@@ -1192,7 +1318,7 @@ final class Site_Export_Push_Session {
             $this->remove_work_path($target);
         }
         $inflight['phase'] = 'completing';
-        $this->write_json($this->work_inflight_path, $inflight);
+        $this->write_metadata($this->work_inflight_path, $inflight);
         $this->ensure_private_parent($target);
         if (!@symlink($target_value, $target)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not stage symlink ' . base64_encode($path) . '.');
@@ -1324,12 +1450,12 @@ final class Site_Export_Push_Session {
             fclose($handle);
         }
         if ($complete) {
-            $push_metadata = $this->read_json($this->push_json_path);
+            $push_metadata = $this->read_metadata($this->push_metadata_path);
             if (!is_array($push_metadata)) {
                 throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata is missing while completing the delete upload.');
             }
             $push_metadata['work_deletes_complete'] = true;
-            $this->write_json($this->push_json_path, $push_metadata);
+            $this->write_metadata($this->push_metadata_path, $push_metadata);
         }
         $this->current_change = ['state' => $complete ? 'complete' : 'partial', 'type' => 'delete-list', 'accepted_bytes' => $stored_bytes];
     }
@@ -1363,7 +1489,7 @@ final class Site_Export_Push_Session {
             $delete_size = $this->file_size($this->work_deletes_path);
             if ($work_deletes_byte_offset === $delete_size) {
                 $commit_state['phase'] = 'installing_files';
-                $this->write_json($this->commit_json_path, $commit_state);
+                $this->write_metadata($this->commit_json_path, $commit_state);
                 return;
             }
             if ($work_deletes_byte_offset < 0 || $work_deletes_byte_offset > $delete_size) {
@@ -1393,7 +1519,7 @@ final class Site_Export_Push_Session {
                         }
                         $this->assert_path_does_not_overlap_excluded_paths($path);
                         $commit_state['current_delete_path'] = base64_encode($path);
-                        $this->write_json($this->commit_json_path, $commit_state);
+                        $this->write_metadata($this->commit_json_path, $commit_state);
                         return;
                     }
                     $path .= $byte;
@@ -1426,7 +1552,7 @@ final class Site_Export_Push_Session {
         }
         $commit_state['work_deletes_byte_offset'] += strlen($path) + 1;
         $commit_state['current_delete_path'] = null;
-        $this->write_json($this->commit_json_path, $commit_state);
+        $this->write_metadata($this->commit_json_path, $commit_state);
     }
 
     /**
@@ -1532,7 +1658,7 @@ final class Site_Export_Push_Session {
                 }
                 $commit_state['current_work_files_descendant'] = null;
                 array_pop($commit_state['commit_cursor']);
-                $this->write_json($this->commit_json_path, $commit_state);
+                $this->write_metadata($this->commit_json_path, $commit_state);
                 return;
             }
 
@@ -1547,7 +1673,7 @@ final class Site_Export_Push_Session {
                 $this->throw_unexpected_docroot_mutation('install', $path, $path, $expected_type, [$expected_type], $docroot_identity);
             }
             $commit_state['current_work_files_descendant'] = null;
-            $this->write_json($this->commit_json_path, $commit_state);
+            $this->write_metadata($this->commit_json_path, $commit_state);
 
             return;
         }
@@ -1586,7 +1712,7 @@ final class Site_Export_Push_Session {
                     throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not remove the private maintenance ownership marker.');
                 }
                 $commit_state['phase'] = 'complete';
-                $this->write_json($this->commit_json_path, $commit_state);
+                $this->write_metadata($this->commit_json_path, $commit_state);
                 $this->release_commit_state();
                 return;
             }
@@ -1596,13 +1722,13 @@ final class Site_Export_Push_Session {
                 $this->throw_unexpected_docroot_mutation('install', $parent_path, $parent_path, 'directory', ['directory'], $docroot_identity);
             }
             $commit_state['current_work_files_descendant'] = ['path_b64' => base64_encode($parent_path), 'expected_type' => 'directory'];
-            $this->write_json($this->commit_json_path, $commit_state);
+            $this->write_metadata($this->commit_json_path, $commit_state);
             if (!@rmdir($work_directory_path)) {
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not consume empty work ancestor directory ' . base64_encode($parent_path) . '.');
             }
             $commit_state['current_work_files_descendant'] = null;
             array_pop($commit_state['commit_cursor']);
-            $this->write_json($this->commit_json_path, $commit_state);
+            $this->write_metadata($this->commit_json_path, $commit_state);
             return;
         }
 
@@ -1616,7 +1742,7 @@ final class Site_Export_Push_Session {
         if ($identity['type'] === 'directory' && $this->first_directory_entry($work_path) !== null) {
             $this->assert_path_is_not_excluded($path);
             $commit_state['commit_cursor'][] = ['component_b64' => base64_encode($entry)];
-            $this->write_json($this->commit_json_path, $commit_state);
+            $this->write_metadata($this->commit_json_path, $commit_state);
             $requested_path = $this->first_work_files_descendant_path($work_path, $path);
             $parent_device = $this->require_docroot_ancestors($path, 'install', 'directory');
             $docroot_value_path = $this->docroot_path($path);
@@ -1687,7 +1813,7 @@ final class Site_Export_Push_Session {
         }
         if (!$recovering) {
             $commit_state['current_work_files_descendant'] = ['path_b64' => base64_encode($path), 'expected_type' => $expected_type];
-            $this->write_json($this->commit_json_path, $commit_state);
+            $this->write_metadata($this->commit_json_path, $commit_state);
         }
         error_clear_last();
         if (!@rename($work_path, $docroot_value_path)) {
@@ -1707,7 +1833,7 @@ final class Site_Export_Push_Session {
             );
         }
         $commit_state['current_work_files_descendant'] = null;
-        $this->write_json($this->commit_json_path, $commit_state);
+        $this->write_metadata($this->commit_json_path, $commit_state);
     }
 
 
@@ -2054,7 +2180,7 @@ final class Site_Export_Push_Session {
                     throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Required push directory is missing or not real: ' . $directory . '.');
                 }
             }
-            foreach ([$this->push_json_path, $this->push_lock_path, $this->work_deletes_path] as $file) {
+            foreach ([$this->push_metadata_path, $this->push_lock_path, $this->work_deletes_path] as $file) {
                 $identity = $this->lstat_path($file);
                 if ($identity === null || $identity['type'] !== 'file') {
                     throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Required push file is missing or not regular: ' . $file . '.');
@@ -2083,7 +2209,44 @@ final class Site_Export_Push_Session {
      * and retain the same-device guarantee under which the push was made.
      */
     private function assert_push_configuration(): void {
-        $push_metadata = $this->read_json($this->push_json_path);
+        $push_metadata = $this->read_metadata($this->push_metadata_path);
+        $configuration = $this->decode_push_metadata($push_metadata);
+        $this->assert_expected_push_session_secret($configuration['push_session_secret']);
+        if ($configuration['docroot'] !== $this->docroot || $configuration['excluded_paths'] !== $this->excluded_paths) {
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata does not match the current push configuration.');
+        }
+        $this->require_same_device($this->work_files_directory, $this->docroot, 'receive', '');
+    }
+
+    /**
+     * Confirms that the route-authenticated secret still belongs to this session.
+     *
+     * Another request may remove and recreate the same public push session ID
+     * after route authentication but before this operation acquires its lock.
+     * Treat the replacement as absent so an old session secret cannot inspect
+     * or mutate the new session.
+     *
+     * @param string $stored_push_session_secret Secret read under the session lock.
+     */
+    private function assert_expected_push_session_secret(string $stored_push_session_secret): void {
+        if (
+            $this->expected_push_session_secret !== null
+            && !hash_equals($stored_push_session_secret, $this->expected_push_session_secret)
+        ) {
+            throw new Site_Export_Push_Exception(
+                self::ERROR_PUSH_NOT_FOUND,
+                'The authenticated push session no longer exists.'
+            );
+        }
+    }
+
+    /**
+     * Decodes the immutable push configuration stored in push-metadata.php.
+     *
+     * @param array<string,mixed>|null $push_metadata Bounded push metadata.
+     * @return array{docroot:string,excluded_paths:list<string>,push_session_secret:string,maximum_part_bytes:int,maximum_commit_entries:int}
+     */
+    private function decode_push_metadata(?array $push_metadata): array {
         if (!is_array($push_metadata) || ( $push_metadata['push_session_id'] ?? null ) !== $this->push_session_id
             || !is_bool($push_metadata['work_deletes_complete'] ?? null)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata has an invalid push session ID or work-deletes completion state.');
@@ -2091,33 +2254,51 @@ final class Site_Export_Push_Session {
         if (!is_string($push_metadata['docroot_b64'] ?? null) || !is_array($push_metadata['excluded_paths_b64'] ?? null)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata does not contain the configured document root and excluded paths.');
         }
+        $push_session_secret = $push_metadata['push_session_secret'] ?? null;
+        if (!is_string($push_session_secret) || preg_match('/^[a-f0-9]{64}$/D', $push_session_secret) !== 1) {
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata does not contain a valid push session secret.');
+        }
+        $maximum_part_bytes = $push_metadata['maximum_part_bytes'] ?? null;
+        $maximum_commit_entries = $push_metadata['maximum_commit_entries'] ?? null;
+        if (!is_int($maximum_part_bytes) || $maximum_part_bytes <= 0) {
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata does not contain a positive maximum multipart part size.');
+        }
+        if (!is_int($maximum_commit_entries) || $maximum_commit_entries <= 0) {
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata does not contain a positive maximum commit entry count.');
+        }
         $docroot = base64_decode($push_metadata['docroot_b64'], true);
-        $excluded = [];
+        if (!is_string($docroot)) {
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata contains an invalid document root.');
+        }
+        $excluded_paths = [];
         foreach ($push_metadata['excluded_paths_b64'] as $encoded) {
             $decoded = is_string($encoded) ? base64_decode($encoded, true) : false;
             if (!is_string($decoded)) {
                 throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata contains an invalid excluded path.');
             }
-            $excluded[] = $decoded;
+            $excluded_paths[] = $decoded;
         }
-        if ($docroot !== $this->docroot || $excluded !== $this->excluded_paths) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata does not match the current push configuration.');
-        }
-        $this->require_same_device($this->work_files_directory, $this->docroot, 'receive', '');
+        return [
+            'docroot' => $docroot,
+            'excluded_paths' => $excluded_paths,
+            'push_session_secret' => $push_session_secret,
+            'maximum_part_bytes' => $maximum_part_bytes,
+            'maximum_commit_entries' => $maximum_commit_entries,
+        ];
     }
 
     /**
-     * Reads a bounded JSON object from private push metadata.
+     * Reads one bounded private metadata array.
      *
-     * Missing files return null so callers can distinguish optional checkpoints
-     * from malformed ones. Existing files must be regular, within the metadata
-     * size ceiling, and decode to a JSON object.
+     * `push-metadata.php` returns the receiver-owned push identity and policy.
+     * Commit checkpoints and in-flight work remain JSON. Missing files return
+     * null so callers can distinguish optional checkpoints from malformed ones.
      *
      * @param string $path Absolute metadata file path.
-     * @return array<string,mixed>|null Decoded caller-specific object, or null
+     * @return array<string,mixed>|null Decoded caller-specific metadata, or null
      *                                  if absent.
      */
-    private function read_json(string $path): ?array {
+    private function read_metadata(string $path): ?array {
         $identity = $this->lstat_path($path);
         if ($identity === null) {
             return null;
@@ -2125,23 +2306,44 @@ final class Site_Export_Push_Session {
         if ($identity['type'] !== 'file' || $identity['size'] > self::MAX_METADATA_BYTES) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Metadata file ' . $path . ' is not a bounded regular file.');
         }
+        if (substr($path, -4) === '.php') {
+            // This array changes between requests. Do not let an opcode cache retain
+            // an earlier delete-completion state or a removed session's secret.
+            if (function_exists('opcache_invalidate')) {
+                @opcache_invalidate($path, true);
+            }
+            ob_start();
+            try {
+                $metadata = ( static function (string $metadata_path) {
+                    return @include $metadata_path;
+                } )($path);
+            } catch (Throwable $exception) {
+                ob_end_clean();
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Metadata file ' . $path . ' does not return a PHP array without output.');
+            }
+            $output = ob_get_clean();
+            if ($output !== '' || !is_array($metadata)) {
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Metadata file ' . $path . ' does not return a PHP array without output.');
+            }
+            return $metadata;
+        }
         $contents = @file_get_contents($path);
         if (!is_string($contents)) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read metadata file ' . $path . '.');
         }
-        $decoded = json_decode($contents, true);
-        if (!is_array($decoded)) {
+        $metadata = json_decode($contents, true);
+        if (!is_array($metadata)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Metadata file ' . $path . ' does not contain a JSON object.');
         }
-        return $decoded;
+        return $metadata;
     }
 
     /**
-     * Atomically writes one bounded JSON metadata object.
+     * Atomically writes one bounded private metadata array.
      *
-     * JSON is encoded without slash escaping because metadata contains many
-     * filesystem paths already excluded by base64 where necessary. The encoded
-     * object must fit the same ceiling enforced by read_json().
+     * PHP metadata returns its array without printing it, so a direct request
+     * which executes the file receives no secret bytes. Checkpoints and in-flight
+     * work use JSON. Both formats use the same atomic 0600 writer.
      *
      * @param string $path Absolute metadata file path.
      * @param array $value {
@@ -2150,6 +2352,9 @@ final class Site_Export_Push_Session {
      *     @type string $push_session_id Push session ID. Present only in push metadata.
      *     @type string $docroot_b64 Base64-encoded document root. Present only in push metadata.
      *     @type string[] $excluded_paths_b64 Base64-encoded excluded paths. Present only in push metadata.
+     *     @type string $push_session_secret Session-scoped HMAC secret. Present only in push metadata.
+     *     @type int $maximum_part_bytes Maximum multipart part bytes. Present only in push metadata.
+     *     @type int $maximum_commit_entries Maximum entries per commit request. Present only in push metadata.
      *     @type bool $work_deletes_complete Delete-list completion. Present only in push metadata.
      *     @type string $phase In-flight or commit phase. Absent from push metadata.
      *     @type string $path_b64 In-flight work path. Present only in in-flight work.
@@ -2162,15 +2367,20 @@ final class Site_Export_Push_Session {
      *     @type array $commit_cursor Bounded tree cursor. Present only in a commit checkpoint.
      *     @type array $non_recoverable_commit_failure Persisted failure. Present only after a non-recoverable commit failure.
      * }
-     * @phpstan-param array{push_session_id:string,docroot_b64:string,excluded_paths_b64:list<string>,work_deletes_complete:bool}|InFlightWork|CommitState $value
+     * @phpstan-param array{push_session_id:string,docroot_b64:string,excluded_paths_b64:list<string>,push_session_secret:string,maximum_part_bytes:int,maximum_commit_entries:int,work_deletes_complete:bool}|InFlightWork|CommitState $value
      */
-    private function write_json(string $path, array $value): void {
-        $contents = json_encode($value, JSON_UNESCAPED_SLASHES);
-        if (!is_string($contents)) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Could not encode bounded push metadata.');
+    private function write_metadata(string $path, array $value): void {
+        if (substr($path, -4) === '.php') {
+            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- This is the PHP metadata serializer, not debug output.
+            $contents = "<?php\nreturn " . var_export($value, true) . ";\n";
+        } else {
+            $contents = json_encode($value, JSON_UNESCAPED_SLASHES);
+            if (!is_string($contents)) {
+                throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Could not encode bounded metadata.');
+            }
         }
         if (strlen($contents) > self::MAX_METADATA_BYTES) {
-            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Encoded push metadata exceeds the maximum of ' . self::MAX_METADATA_BYTES . ' bytes.');
+            throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Encoded metadata exceeds the maximum of ' . self::MAX_METADATA_BYTES . ' bytes.');
         }
         $this->write_atomic_file($path, $contents, 0600);
     }
@@ -2302,7 +2512,7 @@ final class Site_Export_Push_Session {
      * @return bool True once a delete-list part declared completion.
      */
     private function work_deletes_are_complete(): bool {
-        $push_metadata = $this->read_json($this->push_json_path);
+        $push_metadata = $this->read_metadata($this->push_metadata_path);
         if (!is_array($push_metadata) || !is_bool($push_metadata['work_deletes_complete'] ?? null)) {
             throw new Site_Export_Push_Exception(self::ERROR_CORRUPTED_PUSH_STATE, 'Push metadata has no valid work-deletes completion state.');
         }
@@ -2697,6 +2907,10 @@ final class Site_Export_Push_Session {
             if (!flock($lock, LOCK_EX | LOCK_NB)) {
                 throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'Push removal cleanup is busy. Retry remove.');
             }
+            if ($this->expected_push_session_secret !== null) {
+                $configuration = $this->decode_push_metadata($this->read_metadata($tombstone . '/push-metadata.php'));
+                $this->assert_expected_push_session_secret($configuration['push_session_secret']);
+            }
             // The push directory rename is durable before commit ownership is released.
             // Retry that release while the tombstone still preserves push state.
             $this->release_commit_state();
@@ -2709,7 +2923,12 @@ final class Site_Export_Push_Session {
             flock($lock, LOCK_UN);
             fclose($lock);
         }
-        if (!@unlink($push_lock_path) || !@rmdir($tombstone)) {
+        $push_metadata_path = $tombstone . '/push-metadata.php';
+        if (
+            ( is_file($push_metadata_path) && !@unlink($push_metadata_path) )
+            || !@unlink($push_lock_path)
+            || !@rmdir($tombstone)
+        ) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not remove the completed push removal tombstone.');
         }
         return true;
@@ -2765,10 +2984,10 @@ final class Site_Export_Push_Session {
      *
      * @param string $directory_path Absolute directory currently being drained.
      * @param int $remaining_entries Remaining unlink/rmdir operations allowed.
-     * @param bool $preserve_lock Whether to keep a child named `lock`.
+     * @param bool $preserve_control_files Whether to keep `push-metadata.php` and `push.lock`.
      * @return bool True when this directory is empty enough to remove.
      */
-    private static function remove_directory_entries(string $directory_path, int &$remaining_entries, bool $preserve_lock = false): bool {
+    private static function remove_directory_entries(string $directory_path, int &$remaining_entries, bool $preserve_control_files = false): bool {
         $handle = @opendir($directory_path);
         if ($handle === false) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not read push removal directory: ' . $directory_path . '.');
@@ -2779,7 +2998,11 @@ final class Site_Export_Push_Session {
                 if ($entry === false) {
                     break;
                 }
-                if ($entry === '.' || $entry === '..' || ( $preserve_lock && $entry === 'push.lock' )) {
+                if (
+                    $entry === '.'
+                    || $entry === '..'
+                    || ( $preserve_control_files && in_array($entry, ['push-metadata.php', 'push.lock'], true) )
+                ) {
                     continue;
                 }
                 if ($remaining_entries === 0) {

@@ -49,17 +49,17 @@
  * process starts from the preceding durable boundary and reads
  * receiver-confirmed work before sending more data.
  *
- * A new sender calls `push_create` to learn target-owned exclusions before
- * starting PushPlan. The plan builds the fresh local index and diffs it against
- * the index at the previous push, one bounded step at a time. After planning
- * completes, local files, symlinks, and empty directories stream through
- * multipart requests. The raw deletion list follows, and repeated `push_commit`
- * calls let the target install the work in bounded steps. A confirmed commit
- * enters another phase which saves the fresh local index as the local index at
- * the previous push through a swap file. Index completion, plan completion,
- * local-index saving, and plan discard each have a separate durable phase. A
- * stopped process therefore repeats only an idempotent boundary action rather
- * than a group of unrelated transitions.
+ * A new sender calls `push_create` through the push route to learn target-owned
+ * exclusions and receive a push session secret. The plan builds the fresh
+ * local index and diffs it against the index at the previous push, one bounded
+ * step at a time. After planning completes, local files, symlinks, empty
+ * directories, the raw deletion list, and repeated `push_commit` requests use
+ * the same route with that session secret. A confirmed commit enters another
+ * phase which saves the fresh local index as the local index at the previous
+ * push through a swap file. Index completion, plan completion, local-index
+ * saving, and plan discard each have a separate durable phase. A stopped
+ * process therefore repeats only an idempotent boundary action rather than a
+ * group of unrelated transitions.
  *
  * sender.json owns the top-level phase and the cursor returned by
  * PushPlan. PushFilesSender stores that cursor after every completed planning
@@ -116,7 +116,7 @@
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index_at_previous_push'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index_at_previous_push'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,max_part_bytes:int|null,push_session_secret:string|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
@@ -228,7 +228,7 @@ final class PushFilesSender
      *
      *     @type string                  $docroot                Required local document-root directory.
      *     @type string                  $push_state_directory    Required local push state directory.
-     *     @type string                  $base_url                Required exporter API URL.
+     *     @type string                  $base_url                Required push URL.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
      *     @type bool                    $allow_http              Explicit plain-HTTP opt-in. Default false.
      *     @type int|float|string        $chunk_bytes             Maximum bytes read from one local file. Default 4 MiB.
@@ -262,6 +262,7 @@ final class PushFilesSender
                 'push_plan_cursor' => null,
                 'local_paths_to_push_byte_offset' => 0,
                 'max_part_bytes' => null,
+                'push_session_secret' => null,
                 'request_sizer_state' => $sender->push_stream_client->get_request_sizer_state(),
             ];
             $sender->store_state($sender->state);
@@ -524,14 +525,14 @@ final class PushFilesSender
      */
     private function create_push_session(): void
     {
-        $request_result = $this->push_stream_client->send_push_request('POST', 'push_create', [
+        $request_result = $this->push_stream_client->send_connection_request('POST', 'push_create', [
             'push_session_id' => $this->state['push_session_id'],
         ], ['created']);
         if ($this->handle_request_failure($request_result)) {
             return;
         }
 
-        /** @var array{max_part_bytes:int,post_max_bytes:?int,excluded_paths_b64:list<string>} $response */
+        /** @var array{max_part_bytes:int,post_max_bytes:?int,excluded_paths_b64:list<string>,push_session_secret:mixed} $response */
         $response = $request_result['response'];
         if (count($response['excluded_paths_b64']) > 100) {
             $this->fail(
@@ -547,12 +548,21 @@ final class PushFilesSender
                 return;
             }
         }
+        $push_session_secret = $response['push_session_secret'] ?? null;
+        if (!is_string($push_session_secret) || preg_match('/^[a-f0-9]{64}$/D', $push_session_secret) !== 1) {
+            $this->fail('unexpected_response', 'push_create did not return a valid push_session_secret.');
+            return;
+        }
+        $this->push_stream_client->set_push_session_hmac_client(
+            new Site_Export_HMAC_Client($push_session_secret)
+        );
         $this->create_plan_directory();
         $this->store_excluded_paths($response['excluded_paths_b64']);
 
         $this->push_stream_client->set_max_part_bytes($response['max_part_bytes']);
         $this->push_stream_client->apply_reported_limits([$response['post_max_bytes']]);
         $this->state['max_part_bytes'] = $response['max_part_bytes'];
+        $this->state['push_session_secret'] = $push_session_secret;
         $this->state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         $this->state['phase'] = 'starting_plan';
         $this->store_state($this->state);
@@ -705,7 +715,7 @@ final class PushFilesSender
         } elseif ($this->receiver_confirmed_file_byte_offset !== null) {
             $file_byte_offset = $this->receiver_confirmed_file_byte_offset;
         } else {
-            $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
+            $request_result = $this->push_stream_client->send_push_session_request('GET', 'push_status', [
                 'push_session_id' => $this->state['push_session_id'],
                 'path_b64' => $local_path_to_push['path_b64'],
             ], ['accepted']);
@@ -938,7 +948,7 @@ final class PushFilesSender
                 // Without a cached position, ask how much of the list the target accepted.
                 // The same call then sends one part so even a one-step process makes progress.
                 if ($this->receiver_confirmed_deleted_paths_byte_offset === null) {
-                    $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
+                    $request_result = $this->push_stream_client->send_push_session_request('GET', 'push_status', [
                         'push_session_id' => $this->state['push_session_id'],
                     ], ['accepted']);
                     if ($this->handle_request_failure($request_result)) {
@@ -1163,16 +1173,18 @@ final class PushFilesSender
      */
     private function commit_push(): void
     {
-        $request_result = $this->push_stream_client->send_push_request('POST', 'push_commit', [
+        $request_result = $this->push_stream_client->send_push_session_request('POST', 'push_commit', [
             'push_session_id' => $this->state['push_session_id'],
         ], ['accepted']);
         if ($this->handle_request_failure($request_result)) {
             return;
         }
-        /** @var array{send_next_request:bool} $response */
         $response = $request_result['response'];
-
-        if ($response['send_next_request']) {
+        if ( ( $response['send_next_request'] ?? null ) === true ) {
+            return;
+        }
+        if ( ( $response['send_next_request'] ?? null ) !== false || ( $response['phase'] ?? null ) !== 'complete' ) {
+            $this->fail('unexpected_response', 'push_commit returned an invalid completion state.');
             return;
         }
         $this->state['phase'] = 'saving_local_index_at_previous_push';
@@ -1240,7 +1252,7 @@ final class PushFilesSender
      */
     private function remove_push_session(): void
     {
-        $request_result = $this->push_stream_client->send_push_request('POST', 'push_remove', [
+        $request_result = $this->push_stream_client->send_push_session_request('POST', 'push_remove', [
             'push_session_id' => $this->state['push_session_id'],
         ], ['accepted']);
         if ($this->handle_request_failure($request_result)) {
@@ -1325,6 +1337,11 @@ final class PushFilesSender
         $push_stream_client = new MultipartPushStreamClient($push_stream_client_options);
         if ($state !== null && $state['max_part_bytes'] !== null) {
             $push_stream_client->set_max_part_bytes($state['max_part_bytes']);
+        }
+        if ($state !== null && is_string($state['push_session_secret'] ?? null)) {
+            $push_stream_client->set_push_session_hmac_client(
+                new Site_Export_HMAC_Client($state['push_session_secret'])
+            );
         }
         return $push_stream_client;
     }
@@ -1530,6 +1547,13 @@ final class PushFilesSender
             throw new RuntimeException('Failed to encode active state.', 0, $exception);
         }
         $temporary_path = $this->state_path . '.tmp';
+        if (file_put_contents($temporary_path, '') !== 0) {
+            throw new RuntimeException('Failed to create temporary active state: ' . $temporary_path);
+        }
+        if (!chmod($temporary_path, 0600)) {
+            @unlink($temporary_path);
+            throw new RuntimeException('Failed to protect active state: ' . $temporary_path);
+        }
         if (file_put_contents($temporary_path, $json) !== strlen($json)) {
             throw new RuntimeException('Failed to write active state: ' . $temporary_path);
         }

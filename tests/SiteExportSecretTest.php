@@ -15,7 +15,6 @@ if (!defined('SITE_EXPORT_PLUGIN_DIR')) {
 if (!defined('SITE_EXPORT_SECRET_FILE')) {
     define('SITE_EXPORT_SECRET_FILE', SITE_EXPORT_PLUGIN_DIR . 'secret.php');
 }
-
 $GLOBALS['site_export_test_options'] = [];
 $GLOBALS['site_export_registered_settings'] = [];
 $GLOBALS['site_export_settings_errors'] = [];
@@ -85,6 +84,14 @@ if (!function_exists('add_filter')) {
 if (!function_exists('plugin_basename')) {
     function plugin_basename(string $file): string {
         return basename($file);
+    }
+}
+
+if (!function_exists('plugin_dir_url')) {
+    // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- WordPress test stub.
+    function plugin_dir_url(string $file): string {
+        unset($file);
+        return 'https://example.test/wp-content/plugins/site-export/';
     }
 }
 
@@ -202,6 +209,9 @@ final class SiteExportSecretTest extends TestCase
     /** @var string|false */
     private $original_push_enabled_environment;
 
+    /** @var string */
+    private $push_config_file = '';
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -219,7 +229,9 @@ final class SiteExportSecretTest extends TestCase
         $GLOBALS['site_export_test_options'] = [];
         $GLOBALS['site_export_registered_settings'] = [];
         $GLOBALS['site_export_settings_errors'] = [];
-        $_SERVER = [];
+        $_SERVER = [
+            'DOCUMENT_ROOT' => rtrim(SITE_EXPORT_PLUGIN_DIR, '/\\'),
+        ];
         $_FILES = [];
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Test resets request globals.
         $_POST = [];
@@ -228,12 +240,25 @@ final class SiteExportSecretTest extends TestCase
         if (file_exists(SITE_EXPORT_SECRET_FILE)) {
             unlink(SITE_EXPORT_SECRET_FILE);
         }
+        $push_config_file = _site_export_get_push_config_file();
+        $this->assertIsString($push_config_file);
+        $this->push_config_file = $push_config_file;
+        if (file_exists($this->push_config_file)) {
+            unlink($this->push_config_file);
+        }
     }
 
     protected function tearDown(): void
     {
         if (file_exists(SITE_EXPORT_SECRET_FILE)) {
             unlink(SITE_EXPORT_SECRET_FILE);
+        }
+        if ($this->push_config_file !== '' && file_exists($this->push_config_file)) {
+            unlink($this->push_config_file);
+        }
+        if ($this->push_config_file !== '') {
+            @rmdir(dirname($this->push_config_file));
+            @rmdir(dirname(dirname($this->push_config_file)));
         }
 
         if (is_dir(SITE_EXPORT_PLUGIN_DIR)) {
@@ -319,6 +344,7 @@ final class SiteExportSecretTest extends TestCase
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
 
         putenv('SITE_EXPORT_PUSH_ENABLED=true');
+        $this->assertTrue(_site_export_sync_managed_push_config());
         $this->assertTrue(_site_export_is_push_authorized());
 
         $this->assertTrue(_site_export_update_push_authorization(true));
@@ -416,6 +442,32 @@ final class SiteExportSecretTest extends TestCase
         $this->assertTrue(_site_export_is_push_authorized());
     }
 
+    public function testPushAccessWritesPrivatePhpConfigurationForStandaloneRoute(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+
+        $this->assertTrue(_site_export_update_push_authorization(true));
+
+        $this->assertFileExists($this->push_config_file);
+        $this->assertSame(0600, fileperms($this->push_config_file) & 0777);
+        ob_start();
+        $configuration = include $this->push_config_file;
+        $output = ob_get_clean();
+        $this->assertSame('', $output);
+        $this->assertSame(['connection_secret' => 'current-token'], $configuration);
+    }
+
+    public function testDisablingPushRemovesStandaloneRouteConfiguration(): void
+    {
+        $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
+        $this->assertTrue(_site_export_update_push_authorization(true));
+
+        $this->assertTrue(_site_export_update_push_authorization(false));
+
+        $this->assertFileDoesNotExist($this->push_config_file);
+        $this->assertFalse(_site_export_is_push_authorized());
+    }
+
     public function testDownloadOnlyAdminCopyAndPushAccessForm(): void
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
@@ -439,12 +491,19 @@ final class SiteExportSecretTest extends TestCase
 
         $this->assertStringContainsString('<strong>Connected for downloads and push.</strong>', $html);
         $this->assertStringContainsString('name="site_export_push_enabled" value="1" checked', $html);
+        $this->assertStringContainsString('<h2>Push endpoint</h2>', $html);
+        $this->assertStringContainsString(
+            'https://example.test/wp-content/plugins/site-export/push.php',
+            $html
+        );
+        $this->assertStringContainsString('It remains available when WordPress cannot boot.', $html);
     }
 
     public function testManagedAdminCopyIsReadOnlyAndShowsEffectiveState(): void
     {
         $GLOBALS['site_export_test_options'][SITE_EXPORT_SECRET_OPTION] = 'current-token';
         putenv('SITE_EXPORT_PUSH_ENABLED=true');
+        $this->assertTrue(_site_export_sync_managed_push_config());
 
         $html = $this->renderAdminPage();
 

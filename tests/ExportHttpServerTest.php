@@ -119,16 +119,15 @@ final class ExportHttpServerTest extends TestCase
             is_callable([$server, 'is_push_endpoint']),
             'The HTTP server must expose its push endpoint classification.'
         );
-
         foreach (['push_create', 'push_upload', 'push_status', 'push_commit', 'push_remove'] as $endpoint) {
             $this->assertTrue($server->is_push_endpoint($endpoint), $endpoint);
         }
-        foreach (['preflight', 'file_index', 'unknown'] as $endpoint) {
+        foreach (['preflight', 'file_index', 'push_future', 'unknown'] as $endpoint) {
             $this->assertFalse($server->is_push_endpoint($endpoint), $endpoint);
         }
     }
 
-    public function testDefaultHandlersMatchPushEndpointMethodRegistry(): void
+    public function testDefaultHandlersRegisterEveryPushOperationOnce(): void
     {
         $root = sys_get_temp_dir() . '/export-http-server-' . bin2hex(random_bytes(6));
         $docroot = $root . '/docroot';
@@ -147,6 +146,7 @@ final class ExportHttpServerTest extends TestCase
             $handlers_property = new ReflectionProperty(Site_Export_HTTP_Server::class, 'handlers');
             $handlers_property->setAccessible(true);
             $handlers = $handlers_property->getValue($server);
+            $this->assertIsArray($handlers);
             $registered_push_endpoint_methods = [];
             foreach ($handlers as $endpoint => $handler) {
                 if (strpos($endpoint, 'push_') !== 0) {
@@ -156,7 +156,6 @@ final class ExportHttpServerTest extends TestCase
                 $this->assertInstanceOf(Site_Export_Push_Endpoints::class, $handler[0]);
                 $registered_push_endpoint_methods[$endpoint] = $handler[1];
             }
-
             $this->assertSame([
                 'push_create' => 'create',
                 'push_upload' => 'upload',

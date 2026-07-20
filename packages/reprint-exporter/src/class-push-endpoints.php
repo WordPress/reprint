@@ -43,7 +43,7 @@ final class Site_Export_Push_Endpoints {
     private $maximum_commit_entries;
 
     /** @var string|null */
-    private $commit_start_denial_detail;
+    private $expected_push_session_secret;
 
     /** @var int|null */
     private $post_max_bytes;
@@ -66,9 +66,8 @@ final class Site_Export_Push_Endpoints {
      *         accepted for one multipart part. Default 4 MiB.
      *     @type int|float|string $maximum_commit_entries Maximum entries one
      *         commit request may process. Default 256.
-     *     @type string $commit_start_denial_detail When present, starting commit
-     *         returns `push_disabled` with this detail. A commit with a durable
-     *         checkpoint remains recoverable.
+     *     @type string $expected_push_session_secret Session secret authenticated
+     *         by the push route. Session creation omits it.
      *     @type int|float|string|null $post_max_bytes Decoded request-body
      *         limit enforced and reported to senders. Defaults to PHP's
      *         post_max_size; null means PHP reports no positive limit.
@@ -79,13 +78,13 @@ final class Site_Export_Push_Endpoints {
      *     excluded_paths?:mixed,
      *     maximum_part_bytes?:mixed,
      *     maximum_commit_entries?:mixed,
-     *     commit_start_denial_detail?:mixed,
+     *     expected_push_session_secret?:mixed,
      *     post_max_bytes?:mixed
      * } $options
      *
      * @throws InvalidArgumentException If required configuration is absent, a
-     *     present numeric limit is not positive, or a commit-start denial detail
-     *     is not a non-empty string.
+     *     present numeric limit is not positive, or the expected push session
+     *     secret is malformed.
      */
     public function __construct(array $options) {
         $reprint_directory = $options['reprint_directory'] ?? null;
@@ -162,12 +161,15 @@ final class Site_Export_Push_Endpoints {
         $this->excluded_paths = $excluded_paths;
         $this->maximum_part_bytes = (int) $maximum_part_bytes;
         $this->maximum_commit_entries = (int) $maximum_commit_entries;
-        $this->commit_start_denial_detail = null;
-        if (array_key_exists('commit_start_denial_detail', $options)) {
-            if (!is_string($options['commit_start_denial_detail']) || $options['commit_start_denial_detail'] === '') {
-                throw new InvalidArgumentException('commit_start_denial_detail must be a non-empty string.');
+        $this->expected_push_session_secret = null;
+        if (array_key_exists('expected_push_session_secret', $options)) {
+            if (
+                !is_string($options['expected_push_session_secret'])
+                || preg_match('/^[a-f0-9]{64}$/D', $options['expected_push_session_secret']) !== 1
+            ) {
+                throw new InvalidArgumentException('expected_push_session_secret must be 64 lowercase hexadecimal characters.');
             }
-            $this->commit_start_denial_detail = $options['commit_start_denial_detail'];
+            $this->expected_push_session_secret = $options['expected_push_session_secret'];
         }
     }
 
@@ -186,6 +188,7 @@ final class Site_Export_Push_Endpoints {
      * - `max_part_bytes`: the maximum multipart-part Content-Length.
      * - `post_max_bytes`: the decoded request-body limit, or null.
      * - `excluded_paths_b64`: the stored excluded paths in base64.
+     * - `push_session_secret`: the session-scoped HMAC secret for later requests.
      *
      * @param array $config {
      *     Create request parameters.
@@ -197,22 +200,30 @@ final class Site_Export_Push_Endpoints {
     public function create(array $config): void {
         try {
             $this->assert_request_method('POST');
-            $push_session_id = $this->read_push_session_id($config);
+            $push_session_id = self::read_push_session_id($config);
             Site_Export_Push_Session::create(
                 $this->reprint_directory,
                 $this->docroot,
                 $this->excluded_paths,
+                $push_session_id,
+                $this->maximum_part_bytes,
+                $this->maximum_commit_entries
+            );
+            $push_session_configuration = Site_Export_Push_Session::load_push_session_configuration(
+                $this->reprint_directory,
+                $this->docroot,
                 $push_session_id
             );
-            $this->respond(200, [
+            self::emit_response(200, [
                 'status' => 'created',
                 'push_session_id' => $push_session_id,
-                'max_part_bytes' => $this->maximum_part_bytes,
+                'max_part_bytes' => $push_session_configuration['maximum_part_bytes'],
                 'post_max_bytes' => $this->post_max_bytes,
-                'excluded_paths_b64' => array_map('base64_encode', $this->excluded_paths),
+                'excluded_paths_b64' => array_map('base64_encode', $push_session_configuration['excluded_paths']),
+                'push_session_secret' => $push_session_configuration['push_session_secret'],
             ]);
         } catch (Throwable $exception) {
-            $this->respond_to_failure($exception);
+            self::emit_failure($exception, $this->post_max_bytes);
         }
     }
 
@@ -248,7 +259,7 @@ final class Site_Export_Push_Endpoints {
         $upload_open = false;
         try {
             $this->assert_request_method('POST');
-            $push_session_id = $this->read_push_session_id($config);
+            $push_session_id = self::read_push_session_id($config);
             $content_type = (string) ( $_SERVER['CONTENT_TYPE'] ?? '' );
             $boundary = Site_Export_Multipart_Processor::boundary_from_content_type($content_type);
             $declared_request_bytes = $_SERVER['CONTENT_LENGTH'] ?? null;
@@ -257,7 +268,7 @@ final class Site_Export_Push_Endpoints {
                 && is_numeric($declared_request_bytes)
                 && (int) $declared_request_bytes > $this->post_max_bytes
             ) {
-                $this->respond(413, [
+                self::emit_response(413, [
                     'status' => 'rejected',
                     'reason' => 'request_too_large',
                     'detail' => 'The decoded request body declares ' . (int) $declared_request_bytes
@@ -277,7 +288,8 @@ final class Site_Export_Push_Endpoints {
                 $this->reprint_directory,
                 $this->docroot,
                 $push_session_id,
-                $this->excluded_paths
+                $this->excluded_paths,
+                $this->expected_push_session_secret
             );
             $push_session->accept_upload(
                 $input,
@@ -306,7 +318,7 @@ final class Site_Export_Push_Endpoints {
             $upload_open = false;
             fclose($input);
             $input = null;
-            $this->respond(200, [
+            self::emit_response(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
                 'changes_accepted' => $changes_accepted,
@@ -319,7 +331,7 @@ final class Site_Export_Push_Endpoints {
             if (is_resource($input)) {
                 fclose($input);
             }
-            $this->respond_to_failure($exception);
+            self::emit_failure($exception, $this->post_max_bytes);
         }
     }
 
@@ -338,6 +350,8 @@ final class Site_Export_Push_Endpoints {
      *   `complete`.
      * - `work_deletes_bytes`: receiver-confirmed delete-list bytes.
      * - `work_deletes_complete`: whether the sender closed the delete list.
+     * - `max_part_bytes`: the session's maximum multipart-part Content-Length.
+     * - `post_max_bytes`: the decoded request-body limit on this route, or null.
      * - `path`: null when no path was requested. Otherwise it contains
      *   `path_b64`, `state`, and `accepted_bytes`; non-missing paths also have
      *   `type`.
@@ -354,7 +368,7 @@ final class Site_Export_Push_Endpoints {
     public function status(array $config): void {
         try {
             $this->assert_request_method('GET');
-            $push_session_id = $this->read_push_session_id($config);
+            $push_session_id = self::read_push_session_id($config);
             $path = null;
             if (array_key_exists('path_b64', $config)) {
                 if (!is_string($config['path_b64'])) {
@@ -369,7 +383,8 @@ final class Site_Export_Push_Endpoints {
                 $this->reprint_directory,
                 $this->docroot,
                 $push_session_id,
-                $this->excluded_paths
+                $this->excluded_paths,
+                $this->expected_push_session_secret
             );
             $push_status = $push_session->get_status($path);
             $path_status = null;
@@ -383,16 +398,18 @@ final class Site_Export_Push_Endpoints {
                 }
                 $path_status['accepted_bytes'] = $push_status['path']['accepted_bytes'];
             }
-            $this->respond(200, [
+            self::emit_response(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
                 'phase' => $push_status['phase'],
                 'work_deletes_bytes' => $push_status['work_deletes_bytes'],
                 'work_deletes_complete' => $push_status['work_deletes_complete'],
+                'max_part_bytes' => $this->maximum_part_bytes,
+                'post_max_bytes' => $this->post_max_bytes,
                 'path' => $path_status,
             ]);
         } catch (Throwable $exception) {
-            $this->respond_to_failure($exception);
+            self::emit_failure($exception, $this->post_max_bytes);
         }
     }
 
@@ -417,18 +434,16 @@ final class Site_Export_Push_Endpoints {
     public function commit(array $config): void {
         try {
             $this->assert_request_method('POST');
-            $push_session_id = $this->read_push_session_id($config);
+            $push_session_id = self::read_push_session_id($config);
             $push_session = Site_Export_Push_Session::open(
                 $this->reprint_directory,
                 $this->docroot,
                 $push_session_id,
-                $this->excluded_paths
+                $this->excluded_paths,
+                $this->expected_push_session_secret
             );
-            $commit = $push_session->commit(
-                $this->maximum_commit_entries,
-                $this->commit_start_denial_detail
-            );
-            $this->respond(200, [
+            $commit = $push_session->commit($this->maximum_commit_entries);
+            self::emit_response(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
                 'phase' => $commit['phase'],
@@ -436,19 +451,7 @@ final class Site_Export_Push_Endpoints {
                 'entries_processed' => $commit['entries_processed'],
             ]);
         } catch (Throwable $exception) {
-            if (
-                $this->commit_start_denial_detail !== null
-                && $exception instanceof Site_Export_Push_Exception
-                && $exception->get_error_code() === Site_Export_Push_Session::ERROR_PUSH_NOT_FOUND
-            ) {
-                $this->respond(403, [
-                    'status' => 'rejected',
-                    'reason' => Site_Export_Push_Session::ERROR_PUSH_DISABLED,
-                    'detail' => $this->commit_start_denial_detail,
-                ]);
-                return;
-            }
-            $this->respond_to_failure($exception);
+            self::emit_failure($exception, $this->post_max_bytes);
         }
     }
 
@@ -471,20 +474,21 @@ final class Site_Export_Push_Endpoints {
     public function remove(array $config): void {
         try {
             $this->assert_request_method('POST');
-            $push_session_id = $this->read_push_session_id($config);
+            $push_session_id = self::read_push_session_id($config);
             $remove_complete = Site_Export_Push_Session::remove(
                 $this->reprint_directory,
                 $this->docroot,
                 $push_session_id,
-                $this->excluded_paths
+                $this->excluded_paths,
+                $this->expected_push_session_secret
             );
-            $this->respond(200, [
+            self::emit_response(200, [
                 'status' => 'accepted',
                 'push_session_id' => $push_session_id,
                 'removed' => $remove_complete,
             ]);
         } catch (Throwable $exception) {
-            $this->respond_to_failure($exception);
+            self::emit_failure($exception, $this->post_max_bytes);
         }
     }
 
@@ -521,7 +525,7 @@ final class Site_Export_Push_Endpoints {
      *
      * @throws InvalidArgumentException If `push_session_id` is not a string.
      */
-    private function read_push_session_id(array $config): string {
+    public static function read_push_session_id(array $config): string {
         $push_session_id = $config['push_session_id'] ?? null;
         if (!is_string($push_session_id)) {
             throw new InvalidArgumentException('push_session_id must be a string.');
@@ -530,7 +534,7 @@ final class Site_Export_Push_Endpoints {
     }
 
     /**
-     * Maps a push exception onto its stable protocol reason and HTTP status.
+     * Maps a push failure onto its stable protocol reason and HTTP status.
      *
      * The response owns its public fields instead of copying an exception's
      * internal context. A streamed request-size rejection deliberately exposes
@@ -538,16 +542,19 @@ final class Site_Export_Push_Endpoints {
      * receives `invalid_request`; unexpected failures receive
      * `filesystem_error` without exposing a PHP trace.
      *
-     * @param Throwable $exception Failure raised while handling an endpoint.
+     * The push route uses this same mapping before or during endpoint dispatch,
+     * so a failure has one wire representation.
+     *
+     * @param Throwable $exception Failure raised while handling a push request.
+     * @param int|null  $post_max_bytes Target request-body limit included with
+     *                                  request_too_large failures.
      */
-    private function respond_to_failure(Throwable $exception): void {
+    public static function emit_failure(Throwable $exception, ?int $post_max_bytes = null): void {
         if ($exception instanceof Site_Export_Push_Exception) {
             $reason = $exception->get_error_code();
             $http_code = 409;
             if ($reason === Site_Export_Push_Session::ERROR_PUSH_NOT_FOUND) {
                 $http_code = 404;
-            } elseif ($reason === Site_Export_Push_Session::ERROR_PUSH_DISABLED) {
-                $http_code = 403;
             } elseif ($reason === Site_Export_Push_Session::ERROR_LOCK_ACQUISITION_FAILURE) {
                 $http_code = 423;
             } elseif ($reason === Site_Export_Push_Session::ERROR_REQUEST_TOO_LARGE) {
@@ -568,23 +575,23 @@ final class Site_Export_Push_Endpoints {
                 if (is_int($context['observed_request_body_bytes'] ?? null)) {
                     $response['observed_request_body_bytes'] = $context['observed_request_body_bytes'];
                 }
-                $response['post_max_bytes'] = $this->post_max_bytes;
+                $response['post_max_bytes'] = $post_max_bytes;
             }
-            $this->respond($http_code, $response);
+            self::emit_response($http_code, $response);
             return;
         }
         if (
             $exception instanceof InvalidArgumentException
             || $exception instanceof RuntimeException
         ) {
-            $this->respond(400, [
+            self::emit_response(400, [
                 'status' => 'rejected',
                 'reason' => 'invalid_request',
                 'detail' => $exception->getMessage(),
             ]);
             return;
         }
-        $this->respond(500, [
+        self::emit_response(500, [
             'status' => 'rejected',
             'reason' => Site_Export_Push_Session::ERROR_FILESYSTEM,
             'detail' => 'The push endpoint failed while processing the request.',
@@ -592,14 +599,14 @@ final class Site_Export_Push_Endpoints {
     }
 
     /**
-     * Emits one complete JSON protocol response.
+     * Emits one complete push-protocol JSON response.
      *
      * @param int $http_code HTTP status code.
      * @param array $body Exact endpoint-specific response object whose keys
      *                    are documented by the calling endpoint.
      * @phpstan-param array<string,mixed> $body
      */
-    private function respond(int $http_code, array $body): void {
+    public static function emit_response(int $http_code, array $body): void {
         http_response_code($http_code);
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');

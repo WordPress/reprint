@@ -188,6 +188,213 @@ final class Site_Export_HTTP_Server {
     }
 
     /**
+     * Authenticates and dispatches one push request without loading WordPress.
+     *
+     * Session creation uses the connection secret supplied by server
+     * configuration. Every later request uses the secret stored in that push
+     * session's private metadata. A created session therefore remains usable
+     * when WordPress cannot boot or new push sessions have been disabled.
+     *
+     * @param array $options {
+     *     Trusted push-route configuration.
+     *
+     *     @type callable $authenticate Optional push_create authentication.
+     *         When absent, connection_secret authenticates the request.
+     *     @type string $connection_secret Optional secret required by
+     *         push_create when authenticate is absent.
+     *     @type string $reprint_directory Private reprint directory. Defaults
+     *         to a document-root-specific sibling.
+     *     @type string $docroot Required document-root directory.
+     *     @type list<string> $excluded_paths Document-root-relative paths which
+     *         push must preserve. Default empty.
+     *     @type int|float|string $maximum_part_bytes Maximum Content-Length
+     *         accepted for one multipart part. Default 4 MiB.
+     *     @type int|float|string $maximum_commit_entries Maximum entries one
+     *         commit request may process. Default 256.
+     * }
+     * @phpstan-param array{authenticate?:mixed,connection_secret?:mixed,reprint_directory?:mixed,docroot?:mixed,excluded_paths?:mixed,maximum_part_bytes?:mixed,maximum_commit_entries?:mixed} $options
+     */
+    public static function serve_push(array $options): void {
+        if (!class_exists('Site_Export_Push_Endpoints', false)) {
+            require_once __DIR__ . '/class-push-endpoints.php';
+        }
+
+        // The HMAC authenticates the exact raw request target without
+        // loading the WordPress nonce, slashing, or sanitization helpers.
+        // phpcs:disable WordPress.Security.NonceVerification,WordPress.Security.ValidatedSanitizedInput
+        $endpoint = $_GET['endpoint'] ?? null;
+        if (!is_string($endpoint) || !self::is_push_endpoint($endpoint)) {
+            Site_Export_Push_Endpoints::emit_response(404, [
+                'status' => 'rejected',
+                'reason' => 'invalid_request',
+                'detail' => 'The push route accepts push_create, push_upload, push_status, push_commit, and push_remove.',
+            ]);
+            return;
+        }
+
+        $connection_secret = $options['connection_secret'] ?? null;
+        $reprint_directory = $options['reprint_directory'] ?? null;
+        $docroot = $options['docroot'] ?? null;
+        if (!is_string($docroot) || $docroot === '') {
+            Site_Export_Push_Endpoints::emit_response(503, [
+                'status' => 'rejected',
+                'reason' => 'not_configured',
+                'detail' => 'The push route requires docroot to name an existing directory; observed ' . json_encode($docroot) . '.',
+            ]);
+            return;
+        }
+        $canonical_docroot = realpath($docroot);
+        if ($canonical_docroot === false || !is_dir($canonical_docroot)) {
+            Site_Export_Push_Endpoints::emit_response(503, [
+                'status' => 'rejected',
+                'reason' => 'not_configured',
+                'detail' => 'The push route requires docroot to name an existing directory; observed ' . json_encode($docroot) . '.',
+            ]);
+            return;
+        }
+        $docroot = $canonical_docroot === '/' ? '/' : rtrim($canonical_docroot, '/\\');
+        if ($reprint_directory === null) {
+            $reprint_directory = self::default_reprint_directory($docroot);
+        }
+        if (!is_string($reprint_directory) || $reprint_directory === '') {
+            Site_Export_Push_Endpoints::emit_response(503, [
+                'status' => 'rejected',
+                'reason' => 'not_configured',
+                'detail' => 'The push route requires reprint_directory to be a non-empty string; observed ' . json_encode($reprint_directory) . '.',
+            ]);
+            return;
+        }
+        $options['docroot'] = $docroot;
+        $options['reprint_directory'] = $reprint_directory;
+        if (!array_key_exists('excluded_paths', $options)) {
+            $options['excluded_paths'] = [];
+        }
+
+        $request_method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
+        $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
+        $authentication_secret = null;
+        if ($endpoint === 'push_create') {
+            $authenticate = $options['authenticate'] ?? null;
+            if ($authenticate !== null) {
+                if (!is_callable($authenticate)) {
+                    Site_Export_Push_Endpoints::emit_response(503, [
+                        'status' => 'rejected',
+                        'reason' => 'not_configured',
+                        'detail' => 'The push route authenticate option must be callable.',
+                    ]);
+                    return;
+                }
+                try {
+                    call_user_func($authenticate);
+                } catch (Throwable $exception) {
+                    Site_Export_Push_Endpoints::emit_failure($exception);
+                    return;
+                }
+            } else {
+                if (!is_string($connection_secret) || $connection_secret === '') {
+                    Site_Export_Push_Endpoints::emit_response(403, [
+                        'status' => 'rejected',
+                        'reason' => 'push_disabled',
+                        'detail' => 'Push access is disabled for new push sessions.',
+                    ]);
+                    return;
+                }
+                $authentication_secret = $connection_secret;
+            }
+
+            $push_options = $options;
+            unset($push_options['authenticate'], $push_options['connection_secret']);
+        } else {
+            try {
+                $push_session_id = Site_Export_Push_Endpoints::read_push_session_id($_GET);
+            } catch (Throwable $exception) {
+                Site_Export_Push_Endpoints::emit_failure($exception);
+                return;
+            }
+
+            try {
+                $push_session_configuration = Site_Export_Push_Session::load_push_session_configuration(
+                    $reprint_directory,
+                    $docroot,
+                    $push_session_id
+                );
+            } catch (Throwable $exception) {
+                if (
+                    $endpoint === 'push_remove'
+                    && $exception instanceof Site_Export_Push_Exception
+                    && $exception->get_error_code() === Site_Export_Push_Session::ERROR_PUSH_NOT_FOUND
+                ) {
+                    try {
+                        // The final bounded remove deletes its authentication state.
+                        // A lost response may therefore repeat remove without a secret.
+                        // Only an unfinished tombstone needs another cleanup step.
+                        $removal_tombstone = rtrim($reprint_directory, '/\\')
+                            . '/.reprint/push/.removing-' . $push_session_id;
+                        $removed = true;
+                        if (is_dir($removal_tombstone)) {
+                            $removed = Site_Export_Push_Session::remove(
+                                $reprint_directory,
+                                $docroot,
+                                $push_session_id,
+                                []
+                            );
+                        }
+                        Site_Export_Push_Endpoints::emit_response(200, [
+                            'status' => 'accepted',
+                            'push_session_id' => $push_session_id,
+                            'removed' => $removed,
+                        ]);
+                    } catch (Throwable $remove_exception) {
+                        Site_Export_Push_Endpoints::emit_failure($remove_exception);
+                    }
+                    return;
+                }
+                Site_Export_Push_Endpoints::emit_failure($exception);
+                return;
+            }
+
+            $authentication_secret = $push_session_configuration['push_session_secret'];
+            $push_options = [
+                'reprint_directory' => $reprint_directory,
+                'docroot' => $docroot,
+                'excluded_paths' => $push_session_configuration['excluded_paths'],
+                'maximum_part_bytes' => $push_session_configuration['maximum_part_bytes'],
+                'maximum_commit_entries' => $push_session_configuration['maximum_commit_entries'],
+                'expected_push_session_secret' => $push_session_configuration['push_session_secret'],
+            ];
+        }
+
+        if ($authentication_secret !== null) {
+            $authentication_error = ( new Site_Export_HMAC_Server($authentication_secret) )->verify_envelope(
+                $_SERVER,
+                $request_method,
+                $request_target
+            );
+            if ($authentication_error !== null) {
+                Site_Export_Push_Endpoints::emit_response(403, [
+                    'status' => 'rejected',
+                    'reason' => 'auth_failed',
+                    'detail' => $authentication_error,
+                ]);
+                return;
+            }
+        }
+        // phpcs:enable WordPress.Security.NonceVerification,WordPress.Security.ValidatedSanitizedInput
+
+        try {
+            self::serve(['push' => $push_options]);
+        } catch (Site_Export_Push_Configuration_Exception $exception) {
+            Site_Export_Push_Endpoints::emit_response(503, [
+                'status' => 'rejected',
+                'reason' => 'not_configured',
+                'detail' => $exception->getMessage(),
+            ]);
+        } catch (Throwable $exception) {
+            Site_Export_Push_Endpoints::emit_failure($exception);
+        }
+    }
+
+    /**
      * @param array<string, mixed> $get
      * @param array<string, mixed> $post
      * @param array<string, mixed> $server
@@ -330,9 +537,41 @@ final class Site_Export_HTTP_Server {
         return isset(self::PUSH_ENDPOINT_METHODS[$endpoint]);
     }
 
-    /**
-     * @return array<string, callable>
-     */
+    /** Returns the private sibling directory used by the bundled push route. */
+    public static function default_reprint_directory(string $docroot): string {
+        return dirname($docroot) . '/.reprint-' . substr(hash('sha256', $docroot), 0, 12);
+    }
+
+    /** Loads the connection secret from a private PHP configuration file. */
+    public static function load_push_connection_secret(string $configuration_path): ?string {
+        if (!is_file($configuration_path) || is_link($configuration_path)) {
+            return null;
+        }
+        if (function_exists('opcache_invalidate')) {
+            @opcache_invalidate($configuration_path, true);
+        }
+        ob_start();
+        try {
+            $configuration = ( static function (string $path) {
+                return include $path;
+            } )($configuration_path);
+        } catch (Throwable $throwable) {
+            ob_end_clean();
+            return null;
+        }
+        $output = ob_get_clean();
+        if (
+            $output !== ''
+            || !is_array($configuration)
+            || !is_string($configuration['connection_secret'] ?? null)
+            || $configuration['connection_secret'] === ''
+        ) {
+            return null;
+        }
+        return $configuration['connection_secret'];
+    }
+
+    /** @return array<string, callable> */
     private function default_handlers(): array {
         $handlers = [
             'file_index' => 'endpoint_file_index',

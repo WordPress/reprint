@@ -37,13 +37,20 @@ final class PushSessionTest extends TestCase {
         $this->assertFileDoesNotExist($work_directory . '/partial');
         $this->assertFileDoesNotExist($work_directory . '/inflight.json');
         $this->assertFileDoesNotExist($work_directory . '/inflight.data');
-        $push_metadata = json_decode(
-            (string) file_get_contents($push_session->get_push_directory() . '/push.json'),
-            true,
-            512,
-            JSON_THROW_ON_ERROR
-        );
+        $push_metadata = $this->load_push_metadata($push_session->get_push_directory());
         $this->assertArrayNotHasKey('version', $push_metadata);
+    }
+
+    public function testPushMetadataPhpFileReturnsItsArrayWithoutOutput(): void {
+        $push_session = $this->push_session('10101010101010101010101010101011');
+        $push_directory = $push_session->get_push_directory();
+        $push_metadata_path = $push_directory . '/push-metadata.php';
+
+        $this->assertFileExists($push_metadata_path);
+        $this->assertFileDoesNotExist($push_directory . '/push.json');
+        $this->assertSame(0600, fileperms($push_metadata_path) & 0777);
+        $push_metadata = $this->load_push_metadata($push_directory);
+        $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/D', $push_metadata['push_session_secret']);
     }
 
     public function testPushSessionRejectsMoreThanOneHundredExcludedPaths(): void {
@@ -58,7 +65,9 @@ final class PushSessionTest extends TestCase {
             $this->reprint_directory,
             $this->docroot,
             $excluded_paths,
-            '11111111111111111111111111111110'
+            '11111111111111111111111111111110',
+            4194304,
+            256
         );
     }
 
@@ -326,7 +335,7 @@ final class PushSessionTest extends TestCase {
 
     public function testReprintDirectoryBelowDocumentRootIsExcludedAndRootCanBeReopened(): void {
         $reprint_directory = $this->docroot . '/private-work';
-        $push_session = Site_Export_Push_Session::create($reprint_directory, $this->docroot, [], str_repeat('a', 32));
+        $push_session = Site_Export_Push_Session::create($reprint_directory, $this->docroot, [], str_repeat('a', 32), 4194304, 256);
         try {
             $this->push_parts($push_session, [[
                 'headers' => [
@@ -342,7 +351,7 @@ final class PushSessionTest extends TestCase {
             $this->assertStringContainsString('Excluded', $exception->getMessage());
         }
 
-        $root_session = Site_Export_Push_Session::create($this->reprint_directory, '/', [], str_repeat('b', 32));
+        $root_session = Site_Export_Push_Session::create($this->reprint_directory, '/', [], str_repeat('b', 32), 4194304, 256);
         $reopened = Site_Export_Push_Session::open($this->reprint_directory, '/', $root_session->get_push_session_id(), []);
         $this->assertSame($root_session->get_push_directory(), $reopened->get_push_directory());
     }
@@ -449,7 +458,7 @@ final class PushSessionTest extends TestCase {
         $this->assertStringContainsString('// reprint-push-session:' . $push_session->get_push_session_id(), (string) $first);
         $this->assertTrue($marker_blocks_request([]));
         $this->assertTrue($marker_blocks_request(['reprint-api' => '', 'endpoint' => 'preflight']));
-        $this->assertFalse($marker_blocks_request(['reprint-api' => '', 'endpoint' => 'push_commit']));
+        $this->assertTrue($marker_blocks_request(['reprint-api' => '', 'endpoint' => 'push_commit']));
         sleep(1);
         $push_session->commit(1);
         $second = file_get_contents($this->docroot . '/.maintenance');
@@ -777,19 +786,21 @@ final class PushSessionTest extends TestCase {
 
     public function testMalformedMetadataAndPushDirectorySymlinksAreRejected(): void {
         $push_metadata_session = $this->push_session('23452345234523452345234523452345');
-        file_put_contents($push_metadata_session->get_push_directory() . '/push.json', '{not-json');
+        file_put_contents($push_metadata_session->get_push_directory() . '/push-metadata.php', "<?php\nreturn [\n");
         try {
             $push_metadata_session->get_status();
             $this->fail('Malformed push metadata was accepted.');
         } catch (Site_Export_Push_Exception $exception) {
             $this->assertSame('corrupted_push_state', $exception->get_error_code());
+            $this->assertStringContainsString('does not return a PHP array', $exception->getMessage());
         }
 
         $shape_session = $this->push_session('34563456345634563456345634563455');
-        $push_metadata_path = $shape_session->get_push_directory() . '/push.json';
-        $push_metadata = json_decode( (string) file_get_contents($push_metadata_path), true, 512, JSON_THROW_ON_ERROR);
+        $push_metadata_path = $shape_session->get_push_directory() . '/push-metadata.php';
+        $push_metadata = $this->load_push_metadata($shape_session->get_push_directory());
         $push_metadata['excluded_paths_b64'] = 'not-a-list';
-        file_put_contents($push_metadata_path, json_encode($push_metadata, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- The test rewrites the real PHP metadata format with one corrupt field.
+        file_put_contents($push_metadata_path, "<?php\nreturn " . var_export($push_metadata, true) . ";\n");
         try {
             $shape_session->get_status();
             $this->fail('Push metadata with a scalar excluded-path list was accepted.');
@@ -890,7 +901,9 @@ final class PushSessionTest extends TestCase {
                 $this->reprint_directory,
                 $this->docroot,
                 ['wp-content/plugins/reprint', 'wp-config.php'],
-                $push_session->get_push_session_id()
+                $push_session->get_push_session_id(),
+                4194304,
+                256
             );
             $this->fail('Repeated create accepted different immutable excluded paths.');
         } catch (Site_Export_Push_Exception $exception) {
@@ -1530,6 +1543,123 @@ final class PushSessionTest extends TestCase {
         $this->assertSame('receiving_work', $recreated->get_status()['phase']);
     }
 
+    public function testSessionSecretCannotAddressARecreatedPushSession(): void {
+        $push_session_id = 'efefefefefefefefefefefefefefefef';
+        $old_push_session = $this->push_session($push_session_id);
+        $old_metadata = $this->load_push_metadata($old_push_session->get_push_directory());
+        $old_push_session_secret = $old_metadata['push_session_secret'];
+        $this->assertIsString($old_push_session_secret);
+        do {
+            $removed = $old_push_session->remove_push_directory();
+        } while (!$removed);
+
+        $new_push_session = $this->push_session($push_session_id);
+        $new_metadata = $this->load_push_metadata($new_push_session->get_push_directory());
+        $this->assertNotSame($old_push_session_secret, $new_metadata['push_session_secret']);
+
+        $stale_push_session = Site_Export_Push_Session::open(
+            $this->reprint_directory,
+            $this->docroot,
+            $push_session_id,
+            ['wp-content/plugins/reprint'],
+            $old_push_session_secret
+        );
+        try {
+            $stale_push_session->get_status();
+            $this->fail('An old push session secret inspected a recreated session.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('push_not_found', $exception->get_error_code());
+        }
+
+        try {
+            Site_Export_Push_Session::remove(
+                $this->reprint_directory,
+                $this->docroot,
+                $push_session_id,
+                ['wp-content/plugins/reprint'],
+                $old_push_session_secret
+            );
+            $this->fail('An old push session secret removed a recreated session.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('push_not_found', $exception->get_error_code());
+        }
+        $this->assertDirectoryExists($new_push_session->get_push_directory());
+    }
+
+    public function testOpcodeCacheCannotRetainARecreatedPushSessionSecret(): void {
+        if (!function_exists('opcache_get_status')) {
+            $this->markTestSkipped('The opcode cache extension is unavailable.');
+        }
+
+        // The child must enable the CLI opcode cache before PHP starts.
+        $script = <<<'PHP'
+require $argv[1] . '/vendor/autoload.php';
+$root = $argv[2];
+$docroot = $root . '/docroot';
+$reprint_directory = $root . '/reprint';
+mkdir($docroot, 0700, true);
+mkdir($reprint_directory, 0700, true);
+$push_session_id = str_repeat('f', 32);
+$old_push_session = Site_Export_Push_Session::create($reprint_directory, $docroot, [], $push_session_id, 1024, 10);
+$old_push_session_secret = Site_Export_Push_Session::load_push_session_configuration($reprint_directory, $docroot, $push_session_id)['push_session_secret'];
+$push_metadata_path = $old_push_session->get_push_directory() . '/push-metadata.php';
+$opcode_cache = opcache_get_status(true);
+if (!isset($opcode_cache['scripts'][$push_metadata_path])) {
+    fwrite(STDERR, "The push metadata file was not cached.\n");
+    exit(2);
+}
+do {
+    $removed = $old_push_session->remove_push_directory();
+} while (!$removed);
+Site_Export_Push_Session::create($reprint_directory, $docroot, [], $push_session_id, 1024, 10);
+$new_push_session_secret = Site_Export_Push_Session::load_push_session_configuration($reprint_directory, $docroot, $push_session_id)['push_session_secret'];
+if (hash_equals($old_push_session_secret, $new_push_session_secret)) {
+    fwrite(STDERR, "The recreated push session reused the cached secret.\n");
+    exit(3);
+}
+PHP;
+        $process = proc_open(
+            [
+                PHP_BINARY,
+                '-d',
+                'opcache.enable_cli=1',
+                '-d',
+                'opcache.validate_timestamps=0',
+                '-d',
+                'opcache.file_update_protection=0',
+                '-r',
+                $script,
+                dirname(__DIR__),
+                $this->root . '/opcode-cache',
+            ],
+            [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+            $pipes
+        );
+        $this->assertIsResource($process);
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+
+        $this->assertSame(0, proc_close($process), $stdout . $stderr);
+    }
+
+    /** @return array<string,mixed> */
+    private function load_push_metadata(string $push_directory): array {
+        ob_start();
+        try {
+            $push_metadata = ( static function (string $push_metadata_path) {
+                return include $push_metadata_path;
+            } )($push_directory . '/push-metadata.php');
+        } finally {
+            $output = ob_get_clean();
+        }
+        $this->assertSame('', $output);
+        $this->assertIsArray($push_metadata);
+        return $push_metadata;
+    }
+
     /**
      * Runs an upload while one named filesystem call fails in production code.
      *
@@ -1639,7 +1769,9 @@ final class PushSessionTest extends TestCase {
             $this->reprint_directory,
             $this->docroot,
             ['wp-content/plugins/reprint'],
-            $id
+            $id,
+            4194304,
+            256
         );
     }
 

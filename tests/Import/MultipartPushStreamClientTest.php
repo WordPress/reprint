@@ -21,7 +21,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -155,7 +155,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             exit(0);
         }
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -189,7 +189,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -221,7 +221,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'start_bytes' => 512,
             'max_bytes' => 512,
         ]);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -262,6 +262,20 @@ final class MultipartPushStreamClientTest extends TestCase {
         ]);
     }
 
+    public function testUploadRequiresPushSessionAuthentication(): void {
+        if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
+            $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');
+        }
+        $client = new MultipartPushStreamClient([
+            'base_url' => 'https://example.test/?reprint-api=1',
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+        ]);
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('before set_push_session_hmac_client()');
+        $client->start_upload_request(str_repeat('a', 32));
+    }
+
     public function testRawHttp413LearnsASmallerRequestCeilingWithoutRequiringJson(): void {
         if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
             $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');
@@ -269,7 +283,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -318,7 +332,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'start_bytes' => 512,
             'max_bytes' => 2048,
         ]);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -352,7 +366,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -397,7 +411,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -476,7 +490,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             'connect_timeout' => 2,
             'response_timeout' => 2,
         ]);
-        $result = $client->send_push_request('POST', 'push_create', [
+        $result = $client->send_connection_request('POST', 'push_create', [
             'push_session_id' => str_repeat('7', 32),
         ], ['created']);
         pcntl_waitpid($child, $status);
@@ -540,7 +554,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             exit(0);
         }
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -633,7 +647,7 @@ final class MultipartPushStreamClientTest extends TestCase {
                 'response_timeout' => 2,
             ]);
             if ($case === 'redirect') {
-                $result = $client->send_push_request('POST', 'push_create', [
+                $result = $client->send_connection_request('POST', 'push_create', [
                     'push_session_id' => str_repeat('8', 32),
                 ], ['created']);
                 $this->assertSame('failed', $result['status']);
@@ -643,7 +657,7 @@ final class MultipartPushStreamClientTest extends TestCase {
                     $result['detail']
                 );
             } else {
-                $result = $client->send_push_request('POST', 'push_create', [
+                $result = $client->send_connection_request('POST', 'push_create', [
                     'push_session_id' => str_repeat('9', 32),
                 ], ['created']);
                 $this->assertSame('failed', $result['status']);
@@ -664,7 +678,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -707,7 +721,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -790,7 +804,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             exit(0);
         }
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -871,7 +885,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             exit(0);
         }
 
-        $client = new MultipartPushStreamClient([
+        $client = $this->newPushSessionClient([
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
@@ -899,6 +913,21 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertGreaterThan(1.0, $elapsed);
         $this->assertTrue($sent, (string) json_encode($result));
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
+    }
+
+    /**
+     * @param array $options {
+     *     Client options for one raw push route.
+     *
+     *     @type string                  $base_url    Route URL.
+     *     @type Site_Export_HMAC_Client $hmac_client Route signer.
+     * }
+     * @phpstan-param array{base_url:string,hmac_client:Site_Export_HMAC_Client,...} $options
+     */
+    private function newPushSessionClient(array $options): MultipartPushStreamClient {
+        $client = new MultipartPushStreamClient($options);
+        $client->set_push_session_hmac_client($options['hmac_client']);
+        return $client;
     }
 
     private function read_available($connection): string {
