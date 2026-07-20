@@ -130,13 +130,23 @@ jobs:
           echo "$preflight_output" | head -50
 
           echo "=== Importer files-pull ==="
-          files_pull_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" || {
-            status=$?
+          files_pull_status=2
+          files_pull_attempt=0
+          while [ "$files_pull_status" -eq 2 ] && [ "$files_pull_attempt" -lt 3 ]; do
+            files_pull_attempt=$((files_pull_attempt + 1))
+            files_pull_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && files_pull_status=0 || files_pull_status=$?
             echo "$files_pull_output" | head -50
-            echo "EXIT: $status"
-            exit "$status"
-          }
-          echo "$files_pull_output" | head -50
+            if [ "$files_pull_status" -eq 2 ]; then
+              echo "files-pull partial; resuming (attempt ${files_pull_attempt})"
+            elif [ "$files_pull_status" -ne 0 ]; then
+              echo "EXIT: $files_pull_status"
+              exit "$files_pull_status"
+            fi
+          done
+          if [ "$files_pull_status" -eq 2 ]; then
+            echo "EXIT: 2 (files-pull remained partial after ${files_pull_attempt} attempts)"
+            exit 2
+          fi
 
       - name: Run E2E tests
         if: matrix.exporter_php != '7.2'
