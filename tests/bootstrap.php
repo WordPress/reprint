@@ -9,6 +9,8 @@ require_once __DIR__ . '/../packages/reprint-exporter/src/class-mysql-dump-produ
 // Load the FileTreeProducer class
 require_once __DIR__ . '/../packages/reprint-exporter/src/class-file-tree-producer.php';
 
+require_once __DIR__ . '/../packages/reprint-exporter/src/class-file-index-processor.php';
+
 // Local path-package installs can be stale until composer reinstall.
 if (!function_exists('build_pdo_dsn')) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/utils.php';

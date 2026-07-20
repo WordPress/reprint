@@ -354,13 +354,13 @@ final class FileIndexProcessor {
             $type = "other";
         }
 
-        // Build the index entry from the one successful lstat() call. Only
-        // regular-file bytes contribute a size; directories and links carry
-        // their type-specific details separately.
+        // Build the index entry from the one successful lstat() call. File and
+        // link sizes participate in push change detection; directory size does
+        // not describe its descendants and is normalized to zero.
         $item = [
             "path" => $path,
             "ctime" => (int) ( isset($stat["ctime"]) ? $stat["ctime"] : 0 ),
-            "size" => $type === "file" ? (int) ( isset($stat["size"]) ? $stat["size"] : 0 ) : 0,
+            "size" => $type === "file" || $type === "link" ? (int) ( isset($stat["size"]) ? $stat["size"] : 0 ) : 0,
             "type" => $type,
         ];
         if ($link_target !== null) {

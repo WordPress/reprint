@@ -9,15 +9,18 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push
 /**
  * Coverage for PushPlan's per-target local index at the previous push and bounded steps.
  *
- * The plan merges the fresh local index, whose directory entries carry an `empty`
- * boolean from the indexer, with the local index at the previous push. The tests pin
- * the resulting local_paths_to_push JSONL, raw NUL-delimited local paths to delete,
- * cursor replay, and every transition among files, symlinks, empty
- * directories, and non-empty directories.
+ * The plan diffs the fresh local index, whose directory entries carry an
+ * `empty` boolean from the indexer, against the local index at the previous
+ * push. The tests pin the resulting local_paths_to_push JSONL, raw NUL-delimited
+ * local paths to delete, cursor replay, and every transition among files,
+ * symlinks, empty directories, and non-empty directories.
  */
 final class PushPlanTest extends TestCase
 {
     private string $tempDir;
+
+    /** @var array<string,array<string,mixed>> Last tree shape created by materializeLocalTree(). */
+    private array $materializedIndexEntries = [];
 
     protected function setUp(): void
     {
@@ -45,29 +48,20 @@ final class PushPlanTest extends TestCase
         $localIndexAtPreviousPush = $this->tempDir . '/state/push/example.com/local_index_at_previous_push.jsonl';
         $this->assertFileDoesNotExist($localIndexAtPreviousPush);
 
-        $this->recordSuccessfulPush($this->writeIndex([
+        $this->saveSuccessfulPush($this->writeIndex([
             'a.txt' => [100, 5, 'file'],
         ]));
         $this->assertFileExists($this->planPath('local_index_at_previous_push.jsonl'));
         $this->assertFileDoesNotExist($this->planPath('local_index_at_previous_push.jsonl') . '.tmp');
+        $this->assertFileDoesNotExist($this->planPath('fresh_local_index.jsonl'));
 
         // A second successful push replaces the first. Comparing that same index
         // again produces no paths to push or delete.
         $second = $this->writeIndex(['b.txt' => [200, 9, 'file']]);
-        $this->recordSuccessfulPush($second);
+        $this->saveSuccessfulPush($second);
         $plan = $this->startPlan($second);
         $this->planToCompletion($plan);
         $this->assertPathCounts(0, 0);
-    }
-
-    public function testAfterSuccessfulPushRequiresTheFreshLocalIndexToExist(): void
-    {
-        $plan = $this->startPlan();
-        $plan->close();
-        unlink($this->planPath('fresh_local_index.jsonl'));
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('fresh local index is missing');
-        $plan->after_successful_push();
     }
 
     public function testAfterSuccessfulPushRejectsAClosedIncompletePlan(): void
@@ -83,7 +77,7 @@ final class PushPlanTest extends TestCase
 
     public function testAfterSuccessfulPushRequiresThePreviousIndexToBeConsumed(): void
     {
-        $this->recordSuccessfulPush($this->writeIndex($this->manyFileEntries(2)));
+        $this->saveSuccessfulPush($this->writeIndex($this->manyFileEntries(2)));
         $plan = $this->startPlan();
         $this->assertTrue($plan->next_step());
         $plan->close();
@@ -112,6 +106,7 @@ final class PushPlanTest extends TestCase
         $plan->discard();
 
         $this->assertFalse(PushPlan::has_plan($this->planDirectory()));
+        $this->assertFileDoesNotExist($this->planPath('fresh_local_index.jsonl'));
         $this->assertFileDoesNotExist($this->planPath('local_index_at_previous_push.jsonl'));
 
         $secondIndex = $this->writeIndex(['second.txt' => [200, 6, 'file']]);
@@ -154,15 +149,16 @@ final class PushPlanTest extends TestCase
         $pathsToPush = file_get_contents($this->planPath('local_paths_to_push.jsonl'));
         $this->assertIsString($pathsToPush);
         $firstLine = strtok($pathsToPush, "\n");
-        $this->assertSame(
-            '{"path":"' . base64_encode('index.php') . '","type":"file","size":5,"ctime":100}',
-            $firstLine
-        );
+        $firstPath = json_decode($firstLine, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(base64_encode('index.php'), $firstPath['path']);
+        $this->assertSame('file', $firstPath['type']);
+        $this->assertSame(5, $firstPath['size']);
+        $this->assertIsInt($firstPath['ctime']);
     }
 
     public function testPlanCopiesEveryFreshLocalIndexEntryAndExcludesOnlyPushAndDeletePaths(): void
     {
-        $this->recordSuccessfulPush($this->writeIndex([
+        $this->saveSuccessfulPush($this->writeIndex([
             'gone.txt' => [1, 1, 'file'],
             'private' => [1, 0, 'dir', false],
             'private/gone.txt' => [1, 1, 'file'],
@@ -200,7 +196,7 @@ final class PushPlanTest extends TestCase
             'a.txt' => [100, 5, 'file'],
             'b/c.txt' => [200, 7, 'file'],
         ]);
-        $this->recordSuccessfulPush($index);
+        $this->saveSuccessfulPush($index);
 
         $plan = $this->startPlan($index);
         $this->planToCompletion($plan);
@@ -212,12 +208,18 @@ final class PushPlanTest extends TestCase
 
     public function testCtimeSizeOrTypeChangeEachMarksThePathChanged(): void
     {
-        $this->recordSuccessfulPush($this->writeIndex([
+        $this->saveSuccessfulPush($this->writeIndex([
             'ctime-bump.txt' => [100, 5, 'file'],
             'size-bump.txt' => [100, 5, 'file'],
             'type-swap' => [100, 5, 'file'],
             'same.txt' => [100, 5, 'file'],
         ]));
+        $previousStat = lstat($this->localTreeRoot() . '/ctime-bump.txt');
+        $this->assertIsArray($previousStat);
+        $previousCtime = $previousStat['ctime'];
+        while (time() <= $previousCtime) {
+            usleep(10000);
+        }
         $current = $this->writeIndex([
             'ctime-bump.txt' => [101, 5, 'file'],
             'size-bump.txt' => [100, 6, 'file'],
@@ -233,37 +235,6 @@ final class PushPlanTest extends TestCase
             ['ctime-bump.txt', 'size-bump.txt', 'type-swap'],
             $this->listPaths($this->planPath('local_paths_to_push.jsonl'))
         );
-    }
-
-    public function testUnrelatedIndexFieldsDoNotMarkFilesOrSymlinksChanged(): void
-    {
-        $previous = $this->tempDir . '/previous-with-extra-fields.jsonl';
-        $current = $this->tempDir . '/current-with-extra-fields.jsonl';
-        $previousEntries = [
-            ['path' => base64_encode('file.txt'), 'ctime' => 100, 'size' => 5, 'type' => 'file', 'future' => 'before'],
-            ['path' => base64_encode('link'), 'ctime' => 100, 'size' => 0, 'type' => 'link', 'future' => 'before'],
-        ];
-        $currentEntries = [
-            ['path' => base64_encode('file.txt'), 'ctime' => 100, 'size' => 5, 'type' => 'file', 'future' => 'after'],
-            ['path' => base64_encode('link'), 'ctime' => 100, 'size' => 0, 'type' => 'link', 'future' => 'after'],
-        ];
-        file_put_contents(
-            $previous,
-            json_encode($previousEntries[0], JSON_THROW_ON_ERROR) . "\n"
-            . json_encode($previousEntries[1], JSON_THROW_ON_ERROR) . "\n"
-        );
-        file_put_contents(
-            $current,
-            json_encode($currentEntries[0], JSON_THROW_ON_ERROR) . "\n"
-            . json_encode($currentEntries[1], JSON_THROW_ON_ERROR) . "\n"
-        );
-        $this->recordSuccessfulPush($previous);
-
-        $plan = $this->startPlan($current);
-        $this->planToCompletion($plan);
-
-        $this->assertPathCounts(0, 0);
-        $this->assertSame([], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
     }
 
     public function testEveryLogicalTypeTransitionEmitsOnlyTheRequiredPushAndDeletePaths(): void
@@ -297,7 +268,7 @@ final class PushPlanTest extends TestCase
 
         foreach ($matrix as $previousType => $transitions) {
             foreach ($transitions as $currentType => [$expectedPushes, $expectedDeletes]) {
-                $this->recordSuccessfulPush($this->writeLogicalIndex($previousType, 1));
+                $this->saveSuccessfulPush($this->writeLogicalIndex($previousType, 1));
                 $current = $this->writeLogicalIndex($currentType, 2);
 
                 $plan = $this->startPlan($current);
@@ -314,7 +285,7 @@ final class PushPlanTest extends TestCase
 
     public function testDeletedSubtreeEmitsOnlyItsRootAsALocalPathToDelete(): void
     {
-        $this->recordSuccessfulPush($this->writeIndex([
+        $this->saveSuccessfulPush($this->writeIndex([
             'gone' => [1, 0, 'dir', false],
             'gone/child.txt' => [1, 1, 'file'],
             'gone/nested' => [1, 0, 'dir', false],
@@ -333,7 +304,7 @@ final class PushPlanTest extends TestCase
 
     public function testDeletedDirectoryStackAppendsWithoutGrowingTheCursor(): void
     {
-        $this->recordSuccessfulPush($this->writeIndex([
+        $this->saveSuccessfulPush($this->writeIndex([
             'a' => [1, 0, 'dir', false],
             'a/child.txt' => [1, 1, 'file'],
             'b.txt' => [1, 1, 'file'],
@@ -350,7 +321,7 @@ final class PushPlanTest extends TestCase
         $this->assertTrue($plan->next_step());
         $this->assertFalse($plan->next_step());
         $complete_cursor = $this->planCursor();
-        $this->assertNull($complete_cursor['deleted_directory_stack_top_byte_offset']);
+        $this->assertSame(['phase' => 'complete'], $complete_cursor);
         $this->assertSame($stack_bytes, filesize($this->planPath('deleted_directories_stack.jsonl')));
         $plan->close();
 
@@ -359,7 +330,7 @@ final class PushPlanTest extends TestCase
 
     public function testSeenDeletedDirectorySurvivesAnInterleavedSiblingCursor(): void
     {
-        $this->recordSuccessfulPush($this->writeIndex([
+        $this->saveSuccessfulPush($this->writeIndex([
             'a' => [1, 0, 'dir', false],
             'a/child.txt' => [1, 1, 'file'],
         ]));
@@ -383,7 +354,7 @@ final class PushPlanTest extends TestCase
 
     public function testReplacementRootSurvivesLexicallyInterleavedSiblingPaths(): void
     {
-        $this->recordSuccessfulPush($this->writeIndex([
+        $this->saveSuccessfulPush($this->writeIndex([
             'a' => [1, 0, 'dir', false],
             'a/child.txt' => [1, 1, 'file'],
         ]));
@@ -403,14 +374,14 @@ final class PushPlanTest extends TestCase
 
     public function testNewChangedDeletedAndUnchangedPathsArePlannedTogether(): void
     {
-        $this->recordSuccessfulPush($this->writeIndex([
+        $this->saveSuccessfulPush($this->writeIndex([
             'changed.txt' => [100, 5, 'file'],
             'deleted.txt' => [100, 5, 'file'],
             'unchanged.txt' => [100, 5, 'file'],
         ]));
         $current = $this->writeIndex([
             'added.txt' => [300, 3, 'file'],
-            'changed.txt' => [200, 5, 'file'],
+            'changed.txt' => [200, 6, 'file'],
             'unchanged.txt' => [100, 5, 'file'],
         ]);
 
@@ -436,6 +407,7 @@ final class PushPlanTest extends TestCase
             $this->planPath('local_index_at_previous_push.jsonl')
         );
         $plan->after_successful_push();
+        $this->assertFileDoesNotExist($this->planPath('fresh_local_index.jsonl'));
         $plan = $this->startPlan($index);
         $this->planToCompletion($plan);
 
@@ -449,7 +421,7 @@ final class PushPlanTest extends TestCase
         // Newlines and non-ASCII bytes are why JSONL indexes encode paths.
         $newPath = "wp-content/uploads/line\nbreak.png";
         $deletedPath = 'wp-content/uploads/naïve-café.jpg';
-        $this->recordSuccessfulPush($this->writeIndex([
+        $this->saveSuccessfulPush($this->writeIndex([
             $deletedPath => [100, 6, 'file'],
         ]));
         $current = $this->writeIndex([
@@ -464,38 +436,13 @@ final class PushPlanTest extends TestCase
         $this->assertSame($deletedPath . "\0", file_get_contents($this->planPath('local_paths_to_delete')));
     }
 
-    public function testPlanParsesJsonWithoutDependingOnFieldOrderOrEscaping(): void
-    {
-        $path = 'wp-content/???';
-        $base64Path = base64_encode($path);
-        $localIndexAtPreviousPush = $this->tempDir . '/local_index_at_previous_push_shape.jsonl';
-        $current = $this->tempDir . '/current-shape.jsonl';
-
-        file_put_contents(
-            $localIndexAtPreviousPush,
-            json_encode(['path' => $base64Path, 'ctime' => 100, 'size' => 5, 'type' => 'file'], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
-        );
-        file_put_contents(
-            $current,
-            json_encode(['type' => 'file', 'size' => 5, 'ctime' => 100, 'path' => $base64Path], JSON_THROW_ON_ERROR) . "\n"
-        );
-        $this->recordSuccessfulPush($localIndexAtPreviousPush);
-
-        $plan = $this->startPlan($current);
-        $this->planToCompletion($plan);
-
-        $this->assertPathCounts(0, 0);
-        $this->assertSame([], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame('', file_get_contents($this->planPath('local_paths_to_delete')));
-    }
-
     // ------------------------------------------------------------------
     //  Bounded steps and restart
     // ------------------------------------------------------------------
 
-    public function testInitializationPinsTheIndexWithoutConsumingAndClearsOldOutput(): void
+    public function testIndexingFinishesBeforeDiffingAndClearsOldOutput(): void
     {
-        $this->recordSuccessfulPush($this->writeIndex([
+        $this->saveSuccessfulPush($this->writeIndex([
             'gone.txt' => [1, 1, 'file'],
         ]));
         $oldIndex = $this->writeIndex(['old.txt' => [1, 1, 'file']]);
@@ -508,30 +455,10 @@ final class PushPlanTest extends TestCase
 
         $current = $this->writeIndex($this->manyFileEntries(2));
         $plan = $this->startPlan($current);
-        $this->assertSame(file_get_contents($current), file_get_contents($this->planPath('fresh_local_index.jsonl')));
+        $this->assertCount(2, $this->indexEntries($this->planPath('fresh_local_index.jsonl')));
+        $this->assertSame('diffing', $this->planCursor()['phase']);
         $this->assertFileExists(dirname($this->planPath('fresh_local_index.jsonl')) . '/cursor.json');
         $this->assertSame(0, filesize($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame(0, filesize($this->planPath('local_paths_to_delete')));
-        $plan->close();
-    }
-
-    public function testPlanUsesItsCopyWhenTheStartingIndexIsReplacedBeforeTheFirstBatch(): void
-    {
-        $current = $this->tempDir . '/fresh-local-index.jsonl';
-        copy($this->writeIndex(['value.txt' => [1, 1, 'file']]), $current);
-        $plan = $this->startPlan($current);
-        // Replace the caller-owned index after the plan retained its copy.
-        $replacement = $this->writeIndex([
-            'another.txt' => [1, 1, 'file'],
-            'value.txt' => [1, 1, 'file'],
-        ]);
-        rename($replacement, $current);
-        clearstatcache(true, $current);
-
-        $this->assertFalse($plan->next_step());
-
-        $this->assertPathCounts(1, 0);
-        $this->assertSame(['value.txt'], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
         $this->assertSame(0, filesize($this->planPath('local_paths_to_delete')));
         $plan->close();
     }
@@ -603,12 +530,12 @@ final class PushPlanTest extends TestCase
         $cursor = json_decode($cursorContents, true, 512, JSON_THROW_ON_ERROR);
         $this->assertIsArray($cursor);
         $this->assertSame([
+            'phase',
             'byte_offset_in_fresh_index',
             'byte_offset_in_previous_index',
             'byte_offset_in_local_paths_to_push',
             'byte_offset_in_local_paths_to_delete',
             'deleted_directory_stack_top_byte_offset',
-            'complete',
         ], array_keys($cursor));
         $this->assertSame(
             filesize($this->planPath('local_paths_to_push.jsonl')),
@@ -632,7 +559,7 @@ final class PushPlanTest extends TestCase
             $localIndexAtPreviousPushEntries[sprintf('item-%04d-deleted.txt', $index)] = [$index + 1, 1, 'file'];
         }
         $current = $this->writeIndex($currentEntries);
-        $this->recordSuccessfulPush($this->writeIndex($localIndexAtPreviousPushEntries));
+        $this->saveSuccessfulPush($this->writeIndex($localIndexAtPreviousPushEntries));
         $plan = $this->startPlan($current);
 
         $this->assertTrue($plan->next_step());
@@ -664,6 +591,8 @@ final class PushPlanTest extends TestCase
         $freshLocalIndex = $this->writeIndex(['value.txt' => [1, 5, 'file']]);
         $plan = $this->startPlan($freshLocalIndex);
         $this->planToCompletion($plan);
+        $completedFreshLocalIndex = file_get_contents($this->planPath('fresh_local_index.jsonl'));
+        $this->assertIsString($completedFreshLocalIndex);
 
         $loaded = PushPlan::load_retained($this->planDirectory());
         foreach ([
@@ -682,8 +611,9 @@ final class PushPlanTest extends TestCase
             $this->planPath('local_index_at_previous_push.jsonl')
         );
         $loaded->after_successful_push();
+        $this->assertFileDoesNotExist($this->planPath('fresh_local_index.jsonl'));
         $this->assertSame(
-            file_get_contents($freshLocalIndex),
+            $completedFreshLocalIndex,
             file_get_contents($this->planPath('local_index_at_previous_push.jsonl'))
         );
     }
@@ -712,25 +642,6 @@ final class PushPlanTest extends TestCase
         $this->assertSame($localPathsToDelete, file_get_contents($this->planPath('local_paths_to_delete')));
     }
 
-    public function testReplacingTheStartingIndexBetweenStepsDoesNotChangeThePlan(): void
-    {
-        $current = $this->tempDir . '/fresh-local-index.jsonl';
-        $index_to_copy = $this->writeIndex($this->manyFileEntries(2));
-        copy($index_to_copy, $current);
-        $plan = $this->startPlan($current);
-        $this->assertTrue($plan->next_step());
-
-        $replacement = $this->writeIndex($this->manyFileEntries(3));
-        rename($replacement, $current);
-        clearstatcache(true, $current);
-
-        $this->assertFalse($plan->next_step());
-
-        $this->assertPathCounts(2, 0);
-        $this->assertCount(2, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $plan->close();
-    }
-
     public function testResumeUsesTheExcludedPathsSavedByStart(): void
     {
         $entries = $this->manyFileEntries(2);
@@ -752,54 +663,19 @@ final class PushPlanTest extends TestCase
     }
 
     // ------------------------------------------------------------------
-    //  Invalid indexes
-    // ------------------------------------------------------------------
-
-    public function testPlanReportsInvalidJson(): void
-    {
-        // A blank line is invalid JSON, so the plan stops instead of silently
-        // skipping an index line.
-        $garbage = $this->tempDir . '/garbage.jsonl';
-        file_put_contents(
-            $garbage,
-            $this->indexLine('a.txt', 100, 5, 'file') . "\n\nnot json at all\n"
-        );
-
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('not valid JSON');
-        $this->planToCompletion($this->startPlan($garbage));
-    }
-
-    public function testPlanReportsAPathThatIsNotBase64(): void
-    {
-        $bad = $this->tempDir . '/bad-path.jsonl';
-        file_put_contents($bad, '{"path":"%%%not-base64%%%","ctime":1,"size":1,"type":"file"}' . "\n");
-
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('index path is not valid base64');
-        $this->planToCompletion($this->startPlan($bad));
-    }
-
-    public function testPlanRequiresTheFreshLocalIndexToExist(): void
-    {
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('fresh local index file is missing');
-        $this->startPlan($this->tempDir . '/no-such-index.jsonl');
-    }
-
-    // ------------------------------------------------------------------
     //  Helpers
     // ------------------------------------------------------------------
 
     /** @param list<string> $excludedPaths */
-    private function startPlan(?string $freshLocalIndexPath = null, array $excludedPaths = []): PushPlan
+    private function startPlan(?string $treeDescriptionPath = null, array $excludedPaths = []): PushPlan
     {
-        if ($freshLocalIndexPath === null) {
-            $freshLocalIndexPath = $this->tempDir . '/empty-fresh-local-index.jsonl';
-            if (!is_file($freshLocalIndexPath)) {
-                file_put_contents($freshLocalIndexPath, '');
+        if ($treeDescriptionPath === null) {
+            $treeDescriptionPath = $this->tempDir . '/empty-tree.jsonl';
+            if (!is_file($treeDescriptionPath)) {
+                file_put_contents($treeDescriptionPath, '');
             }
         }
+        $this->materializeLocalTree($treeDescriptionPath);
         if (!is_dir($this->planDirectory())) {
             mkdir($this->planDirectory(), 0755, true);
         }
@@ -810,20 +686,24 @@ final class PushPlanTest extends TestCase
                 JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
             )
         );
-        if (is_file($freshLocalIndexPath)) {
-            copy($freshLocalIndexPath, $this->planPath('fresh_local_index.jsonl'));
+        $plan = PushPlan::start($this->planDirectory(), $this->localTreeRoot());
+        for ($step = 0; $step < 100; ++$step) {
+            if ($this->planCursor()['phase'] === 'diffing') {
+                return $plan;
+            }
+            $this->assertTrue($plan->next_step());
         }
-        return PushPlan::start($this->planDirectory());
+        $this->fail('Push plan did not finish indexing within 100 bounded steps.');
     }
 
     private function resumePlan(): PushPlan
     {
-        return PushPlan::resume($this->planDirectory());
+        return PushPlan::resume($this->planDirectory(), $this->localTreeRoot());
     }
 
-    private function recordSuccessfulPush(string $freshLocalIndex): void
+    private function saveSuccessfulPush(string $treeDescriptionPath): void
     {
-        $plan = $this->startPlan($freshLocalIndex);
+        $plan = $this->startPlan($treeDescriptionPath);
         $this->planToCompletion($plan);
         copy(
             $this->planPath('fresh_local_index.jsonl'),
@@ -882,6 +762,93 @@ final class PushPlanTest extends TestCase
         return $this->planDirectory() . '/' . $filename;
     }
 
+    private function localTreeRoot(): string
+    {
+        return $this->tempDir . '/local-tree-root';
+    }
+
+    /**
+     * Makes the local tree match one test description while preserving unchanged paths.
+     *
+     * @param string $treeDescriptionPath JSONL path descriptions created by writeIndex().
+     */
+    private function materializeLocalTree(string $treeDescriptionPath): void
+    {
+        $entries = $this->indexEntries($treeDescriptionPath);
+        if (!is_dir($this->localTreeRoot())) {
+            mkdir($this->localTreeRoot(), 0755, true);
+        }
+
+        $pathsToKeep = $this->pathsRequiredByIndexEntries($entries);
+        $previousPaths = $this->pathsRequiredByIndexEntries($this->materializedIndexEntries);
+        $pathsToRemove = array_keys(array_diff_key($previousPaths, $pathsToKeep));
+        usort($pathsToRemove, static fn(string $left, string $right): int => strlen($right) <=> strlen($left));
+        foreach ($pathsToRemove as $path) {
+            $this->recursiveDelete($this->localTreeRoot() . '/' . $path);
+        }
+
+        $implicitDirectories = array_keys(array_diff_key($pathsToKeep, $entries));
+        usort($implicitDirectories, static fn(string $left, string $right): int => strlen($left) <=> strlen($right));
+        foreach ($implicitDirectories as $path) {
+            $localPath = $this->localTreeRoot() . '/' . $path;
+            if (!is_dir($localPath) || is_link($localPath)) {
+                $this->recursiveDelete($localPath);
+                mkdir($localPath, 0755, true);
+            }
+        }
+
+        uksort($entries, static function (string $left, string $right): int {
+            $depthComparison = substr_count($left, '/') <=> substr_count($right, '/');
+            return $depthComparison !== 0 ? $depthComparison : strcmp($left, $right);
+        });
+        foreach ($entries as $path => $entry) {
+            $localPath = $this->localTreeRoot() . '/' . $path;
+            $parentDirectory = dirname($localPath);
+            if (!is_dir($parentDirectory)) {
+                mkdir($parentDirectory, 0755, true);
+            }
+            $previousEntry = $this->materializedIndexEntries[$path] ?? null;
+            if ($entry['type'] === 'dir') {
+                if (!is_dir($localPath) || is_link($localPath)) {
+                    $this->recursiveDelete($localPath);
+                    mkdir($localPath, 0755, true);
+                }
+                continue;
+            }
+            if ($previousEntry === $entry) {
+                continue;
+            }
+            $this->recursiveDelete($localPath);
+            if ($entry['type'] === 'link') {
+                symlink(str_repeat('x', max(1, (int) $entry['ctime'])), $localPath);
+                continue;
+            }
+            $byte = chr(97 + ( (int) $entry['ctime'] % 26 ));
+            file_put_contents($localPath, str_repeat($byte, (int) $entry['size']));
+        }
+        $this->materializedIndexEntries = $entries;
+    }
+
+    /**
+     * Returns every described path and the implicit parent directories it needs.
+     *
+     * @param array<string,array<string,mixed>> $entries Index entries keyed by local path.
+     * @return array<string,true>
+     */
+    private function pathsRequiredByIndexEntries(array $entries): array
+    {
+        $paths = [];
+        foreach (array_keys($entries) as $path) {
+            $paths[$path] = true;
+            $parent = dirname($path);
+            while ($parent !== '.' && $parent !== '') {
+                $paths[$parent] = true;
+                $parent = dirname($parent);
+            }
+        }
+        return $paths;
+    }
+
     private function writeLogicalIndex(string $logicalType, int $version): string
     {
         if ($logicalType === 'file') {
@@ -910,8 +877,7 @@ final class PushPlanTest extends TestCase
     }
 
     /**
-     * Write a sorted index. Entries map path to ctime, size, type, and the
-     * empty flag the indexer records on directory entries.
+     * Writes a sorted description of paths, versions, sizes, types, and directory emptiness.
      *
      * @param array<string,array{0:int,1:int,2:string,3?:bool}> $entries
      */
@@ -977,7 +943,7 @@ final class PushPlanTest extends TestCase
             return [];
         }
         $paths = explode("\0", $bytes);
-        $this->assertSame('', array_pop($paths), 'The local_paths_to_delete file must end at a NUL record boundary.');
+        $this->assertSame('', array_pop($paths), 'The local_paths_to_delete file must end after a NUL-terminated path.');
         return $paths;
     }
 

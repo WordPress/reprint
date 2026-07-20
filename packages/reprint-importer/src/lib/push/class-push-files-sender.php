@@ -10,9 +10,10 @@
  * PushFilesSender owns the only caller-visible lifecycle. It holds the lock,
  * creates and removes the target push session, drives its internal PushPlan,
  * streams the selected paths, commits the push, and saves the completed fresh
- * local index as the local index at the previous push. The target owns the upload cursor for every path and for the
- * deletion list. Durable sender state retains the top-level phase, selected
- * path-list cursor, and learned request limits needed after a process restart.
+ * local index as the local index at the previous push. The target owns the
+ * upload cursor for every path and for the deletion list. Durable sender state
+ * retains the top-level phase, the selected path-list cursor, and learned
+ * request limits needed after a process restart.
  *
  * ## Usage
  *
@@ -48,24 +49,23 @@
  * process starts from the preceding durable boundary and reads
  * receiver-confirmed work before sending more data.
  *
- * Before start() returns, the sender copies the completed fresh local index
- * through a swap file into plan-owned state. A new push then calls `push_create`
- * to learn target-owned exclusions before starting PushPlan with that policy.
- * After planning completes, local files, symlinks, and empty
- * directories stream through multipart requests. The raw deletion list
- * follows, and repeated `push_commit` calls let the target install the work in
- * bounded steps. A confirmed commit enters another phase which saves the fresh
- * local index as the local index at the previous push through a swap file.
- * Starting and completing the plan, saving that index, and discarding a
- * removed plan have separate durable phases. A stopped process therefore
- * repeats only an idempotent boundary action rather than a group of unrelated
- * transitions.
+ * A new sender calls `push_create` to learn target-owned exclusions before
+ * starting PushPlan. The plan builds the fresh local index and merges it with
+ * the index at the previous push, one bounded step at a time. After planning
+ * completes, local files, symlinks, and empty directories stream through
+ * multipart requests. The raw deletion list follows, and repeated `push_commit`
+ * calls let the target install the work in bounded steps. A confirmed commit
+ * enters another phase which saves the fresh local index as the local index at
+ * the previous push through a swap file. Index completion, plan completion,
+ * local-index saving, and plan discard each have a separate durable phase. A
+ * stopped process therefore repeats only an idempotent boundary action rather
+ * than a group of unrelated transitions.
  *
  * sender.json owns the top-level phase. During `planning`, cursor.json owns the
- * exact merge position and output lengths; sender.json does not duplicate
+ * plan's internal phase and continuation offsets; sender.json does not duplicate
  * them. A completed plan cursor remains until the target commit and local index
- * save have both finished. A removed target session enters
- * `discarding_plan` before that cursor is deleted.
+ * save have both finished. A removed target session enters `discarding_plan`
+ * before that cursor is deleted.
  *
  * ## Resume after local changes
  *
@@ -82,8 +82,8 @@
  * tree again. A local path which reappears after planning may therefore be
  * deleted by this push; the next push will send it again. If a local path to
  * push changes, the sender removes the upload-only push session, discards the
- * plan, and changes the sender status to `restart` so the caller can produce a
- * new local index.
+ * plan, and changes the sender status to `restart` so the caller can start a
+ * new sender which builds a fresh local index.
  *
  * ## Streaming and durability
  *
@@ -95,7 +95,8 @@
  * the current path phase ends. An open sender retains that request, its
  * path-list handles, and its current local file handle between steps.
  *
- * Copying a complete local index is the deliberate exception to bounded steps.
+ * Saving a complete local index after commit is the deliberate exception to
+ * bounded steps.
  * A representative index entry is about 150 bytes, so one million paths produce
  * roughly 150 MB. Even a 10 MiB/s drive copies that in about 15 seconds. Keeping
  * two copy cursors, two retained handles, and per-chunk state writes for larger
@@ -209,8 +210,7 @@ final class PushFilesSender
     /**
      * Starts a new sender and acquires exclusive ownership of its push state.
      *
-     * The completed fresh local index is copied into plan-owned state before
-     * the initial `creating` state is written. An existing active state is
+     * The returned sender begins in `creating`. An existing active state is
      * rejected so unfinished work cannot be replaced. The returned sender
      * retains its lock until close().
      *
@@ -218,7 +218,6 @@ final class PushFilesSender
      *     Push, push stream client, and local-file options.
      *
      *     @type string                  $docroot                Required local document-root directory.
-     *     @type string                  $fresh_local_index_path Completed fresh local index required by start().
      *     @type string                  $push_state_directory    Required local push state directory.
      *     @type string                  $base_url                Required exporter API URL.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
@@ -247,15 +246,6 @@ final class PushFilesSender
                     . $sender->state_path
                 );
             }
-            $fresh_local_index_path = $options['fresh_local_index_path'] ?? null;
-            if (!is_string($fresh_local_index_path) || $fresh_local_index_path === '') {
-                throw new InvalidArgumentException('PushFilesSender requires a fresh_local_index_path when starting a sender.');
-            }
-            $sender->copy_through_swap_file(
-                $fresh_local_index_path,
-                PushPlan::fresh_local_index_path($sender->push_state_directory)
-            );
-
             $sender->push_stream_client = $sender->create_push_stream_client(null);
             $sender->state = [
                 'push_session_id' => bin2hex(random_bytes(16)),
@@ -279,8 +269,7 @@ final class PushFilesSender
      * works from that in-memory state, storing each later durable boundary
      * without reopening sender.json.
      *
-     * @param array<string,mixed> $options Options documented by start(). The
-     *     fresh_local_index_path option is not needed when resuming.
+     * @param array<string,mixed> $options Options documented by start().
      * @return self Open sender at its last durable state.
      */
     public static function resume(array $options): self
@@ -304,7 +293,7 @@ final class PushFilesSender
             $sender->state = $state;
             $sender->push_stream_client = $sender->create_push_stream_client($state);
             if ($state['phase'] === 'planning') {
-                $sender->plan = PushPlan::resume($sender->push_state_directory);
+                $sender->plan = PushPlan::resume($sender->push_state_directory, $sender->docroot);
             }
             return $sender;
         } catch (Throwable $throwable) {
@@ -346,7 +335,11 @@ final class PushFilesSender
             }
         }
 
-        $this->docroot = rtrim($docroot, '/');
+        $canonical_docroot = realpath($docroot);
+        if ($canonical_docroot === false) {
+            throw new InvalidArgumentException('PushFilesSender requires a real docroot directory.');
+        }
+        $this->docroot = rtrim($canonical_docroot, '/');
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->state_path = $this->push_state_directory . '/sender.json';
         $this->lock_path = $this->push_state_directory . '/sender.lock';
@@ -360,12 +353,12 @@ final class PushFilesSender
      *
      * start() or resume() has already acquired the lifecycle lock and loaded the
      * durable state, so this method only dispatches its current phase. Every
-     * phase step is bounded except the deliberate complete-index copy described
+     * phase step is bounded except the deliberate completed-index copy described
      * in the class documentation. A caller stopping after this method returns
      * true calls cancel() before close(); close() does not finish an open
      * multipart request. A false return directs the caller to get_status(),
      * where `restart` means the old push session and local plan are gone and a
-     * new local index is required.
+     * new sender is required.
      *
      * @return bool Whether the sender can perform another step.
      */
@@ -553,14 +546,14 @@ final class PushFilesSender
     }
 
     /**
-     * Creates or reopens PushPlan after its fresh local index is complete.
+     * Creates or reopens PushPlan after the target exclusions are stored.
      */
     private function start_plan(): void
     {
         if (PushPlan::has_plan($this->push_state_directory)) {
-            $this->plan = PushPlan::resume($this->push_state_directory);
+            $this->plan = PushPlan::resume($this->push_state_directory, $this->docroot);
         } else {
-            $this->plan = PushPlan::start($this->push_state_directory);
+            $this->plan = PushPlan::start($this->push_state_directory, $this->docroot);
         }
         $this->state['phase'] = 'planning';
         $this->store_state($this->state);
@@ -571,7 +564,13 @@ final class PushFilesSender
      */
     private function next_plan_step(): void
     {
-        if (!$this->plan->next_step()) {
+        try {
+            $has_next_step = $this->plan->next_step();
+        } catch (RuntimeException $exception) {
+            $this->fail('local_io_error', $exception->getMessage());
+            return;
+        }
+        if (!$has_next_step) {
             $this->plan->close();
             $this->state['phase'] = 'pushing_paths';
             $this->store_state($this->state);
@@ -1245,7 +1244,7 @@ final class PushFilesSender
         $this->delete_state();
         $this->status = 'restart';
         $this->reason = 'local_path_changed';
-        $this->detail = 'The upload-only push session was removed. Generate a new local index before retrying.';
+        $this->detail = 'The upload-only push session was removed. Run the push command again to build a fresh local index.';
     }
 
     /**
@@ -1405,7 +1404,7 @@ final class PushFilesSender
         }
         return [
             'type' => $type,
-            'size' => (int) $path_stat['size'],
+            'size' => $type === 'directory' ? 0 : (int) $path_stat['size'],
             'ctime' => (int) $path_stat['ctime'],
         ];
     }
