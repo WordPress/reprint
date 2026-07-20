@@ -91,13 +91,14 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 
 | Surface | Name |
 | --- | --- |
+| Active plan directory | `plan`, `$plan_directory` |
 | Plan-owned fresh local index | `fresh_local_index.jsonl`, `$fresh_local_index` |
 | Local index at the previous push | `local_index_at_previous_push.jsonl`, `$local_index_at_previous_push` |
 | Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
 | Local push state directory | `push_state_directory`, `$push_state_directory` |
-| PushPlan cursor | `cursor.json`, `$cursor_file` |
-| Excluded paths | `excluded_paths.json`, `$excluded_paths_path` |
+| PushPlan cursor | `push_plan_cursor`, `$push_plan_cursor`, `get_cursor()` |
+| Sender-owned excluded paths | `excluded_paths.json`, `$excluded_paths_path` |
 | Deleted-directory stack | `deleted_directories_stack.jsonl`, `$deleted_directories_stack` |
 | Active state | `sender.json`, `$state_path` |
 | Lifecycle lock file | `sender.lock`, `$lock_path` |
@@ -105,21 +106,32 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
-`cursor.json` owns PushPlan's internal phase. During `indexing`, it stores the
+`sender.json`, `sender.lock`, `excluded_paths.json`, and
+`local_index_at_previous_push.jsonl` live directly under the local push state
+directory. The sender creates `plan/` for one active plan. PushPlan copies the
+sender-owned exclusions to `plan/excluded_paths.json` when it starts.
+`fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
+`local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
+
+The PushPlan cursor is stored in `sender.json`. It contains the plan
+directory, local tree root, local index at the previous push, and current
+planning position. During `indexing`, that position contains the
 FileIndexProcessor cursor and the committed byte offset in
-`fresh_local_index.jsonl`. During `diffing`, it stores the index offsets,
+`fresh_local_index.jsonl`. During `diffing`, it contains the index offsets,
 output offsets, and the active byte offset in
 `deleted_directories_stack.jsonl`. The stack file is append-only; each entry
-links to the preceding active directory. `excluded_paths.json` stores the target
-exclusions once for the active push, with a maximum of 100 paths. `sender.json`
-does not repeat those values. Its phases are `creating`, `starting_plan`,
+links to the preceding active directory. The exclusions have a maximum of 100
+paths. `sender.json` phases are `creating`, `starting_plan`,
 `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
 `saving_local_index_at_previous_push`, `completing`,
 `removing`, and `discarding_plan`. It stores the push session ID, selected
 path-list cursor, receiver part limit, and request-sizing state. The index diff
 completes before local paths are sent. The index copy after a successful commit
-has no sender cursor and is repeated after interruption. The plan then removes
-the fresh local index and its cursor.
+has no separate copy cursor and is repeated after interruption. After the index
+is saved or the target confirms removal, the sender clears the PushPlan
+cursor, then removes the entire plan directory and its exclusions file. It
+does not ask PushPlan to manage terminal cleanup; PushPlan only closes its open
+handles.
 
 A request failure ends the current sender run. The active state remains in
 place so a later push command can resume from the last durable boundary. Only
@@ -195,7 +207,10 @@ Use these names verbatim inside `PushPlan`:
 
 | Meaning | Name |
 | --- | --- |
+| Active plan directory | `$plan_directory` |
 | Local tree root | `$local_tree_root`, `set_local_tree_root()` |
+| Cursor | `$cursor`, `get_cursor()` |
+| Plan-owned excluded paths | `$excluded_paths_file` |
 | Fresh local index processor | `$file_index_processor`, `next_file_index_step()` |
 | Fresh local indexing cursor | `IndexingCursor`, `file_index_cursor` |
 | Fresh local index byte offset | `$fresh_local_index_byte_offset` |
