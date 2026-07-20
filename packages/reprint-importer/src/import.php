@@ -1087,6 +1087,9 @@ class ImportClient
     /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
     private $shutdown_requested = false;
 
+    /** @var int|null First signal asking files-push to stop after its active sender step. */
+    private $files_push_stop_signal = null;
+
     /**
      * @var bool When true, tell the server to follow symlinks that point outside
      * the document root (expanding them into real files). Enabled by default,
@@ -1244,8 +1247,28 @@ class ImportClient
      */
     public $exit_code = 0;
 
-    public function __construct(string $remote_url, string $state_dir, string $fs_root)
+    public function __construct(
+        string $remote_url,
+        string $state_dir,
+        string $fs_root,
+        ?string $signal_handling_command = null
+    )
     {
+        // Register the command's signal behavior before constructor work can
+        // create state or receive a signal under another command's policy.
+        if (function_exists("pcntl_signal")) {
+            // Enable async signals (PHP 7.1+) so signals work during blocking operations
+            if (function_exists("pcntl_async_signals")) {
+                pcntl_async_signals(true);
+            }
+            if ($signal_handling_command === 'files-push') {
+                $this->enable_files_push_signal_handling();
+            } else {
+                pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
+                pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
+            }
+        }
+
         $this->remote_url = rtrim($remote_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->fs_root = rtrim($fs_root, "/");
@@ -1269,16 +1292,6 @@ class ImportClient
         $this->progress_fd = STDOUT;
         $this->progress = new TerminalProgress($this->is_tty, $this->progress_fd);
         $this->pull = new Pull($this, $this->progress);
-
-        // Register signal handlers for graceful shutdown
-        if (function_exists("pcntl_signal")) {
-            // Enable async signals (PHP 7.1+) so signals work during blocking operations
-            if (function_exists("pcntl_async_signals")) {
-                pcntl_async_signals(true);
-            }
-            pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
-            pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
-        }
 
         // Create directories
         if (!is_dir($this->state_dir)) {
@@ -1443,15 +1456,28 @@ class ImportClient
      * Log the executed command and full argv to the audit log.
      * Called from the CLI entry point before run() so the invocation
      * is captured even if run() throws early.
+     *
+     * @param string       $command Canonical CLI command name.
+     * @param list<string> $argv    Raw command arguments.
+     * @param string|null  $pair    Files-push pair key, when available.
      */
-    public function audit_log_argv(string $command, array $argv): void
+    public function audit_log_argv(string $command, array $argv, ?string $pair = null): void
     {
         // Mask the remote URL (argv[2]) to avoid logging secrets embedded in query strings.
         $masked = $argv;
         if (isset($masked[2]) && $command !== 'apply-runtime') {
             $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
+            if ($command === 'files-push') {
+                $masked[2] = self::mask_files_push_url_user_info($masked[2]);
+            }
         }
-        $this->audit_log("COMMAND | {$command} | argv=" . implode(' ', $masked), false);
+        foreach ($masked as $argument_index => $argument) {
+            if (is_string($argument) && strpos($argument, '--secret=') === 0) {
+                $masked[$argument_index] = '--secret=***';
+            }
+        }
+        $pair_field = $pair === null ? '' : " | pair={$pair}";
+        $this->audit_log("COMMAND | {$command}{$pair_field} | argv=" . implode(' ', $masked), false);
     }
 
     /**
@@ -1614,6 +1640,7 @@ class ImportClient
             "pull-files",
             "pull-db",
             "files-pull",
+            "files-push",
             "files-index",
             "files-stats",
             "db-pull",
@@ -1637,6 +1664,13 @@ class ImportClient
             throw new InvalidArgumentException(
                 "Invalid command: {$command}. Valid commands: " . implode(", ", $valid_commands),
             );
+        }
+
+        // files-push owns separate pair state and must not load or write the
+        // pull command's .import-state.json file.
+        if ($command === "files-push") {
+            $this->run_files_push($options);
+            return;
         }
 
         // High-level pulls persist resume state before they enter the stage
@@ -1970,6 +2004,414 @@ class ImportClient
             $this->write_status_file($e->getMessage());
             throw $e;
         }
+    }
+
+    /**
+     * Runs one caller-bounded files-push lifecycle.
+     *
+     * One open sender performs at most one step per loop turn. A planned stop
+     * cancels any open multipart request before close() releases the lifecycle
+     * lock. Terminal sender outcomes are reported without retrying or opening
+     * a replacement; this process never opens a second sender.
+     *
+     * @param array $options {
+     *     Parsed files-push options and context.
+     *
+     *     @type string $secret             HMAC shared secret.
+     *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
+     *     @type array  $files_push_context Optional context already validated by the CLI entry point.
+     * }
+     * @phpstan-param array<string,mixed> $options
+     */
+    private function run_files_push(array $options): void
+    {
+        $started_at = hrtime(true) / 1000000000;
+        $context = $options['files_push_context'] ?? self::prepare_files_push_context(
+            $this->remote_url,
+            $this->state_dir,
+            $this->fs_root,
+            $options
+        );
+        if (!is_array($context)) {
+            throw new InvalidArgumentException('files-push requires its validated command context.');
+        }
+
+        $this->enable_files_push_signal_handling();
+
+        if (!class_exists('Site_Export_HMAC_Client')) {
+            throw new RuntimeException(
+                'Streaming exporter runtime not found. Run composer install before using --secret.'
+            );
+        }
+
+        $chunk_bytes = 4 * 1024 * 1024;
+        $max_execution_seconds = (int) ini_get('max_execution_time');
+        $memory_limit_value = trim( (string) ini_get('memory_limit') );
+        $memory_limit_bytes = $memory_limit_value === '' || $memory_limit_value === '-1'
+            ? -1
+            : parse_size($memory_limit_value);
+        $sender_options = [
+            'docroot' => $context['local_tree'],
+            'push_state_directory' => $context['push_state_directory'],
+            'base_url' => $context['target_url'],
+            'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
+            'allow_http' => $options['force_http'] ?? false,
+            'chunk_bytes' => $chunk_bytes,
+        ];
+
+        $resuming = is_file($context['push_state_directory'] . '/sender.json');
+        $sender = $resuming
+            ? PushFilesSender::resume($sender_options)
+            : PushFilesSender::start($sender_options);
+        $status = null;
+        $reason = null;
+        $detail = null;
+        $phase = $sender->get_phase();
+        $previous_phase = $phase;
+
+        try {
+            $this->audit_log(
+                ( $resuming ? 'RESUME' : 'START' )
+                    . " files-push | pair={$context['pair']} | phase={$phase}",
+                false
+            );
+
+            while ($sender->get_status() === 'continue') {
+                if ($this->files_push_stop_signal !== null) {
+                    $status = 'interrupted';
+                    $reason = 'signal';
+                    $detail = 'Received signal ' . $this->files_push_stop_signal . '.';
+                    break;
+                }
+
+                $stop_cause = self::files_push_stop_cause(
+                    hrtime(true) / 1000000000 - $started_at,
+                    memory_get_usage(true),
+                    $max_execution_seconds,
+                    $memory_limit_bytes,
+                    $chunk_bytes
+                );
+                if ($stop_cause !== null) {
+                    $status = 'partial';
+                    $reason = $stop_cause;
+                    break;
+                }
+
+                $has_next_sender_step = $sender->next_step();
+                $phase = $sender->get_phase();
+                if ($phase !== $previous_phase) {
+                    $this->audit_log(
+                        "PHASE files-push | pair={$context['pair']} | from={$previous_phase} | to={$phase}",
+                        false
+                    );
+                    $previous_phase = $phase;
+                }
+                if (!$has_next_sender_step) {
+                    break;
+                }
+            }
+
+            if ($sender->get_status() !== 'continue') {
+                $status = $sender->get_status();
+                $reason = $sender->get_reason();
+                $detail = $sender->get_detail();
+            }
+        } catch (\Throwable $throwable) {
+            $status = 'error';
+            $reason = 'unexpected_error';
+            $detail = $throwable->getMessage();
+        } finally {
+            if ($sender->get_status() === 'continue') {
+                try {
+                    $sender->cancel();
+                } catch (\Throwable $throwable) {
+                    $status = 'error';
+                    $reason = 'unexpected_error';
+                    $detail = ( $detail === null ? '' : $detail . ' ' )
+                        . 'Could not cancel the active sender request: '
+                        . $throwable->getMessage();
+                }
+            }
+            $phase = $sender->get_phase();
+            try {
+                $sender->close();
+            } catch (\Throwable $throwable) {
+                $status = 'error';
+                $reason = 'unexpected_error';
+                $detail = ( $detail === null ? '' : $detail . ' ' )
+                    . 'Could not close the sender lifecycle: '
+                    . $throwable->getMessage();
+            }
+        }
+
+        if ($status === null) {
+            $status = 'error';
+            $reason = 'unexpected_error';
+            $detail = 'The files-push sender stopped without an outcome.';
+        }
+
+        switch ($status) {
+            case 'complete':
+                $audit_line = "COMPLETE files-push | pair={$context['pair']} | phase={$phase}";
+                $message = 'Files push complete.';
+                $this->exit_code = 0;
+                break;
+            case 'partial':
+                $audit_line = "PARTIAL files-push | pair={$context['pair']} | phase={$phase} | cause={$reason}";
+                $message = 'Files push paused at a durable boundary; run the same command again to continue.';
+                $this->exit_code = 2;
+                break;
+            case 'interrupted':
+                $audit_line = "INTERRUPTED files-push | pair={$context['pair']} | phase={$phase} | signal={$this->files_push_stop_signal}";
+                $message = 'Files push was interrupted at a durable boundary; run the same command again to continue.';
+                $this->exit_code = 2;
+                break;
+            case 'restart':
+                $audit_line = "RESTART files-push | pair={$context['pair']} | phase={$phase} | reason={$reason}";
+                $message = 'Files push must restart; the next run will build a fresh plan.';
+                $this->exit_code = 2;
+                break;
+            case 'failed':
+                $audit_line = "FAILED files-push | pair={$context['pair']} | phase={$phase} | reason={$reason}";
+                $message = $detail === null ? 'Files push failed.' : 'Files push failed: ' . $detail;
+                $this->exit_code = 1;
+                break;
+            case 'error':
+            default:
+                $audit_line = "ERROR files-push | pair={$context['pair']} | phase={$phase} | reason={$reason}";
+                $message = $detail === null ? 'Files push stopped with an error.' : 'Files push stopped with an error: ' . $detail;
+                $this->exit_code = 1;
+                break;
+        }
+
+        $this->audit_log($audit_line, false);
+        $result = [
+            'command' => 'files-push',
+            'pair' => $context['pair'],
+            'status' => $status,
+            'phase' => $phase,
+            'message' => $message,
+        ];
+        if ($reason !== null) {
+            $result['reason'] = $reason;
+        }
+        if ($detail !== null) {
+            $result['detail'] = $detail;
+        }
+        // Write the flat run status without consulting import state.
+        $status_payload = [
+            'command' => 'files-push',
+            'pair' => $context['pair'],
+            'status' => $status,
+            'phase' => $phase,
+            'reason' => $reason,
+            'detail' => $detail,
+            'ts' => microtime(true),
+        ];
+        $status_json = json_encode(
+            $status_payload,
+            JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE
+        );
+        if ($status_json !== false) {
+            $temporary_status_path = $this->status_file . '.tmp';
+            if (file_put_contents($temporary_status_path, $status_json) !== false) {
+                rename($temporary_status_path, $this->status_file);
+            }
+        }
+
+        // Emit the sole final JSON line for non-interactive callers.
+        if ($this->is_tty && !$this->verbose_mode) {
+            $this->progress->show_lifecycle_line($result['message'] . "\n");
+            return;
+        }
+        $result_json = json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($result_json === false) {
+            $result_json = '{"command":"files-push","status":"error","message":"Could not encode the files-push result."}';
+        }
+        @fwrite($this->progress_fd, $result_json . "\n");
+        @flush();
+    }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions are CLI text, not HTML.
+    /**
+     * Validates files-push inputs and derives its per-pair state path.
+     *
+     * @param array $options {
+     *     Parsed files-push options.
+     *
+     *     @type string $secret     HMAC shared secret.
+     *     @type bool   $force_http Whether the operator allowed a plain-HTTP target.
+     * }
+     * @phpstan-param array<string,mixed> $options
+     * @return array {
+     *     Validated files-push command context.
+     *
+     *     @type string $target_url           Target exporter API URL.
+     *     @type string $local_tree           Canonical local tree being sent.
+     *     @type string $pair                 Target/local-tree pair key.
+     *     @type string $push_state_directory Sender state directory for the pair.
+     * }
+     * @phpstan-return array{target_url:string,local_tree:string,pair:string,push_state_directory:string}
+     */
+    public static function prepare_files_push_context(
+        string $target_url,
+        string $state_directory,
+        string $local_tree,
+        array $options
+    ): array {
+        $secret = $options['secret'] ?? null;
+        if (!is_string($secret) || $secret === '') {
+            throw new InvalidArgumentException('files-push requires --secret=TOKEN.');
+        }
+        if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $target_url) === 1) {
+            throw new InvalidArgumentException(
+                'files-push does not accept SECRET_KEY in the target URL; pass --secret=TOKEN.'
+            );
+        }
+
+        $masked_target_url = self::mask_files_push_url_user_info($target_url);
+        if (strpos($target_url, '#') !== false) {
+            throw new InvalidArgumentException(
+                'The files-push target URL must not contain a fragment: ' . $masked_target_url . '.'
+            );
+        }
+        $target_url_user = parse_url($target_url, PHP_URL_USER);
+        $target_url_password = parse_url($target_url, PHP_URL_PASS);
+        if (is_string($target_url_user) || is_string($target_url_password)) {
+            throw new InvalidArgumentException(
+                'The files-push target URL must not contain URL user-info: ' . $masked_target_url . '.'
+            );
+        }
+        if (is_link($local_tree)) {
+            throw new InvalidArgumentException('The local tree must not be a symlink: ' . $local_tree . '.');
+        }
+        if (!is_dir($local_tree)) {
+            throw new InvalidArgumentException(
+                'The local tree does not exist or is not a directory: ' . $local_tree . '.'
+            );
+        }
+
+        $force_http = $options['force_http'] ?? false;
+        $scheme = strtolower( (string) parse_url($target_url, PHP_URL_SCHEME) );
+        if ($scheme !== 'https' && !( $scheme === 'http' && $force_http === true )) {
+            throw new InvalidArgumentException(
+                'The files-push target must use HTTPS: ' . $masked_target_url
+                . '. Pass --force-http only for a target you trust.'
+            );
+        }
+
+        $canonical_local_tree = realpath($local_tree);
+        if ($canonical_local_tree === false) {
+            throw new InvalidArgumentException(
+                'The local tree does not exist or is not a directory: ' . $local_tree . '.'
+            );
+        }
+        $canonical_local_tree = rtrim($canonical_local_tree, '/') ?: '/';
+        $target_url = rtrim($target_url, '?&');
+        $pair = hash('sha256', $target_url . "\0" . $canonical_local_tree);
+        // Resolve an absolute physical path even when its final components do not exist.
+        $push_state_directory = $state_directory . '/push/' . $pair;
+        if (strpos($push_state_directory, '/') !== 0) {
+            $working_directory = getcwd();
+            if ($working_directory === false) {
+                throw new RuntimeException('Could not resolve the current working directory.');
+            }
+            $push_state_directory = $working_directory . '/' . $push_state_directory;
+        }
+        $push_state_directory = normalize_path($push_state_directory);
+        $existing_state_path = $push_state_directory;
+        $missing_state_components = [];
+        while (
+            !file_exists($existing_state_path)
+            && !is_link($existing_state_path)
+            && $existing_state_path !== '/'
+        ) {
+            array_unshift($missing_state_components, basename($existing_state_path));
+            $existing_state_path = dirname($existing_state_path);
+        }
+        $canonical_existing_state_path = realpath($existing_state_path);
+        if ($canonical_existing_state_path !== false) {
+            $push_state_directory = normalize_path(
+                $canonical_existing_state_path
+                    . ( $missing_state_components === []
+                        ? ''
+                        : '/' . implode('/', $missing_state_components) )
+            );
+        }
+        if (
+            $canonical_local_tree === '/'
+            || path_is_within_root($push_state_directory, $canonical_local_tree)
+        ) {
+            throw new InvalidArgumentException(
+                'The push state directory ' . $push_state_directory
+                . ' must be outside the local tree ' . $canonical_local_tree . '.'
+            );
+        }
+
+        return [
+            'target_url' => $target_url,
+            'local_tree' => $canonical_local_tree,
+            'pair' => $pair,
+            'push_state_directory' => $push_state_directory,
+        ];
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
+    /**
+     * Returns why another sender step must not begin, or null when admitted.
+     */
+    public static function files_push_stop_cause(
+        float $elapsed_seconds,
+        int $allocated_bytes,
+        int $max_execution_seconds,
+        int $memory_limit_bytes,
+        int $chunk_bytes
+    ): ?string {
+        if ($max_execution_seconds > 0 && $elapsed_seconds >= $max_execution_seconds * 0.8) {
+            return 'time_limit';
+        }
+        if (
+            $memory_limit_bytes !== -1
+            && $allocated_bytes + $chunk_bytes >= $memory_limit_bytes * 0.8
+        ) {
+            return 'memory_limit';
+        }
+        return null;
+    }
+
+    /**
+     * Handles a first files-push signal without interrupting its active step.
+     */
+    public function handle_files_push_shutdown(int $signal): void
+    {
+        if ($this->files_push_stop_signal === null) {
+            $this->files_push_stop_signal = $signal;
+            return;
+        }
+        if (function_exists('posix_kill') && function_exists('posix_getpid')) {
+            posix_kill(posix_getpid(), SIGKILL);
+        }
+        die("\nForced exit.\n");
+    }
+
+    /** Installs the files-push first-signal stop behavior when PCNTL exists. */
+    public function enable_files_push_signal_handling(): void
+    {
+        if (function_exists('pcntl_signal')) {
+            pcntl_signal(SIGINT, [$this, 'handle_files_push_shutdown']);
+            pcntl_signal(SIGTERM, [$this, 'handle_files_push_shutdown']);
+        }
+    }
+
+    /** Masks URL authority credentials without changing the pair-key input. */
+    private static function mask_files_push_url_user_info(string $url): string
+    {
+        $masked = preg_replace(
+            '~^([a-z][a-z0-9+.-]*://)[^/?#]*@~i',
+            '$1***@',
+            $url
+        );
+        return is_string($masked) ? $masked : $url;
     }
 
     /**
@@ -11831,7 +12273,7 @@ if (
             'type' => 'value',
             'target' => 'fs_root',
             'placeholder' => 'DIR',
-            'help' => 'Directory where downloaded site files are written',
+            'help' => 'Local directory read from or written to for site files',
             'help_section' => 'required',
             'commands' => ['apply-runtime'],
             'aliases' => ['docroot'],
@@ -11845,7 +12287,14 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC shared secret for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+        ],
+        [
+            'name' => 'force-http',
+            'type' => 'flag',
+            'target' => 'force_http',
+            'help' => 'Allow a trusted plain-HTTP target; anyone able to observe or alter the connection can read or modify transferred content',
+            'commands' => ['files-push'],
         ],
         [
             'name' => 'abort',
@@ -11862,7 +12311,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'flat-docroot', 'apply-runtime'],
         ],
         [
             'name' => 'no-follow-symlinks',
@@ -12396,7 +12845,7 @@ if (
             echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
         }
         echo "\n";
-        echo "Low-level commands (used by pull internally):\n";
+        echo "Low-level commands:\n";
         foreach ($low as $name => $info) {
             echo "  " . str_pad($name, $max_len + 2) . $info["short"] . "\n";
         }
@@ -12411,7 +12860,7 @@ if (
             echo "\n";
         }
 
-        echo "Global options:\n";
+        echo "Shared options (see command help for availability):\n";
         $global = array_filter($option_defs, fn($d) => ($d['help_section'] ?? null) === 'global');
         // --version/-V is handled before option parsing, so inject it manually.
         _cli_render_option_list($global, ['--version, -V' => 'Print version and exit']);
@@ -12422,9 +12871,8 @@ if (
         echo "  2  Partial progress — run the same command again to continue\n";
         echo "  1  Error\n";
         echo "\n";
-        echo "State is stored in --state-dir/.import-state.json. Interrupted\n";
-        echo "commands automatically resume. Use --abort to abort the current\n";
-        echo "sync and exit — downloaded files are preserved.\n";
+        echo "Resumable commands keep their command-specific work under --state-dir.\n";
+        echo "Run command-specific help for continuation and cancellation behavior.\n";
     }
 
     /**
@@ -12608,8 +13056,8 @@ if (
     // The Options: section itself is generated from $option_defs so that
     // every declared option for a command is guaranteed to appear.
     // High-level commands are the ones most users will use. Low-level
-    // commands are the building blocks that pull composes internally —
-    // useful for scripting and hosting platform integrations.
+    // commands expose focused workflows useful for scripting and hosting
+    // platform integrations; pull composes the relevant pull-side commands.
     $command_info = [
         "pull" => [
             "level" => "high",
@@ -12776,6 +13224,26 @@ if (
                 "  .import-download-list-skipped.jsonl     Skipped files (when --filter=essential-files)\n" .
                 "  .import-state.json                      Resumable state\n" .
                 "  .import-audit.log                       Audit log\n",
+        ],
+        "files-push" => [
+            "level" => "low",
+            "short" => "Push one local file tree without database work",
+            "usage" => "reprint files-push <target-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
+            "description" =>
+                "Sends the existing local tree at --fs-root to the target exporter API.\n" .
+                "This is a low-level, files-only command: it performs no database work,\n" .
+                "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
+                "It does not require pull preflight.\n" .
+                "\n" .
+                "Each process runs one sender until it completes, reaches a caller time or\n" .
+                "memory boundary, or receives a signal handled by this PHP runtime.\n" .
+                "Re-run the same command after exit 2.\n" .
+                "After a restart result, the next run starts a fresh plan.\n",
+            "extra" =>
+                "Exit outcomes:\n" .
+                "  0  File push complete\n" .
+                "  2  Partial, interrupted, or restart; run the command again\n" .
+                "  1  Failed request or command error\n",
         ],
         "files-index" => [
             "level" => "low",
@@ -13009,6 +13477,28 @@ if (
     );
     $options["command"] = $command;
 
+    $reprint_files_push_command_arguments = array_slice($argv, $option_start_index);
+    if ($command === 'files-push') {
+        foreach ($reprint_files_push_command_arguments as $reprint_files_push_command_argument) {
+            $reprint_files_push_option_allowed = in_array(
+                $reprint_files_push_command_argument,
+                ['--force-http', '--verbose', '-v'],
+                true
+            )
+                || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
+                || strpos($reprint_files_push_command_argument, '--fs-root=') === 0
+                || strpos($reprint_files_push_command_argument, '--secret=') === 0;
+            if (!$reprint_files_push_option_allowed) {
+                $reprint_files_push_option_name = explode('=', $reprint_files_push_command_argument, 2)[0];
+                fwrite(STDERR, "Error: files-push does not accept {$reprint_files_push_option_name}.\n");
+                exit(1);
+            }
+        }
+    } elseif (!empty($options['force_http'])) {
+        fwrite(STDERR, "Error: --force-http is accepted only by files-push.\n");
+        exit(1);
+    }
+
     if (!$state_dir) {
         fwrite(STDERR, "Error: --state-dir=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
@@ -13037,9 +13527,23 @@ if (
     }
 
     try {
-        $client = new ImportClient($remote_url, $state_dir, $fs_root);
-        $client->audit_log_argv($command, $argv);
-        $client->run($options ?? []);
+        $reprint_files_push_context = null;
+        if ($command === 'files-push') {
+            $reprint_files_push_context = ImportClient::prepare_files_push_context(
+                $remote_url,
+                $state_dir,
+                $fs_root,
+                $options
+            );
+        }
+        $client = new ImportClient($remote_url, $state_dir, $fs_root, $command);
+        $reprint_files_push_pair = $reprint_files_push_context['pair'] ?? null;
+        $client->audit_log_argv($command, $argv, $reprint_files_push_pair);
+        $client->run(
+            $reprint_files_push_context === null
+                ? $options
+                : $options + ['files_push_context' => $reprint_files_push_context]
+        );
         // EXIT_AFTER_IMPORT controls whether we hand control back to
         // the caller after pull returns. Default true: standard CLI
         // invocations (reprint pull, the phar bin, e2e tests) get the

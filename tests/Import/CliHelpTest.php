@@ -34,4 +34,34 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--target-engine=ENGINE', $output);
         $this->assertStringContainsString('--new-site-url=URL', $output);
     }
+
+    public function testFilesPushHelpShowsOnlyItsCommandOptions(): void
+    {
+        $output = $this->runHelp('files-push');
+
+        $this->assertStringContainsString('Usage: reprint files-push <target-url>', $output);
+        $this->assertStringContainsString('--state-dir=DIR', $output);
+        $this->assertStringContainsString('--fs-root=DIR', $output);
+        $this->assertStringContainsString('--secret=TOKEN', $output);
+        $this->assertStringContainsString('--force-http', $output);
+        $this->assertStringContainsString('--verbose, -v', $output);
+        $this->assertStringContainsString('low-level, files-only command', $output);
+        $this->assertStringContainsString('existing local tree at --fs-root', $output);
+        $this->assertStringContainsString('read or modify', $output);
+        $this->assertStringNotContainsString('--abort', $output);
+        $this->assertStringNotContainsString('--filter', $output);
+        $this->assertStringNotContainsString('--remap', $output);
+        $this->assertStringNotContainsString('--only', $output);
+    }
+
+    public function testMainHelpDescribesFilesPushWithoutApplyingPullOnlyContractsGlobally(): void
+    {
+        $output = $this->runHelp('--help');
+
+        $this->assertStringContainsString('files-push', $output);
+        $this->assertStringContainsString('Low-level commands:', $output);
+        $this->assertStringNotContainsString('Low-level commands (used by pull internally):', $output);
+        $this->assertStringNotContainsString('State is stored in --state-dir/.import-state.json', $output);
+        $this->assertStringNotContainsString('Use --abort to abort the current', $output);
+    }
 }

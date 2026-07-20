@@ -81,11 +81,11 @@ one. It only answers "what changed locally since my last successful push to
 this remote" by comparing the current local paths and rows against the local
 index at the previous push and the previously pushed rows.
 
-The local machine keeps these files **per remote site**, overwritten after
-each successful commit:
+The local machine keeps these files **per target URL and canonical local
+tree**, overwritten after each successful commit:
 
-    <state-dir>/push/<site>/local_index_at_previous_push.jsonl
-    <state-dir>/push/<site>/previously_pushed_rows.jsonl   (phase two)
+    <state-dir>/push/<pair-key>/local_index_at_previous_push.jsonl
+    <state-dir>/push/<pair-key>/previously_pushed_rows.jsonl   (phase two)
 
 `PushPlan` first builds a path-sorted fresh local index, then derives the local
 paths to push and delete by diffing it against
@@ -269,7 +269,7 @@ configuration; request parameters cannot select any of them.
 ## Local files sender
 
 `PushFilesSender` joins the durable `PushPlan` to the receiver's push session.
-An active push keeps these files under `<state-dir>/push/<site>/`:
+An active push keeps these files under `<state-dir>/push/<pair-key>/`:
 
 ```text
 local_index_at_previous_push.jsonl  index saved after the previous commit
@@ -392,6 +392,51 @@ and type values. Other drift remains detectable by the next local-index diff.
 Push streaming requires PHP 8.1 or newer because older PHP cURL bindings can
 truncate a paused upload; pull remains PHP 7.4-compatible.
 
+## Low-level files-push command
+
+`reprint files-push <target-url>` is the production CLI caller for one
+`PushFilesSender`. It sends only the canonical local tree named by `--fs-root`.
+It requires `--state-dir`, `--fs-root`, and `--secret`; HTTPS is required unless
+the operator passes `--force-http`. It does not run pull preflight, read or
+write `.import-state.json`, show a plan, ask for confirmation, transfer a
+database, retry a failed request, or start a replacement sender after a
+`restart` outcome.
+
+The command derives one pair key without general URL normalization:
+
+```text
+sha256(rtrim(<target-url>, "?&") + "\0" + <canonical-local-tree-path>)
+```
+
+Its sender state lives at `<state-dir>/push/<pair-key>/`. A different target
+query or canonical local tree therefore selects a different retained local
+index. Fragments, URL user-info, and `SECRET_KEY` target parameters are
+rejected. The pair state directory must be outside the local tree so planning
+cannot index its own changing files.
+
+One process starts or resumes exactly one sender. Before every `next_step()` it
+checks whether another step may begin. The wall-clock admission deadline is 80
+percent of PHP's finite `max_execution_time`; zero is unlimited. With a finite
+`memory_limit`, another step begins only when current allocated PHP memory plus
+the same 4 MiB file chunk passed to the sender remains below 80 percent of the
+limit. These checks happen between steps. An active network step that keeps
+moving bytes, and the completed-index copy, may run past the deadline.
+
+A planned pause or first handled SIGINT or SIGTERM calls `cancel()` while the
+sender still reports `continue`, then calls `close()`. A first handled signal
+only asks the outer loop to stop after the active step; a terminal sender
+outcome takes precedence. A second signal may terminate immediately. Without
+PCNTL, ordinary process termination can bypass cleanup, and the next process
+continues through the same hard-death contract used after SIGKILL.
+
+The stable CLI mapping is `complete`/0, `partial`/2, `interrupted`/2,
+`restart`/2, `failed`/1, and `error`/1. Exit 2 asks the operator to run the
+same command again. After `restart`, that next run builds a fresh plan. The
+shared audit log records opening mode, phase changes, planned pauses, handled
+interruptions, and terminal outcomes with the pair key. The flat status file
+records only the command, pair, outcome, phase, reason, detail, and timestamp;
+neither file copies receiver cursors or tentative upload positions.
+
 ## Where reprint stores its own data on the remote
 
 The remote is configured with one storage path for everything reprint keeps:
@@ -508,9 +553,12 @@ Files first, database second, each PR small and stacked in this order:
 9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
 10. **Row index and database diff** — the local row index, previously pushed
     rows, diff generation and URL rewrite, the commit batch.
-11. **`reprint push`** — the one command that orchestrates plan, confirm,
-    transfer, commit, resume.
-12. **Budgets and resumable limits** — push requests stay bounded by two
+11. **`reprint files-push`** — the low-level, files-only caller that retains
+    one sender per process, applies caller time and memory admission budgets,
+    and reports completion, continuation, restart, or failure without retrying.
+12. **`reprint push`** — the high-level command that adds a change summary,
+    confirmation boundary, database work, transfer, commit, and resume.
+13. **Budgets and resumable limits** — push requests stay bounded by two
     budgets of different dimensions: the fixed chunk (the sender's in-memory
     unit of one read) and the host-learned request body budget that
     PushRequestSizer sizes from reported php.ini limits and 413s, plus a
