@@ -29,6 +29,9 @@ final class PushEndpointsTest extends TestCase {
     private string $reprint_configuration_path;
     private string $docroot_configuration_path;
     private string $excluded_paths_configuration_path;
+    private string $gate_endpoint_configuration_path;
+    private string $gate_ready_path;
+    private string $gate_release_path;
     private string $base_url;
 
     protected function setUp(): void
@@ -48,6 +51,9 @@ final class PushEndpointsTest extends TestCase {
         $this->reprint_configuration_path = $this->root . '/reprint-directory';
         $this->docroot_configuration_path = $this->root . '/docroot-configuration.json';
         $this->excluded_paths_configuration_path = $this->root . '/excluded-paths.json';
+        $this->gate_endpoint_configuration_path = $this->root . '/gate-endpoint';
+        $this->gate_ready_path = $this->root . '/gate-ready';
+        $this->gate_release_path = $this->root . '/gate-release';
         mkdir($this->wordpress_root, 0700, true);
         mkdir($this->reprint_directory, 0700, true);
         file_put_contents($this->secret_configuration_path, self::SECRET);
@@ -55,6 +61,7 @@ final class PushEndpointsTest extends TestCase {
         file_put_contents($this->managed_push_configuration_path, '');
         file_put_contents($this->custom_auth_configuration_path, '');
         file_put_contents($this->reprint_configuration_path, $this->reprint_directory);
+        file_put_contents($this->gate_endpoint_configuration_path, '');
         $this->writeDocrootConfiguration([
             'document_root' => $this->docroot,
         ]);
@@ -2507,6 +2514,502 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNull($this->loadActiveState($push_state_directory));
     }
 
+    public function testFilesPushCliPushesAndUpdatesACompleteLocalTree(): void
+    {
+        $this->writeDocrootConfiguration([
+            'document_root' => $this->docroot,
+            'maximum_part_bytes' => 64,
+        ]);
+        $local_docroot = $this->root . '/cli-local-docroot';
+        $state_directory = $this->root . '/cli-state';
+        mkdir($local_docroot . '/nested', 0700, true);
+        mkdir($local_docroot . '/empty-directory', 0700, true);
+        mkdir($local_docroot . '/preserved', 0700, true);
+        $initial_contents = str_repeat('initial-', 40);
+        file_put_contents($local_docroot . '/nested/multi-chunk.bin', $initial_contents);
+        file_put_contents($local_docroot . '/delete-later.txt', 'delete me later');
+        file_put_contents($local_docroot . '/preserved/value.txt', 'must not replace target');
+        symlink('nested/multi-chunk.bin', $local_docroot . '/file-link');
+
+        $initial = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $initial_result = $this->lastCliJsonLine($initial['stdout']);
+        $this->assertSame('complete', $initial_result['status'] ?? null);
+        $pair_state_directory = $this->filesPushPairStateDirectory($local_docroot, $state_directory);
+        $this->assertSame($initial_contents, file_get_contents($this->docroot . '/nested/multi-chunk.bin'));
+        $this->assertSame('delete me later', file_get_contents($this->docroot . '/delete-later.txt'));
+        $this->assertDirectoryExists($this->docroot . '/empty-directory');
+        $this->assertTrue(is_link($this->docroot . '/file-link'));
+        $this->assertSame('nested/multi-chunk.bin', readlink($this->docroot . '/file-link'));
+        $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
+        $this->assertFileExists($pair_state_directory . '/local_index_at_previous_push.jsonl');
+        $this->assertFileDoesNotExist($pair_state_directory . '/sender.json');
+        $this->assertDirectoryDoesNotExist($pair_state_directory . '/plan');
+        $this->assertFileDoesNotExist($state_directory . '/.import-state.json');
+
+        $status = json_decode(
+            (string) file_get_contents($state_directory . '/.import-status.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertSame(
+            ['command', 'pair', 'status', 'phase', 'reason', 'detail', 'ts'],
+            array_keys($status)
+        );
+        $this->assertSame('complete', $status['status']);
+        $audit = (string) file_get_contents($state_directory . '/.import-audit.log');
+        $this->assertStringNotContainsString(self::SECRET, $audit . $initial['output']);
+        $this->assertStringNotContainsString('cursor', $audit . json_encode($status));
+        $files_push_lines = array_values(array_filter(
+            preg_split('/\R/', trim($audit)) ?: [],
+            static function (string $line): bool {
+                return strpos($line, 'files-push') !== false;
+            }
+        ));
+        $this->assertNotEmpty($files_push_lines);
+        foreach ($files_push_lines as $line) {
+            $this->assertStringContainsString('pair=' . $initial_result['pair'], $line);
+        }
+        preg_match_all('/PHASE files-push .* from=([^ ]+) \| to=([^ ]+)/', $audit, $phase_matches);
+        $phase_transitions = array_map(
+            static function (string $from, string $to): string {
+                return $from . '->' . $to;
+            },
+            $phase_matches[1],
+            $phase_matches[2]
+        );
+        $this->assertSame($phase_transitions, array_values(array_unique($phase_transitions)));
+
+        $updated_contents = str_repeat('updated-', 50);
+        file_put_contents($local_docroot . '/nested/multi-chunk.bin', $updated_contents);
+        unlink($local_docroot . '/delete-later.txt');
+        file_put_contents($local_docroot . '/added.txt', 'added');
+
+        $updated = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(0, $updated['exit'], $updated['output']);
+        $this->assertSame('complete', $this->lastCliJsonLine($updated['stdout'])['status'] ?? null);
+        $this->assertSame($updated_contents, file_get_contents($this->docroot . '/nested/multi-chunk.bin'));
+        $this->assertFileDoesNotExist($this->docroot . '/delete-later.txt');
+        $this->assertSame('added', file_get_contents($this->docroot . '/added.txt'));
+        $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
+        $this->assertFileExists($pair_state_directory . '/local_index_at_previous_push.jsonl');
+        $this->assertFileDoesNotExist($pair_state_directory . '/sender.json');
+        $this->assertDirectoryDoesNotExist($pair_state_directory . '/plan');
+    }
+
+    public function testFilesPushCliStopsAtTheCallerDeadlineAndAnotherProcessCompletes(): void
+    {
+        $local_docroot = $this->root . '/cli-partial-local-docroot';
+        $state_directory = $this->root . '/cli-partial-state';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.txt', 'value');
+        $push_create_requests = $this->countEndpointRequests('push_create');
+        $this->configureEndpointGate('push_create');
+        [$process, $pipes] = $this->startFilesPushCli(
+            $local_docroot,
+            $state_directory,
+            ['max_execution_time' => '1']
+        );
+        $this->waitForPath($this->gate_ready_path);
+        usleep(850000);
+        $this->releaseEndpointGate();
+        $partial = $this->finishFilesPushCli($process, $pipes);
+        $this->clearEndpointGate();
+
+        $this->assertSame(2, $partial['exit'], $partial['output']);
+        $partial_result = $this->lastCliJsonLine($partial['stdout']);
+        $this->assertSame('partial', $partial_result['status'] ?? null);
+        $this->assertSame('time_limit', $partial_result['reason'] ?? null);
+        $this->assertSame('starting_plan', $partial_result['phase'] ?? null);
+        $this->assertSame($push_create_requests + 1, $this->countEndpointRequests('push_create'));
+        $this->assertSame(0, $this->countEndpointRequests('push_upload'));
+        $partial_audit = (string) file_get_contents($state_directory . '/.import-audit.log');
+        $this->assertStringContainsString(
+            'PARTIAL files-push | pair=' . $partial_result['pair']
+                . ' | phase=starting_plan | cause=time_limit',
+            $partial_audit
+        );
+
+        $completed = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(0, $completed['exit'], $completed['output']);
+        $this->assertSame('complete', $this->lastCliJsonLine($completed['stdout'])['status'] ?? null);
+        $this->assertSame('value', file_get_contents($this->docroot . '/value.txt'));
+    }
+
+    public function testFilesPushCliFinishesTheActiveStepAfterSigtermAndAnotherProcessCompletes(): void
+    {
+        if (
+            !function_exists('pcntl_signal')
+            || !function_exists('posix_kill')
+            || !defined('SIGTERM')
+        ) {
+            $this->markTestSkipped('files-push signal coverage requires PCNTL and POSIX signals.');
+        }
+        $local_docroot = $this->root . '/cli-signal-local-docroot';
+        $state_directory = $this->root . '/cli-signal-state';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.txt', 'signal value');
+        $this->configureEndpointGate('push_create');
+        [$process, $pipes] = $this->startFilesPushCli($local_docroot, $state_directory);
+        $this->waitForPath($this->gate_ready_path);
+        $process_status = proc_get_status($process);
+        $this->assertTrue($process_status['running']);
+        $this->assertTrue(posix_kill($process_status['pid'], SIGTERM));
+        usleep(50000);
+        $this->releaseEndpointGate();
+        $interrupted = $this->finishFilesPushCli($process, $pipes);
+        $this->clearEndpointGate();
+
+        $this->assertSame(2, $interrupted['exit'], $interrupted['output']);
+        $interrupted_result = $this->lastCliJsonLine($interrupted['stdout']);
+        $this->assertSame('interrupted', $interrupted_result['status'] ?? null);
+        $this->assertSame('signal', $interrupted_result['reason'] ?? null);
+        $this->assertSame('starting_plan', $interrupted_result['phase'] ?? null);
+        $interrupted_audit = (string) file_get_contents($state_directory . '/.import-audit.log');
+        $this->assertStringContainsString(
+            'INTERRUPTED files-push | pair=' . $interrupted_result['pair']
+                . ' | phase=starting_plan | signal=' . SIGTERM,
+            $interrupted_audit
+        );
+
+        $completed = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(0, $completed['exit'], $completed['output']);
+        $this->assertSame('complete', $this->lastCliJsonLine($completed['stdout'])['status'] ?? null);
+        $this->assertSame('signal value', file_get_contents($this->docroot . '/value.txt'));
+    }
+
+    public function testFilesPushCliContinuesAfterItIsKilledDuringAnAcceptedUpload(): void
+    {
+        if (
+            !function_exists('posix_kill')
+            || !defined('SIGKILL')
+            || !defined('SIGSTOP')
+            || !defined('SIGCONT')
+        ) {
+            $this->markTestSkipped('files-push process-death coverage requires POSIX signals.');
+        }
+        $this->stopServer($this->server_process, $this->server_pipes);
+        [$this->server_process, $this->server_pipes, $this->base_url] = $this->startServer(16 * 1024 * 1024);
+        $this->writeDocrootConfiguration([
+            'document_root' => $this->docroot,
+            'maximum_part_bytes' => 64,
+        ]);
+        $local_docroot = $this->root . '/cli-killed-local-docroot';
+        $state_directory = $this->root . '/cli-killed-state';
+        mkdir($local_docroot, 0700, true);
+        $contents = str_repeat('killed upload contents-', 24000);
+        file_put_contents($local_docroot . '/large.bin', $contents);
+        [$process, $pipes] = $this->startFilesPushCli($local_docroot, $state_directory);
+        $accepted_data_path = $this->waitForAcceptedUploadData();
+        $this->assertGreaterThan(0, filesize($accepted_data_path));
+        $server_status = proc_get_status($this->server_process);
+        $cli_status = proc_get_status($process);
+        $this->assertTrue($server_status['running']);
+        $this->assertTrue($cli_status['running']);
+        $server_stopped = false;
+        try {
+            $this->assertTrue(posix_kill($server_status['pid'], SIGSTOP));
+            $server_stopped = true;
+            usleep(20000);
+            $this->assertTrue(posix_kill($cli_status['pid'], SIGKILL));
+            $killed = $this->finishFilesPushCli($process, $pipes);
+        } finally {
+            if ($server_stopped) {
+                posix_kill($server_status['pid'], SIGCONT);
+            }
+        }
+
+        $this->assertNotSame(0, $killed['exit']);
+        $pair_state_directory = $this->filesPushPairStateDirectory($local_docroot, $state_directory);
+        $active_state = $this->loadActiveState($pair_state_directory);
+        $this->assertIsArray($active_state);
+        $this->waitForPushLockRelease($active_state['push_session_id']);
+
+        $completed = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(0, $completed['exit'], $completed['output']);
+        $this->assertSame('complete', $this->lastCliJsonLine($completed['stdout'])['status'] ?? null);
+        $this->assertSame($contents, file_get_contents($this->docroot . '/large.bin'));
+        $this->assertFileDoesNotExist($pair_state_directory . '/sender.json');
+    }
+
+    public function testFilesPushCliMakesOneFailedAttemptAndALaterProcessCompletes(): void
+    {
+        $local_docroot = $this->root . '/cli-failed-local-docroot';
+        $state_directory = $this->root . '/cli-failed-state';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.txt', 'value after failure');
+        $pair_state_directory = $this->filesPushPairStateDirectory($local_docroot, $state_directory);
+        $sender = PushFilesSender::start(
+            $this->filesPushSenderOptions($local_docroot, $pair_state_directory)
+        );
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+        } finally {
+            $sender->close();
+        }
+        $active_state = $this->loadActiveState($pair_state_directory);
+        $this->assertIsArray($active_state);
+        $push_lock = fopen(
+            $this->reprint_directory . '/.reprint/push/' . $active_state['push_session_id'] . '/push.lock',
+            'r+b'
+        );
+        $this->assertIsResource($push_lock);
+        $this->assertTrue(flock($push_lock, LOCK_EX | LOCK_NB));
+        $status_requests = $this->countEndpointRequests('push_status');
+        try {
+            $failed = $this->runFilesPushCli($local_docroot, $state_directory);
+        } finally {
+            flock($push_lock, LOCK_UN);
+            fclose($push_lock);
+        }
+
+        $this->assertSame(1, $failed['exit'], $failed['output']);
+        $failed_result = $this->lastCliJsonLine($failed['stdout']);
+        $this->assertSame('failed', $failed_result['status'] ?? null);
+        $this->assertSame('lock_acquisition_failure', $failed_result['reason'] ?? null);
+        $this->assertSame($status_requests + 1, $this->countEndpointRequests('push_status'));
+        $this->assertFileExists($pair_state_directory . '/sender.json');
+        $failed_audit = (string) file_get_contents($state_directory . '/.import-audit.log');
+        $this->assertStringContainsString(
+            'FAILED files-push | pair=' . $failed_result['pair'],
+            $failed_audit
+        );
+
+        $completed = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(0, $completed['exit'], $completed['output']);
+        $this->assertSame('complete', $this->lastCliJsonLine($completed['stdout'])['status'] ?? null);
+        $this->assertSame('value after failure', file_get_contents($this->docroot . '/value.txt'));
+    }
+
+    public function testFilesPushCliLeavesRestartForTheNextProcess(): void
+    {
+        $local_docroot = $this->root . '/cli-restart-local-docroot';
+        $state_directory = $this->root . '/cli-restart-state';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.txt', 'before');
+        $pair_state_directory = $this->filesPushPairStateDirectory($local_docroot, $state_directory);
+        $sender = PushFilesSender::start(
+            $this->filesPushSenderOptions($local_docroot, $pair_state_directory)
+        );
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+        } finally {
+            $sender->close();
+        }
+        file_put_contents($local_docroot . '/value.txt', 'after local change');
+        clearstatcache(true, $local_docroot . '/value.txt');
+        $push_create_requests = $this->countEndpointRequests('push_create');
+
+        $restart = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(2, $restart['exit'], $restart['output']);
+        $restart_result = $this->lastCliJsonLine($restart['stdout']);
+        $this->assertSame('restart', $restart_result['status'] ?? null);
+        $this->assertSame('local_path_changed', $restart_result['reason'] ?? null);
+        $this->assertSame($push_create_requests, $this->countEndpointRequests('push_create'));
+        $this->assertFileDoesNotExist($pair_state_directory . '/sender.json');
+        $this->assertDirectoryDoesNotExist($pair_state_directory . '/plan');
+        $restart_audit = (string) file_get_contents($state_directory . '/.import-audit.log');
+        $this->assertStringContainsString(
+            'RESTART files-push | pair=' . $restart_result['pair'],
+            $restart_audit
+        );
+
+        $completed = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(0, $completed['exit'], $completed['output']);
+        $this->assertSame($push_create_requests + 1, $this->countEndpointRequests('push_create'));
+        $this->assertSame('after local change', file_get_contents($this->docroot . '/value.txt'));
+    }
+
+    /**
+     * Runs the production CLI against the production endpoint router.
+     *
+     * @param array<string,string> $ini_settings PHP ini values for the subprocess.
+     * @return array{exit:int,stdout:string,stderr:string,output:string}
+     */
+    private function runFilesPushCli(
+        string $local_docroot,
+        string $state_directory,
+        array $ini_settings = []
+    ): array {
+        [$process, $pipes] = $this->startFilesPushCli(
+            $local_docroot,
+            $state_directory,
+            $ini_settings
+        );
+        return $this->finishFilesPushCli($process, $pipes);
+    }
+
+    /**
+     * Starts a production files-push CLI subprocess.
+     *
+     * @param array<string,string> $ini_settings PHP ini values for the subprocess.
+     * @return array{0:resource,1:array<int,resource>}
+     */
+    private function startFilesPushCli(
+        string $local_docroot,
+        string $state_directory,
+        array $ini_settings = []
+    ): array {
+        $command = [PHP_BINARY];
+        foreach ($ini_settings as $name => $value) {
+            $command[] = '-d';
+            $command[] = $name . '=' . $value;
+        }
+        $command = array_merge($command, [
+            __DIR__ . '/../importer/import.php',
+            'files-push',
+            $this->base_url,
+            '--state-dir=' . $state_directory,
+            '--fs-root=' . $local_docroot,
+            '--secret=' . self::SECRET,
+            '--force-http',
+        ]);
+        $process = proc_open(
+            $command,
+            [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+            $pipes,
+            $this->root
+        );
+        $this->assertIsResource($process);
+        fclose($pipes[0]);
+        unset($pipes[0]);
+        return [$process, $pipes];
+    }
+
+    /**
+     * Collects one files-push CLI subprocess result.
+     *
+     * @param resource $process Running CLI process.
+     * @param array<int,resource> $pipes Process output pipes.
+     * @return array{exit:int,stdout:string,stderr:string,output:string}
+     */
+    private function finishFilesPushCli($process, array $pipes): array
+    {
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exit = proc_close($process);
+        $this->assertIsString($stdout);
+        $this->assertIsString($stderr);
+        return [
+            'exit' => $exit,
+            'stdout' => $stdout,
+            'stderr' => $stderr,
+            'output' => $stdout . $stderr,
+        ];
+    }
+
+    /** @return array<string,mixed> */
+    private function lastCliJsonLine(string $output): array
+    {
+        foreach (array_reverse(preg_split('/\R/', trim($output)) ?: []) as $line) {
+            $decoded = json_decode($line, true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+        $this->fail('No JSON line was found in CLI output: ' . $output);
+    }
+
+    private function filesPushPairStateDirectory(
+        string $local_docroot,
+        string $state_directory
+    ): string {
+        $canonical_local_docroot = realpath($local_docroot);
+        $this->assertIsString($canonical_local_docroot);
+        $pair = hash('sha256', rtrim($this->base_url, '?&') . "\0" . $canonical_local_docroot);
+        return $state_directory . '/push/' . $pair;
+    }
+
+    /** @return array<string,mixed> */
+    private function filesPushSenderOptions(
+        string $local_docroot,
+        string $pair_state_directory
+    ): array {
+        return [
+            'docroot' => $local_docroot,
+            'push_state_directory' => $pair_state_directory,
+            'base_url' => $this->base_url,
+            'allow_http' => true,
+            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'chunk_bytes' => 4 * 1024 * 1024,
+        ];
+    }
+
+    private function waitForAcceptedUploadData(): string
+    {
+        $deadline = microtime(true) + 10;
+        do {
+            $paths = glob($this->reprint_directory . '/.reprint/push/*/work/inflight.data') ?: [];
+            foreach ($paths as $path) {
+                clearstatcache(true, $path);
+                if (is_file($path) && filesize($path) > 0) {
+                    return $path;
+                }
+            }
+            usleep(1000);
+        } while (microtime(true) < $deadline);
+        $this->fail('The production endpoint did not accept upload bytes before the deadline.');
+    }
+
+    private function waitForPushLockRelease(string $push_session_id): void
+    {
+        $lock_path = $this->reprint_directory
+            . '/.reprint/push/' . $push_session_id . '/push.lock';
+        $deadline = microtime(true) + 10;
+        do {
+            $lock = @fopen($lock_path, 'r+b');
+            if (is_resource($lock)) {
+                if (flock($lock, LOCK_EX | LOCK_NB)) {
+                    flock($lock, LOCK_UN);
+                    fclose($lock);
+                    return;
+                }
+                fclose($lock);
+            }
+            usleep(1000);
+        } while (microtime(true) < $deadline);
+        $this->fail('The production endpoint did not release the push lock before the deadline.');
+    }
+
+    private function configureEndpointGate(string $endpoint): void
+    {
+        @unlink($this->gate_ready_path);
+        @unlink($this->gate_release_path);
+        file_put_contents($this->gate_endpoint_configuration_path, $endpoint);
+    }
+
+    private function releaseEndpointGate(): void
+    {
+        file_put_contents($this->gate_release_path, 'release');
+    }
+
+    private function clearEndpointGate(): void
+    {
+        file_put_contents($this->gate_endpoint_configuration_path, '');
+        @unlink($this->gate_ready_path);
+        @unlink($this->gate_release_path);
+    }
+
+    private function waitForPath(string $path): void
+    {
+        $deadline = microtime(true) + 10;
+        while (!file_exists($path) && microtime(true) < $deadline) {
+            usleep(1000);
+        }
+        $this->assertFileExists($path);
+    }
+
     /**
      * @return array{http_code:int,response:array<string,mixed>} Decoded raw HTTP response.
      */
@@ -2632,6 +3135,9 @@ final class PushEndpointsTest extends TestCase {
             'REPRINT_PUSH_TEST_DIRECTORY_CONFIG' => $this->reprint_configuration_path,
             'REPRINT_PUSH_TEST_EXCLUDED_PATHS_CONFIG' => $this->excluded_paths_configuration_path,
             'REPRINT_PUSH_TEST_REQUEST_LOG' => $this->root . '/request.log',
+            'REPRINT_PUSH_TEST_GATE_ENDPOINT_CONFIG' => $this->gate_endpoint_configuration_path,
+            'REPRINT_PUSH_TEST_GATE_READY' => $this->gate_ready_path,
+            'REPRINT_PUSH_TEST_GATE_RELEASE' => $this->gate_release_path,
         ]);
         $server_log_path = $this->root . '/server-' . $post_max_bytes . '-' . bin2hex(random_bytes(4)) . '.log';
         $descriptors = [

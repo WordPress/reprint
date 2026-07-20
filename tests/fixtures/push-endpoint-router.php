@@ -20,6 +20,28 @@ if ($reprint_push_test_request_log !== '' && is_string($reprint_push_test_endpoi
     );
 }
 
+$reprint_push_test_gate_endpoint_path = (string) getenv('REPRINT_PUSH_TEST_GATE_ENDPOINT_CONFIG');
+$reprint_push_test_gate_endpoint = $reprint_push_test_gate_endpoint_path === ''
+    ? ''
+    : trim( (string) file_get_contents($reprint_push_test_gate_endpoint_path) );
+if (
+    $reprint_push_test_gate_endpoint !== ''
+    && $reprint_push_test_endpoint === $reprint_push_test_gate_endpoint
+) {
+    $reprint_push_test_gate_ready_path = (string) getenv('REPRINT_PUSH_TEST_GATE_READY');
+    $reprint_push_test_gate_release_path = (string) getenv('REPRINT_PUSH_TEST_GATE_RELEASE');
+    if (!is_file($reprint_push_test_gate_ready_path)) {
+        file_put_contents($reprint_push_test_gate_ready_path, 'ready', LOCK_EX);
+        $reprint_push_test_gate_deadline = microtime(true) + 20;
+        while (
+            !is_file($reprint_push_test_gate_release_path)
+            && microtime(true) < $reprint_push_test_gate_deadline
+        ) {
+            usleep(1000);
+        }
+    }
+}
+
 $reprint_push_test_docroot_configuration = json_decode(
     (string) file_get_contents( (string) getenv('REPRINT_PUSH_TEST_DOCROOT_CONFIG') ),
     true

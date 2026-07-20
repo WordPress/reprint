@@ -87,7 +87,7 @@ development. There are no compatibility aliases or migration paths.
 ## Local push state
 
 The local machine keeps planning and active state outside the receiver push
-directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
+directory. Under `<state-dir>/push/<pair-key>/`, use these names verbatim:
 
 | Surface | Name |
 | --- | --- |
@@ -159,6 +159,36 @@ never finishes an open request. In `pushing_paths` or
 `pushing_deletes`, one step sends at most one multipart part. `next_step()`
 returns true while another step may be performed and false when `get_status()`
 reports `complete`, `restart`, or `failed`.
+
+## Files-push CLI names
+
+The low-level, files-only command is `files-push`. Its `target URL` is the
+exporter API URL, and its `local tree` is the canonical directory supplied by
+`--fs-root`. It requires `--secret=TOKEN`; `--force-http` is the explicit
+plain-HTTP opt-in.
+
+The `pair key` identifies exactly one target URL and canonical local tree:
+
+```text
+sha256(rtrim(<target-url>, "?&") + "\0" + <canonical-local-tree-path>)
+```
+
+The `pair state directory` is `<state-dir>/push/<pair-key>/`. `files-push`
+chooses `start` or `resume` only from whether `sender.json` exists there. The
+receiver-confirmed upload positions remain receiver-owned; they are not a
+files-push cursor and are not copied into `.import-state.json` or
+`.import-status.json`.
+
+Files-push lifecycle lines use these command-first names verbatim: `START
+files-push`, `RESUME files-push`, `PHASE files-push`, `PARTIAL files-push`,
+`INTERRUPTED files-push`, `COMPLETE files-push`, `RESTART files-push`, `FAILED
+files-push`, and `ERROR files-push`. Every line contains `pair=<pair-key>`.
+Planned stop causes are `time_limit` and `memory_limit`.
+
+The CLI outcome names are `complete`, `partial`, `interrupted`, `restart`,
+`failed`, and `error`. `complete` exits 0; `partial`, `interrupted`, and
+`restart` exit 2; `failed` and `error` exit 1. A `restart` ends the current
+process, and the next invocation starts a fresh plan.
 
 ## PushFilesSender names
 

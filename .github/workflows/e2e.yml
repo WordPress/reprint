@@ -120,6 +120,34 @@ jobs:
           STATE_DIR="/tmp/e2e-smoke-state"
           FS_ROOT="/tmp/e2e-smoke-fs"
 
+          if [ "$IMPORTER_PHP" = "php7.4" ] || [ "$IMPORTER_PHP" = "php8.0" ]; then
+            echo "=== Importer files-push PHP version gate ==="
+            PUSH_STATE_DIR="/tmp/e2e-files-push-version-state"
+            PUSH_FS_ROOT="/tmp/e2e-files-push-version-files"
+            PUSH_PROBE="files-push-version-${{ matrix.importer_php }}"
+            rm -rf "$PUSH_STATE_DIR" "$PUSH_FS_ROOT"
+            mkdir -p "$PUSH_FS_ROOT"
+            set +e
+            files_push_version_output="$("$IMPORTER_PHP" "$IMPORTER_PATH" files-push "${BASE}&directory=${DIR}&version_gate_probe=${PUSH_PROBE}" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --secret="${SECRET}" --force-http 2>&1)"
+            files_push_version_status=$?
+            set -e
+            if [ "$files_push_version_status" -ne 1 ]; then
+              echo "$files_push_version_output"
+              echo "Expected files-push to exit 1 on ${IMPORTER_PHP}; got ${files_push_version_status}"
+              exit 1
+            fi
+            echo "$files_push_version_output" | grep -F 'reprint push requires PHP 8.1 or newer'
+            echo "$files_push_version_output" | sed 's#\\/#/#g' | grep -F 'https://github.com/WordPress/reprint/issues/327'
+            if find "$PUSH_STATE_DIR" -name sender.json -print -quit | grep -q .; then
+              echo "files-push created sender.json below PHP 8.1"
+              exit 1
+            fi
+            if sudo grep -F "version_gate_probe=${PUSH_PROBE}" /var/log/nginx/access.log >/dev/null 2>&1; then
+              echo "files-push contacted the target below PHP 8.1"
+              exit 1
+            fi
+          fi
+
           echo "=== Importer preflight ==="
           preflight_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" || {
             status=$?
