@@ -1347,6 +1347,7 @@ final class PushEndpointsTest extends TestCase {
         $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
 
         $commit_advances = 0;
+        $saw_completing = false;
         for ($step = 0; $step < 200; ++$step) {
             $result = $this->nextSenderDurableBoundary($local_docroot, $push_state_directory);
             $this->assertNotSame('failed', $result['status'], (string) json_encode($result));
@@ -1354,12 +1355,18 @@ final class PushEndpointsTest extends TestCase {
             if (is_array($state) && $state['phase'] === 'committing') {
                 ++$commit_advances;
             }
+            if (is_array($state) && $state['phase'] === 'completing') {
+                $this->assertNull($state['push_plan_cursor']);
+                $this->assertDirectoryExists($push_state_directory . '/plan');
+                $saw_completing = true;
+            }
             if ($result['status'] !== 'continue') {
                 break;
             }
         }
 
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertTrue($saw_completing);
         $this->assertGreaterThan(1, $commit_advances, 'The endpoint work budget must require repeated commit requests.');
         $this->assertSame(str_repeat('A', 2000), file_get_contents($this->docroot . '/nested/large.bin'));
         $this->assertSame('new!', file_get_contents($this->docroot . '/same-size.txt'));
@@ -1370,6 +1377,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
         $this->assertNull($this->loadActiveState($push_state_directory));
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
+        $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json');
         $this->assertFileExists($push_state_directory . '/local_index_at_previous_push.jsonl');
     }
 
@@ -1555,7 +1563,7 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Retains one open PushPlan and leaves sender state untouched while planning continues.
+     * Retains one open PushPlan while storing its cursor after each planning step.
      */
     public function testHighLevelSenderRetainsPushPlanAcrossPlanningSteps(): void
     {
@@ -1565,7 +1573,6 @@ final class PushEndpointsTest extends TestCase {
             file_put_contents($local_docroot . sprintf('/file-%04d.txt', $index), 'x');
         }
         $push_state_directory = $this->root . '/retained-plan-state';
-        $state_path = $push_state_directory . '/sender.json';
         $plan_property = new ReflectionProperty(PushFilesSender::class, 'plan');
         $fresh_local_index_handle_property = new ReflectionProperty(
             PushPlan::class,
@@ -1585,25 +1592,25 @@ final class PushEndpointsTest extends TestCase {
             $fresh_local_index_handle = $fresh_local_index_handle_property->getValue($plan);
             $this->assertIsResource($fresh_local_index_handle);
 
-            clearstatcache(true, $state_path);
-            $state_inode = fileinode($state_path);
-            $this->assertIsInt($state_inode);
+            $cursor_before_step = $this->loadPlanPosition($push_state_directory);
 
             $sender->next_step();
 
             $first_plan_result = $this->senderResult($sender);
             $this->assertSame('planning', $first_plan_result['phase']);
             $this->assertSame($plan, $plan_property->getValue($sender));
-            clearstatcache(true, $state_path);
-            $this->assertSame($state_inode, fileinode($state_path));
+            $cursor_after_first_step = $this->loadPlanPosition($push_state_directory);
+            $this->assertNotSame($cursor_before_step, $cursor_after_first_step);
 
             $sender->next_step();
 
             $second_plan_result = $this->senderResult($sender);
             $this->assertSame('planning', $second_plan_result['phase']);
             $this->assertSame($plan, $plan_property->getValue($sender));
-            clearstatcache(true, $state_path);
-            $this->assertSame($state_inode, fileinode($state_path));
+            $this->assertNotSame(
+                $cursor_after_first_step,
+                $this->loadPlanPosition($push_state_directory)
+            );
         } finally {
             $sender->close();
         }
@@ -1636,6 +1643,11 @@ final class PushEndpointsTest extends TestCase {
             $this->takeSenderStepsUntilPhase($sender, 'planning');
             $this->assertFileExists($fresh_local_index_path);
             $this->assertFileExists($push_state_directory . '/plan/excluded_paths.json');
+            $this->assertFileDoesNotExist($push_state_directory . '/plan/cursor.json');
+            $this->assertSame(
+                file_get_contents($push_state_directory . '/excluded_paths.json'),
+                file_get_contents($push_state_directory . '/plan/excluded_paths.json')
+            );
             $plan = $plan_property->getValue($sender);
             $this->assertInstanceOf(PushPlan::class, $plan);
             $file_index_processor = $file_index_processor_property->getValue($plan);
@@ -1648,12 +1660,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame($plan, $plan_property->getValue($sender));
             $this->assertSame($file_index_processor, $file_index_processor_property->getValue($plan));
             $this->assertSame($fresh_local_index_handle, $fresh_local_index_handle_property->getValue($plan));
-            $plan_cursor = json_decode(
-                (string) file_get_contents($push_state_directory . '/plan/cursor.json'),
-                true,
-                512,
-                JSON_THROW_ON_ERROR
-            );
+            $plan_cursor = $this->loadPlanPosition($push_state_directory);
             $this->assertSame('indexing', $plan_cursor['phase']);
             $this->assertSame(ftell($fresh_local_index_handle), $plan_cursor['fresh_local_index_byte_offset']);
             $this->assertNotEmpty($plan_cursor['file_index_cursor']['stack']);
@@ -1676,12 +1683,7 @@ final class PushEndpointsTest extends TestCase {
 
             $this->assertTrue($sender->next_step());
             $this->assertSame('planning', $sender->get_phase());
-            $plan_cursor = json_decode(
-                (string) file_get_contents($push_state_directory . '/plan/cursor.json'),
-                true,
-                512,
-                JSON_THROW_ON_ERROR
-            );
+            $plan_cursor = $this->loadPlanPosition($push_state_directory);
             $this->assertSame('diffing', $plan_cursor['phase']);
             $this->assertFileExists($fresh_local_index_path);
             $state = $this->loadActiveState($push_state_directory);
@@ -1734,12 +1736,7 @@ final class PushEndpointsTest extends TestCase {
         $state = $this->loadActiveState($push_state_directory);
         $this->assertIsArray($state);
         $this->assertSame('planning', $state['phase']);
-        $plan_cursor = json_decode(
-            (string) file_get_contents($push_state_directory . '/plan/cursor.json'),
-            true,
-            512,
-            JSON_THROW_ON_ERROR
-        );
+        $plan_cursor = $this->loadPlanPosition($push_state_directory);
         $this->assertSame('indexing', $plan_cursor['phase']);
         $this->assertGreaterThan(0, $plan_cursor['fresh_local_index_byte_offset']);
 
@@ -1898,6 +1895,10 @@ final class PushEndpointsTest extends TestCase {
             $this->assertNull($curl_handle_property->getValue($push_stream_client));
             $this->assertTrue($sender->next_step());
             $this->assertSame('discarding_plan', $sender->get_phase());
+            $state = $this->loadActiveState($push_state_directory);
+            $this->assertIsArray($state);
+            $this->assertNull($state['push_plan_cursor']);
+            $this->assertDirectoryExists($push_state_directory . '/plan');
             $this->assertFalse($sender->next_step());
             $this->assertSame('restart', $sender->get_status());
             $this->assertSame('local_path_changed', $sender->get_reason());
@@ -2045,6 +2046,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('local_path_changed', $result['reason']);
         $this->assertNull($this->loadActiveState($push_state_directory));
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
+        $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json');
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
     }
 
@@ -2090,6 +2092,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('local_path_changed', $result['reason']);
         $this->assertNull($this->loadActiveState($push_state_directory));
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
+        $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json');
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
     }
 
@@ -2784,12 +2787,7 @@ final class PushEndpointsTest extends TestCase {
         string $phase
     ): void {
         for ($step = 0; $step < 300; ++$step) {
-            $cursor = json_decode(
-                (string) file_get_contents($push_state_directory . '/plan/cursor.json'),
-                true,
-                512,
-                JSON_THROW_ON_ERROR
-            );
+            $cursor = $this->loadPlanPosition($push_state_directory);
             if ($cursor['phase'] === $phase) {
                 return;
             }
@@ -2798,6 +2796,18 @@ final class PushEndpointsTest extends TestCase {
             }
         }
         $this->fail("The push plan did not reach its requested {$phase} phase.");
+    }
+
+    /** @return array<string,mixed> */
+    private function loadPlanPosition(string $push_state_directory): array
+    {
+        $state = $this->loadActiveState($push_state_directory);
+        $this->assertIsArray($state);
+        $cursor = $state['push_plan_cursor'];
+        $this->assertIsArray($cursor);
+        $position = $cursor['position'];
+        $this->assertIsArray($position);
+        return $position;
     }
 
     /**

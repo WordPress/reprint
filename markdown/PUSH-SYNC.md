@@ -104,12 +104,14 @@ A push plan is an internal part of the sender lifecycle:
 
 1. `PushFilesSender::start()` enters `creating`. `push_create` returns at most
    100 target exclusions, which the sender stores once in
-   `plan/excluded_paths.json` after creating the active `plan/` directory.
-2. The sender starts one internal `PushPlan`. The plan opens
+   `excluded_paths.json` after creating the active `plan/` directory.
+2. The sender starts one internal `PushPlan`. The plan copies the exclusions to
+   `plan/excluded_paths.json`, then opens
    `plan/fresh_local_index.jsonl` and a `FileIndexProcessor`. Each `indexing`
    step advances one traversal event, appends its JSONL entries when applicable,
-   flushes those bytes, and then stores the traversal cursor and committed byte
-   offset in `plan/cursor.json`.
+   flushes those bytes, and then updates its traversal cursor and committed byte
+   offset. The sender stores that cursor in `sender.json` before returning
+   from its step.
 3. Once traversal is complete, the plan enters `starting_diff`. The next step
    starts the index diff and enters `diffing`.
 4. Each later `next_step()` compares at most one path represented by either
@@ -122,9 +124,15 @@ A push plan is an internal part of the sender lifecycle:
 5. The sender closes the plan before consuming those two files.
 6. After the receiver commits successfully, the sender saves the retained fresh
    local index as `local_index_at_previous_push.jsonl` through the same swap-file
-   copy. It then removes the complete `plan/` directory. After the target
+   copy. It then removes the complete `plan/` directory and the sender-owned
+   exclusions file. After the target
    confirms removal of a discarded push session, the sender removes the same
-   directory without changing the local index at the previous push.
+   files without changing the local index at the previous push.
+
+Until the sender stores the initial PushPlan cursor, `starting_plan` remains
+the durable phase. An interrupted start is repeated and overwrites its initial
+plan files. After each later plan step, changed files are flushed before the
+sender atomically stores the returned cursor in `sender.json`.
 
 The completed-index copy after commit is a deliberate exception to bounded
 sender steps. A
@@ -137,16 +145,16 @@ sender run. Keeping another cursor and retained handle for this post-commit copy
 is not justified until measurements from materially larger installations show
 that it matters.
 
-During indexing, `plan/cursor.json` contains the internal phase, the
-`FileIndexProcessor` cursor, and the committed fresh-index byte offset. During
-diffing, each step flushes only the path list or append-only deleted-directory
-stack changed by that step before atomically storing the two index offsets, two
-output byte offsets, and active stack byte offset. Each stack entry links to the
-preceding active directory, so continuation reads only the top entry. A later
-process calls `PushPlan::resume()` with the plan directory, local tree root,
-and local index at the previous push. The plan uses
-`plan/excluded_paths.json`, discards bytes beyond its durable output offsets,
-and continues from the retained internal phase.
+The cursor contains the plan directory, local tree root, local index at
+the previous push, and current planning position. During indexing, that
+position contains the `FileIndexProcessor` cursor and committed fresh-index byte
+offset. During diffing, each step flushes only the path list or append-only
+deleted-directory stack changed by that step before updating the two index
+offsets, two output byte offsets, and active stack byte offset. Each stack entry
+links to the preceding active directory, so continuation reads only the top
+entry. A later process passes the stored cursor to `PushPlan::resume()`. The
+plan uses its private exclusions copy, discards bytes beyond the stored output
+offsets, and continues from the retained internal phase.
 
 The first push to a site has no local index from a previous push or previously
 pushed rows. Every current file, symlink, and empty directory is selected, and
@@ -265,11 +273,11 @@ An active push keeps these files under `<state-dir>/push/<site>/`:
 
 ```text
 local_index_at_previous_push.jsonl  index saved after the previous commit
+excluded_paths.json                 sender-owned target exclusions
 sender.json                         active push state
 sender.lock                         lifecycle lock
 plan/
   excluded_paths.json               target exclusions for the active push
-  cursor.json                       PushPlan cursor
   fresh_local_index.jsonl           plan-owned fresh local index
   local_paths_to_push.jsonl         local paths to push
   local_paths_to_delete             raw NUL-delimited local paths to delete
@@ -306,12 +314,13 @@ The sender creates the push session and stores its exclusion policy before it
 starts PushPlan. Each internal `indexing` step completes one traversal event,
 and `starting_diff` initializes the index diff. Each internal `diffing` step
 compares at most one path and updates the path lists. PushPlan owns the
-file-index cursor, index offsets, output lengths, deleted-directory ranges, and
-exclusions in `plan/cursor.json`. No upload begins until both indexes have been
-consumed and the two path lists are stable.
+meaning of its file-index cursor, index offsets, output lengths, and
+deleted-directory ranges. `sender.json` stores the complete cursor. No
+upload begins until both indexes have been consumed and the two path lists are
+stable.
 
-`sender.json` contains no second planning checkpoint and no copied receiver
-cursor. It stores the push session and phase, the next byte offset in
+`sender.json` contains no copied receiver cursor. It stores the push session
+and phase, the PushPlan cursor, the next byte offset in
 `local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
 sizing state. Its phases are `creating`, `starting_plan`, `planning`,
 `pushing_paths`, `pushing_deletes`, `committing`,
@@ -319,10 +328,11 @@ sizing state. Its phases are `creating`, `starting_plan`, `planning`,
 `discarding_plan`.
 The separate start, index-save, completion, removal, and discard phases ensure
 that a process stop between durable actions repeats only the current action.
-During `planning`, `plan/cursor.json` alone owns the plan's internal phase and
-continuation offsets. A completed cursor remains until commit and the local
-index save finishes, or until `discarding_plan` follows confirmed target
-removal.
+During `planning`, the PushPlan cursor in `sender.json` contains the
+plan's internal phase and continuation offsets. A completed cursor remains until
+the local index is saved, or until the target confirms removal. The sender then
+clears the cursor, enters `completing` or `discarding_plan`, and removes the
+active plan files without reopening PushPlan.
 
 Each local path to push carries the type, size, and ctime from the index used to
 plan it. When the receiver position is unknown, the sender compares the live
