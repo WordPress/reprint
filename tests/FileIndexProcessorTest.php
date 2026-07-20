@@ -32,13 +32,22 @@ final class FileIndexProcessorTest extends TestCase {
         file_put_contents($docroot . '/a.txt', 'a');
         file_put_contents($docroot . '/nested/b.txt', 'b');
         file_put_contents($docroot . '/wp-content/cache/skipped.txt', 'skip');
+        symlink('a.txt', $docroot . '/a-link');
 
         $uninterrupted = $this->runProcessor($docroot, false);
         $resumed = $this->runProcessor($docroot, true);
 
         $this->assertSame($uninterrupted, $resumed);
         $this->assertContains('empty', $this->relativePaths($resumed['entries'], $docroot));
+        $this->assertContains('a-link', $this->relativePaths($resumed['entries'], $docroot));
         $this->assertContains('nested/b.txt', $this->relativePaths($resumed['entries'], $docroot));
+        $link_stat = lstat($docroot . '/a-link');
+        $this->assertIsArray($link_stat);
+        foreach ($resumed['entries'] as $index_entry) {
+            if ($index_entry['path'] === $docroot . '/a-link') {
+                $this->assertSame( (int) $link_stat['size'], $index_entry['size']);
+            }
+        }
         $this->assertNotContains(
             'wp-content/cache',
             $this->relativePaths($resumed['entries'], $docroot)

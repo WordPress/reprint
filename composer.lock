@@ -380,6 +380,7 @@
                 },
                 "classmap": [
                     "src/class-mysql-dump-producer.php",
+                    "src/class-file-index-processor.php",
                     "src/class-file-tree-producer.php",
                     "src/class-hmac-client.php",
                     "src/class-hmac-server.php",

@@ -1,28 +1,29 @@
 <?php
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
+
 /**
  * Internal planner for one PushFilesSender lifecycle.
  *
- * PushPlan merges a path-sorted fresh local index with the local index at the
- * previous push. It writes durable lists of local paths to push and local paths
- * to delete without reading the local tree or accumulating either index in
+ * PushPlan builds a path-sorted fresh local index, then diffs it against the
+ * local index at the previous push. It writes durable lists of local paths to
+ * push and local paths to delete without accumulating an index or path list in
  * memory.
  *
  * PushFilesSender is the only caller-visible processor. It owns the lifecycle
  * lock, top-level phase, transport, result, commit, restart, and removal.
- * PushPlan only merges the two indexes, saves its planning cursor, and
- * produces the local paths to push and local paths to delete.
+ * PushPlan owns FileIndexProcessor, the fresh local index, the index diff, its
+ * planning cursor, and the two completed path lists.
  *
  * ## Durable boundary
  *
- * While sender.json says `planning`, cursor.json exists and the sender owns an
- * open PushPlan under sender.lock. A false next_step() result means both indexes
- * reached EOF; the sender closes the plan before changing its phase. The plan
- * cursor then remains in place until a confirmed commit saves the fresh local
- * index as the local index at the previous push, or removal discards the plan.
- * cursor.json owns planning progress;
- * sender.json never duplicates it.
+ * While sender.json says `planning`, cursor.json owns one of four internal
+ * phases: `indexing`, `starting_diff`, `diffing`, or `complete`. The sender
+ * owns an open PushPlan under sender.lock but does not duplicate any planning
+ * cursor. A false next_step() result means both indexes reached EOF; the sender
+ * closes the plan before changing its phase. The cursor remains until a
+ * confirmed commit saves the fresh local index as the local index at the
+ * previous push, or removal discards the plan.
  *
  * ## Change detection
  *
@@ -42,22 +43,34 @@
  *
  * ## Durability and memory
  *
- * The sender copies the fresh local index into plan-owned state before
- * `start()`. Each step merges one path, flushes the plan output changed by that
- * step, and atomically stores the next cursor.
- * `resume()` discards bytes written beyond the saved output offsets and
- * continues from the saved index offsets, so an interrupted step cannot leave
- * duplicate durable entries.
+ * Each indexing step advances one FileIndexProcessor traversal event and
+ * flushes any appended JSONL bytes before storing the traversal cursor and
+ * committed byte offset.
+ * A separate step starts the index diff. Each diff step compares at most one
+ * path represented by either index and flushes only the output changed by that
+ * step before storing its next cursor. `resume()` discards bytes beyond saved
+ * offsets, so an interrupted step cannot leave duplicate durable entries.
  *
  * PushPlan retains the next entry from each index and the top of an append-only
  * deleted-directory stack needed to suppress redundant descendant deletions. It
  * never loads an index, path list, or the stack in full.
  *
- * @phpstan-type PushPlanCursor array{byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_stack_top_byte_offset:int|null,complete:bool}
+ * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
+ * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
+ * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_stack_top_byte_offset:int|null}
+ * @phpstan-type CompleteCursor array{phase:'complete'}
+ * @phpstan-type PushPlanCursor IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
  * @phpstan-type DeletedDirectoryStackEntry array{path:string,previous_byte_offset:int|null}
  */
 class PushPlan
 {
+    /** @var string Canonical local tree root inspected while building the fresh local index. */
+    private string $local_tree_root;
+
+    /** @var string Local push state directory containing every plan file. */
+    private string $push_state_directory;
+
     /** @var string Paths and metadata from the last completed push. */
     private string $local_index_at_previous_push;
 
@@ -67,7 +80,7 @@ class PushPlan
     /** @var string Raw NUL-delimited local paths to delete. */
     private string $local_paths_to_delete;
 
-    /** @var string Plan-owned copy of the fresh local index. */
+    /** @var string Plan-owned fresh local index. */
     private string $fresh_local_index;
 
     /** @var string Path to the durable PushPlan cursor. */
@@ -88,8 +101,8 @@ class PushPlan
     /** @var bool Whether close() has closed this plan's file handles. */
     private bool $closed = false;
 
-    /** @var bool Whether both index handles reached EOF at a durable boundary. */
-    private bool $complete = false;
+    /** @var FileIndexProcessor Fresh local index traversal retained during indexing. */
+    private FileIndexProcessor $file_index_processor;
 
     /** @var array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}|null */
     private ?array $fresh_local_index_entry = null;
@@ -106,7 +119,7 @@ class PushPlan
     /** @var DeletedDirectoryStackEntry|null Top active deleted-directory stack entry. */
     private ?array $deleted_directory_stack_entry = null;
 
-    /** @var resource|null */
+    /** @var resource|null Open fresh local index retained during indexing or the index diff. */
     private $fresh_local_index_handle = null;
     /** @var resource|null */
     private $local_index_at_previous_push_handle = null;
@@ -118,64 +131,64 @@ class PushPlan
     private $deleted_directories_stack_handle = null;
 
     /**
-     * Starts a push plan from a fresh local index.
+     * Starts a push plan by opening a fresh local index traversal.
      *
-     * The owning sender has already copied the fresh local index into this
-     * plan's directory. This method writes the initial cursor and opens the
-     * planning files. An existing cursor is rejected so unfinished work cannot
-     * be overwritten.
+     * The sender has already stored the target exclusions. An existing cursor
+     * is rejected so unfinished planning cannot be replaced.
      *
      * @param string $push_state_directory Local push state directory.
-     * @return self Open plan positioned at the initial cursor.
+     * @param string $local_tree_root      Canonical local tree root.
+     * @return self Open plan positioned at the initial indexing cursor.
      */
-    public static function start(string $push_state_directory): self
+    public static function start(string $push_state_directory, string $local_tree_root): self
     {
         $plan = new self($push_state_directory);
         if (is_file($plan->cursor_file)) {
             throw new LogicException("Cannot start a push plan while an unfinished plan exists: {$plan->cursor_file}");
         }
-        if (!is_file($plan->fresh_local_index)) {
-            throw new RuntimeException("Cannot plan local files, the fresh local index file is missing: {$plan->fresh_local_index}");
-        }
-
+        $plan->set_local_tree_root($local_tree_root);
         $plan->excluded_paths = $plan->load_excluded_paths();
-        if (file_put_contents($plan->deleted_directories_stack, '') !== 0) {
-            throw new RuntimeException("Failed to initialize the deleted-directory stack: {$plan->deleted_directories_stack}");
+        $plan->fresh_local_index_handle = fopen($plan->fresh_local_index, "w+b");
+        if (!is_resource($plan->fresh_local_index_handle)) {
+            throw new RuntimeException("Failed to open the fresh local index: {$plan->fresh_local_index}");
         }
+        $plan->file_index_processor = FileIndexProcessor::start(
+            [$plan->local_tree_root],
+            $plan->local_tree_root,
+            false,
+            false,
+            $plan->push_state_directory
+        );
         $plan->cursor = [
-            "byte_offset_in_fresh_index" => 0,
-            "byte_offset_in_previous_index" => 0,
-            "byte_offset_in_local_paths_to_push" => 0,
-            "byte_offset_in_local_paths_to_delete" => 0,
-            "deleted_directory_stack_top_byte_offset" => null,
-            "complete" => false,
+            "phase" => "indexing",
+            "file_index_cursor" => $plan->file_index_processor->get_cursor(),
+            "fresh_local_index_byte_offset" => 0,
         ];
         $plan->save_cursor($plan->cursor);
-        $plan->open_plan_files();
         return $plan;
     }
 
     /**
      * Resumes the unfinished push plan retained in local push state.
      *
-     * Reuses the plan-owned fresh local index, offsets, and deleted-directory
-     * ranges in the durable cursor. Excluded paths are the ones originally
-     * passed to start().
+     * Reopens only the processor and files required by the cursor's current
+     * internal phase.
      *
      * @param string $push_state_directory Local push state directory containing the unfinished plan.
+     * @param string $local_tree_root      Canonical local tree root.
      * @return self Open plan positioned at its last durable cursor.
      */
-    public static function resume(string $push_state_directory): self
+    public static function resume(string $push_state_directory, string $local_tree_root): self
     {
         $plan = self::load_retained($push_state_directory);
-        if (!is_file($plan->fresh_local_index)) {
-            throw new RuntimeException("Cannot resume the push plan, the retained fresh local index is missing: {$plan->fresh_local_index}");
-        }
-
+        $plan->set_local_tree_root($local_tree_root);
         $plan->excluded_paths = $plan->load_excluded_paths();
         $plan->closed = false;
-        $plan->complete = $plan->cursor["complete"];
-        $plan->open_plan_files();
+        if ($plan->cursor["phase"] === "indexing") {
+            $plan->open_fresh_local_index_for_continuation();
+        } elseif ($plan->cursor["phase"] === "diffing") {
+            $plan->open_plan_files();
+        }
         return $plan;
     }
 
@@ -265,6 +278,7 @@ class PushPlan
         if (!is_dir($push_state_directory) && !@mkdir($push_state_directory, 0755, true) && !is_dir($push_state_directory)) {
             throw new RuntimeException("Failed to create the push plan directory: {$push_state_directory}");
         }
+        $this->push_state_directory = $push_state_directory;
         $this->local_index_at_previous_push = self::local_index_at_previous_push_path($push_state_directory);
         $this->local_paths_to_push = self::local_paths_to_push_path($push_state_directory);
         $this->local_paths_to_delete = self::local_paths_to_delete_path($push_state_directory);
@@ -275,6 +289,50 @@ class PushPlan
     }
 
     /**
+     * Stores the canonical root of the local tree represented by this push.
+     *
+     * @param string $local_tree_root Local tree root selected by PushFilesSender.
+     */
+    private function set_local_tree_root(string $local_tree_root): void
+    {
+        clearstatcache(true, $local_tree_root);
+        $canonical_local_tree_root = realpath($local_tree_root);
+        if ($canonical_local_tree_root === false || !is_dir($canonical_local_tree_root) || is_link($local_tree_root)) {
+            throw new InvalidArgumentException("PushPlan requires the local tree root to be a real directory.");
+        }
+        $this->local_tree_root = rtrim($canonical_local_tree_root, "/");
+    }
+
+    /**
+     * Reopens the fresh local index at the byte offset stored with its traversal cursor.
+     *
+     * Any bytes appended after the last cursor replacement are discarded before
+     * FileIndexProcessor continues from that same durable step.
+     */
+    private function open_fresh_local_index_for_continuation(): void
+    {
+        /** @var IndexingCursor $cursor */
+        $cursor = $this->cursor;
+        $this->fresh_local_index_handle = fopen($this->fresh_local_index, "r+b");
+        if (!is_resource($this->fresh_local_index_handle)) {
+            throw new RuntimeException("Failed to reopen the fresh local index: {$this->fresh_local_index}");
+        }
+        if (!ftruncate($this->fresh_local_index_handle, $cursor["fresh_local_index_byte_offset"])) {
+            throw new RuntimeException("Failed to discard uncommitted fresh-local-index bytes.");
+        }
+        if (fseek($this->fresh_local_index_handle, $cursor["fresh_local_index_byte_offset"]) !== 0) {
+            throw new RuntimeException("Failed to seek to the fresh local index byte offset.");
+        }
+        $this->file_index_processor = FileIndexProcessor::resume(
+            [$this->local_tree_root],
+            json_encode($cursor["file_index_cursor"], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+            false,
+            false,
+            $this->push_state_directory
+        );
+    }
+
+    /**
      * Opens and positions the files used by start() and resume().
      *
      * Indexes are positioned at their durable cursor offsets. Output bytes
@@ -282,6 +340,8 @@ class PushPlan
      */
     private function open_plan_files(): void
     {
+        /** @var IndexDiffCursor $cursor */
+        $cursor = $this->cursor;
         $this->fresh_local_index_entry = null;
         $this->fresh_local_index_entry_loaded = false;
         $this->previous_local_index_entry = null;
@@ -289,11 +349,11 @@ class PushPlan
         $this->deleted_directory_stack_entry = null;
         $this->local_paths_to_push_handle = $this->open_and_truncate_and_seek(
             $this->local_paths_to_push,
-            $this->cursor["byte_offset_in_local_paths_to_push"]
+            $cursor["byte_offset_in_local_paths_to_push"]
         );
         $this->local_paths_to_delete_handle = $this->open_and_truncate_and_seek(
             $this->local_paths_to_delete,
-            $this->cursor["byte_offset_in_local_paths_to_delete"]
+            $cursor["byte_offset_in_local_paths_to_delete"]
         );
         $this->fresh_local_index_handle = fopen($this->fresh_local_index, "rb");
         if (!is_resource($this->fresh_local_index_handle)) {
@@ -308,13 +368,13 @@ class PushPlan
         }
         $this->seek_to_cursor(
             $this->fresh_local_index_handle,
-            $this->cursor["byte_offset_in_fresh_index"],
+            $cursor["byte_offset_in_fresh_index"],
             "fresh local index"
         );
         if ($this->local_index_at_previous_push_handle) {
             $this->seek_to_cursor(
                 $this->local_index_at_previous_push_handle,
-                $this->cursor["byte_offset_in_previous_index"],
+                $cursor["byte_offset_in_previous_index"],
                 "local index at the previous push"
             );
         }
@@ -323,71 +383,200 @@ class PushPlan
             throw new RuntimeException("Failed to open the deleted-directory stack: {$this->deleted_directories_stack}");
         }
         $this->deleted_directory_stack_entry = $this->read_deleted_directory_stack_entry(
-            $this->cursor["deleted_directory_stack_top_byte_offset"]
+            $cursor["deleted_directory_stack_top_byte_offset"]
         );
     }
 
     /**
-     * Removes the planning cursor after the sender finishes a successful push.
+     * Removes the completed plan after the sender finishes a successful push.
      *
-     * Only a closed, completed plan can remove its cursor. The sender owns
-     * commit and saves the fresh local index as the local index at the previous
-     * push before calling this method.
+     * The sender saves the fresh local index as the local index at the previous
+     * push before calling this method. The fresh index is removed before the
+     * cursor so interrupted cleanup can repeat safely.
      */
     public function after_successful_push(): void
     {
         if (!$this->closed) {
             throw new LogicException("Close the push plan before finishing a successful push.");
         }
-        if (!is_file($this->fresh_local_index)) {
-            throw new RuntimeException("Cannot finish a successful push, the fresh local index is missing: {$this->fresh_local_index}");
-        }
-        if (!$this->cursor["complete"]) {
+        if ($this->cursor["phase"] !== "complete") {
             throw new LogicException("Cannot finish a successful push before the plan is complete.");
         }
 
+        $this->remove_fresh_local_index();
         $this->remove_cursor();
     }
 
     /**
      * Discards a closed plan after its push session is removed.
      *
-     * Removing the cursor permits the next push to start from a new local
-     * index. The plan-owned index and output files may remain because start()
-     * replaces or truncates them before they can be used again.
+     * Removing the fresh index and cursor permits the next push to start from a
+     * new local index. Output files may remain because start() truncates them
+     * before they can be used again.
      */
     public function discard(): void
     {
         if (!$this->closed) {
             throw new LogicException("Close the push plan before discarding it.");
         }
+        $this->remove_fresh_local_index();
         $this->remove_cursor();
     }
 
     /**
-     * Merges one path and stores the resulting push plan cursor.
+     * Performs one step for the current internal phase.
      *
-     * A true return means another path may be merged. False means both indexes
-     * reached EOF and remains false on later calls. The owning sender closes the
-     * plan before using its output files.
-     *
-     * Exclusions suppress network changes, not entries in the retained fresh
-     * local index saved as the local index at the previous push after success.
+     * A false return means planning is complete and remains false on later
+     * calls. The owning sender closes the plan before using its path lists.
      *
      * @return bool Whether another planning step may be performed.
      */
     public function next_step(): bool
     {
-        if ($this->complete) {
+        if ($this->cursor["phase"] === "complete") {
             return false;
         }
         if ($this->closed) {
             throw new LogicException("Cannot take a push plan step after close().");
         }
 
-        $byte_offset_in_fresh_index = $this->cursor["byte_offset_in_fresh_index"];
-        $byte_offset_in_previous_index = $this->cursor["byte_offset_in_previous_index"];
-        $deleted_directory_stack_top_byte_offset = $this->cursor["deleted_directory_stack_top_byte_offset"];
+        switch ($this->cursor["phase"]) {
+            case "indexing":
+                $this->next_file_index_step();
+                return true;
+            case "starting_diff":
+                $this->start_index_diff();
+                return true;
+            case "diffing":
+                return $this->next_index_diff_step();
+        }
+    }
+
+    /**
+     * Performs one filesystem traversal step and stores its exact continuation point.
+     *
+     * Completed index entries are appended and flushed before the cursor moves
+     * past them. Steps which omit a path still store the changed traversal
+     * cursor. A directory failure leaves the durable cursor unchanged so the
+     * next plan run attempts that same directory again.
+     */
+    private function next_file_index_step(): void
+    {
+        if (!$this->file_index_processor->next_index_step()) {
+            $this->file_index_processor->close();
+            $this->close_fresh_local_index_handle();
+            $this->cursor = ["phase" => "starting_diff"];
+            $this->save_cursor($this->cursor);
+            return;
+        }
+
+        $fresh_local_index_changed = false;
+        switch ($this->file_index_processor->get_step_status()) {
+            case FileIndexProcessor::STATUS_INDEXED:
+                foreach ($this->file_index_processor->get_index_entries() as $index_entry) {
+                    $this->append_fresh_local_index_entry($index_entry);
+                    $fresh_local_index_changed = true;
+                }
+                break;
+
+            case FileIndexProcessor::STATUS_DIRECTORY_ERROR:
+                $directory_error = $this->file_index_processor->get_directory_error();
+                throw new RuntimeException(
+                    $directory_error["message"] . ": " . base64_encode($directory_error["path"]) . "."
+                );
+
+            case FileIndexProcessor::STATUS_SKIPPED:
+            case FileIndexProcessor::STATUS_PATH_UNAVAILABLE:
+            case FileIndexProcessor::STATUS_DIRECTORY_COMPLETE:
+                break;
+        }
+
+        if ($fresh_local_index_changed && !fflush($this->fresh_local_index_handle)) {
+            throw new RuntimeException("Failed to flush the fresh local index.");
+        }
+        $fresh_local_index_byte_offset = ftell($this->fresh_local_index_handle);
+        if (!is_int($fresh_local_index_byte_offset)) {
+            throw new RuntimeException("Failed to determine the fresh local index byte offset.");
+        }
+        $this->cursor = [
+            "phase" => "indexing",
+            "file_index_cursor" => $this->file_index_processor->get_cursor(),
+            "fresh_local_index_byte_offset" => $fresh_local_index_byte_offset,
+        ];
+        $this->save_cursor($this->cursor);
+    }
+
+    /**
+     * Starts the index diff and opens its plan files.
+     */
+    private function start_index_diff(): void
+    {
+        if (file_put_contents($this->deleted_directories_stack, "") !== 0) {
+            throw new RuntimeException("Failed to initialize the deleted-directory stack: {$this->deleted_directories_stack}");
+        }
+        $this->cursor = [
+            "phase" => "diffing",
+            "byte_offset_in_fresh_index" => 0,
+            "byte_offset_in_previous_index" => 0,
+            "byte_offset_in_local_paths_to_push" => 0,
+            "byte_offset_in_local_paths_to_delete" => 0,
+            "deleted_directory_stack_top_byte_offset" => null,
+        ];
+        $this->save_cursor($this->cursor);
+        $this->open_plan_files();
+    }
+
+    /**
+     * Appends one FileIndexProcessor entry in the JSONL format consumed by the
+     * index diff.
+     *
+     * @param array<string,mixed> $index_entry Filesystem path details from FileIndexProcessor.
+     */
+    private function append_fresh_local_index_entry(array $index_entry): void
+    {
+        if ($index_entry["type"] === "other") {
+            throw new RuntimeException(
+                "Cannot push the unsupported local path: " . base64_encode($index_entry["path"]) . "."
+            );
+        }
+        if ($index_entry["type"] === "dir" && !array_key_exists("empty", $index_entry)) {
+            throw new RuntimeException(
+                "Could not inspect the local directory: " . base64_encode($index_entry["path"]) . "."
+            );
+        }
+
+        $local_path = substr($index_entry["path"], strlen($this->local_tree_root) + 1);
+        $fresh_local_index_entry = [
+            "path" => base64_encode($local_path),
+            "ctime" => $index_entry["ctime"],
+            "size" => $index_entry["size"],
+            "type" => $index_entry["type"],
+        ];
+        if ($index_entry["type"] === "dir") {
+            $fresh_local_index_entry["empty"] = $index_entry["empty"];
+        }
+        $line = json_encode($fresh_local_index_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+        if (fwrite($this->fresh_local_index_handle, $line) !== strlen($line)) {
+            throw new RuntimeException("Failed to write a fresh local index entry.");
+        }
+    }
+
+    /**
+     * Compares at most one path and stores the resulting push plan cursor.
+     *
+     * Exclusions suppress network changes, not entries in the retained fresh
+     * local index saved as the local index at the previous push after success.
+     *
+     * @return bool Whether another index diff step may be performed.
+     */
+    private function next_index_diff_step(): bool
+    {
+        /** @var IndexDiffCursor $cursor */
+        $cursor = $this->cursor;
+
+        $byte_offset_in_fresh_index = $cursor["byte_offset_in_fresh_index"];
+        $byte_offset_in_previous_index = $cursor["byte_offset_in_previous_index"];
+        $deleted_directory_stack_top_byte_offset = $cursor["deleted_directory_stack_top_byte_offset"];
         $local_paths_to_push_changed = false;
         $local_paths_to_delete_changed = false;
         $deleted_directories_stack_changed = false;
@@ -546,17 +735,18 @@ class PushPlan
             $deleted_directory_stack_top_byte_offset = null;
             $this->deleted_directory_stack_entry = null;
         }
-        $cursor_after_step = [
-            "byte_offset_in_fresh_index" => $byte_offset_in_fresh_index,
-            "byte_offset_in_previous_index" => $byte_offset_in_previous_index,
-            "byte_offset_in_local_paths_to_push" => ftell($this->local_paths_to_push_handle),
-            "byte_offset_in_local_paths_to_delete" => ftell($this->local_paths_to_delete_handle),
-            "deleted_directory_stack_top_byte_offset" => $deleted_directory_stack_top_byte_offset,
-            "complete" => $complete,
-        ];
+        $cursor_after_step = $complete
+            ? ["phase" => "complete"]
+            : [
+                "phase" => "diffing",
+                "byte_offset_in_fresh_index" => $byte_offset_in_fresh_index,
+                "byte_offset_in_previous_index" => $byte_offset_in_previous_index,
+                "byte_offset_in_local_paths_to_push" => ftell($this->local_paths_to_push_handle),
+                "byte_offset_in_local_paths_to_delete" => ftell($this->local_paths_to_delete_handle),
+                "deleted_directory_stack_top_byte_offset" => $deleted_directory_stack_top_byte_offset,
+            ];
         $this->save_cursor($cursor_after_step);
         $this->cursor = $cursor_after_step;
-        $this->complete = $complete;
         return !$complete;
     }
 
@@ -569,9 +759,10 @@ class PushPlan
      */
     public function close(): void
     {
-        if (is_resource($this->fresh_local_index_handle)) {
-            fclose($this->fresh_local_index_handle);
+        if (isset($this->file_index_processor)) {
+            $this->file_index_processor->close();
         }
+        $this->close_fresh_local_index_handle();
         if (is_resource($this->local_index_at_previous_push_handle)) {
             fclose($this->local_index_at_previous_push_handle);
         }
@@ -584,7 +775,6 @@ class PushPlan
         if (is_resource($this->deleted_directories_stack_handle)) {
             fclose($this->deleted_directories_stack_handle);
         }
-        $this->fresh_local_index_handle = null;
         $this->local_index_at_previous_push_handle = null;
         $this->local_paths_to_push_handle = null;
         $this->local_paths_to_delete_handle = null;
@@ -595,6 +785,17 @@ class PushPlan
         $this->previous_local_index_entry_loaded = false;
         $this->deleted_directory_stack_entry = null;
         $this->closed = true;
+    }
+
+    /**
+     * Closes the fresh local index retained while indexing or diffing the indexes.
+     */
+    private function close_fresh_local_index_handle(): void
+    {
+        if (is_resource($this->fresh_local_index_handle)) {
+            fclose($this->fresh_local_index_handle);
+        }
+        $this->fresh_local_index_handle = null;
     }
 
     /**
@@ -893,17 +1094,7 @@ class PushPlan
     /**
      * Loads the durable cursor for an unfinished push plan.
      *
-     * @return array|null {
-     *     Durable cursor, or null when no unfinished plan exists.
-     *
-     *     @type int      $byte_offset_in_fresh_index                Consumed bytes in the fresh local index.
-     *     @type int      $byte_offset_in_previous_index             Consumed bytes in the local index at the previous push.
-     *     @type int      $byte_offset_in_local_paths_to_push        Durable bytes in the local paths to push output.
-     *     @type int      $byte_offset_in_local_paths_to_delete      Durable bytes in the local paths to delete output.
-     *     @type int|null $deleted_directory_stack_top_byte_offset   Active stack entry, or null for an empty stack.
-     *     @type bool     $complete                                  Whether both indexes reached EOF.
-     * }
-     * @phpstan-return PushPlanCursor|null
+     * @phpstan-return PushPlanCursor|null Durable cursor, or null when no unfinished plan exists.
      */
     private function load_cursor(): ?array
     {
@@ -931,21 +1122,11 @@ class PushPlan
     }
 
     /**
-     * Persists the next durable push-plan boundary atomically.
+     * Stores the next durable push-plan boundary atomically.
      *
      * A temporary file and rename prevent readers from observing a partial cursor.
      *
-     * @param array $cursor {
-     *     Cursor to store as the durable plan boundary.
-     *
-     *     @type int      $byte_offset_in_fresh_index                Consumed bytes in the fresh local index.
-     *     @type int      $byte_offset_in_previous_index             Consumed bytes in the local index at the previous push.
-     *     @type int      $byte_offset_in_local_paths_to_push        Durable bytes in the local paths to push output.
-     *     @type int      $byte_offset_in_local_paths_to_delete      Durable bytes in the local paths to delete output.
-     *     @type int|null $deleted_directory_stack_top_byte_offset   Active stack entry, or null for an empty stack.
-     *     @type bool     $complete                                  Whether both indexes reached EOF.
-     * }
-     * @phpstan-param PushPlanCursor $cursor
+     * @phpstan-param PushPlanCursor $cursor Cursor to store as the durable plan boundary.
      */
     private function save_cursor(array $cursor): void
     {
@@ -960,7 +1141,17 @@ class PushPlan
     }
 
     /**
-     * Removes the cursor after the completed fresh local index is saved.
+     * Removes the fresh local index when its plan ends.
+     */
+    private function remove_fresh_local_index(): void
+    {
+        if (is_file($this->fresh_local_index) && !unlink($this->fresh_local_index)) {
+            throw new RuntimeException("Failed to remove the fresh local index: {$this->fresh_local_index}");
+        }
+    }
+
+    /**
+     * Removes the cursor when the plan ends.
      *
      * With no cursor, the local push state directory no longer contains an unfinished
      * push plan and start() may create the next one.
