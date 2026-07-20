@@ -26,17 +26,7 @@ parameters:
 			path: packages/reprint-exporter/src/export.php
 
 		-
-			message: "#^Negated boolean expression is always true\\.$#"
-			count: 1
-			path: packages/reprint-exporter/src/export.php
-
-		-
 			message: "#^Variable \\$directories in empty\\(\\) always exists and is not falsy\\.$#"
-			count: 1
-			path: packages/reprint-exporter/src/export.php
-
-		-
-			message: "#^Variable \\$filesystem_root on left side of \\?\\? always exists and is not nullable\\.$#"
 			count: 1
 			path: packages/reprint-exporter/src/export.php
 
