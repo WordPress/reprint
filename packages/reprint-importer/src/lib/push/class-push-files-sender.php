@@ -50,7 +50,7 @@
  * receiver-confirmed work before sending more data.
  *
  * A new sender calls `push_create` to learn target-owned exclusions before
- * starting PushPlan. The plan builds the fresh local index and merges it with
+ * starting PushPlan. The plan builds the fresh local index and diffs it against
  * the index at the previous push, one bounded step at a time. After planning
  * completes, local files, symlinks, and empty directories stream through
  * multipart requests. The raw deletion list follows, and repeated `push_commit`
@@ -61,11 +61,11 @@
  * stopped process therefore repeats only an idempotent boundary action rather
  * than a group of unrelated transitions.
  *
- * sender.json owns the top-level phase. During `planning`, cursor.json owns the
- * plan's internal phase and continuation offsets; sender.json does not duplicate
- * them. A completed plan cursor remains until the target commit and local index
- * save have both finished. A removed target session enters `discarding_plan`
- * before that cursor is deleted.
+ * sender.json owns the top-level phase. During `planning`, plan/cursor.json owns
+ * the plan's internal phase and continuation offsets; sender.json does not
+ * duplicate them. The sender creates the active plan directory before planning
+ * and removes the whole directory only after success or target-session removal.
+ * The local index at the previous push remains beside sender.json.
  *
  * ## Resume after local changes
  *
@@ -120,8 +120,14 @@ final class PushFilesSender
     /** @var string Local document root whose local paths to push are sent. */
     private string $docroot;
 
-    /** @var string Local push state directory shared with PushPlan. */
+    /** @var string Local push state directory owned by this sender. */
     private string $push_state_directory;
+
+    /** @var string Sender-owned active plan directory. */
+    private string $plan_directory;
+
+    /** @var string Index saved after the previous successful push. */
+    private string $local_index_at_previous_push;
 
     /** @var string Path where the serialized sender state is stored. */
     private string $state_path;
@@ -293,7 +299,11 @@ final class PushFilesSender
             $sender->state = $state;
             $sender->push_stream_client = $sender->create_push_stream_client($state);
             if ($state['phase'] === 'planning') {
-                $sender->plan = PushPlan::resume($sender->push_state_directory, $sender->docroot);
+                $sender->plan = PushPlan::resume(
+                    $sender->plan_directory,
+                    $sender->docroot,
+                    $sender->local_index_at_previous_push
+                );
             }
             return $sender;
         } catch (Throwable $throwable) {
@@ -341,9 +351,11 @@ final class PushFilesSender
         }
         $this->docroot = rtrim($canonical_docroot, '/');
         $this->push_state_directory = rtrim($push_state_directory, '/');
+        $this->plan_directory = $this->push_state_directory . '/plan';
+        $this->local_index_at_previous_push = $this->push_state_directory . '/local_index_at_previous_push.jsonl';
         $this->state_path = $this->push_state_directory . '/sender.json';
         $this->lock_path = $this->push_state_directory . '/sender.lock';
-        $this->excluded_paths_path = $this->push_state_directory . '/excluded_paths.json';
+        $this->excluded_paths_path = $this->plan_directory . '/excluded_paths.json';
         $this->request_sizer_options = $request_sizer_options;
         $this->push_stream_client_options = $push_stream_client_options;
     }
@@ -535,6 +547,7 @@ final class PushFilesSender
                 return;
             }
         }
+        $this->create_plan_directory();
         $this->store_excluded_paths($response['excluded_paths_b64']);
 
         $this->push_stream_client->set_max_part_bytes($response['max_part_bytes']);
@@ -546,14 +559,35 @@ final class PushFilesSender
     }
 
     /**
+     * Creates the active plan directory before storing its first file.
+     *
+     * A repeated `creating` step may find the directory left by an interrupted
+     * earlier step.
+     */
+    private function create_plan_directory(): void
+    {
+        if (!is_dir($this->plan_directory) && !@mkdir($this->plan_directory, 0755) && !is_dir($this->plan_directory)) {
+            throw new RuntimeException('Failed to create the push plan directory: ' . $this->plan_directory);
+        }
+    }
+
+    /**
      * Creates or reopens PushPlan after the target exclusions are stored.
      */
     private function start_plan(): void
     {
-        if (PushPlan::has_plan($this->push_state_directory)) {
-            $this->plan = PushPlan::resume($this->push_state_directory, $this->docroot);
+        if (PushPlan::has_plan($this->plan_directory)) {
+            $this->plan = PushPlan::resume(
+                $this->plan_directory,
+                $this->docroot,
+                $this->local_index_at_previous_push
+            );
         } else {
-            $this->plan = PushPlan::start($this->push_state_directory, $this->docroot);
+            $this->plan = PushPlan::start(
+                $this->plan_directory,
+                $this->docroot,
+                $this->local_index_at_previous_push
+            );
         }
         $this->state['phase'] = 'planning';
         $this->store_state($this->state);
@@ -594,7 +628,7 @@ final class PushFilesSender
 
         // Keep the planned-path list open across calls while this phase is active.
         if (!is_resource($this->local_paths_to_push_handle)) {
-            $local_paths_to_push_path = PushPlan::local_paths_to_push_path($this->push_state_directory);
+            $local_paths_to_push_path = PushPlan::local_paths_to_push_path($this->plan_directory);
             $this->local_paths_to_push_handle = fopen($local_paths_to_push_path, 'rb');
             if (!is_resource($this->local_paths_to_push_handle)) {
                 $this->fail('local_io_error', 'Could not open the local paths to push.');
@@ -945,7 +979,7 @@ final class PushFilesSender
 
             // Keep the completed deletion plan open while successive calls consume it.
             if (!is_resource($this->local_paths_to_delete_handle)) {
-                $local_paths_to_delete_path = PushPlan::local_paths_to_delete_path($this->push_state_directory);
+                $local_paths_to_delete_path = PushPlan::local_paths_to_delete_path($this->plan_directory);
                 $this->local_paths_to_delete_handle = fopen($local_paths_to_delete_path, 'rb');
                 if (!is_resource($this->local_paths_to_delete_handle)) {
                     $this->fail('local_io_error', 'Could not open the local paths to delete.');
@@ -1151,20 +1185,17 @@ final class PushFilesSender
     /**
      * Saves the committed fresh local index as the local index at the previous push.
      *
-     * This uses the same deliberate whole-index copy as the pre-plan snapshot.
-     * If the process stops before the next phase is stored, repeating the copy
-     * is safe and leaves readers on either the old or complete new index.
+     * If the process stops before the next phase is stored, repeating the
+     * deliberate whole-index copy is safe and leaves readers on either the old
+     * or complete new index.
      */
     private function save_local_index_at_previous_push(): void
     {
-        $fresh_local_index = PushPlan::fresh_local_index_path($this->push_state_directory);
-        $local_index_at_previous_push = PushPlan::local_index_at_previous_push_path(
-            $this->push_state_directory
-        );
+        $fresh_local_index = PushPlan::fresh_local_index_path($this->plan_directory);
         try {
             $this->copy_through_swap_file(
                 $fresh_local_index,
-                $local_index_at_previous_push
+                $this->local_index_at_previous_push
             );
         } catch (RuntimeException $exception) {
             $this->fail('local_io_error', $exception->getMessage());
@@ -1196,16 +1227,11 @@ final class PushFilesSender
     }
 
     /**
-     * Completes the sender after removing the completed planning cursor.
+     * Completes the sender after removing its active plan directory.
      */
     private function complete_push(): void
     {
-        if (PushPlan::has_plan($this->push_state_directory)) {
-            if (!isset($this->plan)) {
-                $this->plan = PushPlan::load_retained($this->push_state_directory);
-            }
-            $this->plan->after_successful_push();
-        }
+        $this->remove_plan_directory();
         $this->delete_state();
         $this->status = 'complete';
     }
@@ -1231,20 +1257,45 @@ final class PushFilesSender
     }
 
     /**
-     * Restarts the sender after removing the discarded planning cursor.
+     * Restarts the sender after removing the discarded plan directory.
      */
     private function discard_plan(): void
     {
-        if (PushPlan::has_plan($this->push_state_directory)) {
-            if (!isset($this->plan)) {
-                $this->plan = PushPlan::load_retained($this->push_state_directory);
-            }
-            $this->plan->discard();
-        }
+        $this->remove_plan_directory();
         $this->delete_state();
         $this->status = 'restart';
         $this->reason = 'local_path_changed';
         $this->detail = 'The upload-only push session was removed. Run the push command again to build a fresh local index.';
+    }
+
+    /**
+     * Removes the active plan directory and its files.
+     *
+     * PushPlan creates only a fixed handful of files directly in this
+     * directory. If the process stops during cleanup, the same sender phase
+     * removes the remaining files on the next run.
+     */
+    private function remove_plan_directory(): void
+    {
+        if (!is_dir($this->plan_directory)) {
+            return;
+        }
+        $plan_files = scandir($this->plan_directory);
+        if ($plan_files === false) {
+            throw new RuntimeException('Failed to read the push plan directory: ' . $this->plan_directory);
+        }
+        foreach ($plan_files as $plan_file) {
+            if ($plan_file === '.' || $plan_file === '..') {
+                continue;
+            }
+            $plan_file_path = $this->plan_directory . '/' . $plan_file;
+            if (!unlink($plan_file_path)) {
+                throw new RuntimeException('Failed to remove a push plan file: ' . $plan_file_path);
+            }
+        }
+        if (!rmdir($this->plan_directory)) {
+            throw new RuntimeException('Failed to remove the push plan directory: ' . $this->plan_directory);
+        }
     }
 
     /**

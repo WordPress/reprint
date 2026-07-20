@@ -17,13 +17,12 @@
  *
  * ## Durable boundary
  *
- * While sender.json says `planning`, cursor.json owns one of four internal
+ * While sender.json says `planning`, plan/cursor.json owns one of four internal
  * phases: `indexing`, `starting_diff`, `diffing`, or `complete`. The sender
  * owns an open PushPlan under sender.lock but does not duplicate any planning
  * cursor. A false next_step() result means both indexes reached EOF; the sender
- * closes the plan before changing its phase. The cursor remains until a
- * confirmed commit saves the fresh local index as the local index at the
- * previous push, or removal discards the plan.
+ * closes the plan before changing its phase. The completed files remain in the
+ * sender-owned plan directory until the sender finishes or discards the push.
  *
  * ## Change detection
  *
@@ -68,8 +67,8 @@ class PushPlan
     /** @var string Canonical local tree root inspected while building the fresh local index. */
     private string $local_tree_root;
 
-    /** @var string Local push state directory containing every plan file. */
-    private string $push_state_directory;
+    /** @var string Sender-owned active plan directory. */
+    private string $plan_directory;
 
     /** @var string Paths and metadata from the last completed push. */
     private string $local_index_at_previous_push;
@@ -86,7 +85,7 @@ class PushPlan
     /** @var string Path to the durable PushPlan cursor. */
     private string $cursor_file;
 
-    /** @var string Sender-owned excluded paths retained for the active push. */
+    /** @var string Plan path containing receiver-owned exclusions for the active push. */
     private string $excluded_paths_file;
 
     /** @var string Append-only deleted-directory stack for the active plan. */
@@ -136,13 +135,17 @@ class PushPlan
      * The sender has already stored the target exclusions. An existing cursor
      * is rejected so unfinished planning cannot be replaced.
      *
-     * @param string $push_state_directory Local push state directory.
-     * @param string $local_tree_root      Canonical local tree root.
+     * @param string $plan_directory              Sender-owned active plan directory.
+     * @param string $local_tree_root              Canonical local tree root.
+     * @param string $local_index_at_previous_push Index saved after the previous successful push.
      * @return self Open plan positioned at the initial indexing cursor.
      */
-    public static function start(string $push_state_directory, string $local_tree_root): self
-    {
-        $plan = new self($push_state_directory);
+    public static function start(
+        string $plan_directory,
+        string $local_tree_root,
+        string $local_index_at_previous_push
+    ): self {
+        $plan = new self($plan_directory, $local_index_at_previous_push);
         if (is_file($plan->cursor_file)) {
             throw new LogicException("Cannot start a push plan while an unfinished plan exists: {$plan->cursor_file}");
         }
@@ -157,7 +160,7 @@ class PushPlan
             $plan->local_tree_root,
             false,
             false,
-            $plan->push_state_directory
+            $plan->plan_directory
         );
         $plan->cursor = [
             "phase" => "indexing",
@@ -174,16 +177,24 @@ class PushPlan
      * Reopens only the processor and files required by the cursor's current
      * internal phase.
      *
-     * @param string $push_state_directory Local push state directory containing the unfinished plan.
-     * @param string $local_tree_root      Canonical local tree root.
+     * @param string $plan_directory              Sender-owned active plan directory.
+     * @param string $local_tree_root              Canonical local tree root.
+     * @param string $local_index_at_previous_push Index saved after the previous successful push.
      * @return self Open plan positioned at its last durable cursor.
      */
-    public static function resume(string $push_state_directory, string $local_tree_root): self
-    {
-        $plan = self::load_retained($push_state_directory);
+    public static function resume(
+        string $plan_directory,
+        string $local_tree_root,
+        string $local_index_at_previous_push
+    ): self {
+        $plan = new self($plan_directory, $local_index_at_previous_push);
+        $cursor = $plan->load_cursor();
+        if ($cursor === null) {
+            throw new LogicException("Cannot resume a push plan without a retained plan: {$plan->cursor_file}");
+        }
+        $plan->cursor = $cursor;
         $plan->set_local_tree_root($local_tree_root);
         $plan->excluded_paths = $plan->load_excluded_paths();
-        $plan->closed = false;
         if ($plan->cursor["phase"] === "indexing") {
             $plan->open_fresh_local_index_for_continuation();
         } elseif ($plan->cursor["phase"] === "diffing") {
@@ -193,99 +204,65 @@ class PushPlan
     }
 
     /**
-     * Loads a retained plan without opening files used only while planning.
+     * Reports whether a plan directory contains a retained planning cursor.
      *
-     * The returned plan is closed. It can remove its cursor after a successful
-     * push or be discarded without opening and immediately closing all planning
-     * handles.
-     *
-     * @param string $push_state_directory Local push state directory containing the retained plan.
-     * @return self Closed plan loaded from its durable cursor.
+     * @param string $plan_directory Sender-owned active plan directory.
      */
-    public static function load_retained(string $push_state_directory): self
+    public static function has_plan(string $plan_directory): bool
     {
-        $plan = new self($push_state_directory);
-        $cursor = $plan->load_cursor();
-        if ($cursor === null) {
-            throw new LogicException("Cannot load a push plan without a retained plan: {$plan->cursor_file}");
-        }
-        $plan->cursor = $cursor;
-        $plan->closed = true;
-        return $plan;
-    }
-
-    /**
-     * Reports whether local push state contains a retained planning cursor.
-     *
-     * @param string $push_state_directory Local push state directory.
-     */
-    public static function has_plan(string $push_state_directory): bool
-    {
-        return is_file(rtrim($push_state_directory, "/") . "/cursor.json");
+        return is_file(rtrim($plan_directory, "/") . "/cursor.json");
     }
 
     /**
      * Returns the JSONL local paths to push list.
      *
-     * @param string $push_state_directory Local push state directory.
+     * @param string $plan_directory Sender-owned active plan directory.
      */
-    public static function local_paths_to_push_path(string $push_state_directory): string
+    public static function local_paths_to_push_path(string $plan_directory): string
     {
-        return rtrim($push_state_directory, "/") . "/local_paths_to_push.jsonl";
+        return rtrim($plan_directory, "/") . "/local_paths_to_push.jsonl";
     }
 
     /**
      * Returns the raw NUL-delimited path list produced for local deletions.
      *
-     * @param string $push_state_directory Local push state directory.
+     * @param string $plan_directory Sender-owned active plan directory.
      */
-    public static function local_paths_to_delete_path(string $push_state_directory): string
+    public static function local_paths_to_delete_path(string $plan_directory): string
     {
-        return rtrim($push_state_directory, "/") . "/local_paths_to_delete";
+        return rtrim($plan_directory, "/") . "/local_paths_to_delete";
     }
 
     /**
      * Returns the plan-owned fresh local index path.
      *
-     * @param string $push_state_directory Local push state directory.
+     * @param string $plan_directory Sender-owned active plan directory.
      */
-    public static function fresh_local_index_path(string $push_state_directory): string
+    public static function fresh_local_index_path(string $plan_directory): string
     {
-        return rtrim($push_state_directory, "/") . "/fresh_local_index.jsonl";
+        return rtrim($plan_directory, "/") . "/fresh_local_index.jsonl";
     }
 
     /**
-     * Returns the local index saved after the previous successful push.
+     * Initializes paths in the sender-owned active plan directory.
      *
-     * @param string $push_state_directory Local push state directory.
+     * @param string $plan_directory              Sender-owned active plan directory.
+     * @param string $local_index_at_previous_push Index saved after the previous successful push.
      */
-    public static function local_index_at_previous_push_path(string $push_state_directory): string
+    private function __construct(string $plan_directory, string $local_index_at_previous_push)
     {
-        return rtrim($push_state_directory, "/") . "/local_index_at_previous_push.jsonl";
-    }
-
-    /**
-     * Initializes the files in one local push state directory.
-     *
-     * Creates the directory when it does not already exist. Plan
-     * files are opened only after start() or resume() establishes a cursor.
-     *
-     * @param string $push_state_directory Local push state directory.
-     */
-    private function __construct(string $push_state_directory)
-    {
-        $push_state_directory = rtrim($push_state_directory, "/");
-        if (!is_dir($push_state_directory) && !@mkdir($push_state_directory, 0755, true) && !is_dir($push_state_directory)) {
-            throw new RuntimeException("Failed to create the push plan directory: {$push_state_directory}");
+        $plan_directory = rtrim($plan_directory, "/");
+        if (!is_dir($plan_directory)) {
+            throw new LogicException("Cannot open a push plan without its directory: {$plan_directory}");
         }
-        $this->push_state_directory = $push_state_directory;
-        $this->local_index_at_previous_push = self::local_index_at_previous_push_path($push_state_directory);
-        $this->local_paths_to_push = self::local_paths_to_push_path($push_state_directory);
-        $this->local_paths_to_delete = self::local_paths_to_delete_path($push_state_directory);
-        $this->fresh_local_index = self::fresh_local_index_path($push_state_directory);
-        $this->cursor_file = $push_state_directory . "/cursor.json";
-        $this->excluded_paths_file = $push_state_directory . "/excluded_paths.json";
-        $this->deleted_directories_stack = $push_state_directory . "/deleted_directories_stack.jsonl";
+        $this->plan_directory = $plan_directory;
+        $this->local_index_at_previous_push = $local_index_at_previous_push;
+        $this->local_paths_to_push = self::local_paths_to_push_path($plan_directory);
+        $this->local_paths_to_delete = self::local_paths_to_delete_path($plan_directory);
+        $this->fresh_local_index = self::fresh_local_index_path($plan_directory);
+        $this->cursor_file = $plan_directory . "/cursor.json";
+        $this->excluded_paths_file = $plan_directory . "/excluded_paths.json";
+        $this->deleted_directories_stack = $plan_directory . "/deleted_directories_stack.jsonl";
     }
 
     /**
@@ -328,7 +305,7 @@ class PushPlan
             json_encode($cursor["file_index_cursor"], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
             false,
             false,
-            $this->push_state_directory
+            $this->plan_directory
         );
     }
 
@@ -385,42 +362,6 @@ class PushPlan
         $this->deleted_directory_stack_entry = $this->read_deleted_directory_stack_entry(
             $cursor["deleted_directory_stack_top_byte_offset"]
         );
-    }
-
-    /**
-     * Removes the completed plan after the sender finishes a successful push.
-     *
-     * The sender saves the fresh local index as the local index at the previous
-     * push before calling this method. The fresh index is removed before the
-     * cursor so interrupted cleanup can repeat safely.
-     */
-    public function after_successful_push(): void
-    {
-        if (!$this->closed) {
-            throw new LogicException("Close the push plan before finishing a successful push.");
-        }
-        if ($this->cursor["phase"] !== "complete") {
-            throw new LogicException("Cannot finish a successful push before the plan is complete.");
-        }
-
-        $this->remove_fresh_local_index();
-        $this->remove_cursor();
-    }
-
-    /**
-     * Discards a closed plan after its push session is removed.
-     *
-     * Removing the fresh index and cursor permits the next push to start from a
-     * new local index. Output files may remain because start() truncates them
-     * before they can be used again.
-     */
-    public function discard(): void
-    {
-        if (!$this->closed) {
-            throw new LogicException("Close the push plan before discarding it.");
-        }
-        $this->remove_fresh_local_index();
-        $this->remove_cursor();
     }
 
     /**
@@ -1137,29 +1078,6 @@ class PushPlan
         }
         if (!rename($temporary_cursor, $this->cursor_file)) {
             throw new RuntimeException("Failed to move the cursor into place: {$this->cursor_file}");
-        }
-    }
-
-    /**
-     * Removes the fresh local index when its plan ends.
-     */
-    private function remove_fresh_local_index(): void
-    {
-        if (is_file($this->fresh_local_index) && !unlink($this->fresh_local_index)) {
-            throw new RuntimeException("Failed to remove the fresh local index: {$this->fresh_local_index}");
-        }
-    }
-
-    /**
-     * Removes the cursor when the plan ends.
-     *
-     * With no cursor, the local push state directory no longer contains an unfinished
-     * push plan and start() may create the next one.
-     */
-    private function remove_cursor(): void
-    {
-        if (is_file($this->cursor_file) && !unlink($this->cursor_file)) {
-            throw new RuntimeException("Failed to remove the cursor: {$this->cursor_file}");
         }
     }
 

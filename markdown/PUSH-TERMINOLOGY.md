@@ -91,6 +91,7 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 
 | Surface | Name |
 | --- | --- |
+| Active plan directory | `plan`, `$plan_directory` |
 | Plan-owned fresh local index | `fresh_local_index.jsonl`, `$fresh_local_index` |
 | Local index at the previous push | `local_index_at_previous_push.jsonl`, `$local_index_at_previous_push` |
 | Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
@@ -105,6 +106,12 @@ directory. Under `<state-dir>/push/<site>/`, use these names verbatim:
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
+`sender.json`, `sender.lock`, and `local_index_at_previous_push.jsonl` live
+directly under the local push state directory. The sender creates `plan/` for
+one active plan. `excluded_paths.json`, `cursor.json`,
+`fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
+`local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
+
 `cursor.json` owns PushPlan's internal phase. During `indexing`, it stores the
 FileIndexProcessor cursor and the committed byte offset in
 `fresh_local_index.jsonl`. During `diffing`, it stores the index offsets,
@@ -118,8 +125,10 @@ does not repeat those values. Its phases are `creating`, `starting_plan`,
 `removing`, and `discarding_plan`. It stores the push session ID, selected
 path-list cursor, receiver part limit, and request-sizing state. The index diff
 completes before local paths are sent. The index copy after a successful commit
-has no sender cursor and is repeated after interruption. The plan then removes
-the fresh local index and its cursor.
+has no sender cursor and is repeated after interruption. The sender then
+removes the entire plan directory. It also removes that directory after the
+target confirms removal of a discarded push session. PushPlan only closes its
+open handles; it does not manage terminal cleanup.
 
 A request failure ends the current sender run. The active state remains in
 place so a later push command can resume from the last durable boundary. Only
@@ -195,6 +204,7 @@ Use these names verbatim inside `PushPlan`:
 
 | Meaning | Name |
 | --- | --- |
+| Active plan directory | `$plan_directory` |
 | Local tree root | `$local_tree_root`, `set_local_tree_root()` |
 | Fresh local index processor | `$file_index_processor`, `next_file_index_step()` |
 | Fresh local indexing cursor | `IndexingCursor`, `file_index_cursor` |

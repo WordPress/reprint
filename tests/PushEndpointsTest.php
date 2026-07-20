@@ -1369,8 +1369,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertFileDoesNotExist($this->docroot . '/remove.txt');
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
         $this->assertNull($this->loadActiveState($push_state_directory));
-        $this->assertFileDoesNotExist($push_state_directory . '/cursor.json');
-        $this->assertFileDoesNotExist($push_state_directory . '/fresh_local_index.jsonl');
+        $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
         $this->assertFileExists($push_state_directory . '/local_index_at_previous_push.jsonl');
     }
 
@@ -1622,7 +1621,7 @@ final class PushEndpointsTest extends TestCase {
         file_put_contents($local_docroot . '/a.txt', 'a');
         file_put_contents($local_docroot . '/b.txt', 'bb');
         $push_state_directory = $this->root . '/bounded-index-state';
-        $fresh_local_index_path = $push_state_directory . '/fresh_local_index.jsonl';
+        $fresh_local_index_path = $push_state_directory . '/plan/fresh_local_index.jsonl';
         $options = $this->senderOptions($local_docroot, $push_state_directory);
         $plan_property = new ReflectionProperty(PushFilesSender::class, 'plan');
         $file_index_processor_property = new ReflectionProperty(PushPlan::class, 'file_index_processor');
@@ -1636,6 +1635,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame('creating', $sender->get_phase());
             $this->takeSenderStepsUntilPhase($sender, 'planning');
             $this->assertFileExists($fresh_local_index_path);
+            $this->assertFileExists($push_state_directory . '/plan/excluded_paths.json');
             $plan = $plan_property->getValue($sender);
             $this->assertInstanceOf(PushPlan::class, $plan);
             $file_index_processor = $file_index_processor_property->getValue($plan);
@@ -1649,7 +1649,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame($file_index_processor, $file_index_processor_property->getValue($plan));
             $this->assertSame($fresh_local_index_handle, $fresh_local_index_handle_property->getValue($plan));
             $plan_cursor = json_decode(
-                (string) file_get_contents($push_state_directory . '/cursor.json'),
+                (string) file_get_contents($push_state_directory . '/plan/cursor.json'),
                 true,
                 512,
                 JSON_THROW_ON_ERROR
@@ -1677,7 +1677,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertTrue($sender->next_step());
             $this->assertSame('planning', $sender->get_phase());
             $plan_cursor = json_decode(
-                (string) file_get_contents($push_state_directory . '/cursor.json'),
+                (string) file_get_contents($push_state_directory . '/plan/cursor.json'),
                 true,
                 512,
                 JSON_THROW_ON_ERROR
@@ -1735,7 +1735,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertIsArray($state);
         $this->assertSame('planning', $state['phase']);
         $plan_cursor = json_decode(
-            (string) file_get_contents($push_state_directory . '/cursor.json'),
+            (string) file_get_contents($push_state_directory . '/plan/cursor.json'),
             true,
             512,
             JSON_THROW_ON_ERROR
@@ -2044,7 +2044,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('restart', $result['status'], (string) json_encode($result));
         $this->assertSame('local_path_changed', $result['reason']);
         $this->assertNull($this->loadActiveState($push_state_directory));
-        $this->assertFileDoesNotExist($push_state_directory . '/cursor.json');
+        $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
     }
 
@@ -2089,7 +2089,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('restart', $result['status']);
         $this->assertSame('local_path_changed', $result['reason']);
         $this->assertNull($this->loadActiveState($push_state_directory));
-        $this->assertFileDoesNotExist($push_state_directory . '/cursor.json');
+        $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
     }
 
@@ -2170,16 +2170,9 @@ final class PushEndpointsTest extends TestCase {
         $result = $this->runSender($local_docroot, $push_state_directory);
 
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
-        $stored_excluded_paths = json_decode(
-            (string) file_get_contents($push_state_directory . '/excluded_paths.json'),
-            true,
-            512,
-            JSON_THROW_ON_ERROR
-        );
-        $this->assertContains(base64_encode('preserved'), $stored_excluded_paths);
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
         $this->assertSame('public-change', file_get_contents($this->docroot . '/public.txt'));
-        $this->assertFileDoesNotExist($push_state_directory . '/fresh_local_index.jsonl');
+        $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
         $saved_local_index = file_get_contents($push_state_directory . '/local_index_at_previous_push.jsonl');
         $this->assertIsString($saved_local_index);
         $this->assertStringContainsString(
@@ -2462,7 +2455,7 @@ final class PushEndpointsTest extends TestCase {
             }
         }
         $this->assertIsArray($state);
-        $deletions = (string) file_get_contents($push_state_directory . '/local_paths_to_delete');
+        $deletions = (string) file_get_contents($push_state_directory . '/plan/local_paths_to_delete');
         $this->assertSame("delete-after-lost-response.txt\0", $deletions);
         $boundary = 'reprint-lost-delete-response';
         $delete_body = '--' . $boundary . "\r\n"
@@ -2792,7 +2785,7 @@ final class PushEndpointsTest extends TestCase {
     ): void {
         for ($step = 0; $step < 300; ++$step) {
             $cursor = json_decode(
-                (string) file_get_contents($push_state_directory . '/cursor.json'),
+                (string) file_get_contents($push_state_directory . '/plan/cursor.json'),
                 true,
                 512,
                 JSON_THROW_ON_ERROR
