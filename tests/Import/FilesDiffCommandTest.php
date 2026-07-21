@@ -200,7 +200,7 @@ final class FilesDiffCommandTest extends TestCase
     public function testFilesDiffDoesNotChangeThePreviousLocalIndexAndRepeatsTheSameReport(): void
     {
         $this->writePreviousLocalIndex(array_keys($this->initialFiles));
-        $previousLocalIndex = $this->pairStateDirectory() . '/previous_local_index.jsonl';
+        $previousLocalIndex = $this->pushStateDirectory() . '/previous_local_index.jsonl';
         $previousLocalIndexContents = file_get_contents($previousLocalIndex);
         $this->assertIsString($previousLocalIndexContents);
         file_put_contents($this->localTree . '/added-after-index.txt', 'new');
@@ -256,7 +256,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertSame('', $result['stdout']);
         $this->assertSame("Error: files-diff does not accept --runtime.\n", $result['stderr']);
-        $this->assertDirectoryDoesNotExist($this->pairStateDirectory());
+        $this->assertDirectoryDoesNotExist($this->pushStateDirectory());
     }
 
     public function testInterruptedFilesDiffReportsTheCompleteDiffWhenItIsRunAgain(): void
@@ -318,7 +318,7 @@ final class FilesDiffCommandTest extends TestCase
             'local_paths_to_push' => count($bulkPaths),
             'local_paths_to_delete' => 0,
         ], $finalRecord);
-        $this->assertDirectoryDoesNotExist($this->pairStateDirectory() . '/files-diff-plan');
+        $this->assertDirectoryDoesNotExist($this->pushStateDirectory() . '/files-diff-plan');
     }
 
     /**
@@ -350,11 +350,11 @@ final class FilesDiffCommandTest extends TestCase
             }
             $lines .= json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
         }
-        $pairStateDirectory = $this->pairStateDirectory();
-        if (!is_dir($pairStateDirectory)) {
-            mkdir($pairStateDirectory, 0700, true);
+        $pushStateDirectory = $this->pushStateDirectory();
+        if (!is_dir($pushStateDirectory)) {
+            mkdir($pushStateDirectory, 0700, true);
         }
-        file_put_contents($pairStateDirectory . '/previous_local_index.jsonl', $lines);
+        file_put_contents($pushStateDirectory . '/previous_local_index.jsonl', $lines);
     }
 
     /** @return array{command:string,action:string,path_b64:string,type:string,size:int,ctime:int} */
@@ -391,7 +391,7 @@ final class FilesDiffCommandTest extends TestCase
         return $paths;
     }
 
-    private function pairStateDirectory(): string
+    private function pushStateDirectory(): string
     {
         $canonicalLocalTree = realpath($this->localTree);
         $this->assertIsString($canonicalLocalTree);

@@ -93,7 +93,8 @@ directory. Under `<state-dir>/push/<pair-key>/`, use these names verbatim:
 | --- | --- |
 | Active plan directory | `plan`, `$plan_directory` |
 | Plan-owned fresh local index | `fresh_local_index.jsonl`, `$fresh_local_index` |
-| Local index at the previous push | `local_index_at_previous_push.jsonl`, `$local_index_at_previous_push` |
+| Previous local index | `previous_local_index.jsonl`, `previous_local_index`, `$previous_local_index` |
+| Byte offset in the previous local index | `byte_offset_in_previous_local_index`, `$byte_offset_in_previous_local_index` |
 | Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
 | Local push state directory | `push_state_directory`, `$push_state_directory` |
@@ -102,19 +103,26 @@ directory. Under `<state-dir>/push/<pair-key>/`, use these names verbatim:
 | Deleted-directory stack | `deleted_directories_stack.jsonl`, `$deleted_directories_stack` |
 | Active state | `sender.json`, `$state_path` |
 | Lifecycle lock file | `sender.lock`, `$lock_path` |
+| Files-diff lifecycle lock | `files-diff.lock` |
 | Open lifecycle lock | `$lock_handle` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
 `sender.json`, `sender.lock`, `excluded_paths.json`, and
-`local_index_at_previous_push.jsonl` live directly under the local push state
+`previous_local_index.jsonl` live directly under the local push state
 directory. The sender creates `plan/` for one active plan. PushPlan copies the
 sender-owned exclusions to `plan/excluded_paths.json` when it starts.
 `fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
 `local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
 
+The **previous local index** describes the local tree as the pair's last
+completed push observed it. The sender saves it after a successful commit, and
+`files-diff` reads it. PushPlan diffs its fresh local index against the copy
+its caller supplies. `byte_offset_in_previous_local_index` is the position
+from which its current lookahead entry is read again after resume.
+
 The PushPlan cursor is stored in `sender.json`. It contains the plan
-directory, local tree root, local index at the previous push, and current
+directory, local tree root, previous local index, and current
 planning position. During `indexing`, that position contains the
 FileIndexProcessor cursor and the committed byte offset in
 `fresh_local_index.jsonl`. During `diffing`, it contains the index offsets,
@@ -123,7 +131,7 @@ output offsets, and the active byte offset in
 links to the preceding active directory. The exclusions have a maximum of 100
 paths. `sender.json` phases are `creating`, `starting_plan`,
 `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
-`saving_local_index_at_previous_push`, `completing`,
+`saving_previous_local_index`, `completing`,
 `removing`, and `discarding_plan`. It stores the push session ID, selected
 path-list cursor, receiver part limit, and request-sizing state. The index diff
 completes before local paths are sent. The index copy after a successful commit
@@ -160,6 +168,27 @@ never finishes an open request. In `pushing_paths` or
 returns true while another step may be performed and false when `get_status()`
 reports `complete`, `restart`, or `failed`.
 
+## Files-diff CLI names
+
+The local-only command is `files-diff`. Its `target URL`, `local tree`, `pair
+key`, and `local push state directory` have the same meanings and pair-key
+formula as `files-push`. It reads the pair's `previous_local_index.jsonl`,
+which a completed files-push publishes, and never changes it.
+
+Each JSONL change record has `command: "files-diff"`, an `action` of `push` or
+`delete`, and `path_b64`. A push record also has the local path `type`, `size`,
+and `ctime`; its type is `file`, `dir`, or `link`. These records form a local
+minimized push operation plan before target exclusions: descendants represent
+a new non-empty directory, one deleted subtree root covers its descendants,
+and metadata-only changes to non-empty directories select no operation. The
+final record has `status: "complete"`, `local_paths_to_push`, and
+`local_paths_to_delete`.
+
+files-diff persists nothing between runs. It runs one complete PushPlan under
+`files-diff.lock` in `files-diff-plan/`, streams both finished path lists from
+the beginning, and removes the plan directory before exiting. An interrupted
+report is not resumed; running the command again prints the complete report.
+
 ## Files-push CLI names
 
 The low-level, files-only command is `files-push`. Its `target URL` is the
@@ -173,7 +202,7 @@ The `pair key` identifies exactly one target URL and canonical local tree:
 sha256(rtrim(<target-url>, "?&") + "\0" + <canonical-local-tree-path>)
 ```
 
-The `pair state directory` is `<state-dir>/push/<pair-key>/`. `files-push`
+The `local push state directory` is `<state-dir>/push/<pair-key>/`. `files-push`
 chooses `start` or `resume` only from whether `sender.json` exists there. The
 receiver-confirmed upload positions remain receiver-owned; they are not a
 files-push cursor and are not copied into `.import-state.json` or
@@ -239,6 +268,10 @@ Use these names verbatim inside `PushPlan`:
 | --- | --- |
 | Active plan directory | `$plan_directory` |
 | Local tree root | `$local_tree_root`, `set_local_tree_root()` |
+| Previous local index | `$previous_local_index` |
+| Open previous local index | `$previous_local_index_handle` |
+| Previous local index lookahead entry | `$previous_local_index_lookahead_entry`, `$previous_local_index_lookahead_entry_loaded` |
+| Byte offset in the previous local index | `$byte_offset_in_previous_local_index` |
 | Cursor | `$cursor`, `get_cursor()` |
 | Plan-owned excluded paths | `$excluded_paths_file` |
 | Fresh local index processor | `$file_index_processor`, `next_file_index_step()` |

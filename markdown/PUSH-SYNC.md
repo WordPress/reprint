@@ -19,7 +19,7 @@ the end maps it to a PR stack.
    moves work files into place, executes deletions, and commits the database
    diff, and fixes symlinks — inside a maintenance window that lasts seconds,
    not the length of the transfer.
-5. It stores the current local paths as the local index at the previous push
+5. It stores the current local paths as the pair's previous local index
    and stores the current rows as the previously pushed rows. The push is
    complete only after this step; a crashed push is
    re-driven from the top and converges.
@@ -78,18 +78,22 @@ managed `false` hard-disables push without abandoning durable commit recovery.
 
 ctime is machine-local, so push never compares a local timestamp to a remote
 one. It only answers "what changed locally since my last successful push to
-this remote" by comparing the current local paths and rows against the local
-index at the previous push and the previously pushed rows.
+this remote" by comparing the current local paths and rows against the pair's
+previous local index and the previously pushed rows.
 
 The local machine keeps these files **per target URL and canonical local
 tree**, overwritten after each successful commit:
 
-    <state-dir>/push/<pair-key>/local_index_at_previous_push.jsonl
+    <state-dir>/push/<pair-key>/previous_local_index.jsonl
     <state-dir>/push/<pair-key>/previously_pushed_rows.jsonl   (phase two)
 
+The previous local index records the local path type, size, and ctime as the
+completing push observed them. Besides planning the next push, it feeds the
+local `files-diff` command, which reports the same comparison without pushing.
+
 `PushPlan` first builds a path-sorted fresh local index, then derives the local
-paths to push and delete by diffing it against
-`local_index_at_previous_push.jsonl`. The indexer marks physical emptiness while
+paths to push and delete by diffing it against the previous local index its
+caller supplies. The indexer marks physical emptiness while
 it observes each directory, so a completed index distinguishes empty
 directories from non-empty ones. Files and symlinks change when their `type`,
 `ctime`, or `size` changes; unrelated index values do not select a path for
@@ -123,11 +127,11 @@ A push plan is an internal part of the sender lifecycle:
    `plan/local_paths_to_delete`.
 5. The sender closes the plan before consuming those two files.
 6. After the receiver commits successfully, the sender saves the retained fresh
-   local index as `local_index_at_previous_push.jsonl` through the same swap-file
+   local index as `previous_local_index.jsonl` through the same swap-file
    copy. It then removes the complete `plan/` directory and the sender-owned
    exclusions file. After the target
    confirms removal of a discarded push session, the sender removes the same
-   files without changing the local index at the previous push.
+   files without changing the pair's previous local index.
 
 Until the sender stores the initial PushPlan cursor, `starting_plan` remains
 the durable phase. An interrupted start is repeated and overwrites its initial
@@ -145,8 +149,8 @@ sender run. Keeping another cursor and retained handle for this post-commit copy
 is not justified until measurements from materially larger installations show
 that it matters.
 
-The cursor contains the plan directory, local tree root, local index at
-the previous push, and current planning position. During indexing, that
+The cursor contains the plan directory, local tree root, previous local
+index, and current planning position. During indexing, that
 position contains the `FileIndexProcessor` cursor and committed fresh-index byte
 offset. During diffing, each step flushes only the path list or append-only
 deleted-directory stack changed by that step before updating the two index
@@ -156,7 +160,7 @@ entry. A later process passes the stored cursor to `PushPlan::resume()`. The
 plan uses its private exclusions copy, discards bytes beyond the stored output
 offsets, and continues from the retained internal phase.
 
-The first push to a site has no local index from a previous push or previously
+The first push to a site has no previous local index or previously
 pushed rows. Every current file, symlink, and empty directory is selected, and
 no local deletion can be detected yet.
 
@@ -168,7 +172,7 @@ manager.
 ## Deletes
 
 Local deletions since the last push come from paths present in
-`local_index_at_previous_push.jsonl` but absent from the fresh local index. They
+the previous local index but absent from the fresh local index. They
 travel as NUL-delimited document-root-relative paths in `work/deletes`. Commit
 records its byte offset before and after every destructive mutation, so a later
 request can resume from a durable checkpoint instead of repeating a delete.
@@ -272,7 +276,7 @@ configuration; request parameters cannot select any of them.
 An active push keeps these files under `<state-dir>/push/<pair-key>/`:
 
 ```text
-local_index_at_previous_push.jsonl  index saved after the previous commit
+previous_local_index.jsonl          index saved after the previous commit
 excluded_paths.json                 sender-owned target exclusions
 sender.json                         active push state
 sender.lock                         lifecycle lock
@@ -324,7 +328,7 @@ and phase, the PushPlan cursor, the next byte offset in
 `local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
 sizing state. Its phases are `creating`, `starting_plan`, `planning`,
 `pushing_paths`, `pushing_deletes`, `committing`,
-`saving_local_index_at_previous_push`, `completing`, `removing`, and
+`saving_previous_local_index`, `completing`, `removing`, and
 `discarding_plan`.
 The separate start, index-save, completion, removal, and discard phases ensure
 that a process stop between durable actions repeats only the current action.
@@ -362,8 +366,8 @@ captured by the completed fresh local index rather than attempting to describe
 the live tree at commit time.
 
 Repeated `push_commit` calls drive the receiver to `complete`. Only then does
-the sender enter `saving_local_index_at_previous_push` and copy the plan-owned
-fresh local index to `local_index_at_previous_push.jsonl`. Excluded entries
+the sender enter `saving_previous_local_index` and copy the plan-owned
+fresh local index to `previous_local_index.jsonl`. Excluded entries
 remain in that complete index; exclusions suppress remote work rather than
 creating a second retained index representation. The sender then removes the
 entire plan directory before deleting active sender state.
@@ -411,8 +415,8 @@ sha256(rtrim(<target-url>, "?&") + "\0" + <canonical-local-tree-path>)
 Its sender state lives at `<state-dir>/push/<pair-key>/`. A different target
 query or canonical local tree therefore selects a different retained local
 index. Fragments, URL user-info, and `SECRET_KEY` target parameters are
-rejected. The pair state directory must be outside the local tree so planning
-cannot index its own changing files.
+rejected. The local push state directory must be outside the local tree so
+planning cannot index its own changing files.
 
 One process starts or resumes exactly one sender. Before every `next_step()` it
 checks whether another step may begin. The wall-clock admission deadline is 80
@@ -436,6 +440,35 @@ shared audit log records opening mode, phase changes, planned pauses, handled
 interruptions, and terminal outcomes with the pair key. The flat status file
 records only the command, pair, outcome, phase, reason, detail, and timestamp;
 neither file copies receiver cursors or tentative upload positions.
+
+## Local files-diff command
+
+`reprint files-diff <target-url> --state-dir=DIR --fs-root=DIR` reports a local
+minimized push operation plan before target exclusions: the local paths a
+files-push would send or delete, compared against the pair's previous local
+index published by a completed files-push. It uses the files-push pair-key
+formula, including its trailing `?` and `&` trim, so another URL query or
+local tree cannot reuse the index. It accepts only `--state-dir` and
+`--fs-root`; it needs no secret, performs no preflight, and makes no network
+request. It runs one complete PushPlan against `previous_local_index.jsonl` in
+`files-diff-plan/` and holds `files-diff.lock` for the run.
+
+Output is JSONL. Each selected current file, symlink, or empty directory has
+`action: "push"`, `path_b64`, `type`, `size`, and `ctime`; its type is `file`,
+`dir`, or `link`. Each selected local deletion has `action: "delete"` and
+`path_b64`. Type transitions may emit both actions for one path. This is a
+local minimized push operation plan before target exclusions, not a
+path-for-path filesystem log: descendants represent a new non-empty directory,
+one deleted subtree root covers its descendants, and metadata-only changes to
+non-empty directories select no operation. Base64 keeps arbitrary filesystem
+path bytes representable. The final record carries `status: "complete"` with
+`local_paths_to_push` and `local_paths_to_delete` counts.
+
+files-diff persists nothing between runs. The whole plan runs in one process,
+both finished path lists stream from the beginning, and the plan directory is
+removed before exit. An interrupted report is therefore never resumed
+mid-stream: running the command again always prints the complete report. The
+same-size, same-ctime-second gap described above still applies.
 
 ## Where reprint stores its own data on the remote
 
@@ -464,7 +497,7 @@ Order:
    `commit.json` checkpoint written before each document-root mutation. The
    future database batch and symlink updates follow the same bounded cursor.
 4. **Maintenance off:** commit releases its `commit-state` ownership after
-   completion; the driver saves the local index at the previous push and rows
+   completion; the driver saves the pair's previous local index and rows
    after commit completes.
 
 If the driver dies mid-commit: WordPress stops honoring the `.maintenance`
@@ -556,9 +589,12 @@ Files first, database second, each PR small and stacked in this order:
 11. **`reprint files-push`** — the low-level, files-only caller that retains
     one sender per process, applies caller time and memory admission budgets,
     and reports completion, continuation, restart, or failure without retrying.
-12. **`reprint push`** — the high-level command that adds a change summary,
+12. **`reprint files-diff`** — a local-only command that reports the paths a
+    files-push would send or delete against the pair's previous local index,
+    without contacting the target.
+13. **`reprint push`** — the high-level command that adds a change summary,
     confirmation boundary, database work, transfer, commit, and resume.
-13. **Budgets and resumable limits** — push requests stay bounded by two
+14. **Budgets and resumable limits** — push requests stay bounded by two
     budgets of different dimensions: the fixed chunk (the sender's in-memory
     unit of one read) and the host-learned request body budget that
     PushRequestSizer sizes from reported php.ini limits and 413s, plus a

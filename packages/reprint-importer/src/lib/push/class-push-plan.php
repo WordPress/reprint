@@ -3,40 +3,39 @@
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 
 /**
- * Internal planner for one PushFilesSender lifecycle.
+ * Internal bounded local-index and change planner.
  *
  * PushPlan builds a path-sorted fresh local index, then diffs it against the
- * local index at the previous push. It writes durable lists of local paths to
- * push and local paths to delete without accumulating an index or path list in
- * memory.
+ * previous local index supplied by its caller. It writes durable lists of
+ * local paths to push and local paths to delete without accumulating an index
+ * or path list in memory.
  *
- * PushFilesSender is the only caller-visible processor. It owns the lifecycle
- * lock, top-level phase, transport, result, commit, restart, and removal.
- * PushPlan owns FileIndexProcessor, the fresh local index, the index diff, the
- * meaning of its cursor, and the two completed path lists. PushFilesSender
- * stores the cursor returned by get_cursor().
+ * PushFilesSender or the files-diff command owns the caller-visible lifecycle,
+ * lock, top-level phase, result, and terminal behavior. PushPlan owns
+ * FileIndexProcessor, the fresh local index, the index diff, the meaning of
+ * its cursor, and the two completed path lists. A caller which resumes across
+ * processes stores the cursor returned by get_cursor().
  *
  * ## Durable boundary
  *
- * While sender.json says `planning`, its PushPlan cursor contains one of
- * four internal phases: `indexing`, `starting_diff`, `diffing`, or `complete`.
- * A false next_step() result means both indexes reached EOF; the sender stores
- * the returned cursor and closes the plan before changing its phase. The
- * completed files remain in the sender-owned plan directory until the sender
- * finishes or discards the push.
+ * The PushPlan cursor contains one of four internal phases: `indexing`,
+ * `starting_diff`, `diffing`, or `complete`. A false next_step() result means
+ * both indexes reached EOF; the caller stores the returned cursor and closes
+ * the plan before changing its phase. The completed files remain in the
+ * caller-owned plan directory until the caller no longer needs them.
  *
  * ## Change detection
  *
- * ctime is machine-local, so PushPlan compares the local machine only with its
- * own state at the previous successful push. File and symlink changes are
- * determined by type, ctime, and size. Directory changes use the indexer's
- * empty-directory marker; non-empty directories are represented by their
- * descendants.
+ * ctime is machine-local, so the previous local index must describe the same
+ * local machine: PushFilesSender supplies the index saved after the previous
+ * push, and files-diff supplies the index captured after the previous pull.
+ * File and symlink changes are determined by type, ctime, and size. Directory
+ * changes use the indexer's empty-directory marker; non-empty directories are
+ * represented by their descendants.
  *
- * With no local index from a previous push, every file, symlink, and empty
- * directory is selected, and no deletion can be detected. Excluded paths are
- * omitted from both path lists but remain in the fresh local index saved
- * after success.
+ * With no previous local index, every file, symlink, and empty directory is
+ * selected, and no deletion can be detected. Excluded paths are omitted from
+ * both path lists but remain in the fresh local index.
  *
  * The index reader trusts the entry values produced by the indexer. It retains
  * failure handling for reading lines, decoding JSON, and decoding base64 paths.
@@ -45,10 +44,10 @@
  *
  * Each indexing step advances one FileIndexProcessor traversal event and
  * flushes any appended JSONL bytes before updating the traversal cursor and
- * committed byte offset returned to the sender.
+ * committed byte offset returned to the caller.
  * A separate step starts the index diff. Each diff step compares at most one
  * path represented by either index and flushes only the output changed by that
- * step before updating its next cursor. The sender stores that cursor before
+ * step before updating its next cursor. The caller stores that cursor before
  * returning from its own step. `resume()` discards bytes beyond saved offsets,
  * so an interrupted step cannot leave duplicate durable entries.
  *
@@ -59,10 +58,10 @@
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
  * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
  * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
- * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_index:int,byte_offset_in_previous_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_stack_top_byte_offset:int|null}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_index:int,byte_offset_in_previous_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_stack_top_byte_offset:int|null}
  * @phpstan-type CompleteCursor array{phase:'complete'}
  * @phpstan-type PushPlanPosition IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
- * @phpstan-type PushPlanCursor array{plan_directory:string,local_tree_root:string,local_index_at_previous_push:string,position:PushPlanPosition}
+ * @phpstan-type PushPlanCursor array{plan_directory:string,local_tree_root:string,previous_local_index:string,position:PushPlanPosition}
  * @phpstan-type DeletedDirectoryStackEntry array{path:string,previous_byte_offset:int|null}
  */
 class PushPlan
@@ -70,11 +69,11 @@ class PushPlan
     /** @var string Canonical local tree root inspected while building the fresh local index. */
     private string $local_tree_root;
 
-    /** @var string Sender-owned active plan directory. */
+    /** @var string Caller-owned active plan directory. */
     private string $plan_directory;
 
-    /** @var string Paths and metadata from the last completed push. */
-    private string $local_index_at_previous_push;
+    /** @var string Previous local index supplied by the caller. */
+    private string $previous_local_index;
 
     /** @var string JSONL file of local paths to push. */
     private string $local_paths_to_push;
@@ -94,7 +93,7 @@ class PushPlan
     /** @var list<string> Receiver-owned paths that the plan must not push or delete. */
     private array $excluded_paths = [];
 
-    /** @var PushPlanCursor Current cursor returned to PushFilesSender. */
+    /** @var PushPlanCursor Current cursor returned to the caller. */
     private array $cursor;
 
     /** @var bool Whether close() has closed this plan's file handles. */
@@ -110,10 +109,10 @@ class PushPlan
     private bool $fresh_local_index_entry_loaded = false;
 
     /** @var array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}|null */
-    private ?array $previous_local_index_entry = null;
+    private ?array $previous_local_index_lookahead_entry = null;
 
-    /** @var bool Whether $previous_local_index_entry has been read, including EOF. */
-    private bool $previous_local_index_entry_loaded = false;
+    /** @var bool Whether $previous_local_index_lookahead_entry has been read, including EOF. */
+    private bool $previous_local_index_lookahead_entry_loaded = false;
 
     /** @var DeletedDirectoryStackEntry|null Top active deleted-directory stack entry. */
     private ?array $deleted_directory_stack_entry = null;
@@ -121,7 +120,7 @@ class PushPlan
     /** @var resource|null Open fresh local index retained during indexing or the index diff. */
     private $fresh_local_index_handle = null;
     /** @var resource|null */
-    private $local_index_at_previous_push_handle = null;
+    private $previous_local_index_handle = null;
     /** @var resource|null */
     private $local_paths_to_push_handle = null;
     /** @var resource|null */
@@ -136,19 +135,19 @@ class PushPlan
      * fresh local index traversal. Until the caller stores the returned cursor,
      * an interrupted start is repeated and overwrites these initial plan files.
      *
-     * @param string $plan_directory              Sender-owned active plan directory.
+     * @param string $plan_directory              Caller-owned active plan directory.
      * @param string $local_tree_root              Canonical local tree root.
-     * @param string $local_index_at_previous_push Index saved after the previous successful push.
-     * @param string $excluded_paths_path          Sender-owned target exclusions file.
+     * @param string $previous_local_index Previous local index this plan diffs against.
+     * @param string $excluded_paths_path          Caller-owned target exclusions file.
      * @return self Open plan positioned at the initial indexing cursor.
      */
     public static function start(
         string $plan_directory,
         string $local_tree_root,
-        string $local_index_at_previous_push,
+        string $previous_local_index,
         string $excluded_paths_path
     ): self {
-        $plan = new self($plan_directory, $local_tree_root, $local_index_at_previous_push);
+        $plan = new self($plan_directory, $local_tree_root, $previous_local_index);
         if (!@copy($excluded_paths_path, $plan->excluded_paths_file)) {
             throw new RuntimeException("Failed to copy excluded paths into the push plan: {$excluded_paths_path}");
         }
@@ -167,7 +166,7 @@ class PushPlan
         $plan->cursor = [
             "plan_directory" => $plan->plan_directory,
             "local_tree_root" => $plan->local_tree_root,
-            "local_index_at_previous_push" => $plan->local_index_at_previous_push,
+            "previous_local_index" => $plan->previous_local_index,
             "position" => [
                 "phase" => "indexing",
                 "file_index_cursor" => $plan->file_index_processor->get_cursor(),
@@ -191,7 +190,7 @@ class PushPlan
         $plan = new self(
             $cursor["plan_directory"],
             $cursor["local_tree_root"],
-            $cursor["local_index_at_previous_push"]
+            $cursor["previous_local_index"]
         );
         $plan->cursor = $cursor;
         $position = $plan->cursor["position"];
@@ -241,16 +240,16 @@ class PushPlan
     }
 
     /**
-     * Initializes paths in the sender-owned active plan directory.
+     * Initializes paths in the caller-owned active plan directory.
      *
-     * @param string $plan_directory              Sender-owned active plan directory.
+     * @param string $plan_directory              Caller-owned active plan directory.
      * @param string $local_tree_root              Canonical local tree root.
-     * @param string $local_index_at_previous_push Index saved after the previous successful push.
+     * @param string $previous_local_index Previous local index this plan diffs against.
      */
     private function __construct(
         string $plan_directory,
         string $local_tree_root,
-        string $local_index_at_previous_push
+        string $previous_local_index
     ) {
         $plan_directory = rtrim($plan_directory, "/");
         if (!is_dir($plan_directory)) {
@@ -258,7 +257,7 @@ class PushPlan
         }
         $this->plan_directory = $plan_directory;
         $this->set_local_tree_root($local_tree_root);
-        $this->local_index_at_previous_push = $local_index_at_previous_push;
+        $this->previous_local_index = $previous_local_index;
         $this->local_paths_to_push = $plan_directory . "/local_paths_to_push.jsonl";
         $this->local_paths_to_delete = $plan_directory . "/local_paths_to_delete";
         $this->fresh_local_index = $plan_directory . "/fresh_local_index.jsonl";
@@ -267,9 +266,9 @@ class PushPlan
     }
 
     /**
-     * Stores the canonical root of the local tree represented by this push.
+     * Stores the canonical root of the local tree represented by this plan.
      *
-     * @param string $local_tree_root Local tree root selected by PushFilesSender.
+     * @param string $local_tree_root Local tree root selected by the caller.
      */
     private function set_local_tree_root(string $local_tree_root): void
     {
@@ -284,7 +283,7 @@ class PushPlan
     /**
      * Reopens the fresh local index at the byte offset stored with its traversal cursor.
      *
-     * Any bytes appended after the cursor last stored by the sender are
+     * Any bytes appended after the cursor last stored by the caller are
      * discarded before FileIndexProcessor continues from that same step.
      */
     private function open_fresh_local_index_for_continuation(): void
@@ -322,8 +321,8 @@ class PushPlan
         $cursor = $this->cursor["position"];
         $this->fresh_local_index_entry = null;
         $this->fresh_local_index_entry_loaded = false;
-        $this->previous_local_index_entry = null;
-        $this->previous_local_index_entry_loaded = false;
+        $this->previous_local_index_lookahead_entry = null;
+        $this->previous_local_index_lookahead_entry_loaded = false;
         $this->deleted_directory_stack_entry = null;
         $this->local_paths_to_push_handle = $this->open_and_truncate_and_seek(
             $this->local_paths_to_push,
@@ -338,10 +337,10 @@ class PushPlan
             throw new RuntimeException("Failed to open the retained fresh local index: {$this->fresh_local_index}");
         }
 
-        if (is_file($this->local_index_at_previous_push)) {
-            $this->local_index_at_previous_push_handle = fopen($this->local_index_at_previous_push, "rb");
-            if (!is_resource($this->local_index_at_previous_push_handle)) {
-                throw new RuntimeException("Failed to open local index at the previous push: {$this->local_index_at_previous_push}");
+        if (is_file($this->previous_local_index)) {
+            $this->previous_local_index_handle = fopen($this->previous_local_index, "rb");
+            if (!is_resource($this->previous_local_index_handle)) {
+                throw new RuntimeException("Failed to open the previous local index: {$this->previous_local_index}");
             }
         }
         $this->seek_to_cursor(
@@ -349,11 +348,11 @@ class PushPlan
             $cursor["byte_offset_in_fresh_index"],
             "fresh local index"
         );
-        if ($this->local_index_at_previous_push_handle) {
+        if ($this->previous_local_index_handle) {
             $this->seek_to_cursor(
-                $this->local_index_at_previous_push_handle,
-                $cursor["byte_offset_in_previous_index"],
-                "local index at the previous push"
+                $this->previous_local_index_handle,
+                $cursor["byte_offset_in_previous_local_index"],
+                "previous local index"
             );
         }
         $this->deleted_directories_stack_handle = fopen($this->deleted_directories_stack, "a+b");
@@ -369,7 +368,7 @@ class PushPlan
      * Performs one step for the current internal phase.
      *
      * A false return means planning is complete and remains false on later
-     * calls. The owning sender closes the plan before using its path lists.
+     * calls. The owning caller closes the plan before using its path lists.
      *
      * @return bool Whether another planning step may be performed.
      */
@@ -458,7 +457,7 @@ class PushPlan
         $this->cursor["position"] = [
             "phase" => "diffing",
             "byte_offset_in_fresh_index" => 0,
-            "byte_offset_in_previous_index" => 0,
+            "byte_offset_in_previous_local_index" => 0,
             "byte_offset_in_local_paths_to_push" => 0,
             "byte_offset_in_local_paths_to_delete" => 0,
             "deleted_directory_stack_top_byte_offset" => null,
@@ -504,8 +503,8 @@ class PushPlan
     /**
      * Compares at most one path and updates the resulting push plan cursor.
      *
-     * Exclusions suppress network changes, not entries in the retained fresh
-     * local index saved as the local index at the previous push after success.
+     * Exclusions suppress planned changes, not entries in the retained fresh
+     * local index.
      *
      * @return bool Whether another index diff step may be performed.
      */
@@ -515,7 +514,7 @@ class PushPlan
         $cursor = $this->cursor["position"];
 
         $byte_offset_in_fresh_index = $cursor["byte_offset_in_fresh_index"];
-        $byte_offset_in_previous_index = $cursor["byte_offset_in_previous_index"];
+        $byte_offset_in_previous_local_index = $cursor["byte_offset_in_previous_local_index"];
         $deleted_directory_stack_top_byte_offset = $cursor["deleted_directory_stack_top_byte_offset"];
         $local_paths_to_push_changed = false;
         $local_paths_to_delete_changed = false;
@@ -525,25 +524,25 @@ class PushPlan
             $this->fresh_local_index_entry = $this->parse_next_index_entry($this->fresh_local_index_handle);
             $this->fresh_local_index_entry_loaded = true;
         }
-        if (!$this->previous_local_index_entry_loaded) {
-            $this->previous_local_index_entry = $this->parse_next_index_entry(
-                $this->local_index_at_previous_push_handle
+        if (!$this->previous_local_index_lookahead_entry_loaded) {
+            $this->previous_local_index_lookahead_entry = $this->parse_next_index_entry(
+                $this->previous_local_index_handle
             );
-            $this->previous_local_index_entry_loaded = true;
+            $this->previous_local_index_lookahead_entry_loaded = true;
         }
         $entry_fresh_index = $this->fresh_local_index_entry;
-        $entry_previous_index = $this->previous_local_index_entry;
+        $entry_previous_local_index = $this->previous_local_index_lookahead_entry;
 
-        if ($entry_fresh_index !== null || $entry_previous_index !== null) {
+        if ($entry_fresh_index !== null || $entry_previous_local_index !== null) {
             // Base64 does not preserve byte order ('0' sorts before 'A'
             // in ASCII but encodes a higher value), so ordering uses the
             // decoded path bytes.
-            if ($entry_previous_index === null) {
+            if ($entry_previous_local_index === null) {
                 $path_comparison = -1;
             } elseif ($entry_fresh_index === null) {
                 $path_comparison = 1;
             } else {
-                $path_comparison = strcmp($entry_fresh_index["path"], $entry_previous_index["path"]);
+                $path_comparison = strcmp($entry_fresh_index["path"], $entry_previous_local_index["path"]);
             }
 
             $current_shape = null;
@@ -551,9 +550,9 @@ class PushPlan
                 $current_shape = $this->entry_shape($entry_fresh_index);
             }
 
-            $local_index_at_previous_push_shape = null;
+            $previous_local_index_shape = null;
             if ($path_comparison >= 0) {
-                $local_index_at_previous_push_shape = $this->entry_shape($entry_previous_index);
+                $previous_local_index_shape = $this->entry_shape($entry_previous_local_index);
 
                 // Byte sorting can put a sibling such as `a-other` before
                 // `a/child`. Every retained non-empty directory has a later
@@ -562,8 +561,8 @@ class PushPlan
                 if ($this->deleted_directory_stack_entry !== null) {
                     $descendant_prefix = $this->deleted_directory_stack_entry["path"] . "/";
                     if (
-                        strpos($entry_previous_index["path"], $descendant_prefix) !== 0
-                        && strcmp($entry_previous_index["path"], $descendant_prefix) > 0
+                        strpos($entry_previous_local_index["path"], $descendant_prefix) !== 0
+                        && strcmp($entry_previous_local_index["path"], $descendant_prefix) > 0
                     ) {
                         $deleted_directory_stack_top_byte_offset = $this->deleted_directory_stack_entry["previous_byte_offset"];
                         $this->deleted_directory_stack_entry = $this->read_deleted_directory_stack_entry(
@@ -588,17 +587,17 @@ class PushPlan
                 // A deleted non-empty directory emits one root. Its later
                 // descendant entries are already covered by that path.
                 if (
-                    !$this->path_conflicts_with_excluded_paths($entry_previous_index["path"])
+                    !$this->path_conflicts_with_excluded_paths($entry_previous_local_index["path"])
                     && !$this->deleted_directory_stack_covers_path(
-                        $entry_previous_index["path"],
+                        $entry_previous_local_index["path"],
                         $this->deleted_directory_stack_entry
                     )
                 ) {
-                    $this->append_local_path_to_delete($entry_previous_index["path"]);
+                    $this->append_local_path_to_delete($entry_previous_local_index["path"]);
                     $local_paths_to_delete_changed = true;
-                    if ($local_index_at_previous_push_shape === "non_empty_directory") {
+                    if ($previous_local_index_shape === "non_empty_directory") {
                         $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
-                            $entry_previous_index["path"],
+                            $entry_previous_local_index["path"],
                             $deleted_directory_stack_top_byte_offset
                         );
                         $deleted_directories_stack_changed = true;
@@ -606,20 +605,20 @@ class PushPlan
                 }
             } else {
                 $current_is_file_or_symlink = $current_shape === "file" || $current_shape === "symlink";
-                $local_index_at_previous_push_is_file_or_symlink = $local_index_at_previous_push_shape === "file" || $local_index_at_previous_push_shape === "symlink";
+                $previous_local_index_is_file_or_symlink = $previous_local_index_shape === "file" || $previous_local_index_shape === "symlink";
                 $non_empty_directory_becomes_empty = $current_shape === "empty_directory"
-                    && $local_index_at_previous_push_shape === "non_empty_directory";
+                    && $previous_local_index_shape === "non_empty_directory";
                 $empty_directory_needs_push = $current_shape === "empty_directory"
-                    && $local_index_at_previous_push_shape !== "empty_directory";
+                    && $previous_local_index_shape !== "empty_directory";
                 // File and symlink changes are defined by type, ctime, and
                 // size. Other index values do not select a path for upload.
                 $changed_file_or_symlink_needs_push = $current_is_file_or_symlink
                     && (
-                        $entry_fresh_index["ctime"] !== $entry_previous_index["ctime"]
-                        || $entry_fresh_index["size"] !== $entry_previous_index["size"]
-                        || $entry_fresh_index["type"] !== $entry_previous_index["type"]
+                        $entry_fresh_index["ctime"] !== $entry_previous_local_index["ctime"]
+                        || $entry_fresh_index["size"] !== $entry_previous_local_index["size"]
+                        || $entry_fresh_index["type"] !== $entry_previous_local_index["type"]
                     );
-                $needs_delete = $current_is_file_or_symlink !== $local_index_at_previous_push_is_file_or_symlink
+                $needs_delete = $current_is_file_or_symlink !== $previous_local_index_is_file_or_symlink
                     || $non_empty_directory_becomes_empty;
                 $needs_push = $empty_directory_needs_push
                     || $changed_file_or_symlink_needs_push;
@@ -629,15 +628,15 @@ class PushPlan
                     $needs_delete
                     && !$path_is_excluded
                     && !$this->deleted_directory_stack_covers_path(
-                        $entry_previous_index["path"],
+                        $entry_previous_local_index["path"],
                         $this->deleted_directory_stack_entry
                     )
                 ) {
-                    $this->append_local_path_to_delete($entry_previous_index["path"]);
+                    $this->append_local_path_to_delete($entry_previous_local_index["path"]);
                     $local_paths_to_delete_changed = true;
-                    if ($local_index_at_previous_push_shape === "non_empty_directory") {
+                    if ($previous_local_index_shape === "non_empty_directory") {
                         $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
-                            $entry_previous_index["path"],
+                            $entry_previous_local_index["path"],
                             $deleted_directory_stack_top_byte_offset
                         );
                         $deleted_directories_stack_changed = true;
@@ -654,9 +653,9 @@ class PushPlan
                 $this->fresh_local_index_entry = $this->parse_next_index_entry($this->fresh_local_index_handle);
             }
             if ($path_comparison >= 0) {
-                $byte_offset_in_previous_index = ftell($this->local_index_at_previous_push_handle);
-                $this->previous_local_index_entry = $this->parse_next_index_entry(
-                    $this->local_index_at_previous_push_handle
+                $byte_offset_in_previous_local_index = ftell($this->previous_local_index_handle);
+                $this->previous_local_index_lookahead_entry = $this->parse_next_index_entry(
+                    $this->previous_local_index_handle
                 );
             }
         }
@@ -670,7 +669,7 @@ class PushPlan
         }
 
         $complete = $this->fresh_local_index_entry === null
-            && $this->previous_local_index_entry === null;
+            && $this->previous_local_index_lookahead_entry === null;
         if ($complete) {
             $deleted_directory_stack_top_byte_offset = null;
             $this->deleted_directory_stack_entry = null;
@@ -680,7 +679,7 @@ class PushPlan
             : [
                 "phase" => "diffing",
                 "byte_offset_in_fresh_index" => $byte_offset_in_fresh_index,
-                "byte_offset_in_previous_index" => $byte_offset_in_previous_index,
+                "byte_offset_in_previous_local_index" => $byte_offset_in_previous_local_index,
                 "byte_offset_in_local_paths_to_push" => ftell($this->local_paths_to_push_handle),
                 "byte_offset_in_local_paths_to_delete" => ftell($this->local_paths_to_delete_handle),
                 "deleted_directory_stack_top_byte_offset" => $deleted_directory_stack_top_byte_offset,
@@ -692,7 +691,7 @@ class PushPlan
     /**
      * Closes every plan file handle and prevents further plan steps.
      *
-     * The cursor returned to the sender and the plan-owned files remain
+     * The cursor returned to the caller and the plan-owned files remain
      * available to resume the plan or save the completed fresh local index
      * after a successful push.
      */
@@ -702,8 +701,8 @@ class PushPlan
             $this->file_index_processor->close();
         }
         $this->close_fresh_local_index_handle();
-        if (is_resource($this->local_index_at_previous_push_handle)) {
-            fclose($this->local_index_at_previous_push_handle);
+        if (is_resource($this->previous_local_index_handle)) {
+            fclose($this->previous_local_index_handle);
         }
         if (is_resource($this->local_paths_to_push_handle)) {
             fclose($this->local_paths_to_push_handle);
@@ -714,14 +713,14 @@ class PushPlan
         if (is_resource($this->deleted_directories_stack_handle)) {
             fclose($this->deleted_directories_stack_handle);
         }
-        $this->local_index_at_previous_push_handle = null;
+        $this->previous_local_index_handle = null;
         $this->local_paths_to_push_handle = null;
         $this->local_paths_to_delete_handle = null;
         $this->deleted_directories_stack_handle = null;
         $this->fresh_local_index_entry = null;
         $this->fresh_local_index_entry_loaded = false;
-        $this->previous_local_index_entry = null;
-        $this->previous_local_index_entry_loaded = false;
+        $this->previous_local_index_lookahead_entry = null;
+        $this->previous_local_index_lookahead_entry_loaded = false;
         $this->deleted_directory_stack_entry = null;
         $this->closed = true;
     }
@@ -953,7 +952,7 @@ class PushPlan
     }
 
     /**
-     * Loads the sender-owned exclusions used throughout one planning run.
+     * Loads the caller-owned exclusions used throughout one planning run.
      *
      * @return list<string> Decoded document-root-relative excluded paths.
      */
@@ -983,11 +982,11 @@ class PushPlan
     /**
      * Reads and decodes the next local index entry.
      *
-     * A null handle represents the missing local index at the previous push.
+     * A null handle represents a missing previous local index.
      * The indexer's entry schema is trusted; only file reads, JSON decoding,
      * and base64 path decoding are handled here as fallible operations.
      *
-     * @param resource|null $handle Open local index handle, or null when no previous index exists.
+     * @param resource|null $handle Open local index handle, or null when no previous local index exists.
      * @return array|null {
      *     Decoded index entry, or null at EOF or when the handle is null.
      *
@@ -1007,7 +1006,7 @@ class PushPlan
         $raw_line = fgets($handle);
         if ($raw_line === false) {
             if (!feof($handle)) {
-                throw new RuntimeException("Failed to read a local push index line.");
+                throw new RuntimeException("Failed to read a local index line.");
             }
             return null;
         }
