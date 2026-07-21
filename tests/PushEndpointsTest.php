@@ -2514,6 +2514,91 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNull($this->loadActiveState($push_state_directory));
     }
 
+    public function testCompletedFilesPushPublishesThePreviousLocalIndexForFilesDiff(): void
+    {
+        $local_docroot = $this->root . '/push-diff-local-docroot';
+        $state_directory = $this->root . '/push-diff-state';
+        mkdir($local_docroot, 0700, true);
+        mkdir($state_directory, 0700, true);
+        file_put_contents($local_docroot . '/pushed.txt', 'pushed content');
+
+        $push = $this->runFilesPushCli($local_docroot, $state_directory);
+        $this->assertSame(0, $push['exit'], $push['output']);
+
+        $empty_diff = $this->runFilesDiffCli($local_docroot, $state_directory);
+        $this->assertSame(0, $empty_diff['exit'], $empty_diff['output']);
+        $this->assertSame(
+            json_encode([
+                'command' => 'files-diff',
+                'status' => 'complete',
+                'local_paths_to_push' => 0,
+                'local_paths_to_delete' => 0,
+            ], JSON_UNESCAPED_SLASHES) . "\n",
+            $empty_diff['stdout']
+        );
+
+        file_put_contents($local_docroot . '/pushed.txt', 'edited after the push');
+
+        $changed_diff = $this->runFilesDiffCli($local_docroot, $state_directory);
+        $this->assertSame(0, $changed_diff['exit'], $changed_diff['output']);
+        $changed_stat = lstat($local_docroot . '/pushed.txt');
+        $this->assertIsArray($changed_stat);
+        $this->assertSame(
+            json_encode([
+                'command' => 'files-diff',
+                'action' => 'push',
+                'path_b64' => base64_encode('pushed.txt'),
+                'type' => 'file',
+                'size' => (int) $changed_stat['size'],
+                'ctime' => (int) $changed_stat['ctime'],
+            ], JSON_UNESCAPED_SLASHES) . "\n"
+            . json_encode([
+                'command' => 'files-diff',
+                'status' => 'complete',
+                'local_paths_to_push' => 1,
+                'local_paths_to_delete' => 0,
+            ], JSON_UNESCAPED_SLASHES) . "\n",
+            $changed_diff['stdout']
+        );
+    }
+
+    /**
+     * Runs the production files-diff CLI for the same pair a push CLI used.
+     *
+     * @return array{exit:int,stdout:string,stderr:string,output:string}
+     */
+    private function runFilesDiffCli(string $local_docroot, string $state_directory): array
+    {
+        $process = proc_open(
+            [
+                PHP_BINARY,
+                __DIR__ . '/../importer/import.php',
+                'files-diff',
+                $this->base_url,
+                '--state-dir=' . $state_directory,
+                '--fs-root=' . $local_docroot,
+            ],
+            [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+            $pipes,
+            $this->root
+        );
+        $this->assertIsResource($process);
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exit = proc_close($process);
+        $this->assertIsString($stdout);
+        $this->assertIsString($stderr);
+        return [
+            'exit' => $exit,
+            'stdout' => $stdout,
+            'stderr' => $stderr,
+            'output' => $stdout . $stderr,
+        ];
+    }
+
     public function testFilesPushCliPushesAndUpdatesACompleteLocalTree(): void
     {
         $this->writeDocrootConfiguration([

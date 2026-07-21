@@ -54,11 +54,33 @@ class CliHelpTest extends TestCase
         $this->assertStringNotContainsString('--only', $output);
     }
 
+    public function testFilesDiffHelpShowsOnlyItsLocalCommandOptions(): void
+    {
+        $output = $this->runHelp('files-diff');
+
+        $this->assertStringContainsString('Usage: reprint files-diff <target-url>', $output);
+        $this->assertStringContainsString('--state-dir=DIR', $output);
+        $this->assertStringContainsString('--fs-root=DIR', $output);
+        $this->assertStringContainsString('previous local index', $output);
+        $this->assertStringContainsString('completed files-push', $output);
+        $this->assertStringContainsString('push operation plan', $output);
+        $this->assertStringContainsString('default-skipped paths', $output);
+        $this->assertStringContainsString('No network calls', $output);
+        $this->assertStringContainsString('complete diff from the beginning', $output);
+        $this->assertStringNotContainsString('--runtime', $output);
+        $this->assertStringNotContainsString('--secret', $output);
+        $this->assertStringNotContainsString('--force-http', $output);
+        $this->assertStringNotContainsString('--filter', $output);
+        $this->assertStringNotContainsString('--remap', $output);
+        $this->assertStringNotContainsString('--only', $output);
+    }
+
     public function testMainHelpDescribesFilesPushWithoutApplyingPullOnlyContractsGlobally(): void
     {
         $output = $this->runHelp('--help');
 
         $this->assertStringContainsString('files-push', $output);
+        $this->assertStringContainsString('files-diff', $output);
         $this->assertStringContainsString('Low-level commands:', $output);
         $this->assertStringNotContainsString('Low-level commands (used by pull internally):', $output);
         $this->assertStringNotContainsString('State is stored in --state-dir/.import-state.json', $output);
