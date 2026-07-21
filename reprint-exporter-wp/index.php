@@ -9,6 +9,50 @@
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  */
 
+// ── TEMPORARY E2E DIAGNOSTIC — REVERT BEFORE MERGE ──────────────────────────
+// Traces the double-bootstrap behind the intermittent wpcloud-flatten fatal
+// ("Cannot redeclare class ComposerAutoloaderInit*"). Gated to the wpcloud
+// E2E vhost so the rest of the suite stays quiet.
+if (
+    getenv('SITE_EXPORT_TEST_MODE') &&
+    strpos($_SERVER['DOCUMENT_ROOT'] ?? '', 'wpcloud') !== false
+) {
+    $stu_diag_trace = array_map(
+        static function ($f) {
+            return ($f['file'] ?? '?') . ':' . ($f['line'] ?? 0);
+        },
+        debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS)
+    );
+    error_log(
+        '[E2E-DIAG] index.php __FILE__=' . __FILE__
+        . ' uri=' . ($_SERVER['REQUEST_URI'] ?? '-')
+        . ' includers=' . implode(' <- ', array_slice($stu_diag_trace, 0, 6))
+    );
+    error_log(
+        '[E2E-DIAG] init-classes=' . implode(
+            ',',
+            preg_grep('/^ComposerAutoloaderInit/', get_declared_classes()) ?: ['none']
+        )
+    );
+    if (!defined('STU_DIAG_SHUTDOWN_ARMED')) {
+        define('STU_DIAG_SHUTDOWN_ARMED', true);
+        register_shutdown_function(static function () {
+            $e = error_get_last();
+            if (!$e || strpos($e['message'], 'ComposerAutoloaderInit') === false) {
+                return;
+            }
+            error_log('[E2E-DIAG] FATAL ' . $e['message'] . ' @ ' . $e['file'] . ':' . $e['line']);
+            // Ordered include list at the moment of death: the entry just
+            // before the second autoload.php names its includer chain.
+            error_log(
+                '[E2E-DIAG] at-fatal includes: '
+                . implode(' | ', preg_grep('#site-export|autoload#', get_included_files()) ?: [])
+            );
+        });
+    }
+}
+// ── END TEMPORARY E2E DIAGNOSTIC ─────────────────────────────────────────────
+
 require_once __DIR__ . '/lib.php';
 
 // Intercept export API requests as early as possible.

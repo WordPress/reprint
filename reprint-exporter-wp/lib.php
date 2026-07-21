@@ -10,6 +10,17 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// TEMPORARY E2E DIAGNOSTIC — REVERT BEFORE MERGE (see index.php).
+if (
+    getenv('SITE_EXPORT_TEST_MODE') &&
+    strpos($_SERVER['DOCUMENT_ROOT'] ?? '', 'wpcloud') !== false
+) {
+    error_log(
+        '[E2E-DIAG] lib.php __FILE__=' . __FILE__
+        . ' plugin_dir=' . (defined('SITE_EXPORT_PLUGIN_DIR') ? SITE_EXPORT_PLUGIN_DIR : '(unset)')
+    );
+}
+
 if (!defined('SITE_EXPORT_VERSION')) {
     define('SITE_EXPORT_VERSION', '0.9.2-dev');
 }
@@ -111,6 +122,20 @@ function _site_export_load_exporter_runtime(): ?string {
         // re-declares the ComposerAutoloaderInit* class and fatals.
         // build_pdo_dsn() is a Composer `files` autoload entry, so it exists
         // exactly when the autoloader has already run.
+        // TEMPORARY E2E DIAGNOSTIC — REVERT BEFORE MERGE (see index.php).
+        if (
+            getenv('SITE_EXPORT_TEST_MODE') &&
+            strpos($_SERVER['DOCUMENT_ROOT'] ?? '', 'wpcloud') !== false
+        ) {
+            error_log(
+                '[E2E-DIAG] loader candidate=' . $candidate['autoload']
+                . ' guard-skip=' . (function_exists('build_pdo_dsn') ? '1' : '0')
+                . ' init-classes=' . implode(
+                    ',',
+                    preg_grep('/^ComposerAutoloaderInit/', get_declared_classes()) ?: ['none']
+                )
+            );
+        }
         if (!function_exists('build_pdo_dsn')) {
             require_once $candidate['autoload'];
         }
