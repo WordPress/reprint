@@ -115,20 +115,22 @@ function _site_export_load_exporter_runtime(): ?string {
             continue;
         }
 
-        // Guard with an existence check: when wp-content is reached through a
-        // symlink, the same physical autoload.php can be included through two
-        // different paths. With opcache.revalidate_path=0 (default),
-        // require_once does not resolve symlinks, so the second include
-        // re-declares the ComposerAutoloaderInit* class and fatals.
-        // build_pdo_dsn() is a Composer `files` autoload entry, so it exists
-        // exactly when the autoloader has already run.
+        // Canonicalize before requiring: when wp-content is reached through a
+        // symlink, the same physical autoload.php is reachable through two
+        // path strings, and with opcache.revalidate_path=0 (default)
+        // require_once does not dedupe across them — the second include
+        // re-declares the ComposerAutoloaderInit* class and fatals. Composer's
+        // own baked __DIR__ paths resolve to the real path, so requiring the
+        // realpath here puts every include in the same family and lets
+        // require_once dedupe natively.
+        $autoload = realpath($candidate['autoload']) ?: $candidate['autoload'];
         // TEMPORARY E2E DIAGNOSTIC — REVERT BEFORE MERGE (see index.php).
         if (
             getenv('SITE_EXPORT_TEST_MODE') &&
             strpos($_SERVER['DOCUMENT_ROOT'] ?? '', 'wpcloud') !== false
         ) {
             error_log(
-                '[E2E-DIAG] loader candidate=' . $candidate['autoload']
+                '[E2E-DIAG] loader autoload=' . $autoload
                 . ' guard-skip=' . (function_exists('build_pdo_dsn') ? '1' : '0')
                 . ' init-classes=' . implode(
                     ',',
@@ -136,9 +138,7 @@ function _site_export_load_exporter_runtime(): ?string {
                 )
             );
         }
-        if (!function_exists('build_pdo_dsn')) {
-            require_once $candidate['autoload'];
-        }
+        require_once $autoload;
         return $candidate['export'];
     }
 
