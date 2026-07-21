@@ -104,7 +104,16 @@ function _site_export_load_exporter_runtime(): ?string {
             continue;
         }
 
-        require_once $candidate['autoload'];
+        // Guard with an existence check: when wp-content is reached through a
+        // symlink, the same physical autoload.php can be included through two
+        // different paths. With opcache.revalidate_path=0 (default),
+        // require_once does not resolve symlinks, so the second include
+        // re-declares the ComposerAutoloaderInit* class and fatals.
+        // build_pdo_dsn() is a Composer `files` autoload entry, so it exists
+        // exactly when the autoloader has already run.
+        if (!function_exists('build_pdo_dsn')) {
+            require_once $candidate['autoload'];
+        }
         return $candidate['export'];
     }
 
