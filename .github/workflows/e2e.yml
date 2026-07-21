@@ -181,7 +181,9 @@ jobs:
         env:
           IMPORTER_PATH: ${{ github.workspace }}/reprint.phar
         working-directory: tests/e2e
-        run: npx vitest run
+        # Individual importer subprocesses have their own tighter timeouts;
+        # the Vitest budget must cover slow PHP-FPM matrix runs.
+        run: npx vitest run --test-timeout=120000
 
       - name: Debug logs
         if: always()
