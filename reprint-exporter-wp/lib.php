@@ -104,8 +104,14 @@ function _site_export_load_exporter_runtime(): ?string {
             continue;
         }
 
-        require_once $candidate['autoload'];
-        return $candidate['export'];
+        $autoload_path = realpath($candidate['autoload']);
+        $export_path = realpath($candidate['export']);
+        if ($autoload_path === false || $export_path === false) {
+            continue;
+        }
+
+        require_once $autoload_path;
+        return $export_path;
     }
 
     return null;
