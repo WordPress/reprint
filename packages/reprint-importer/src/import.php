@@ -5482,6 +5482,10 @@ class ImportClient
         // to removed files would accumulate. Only links pointing back into the
         // fs root were created here; anything else belongs to the target.
         $root = $this->get_filesystem_root_path();
+        // The fs root is canonical, so the link has to be resolved against a
+        // canonical base too: a lexical one misses every link whose route
+        // passes through a symlink, and the prune then silently does nothing.
+        $base = realpath($target) ?: $target;
         foreach (@scandir($target) ?: [] as $entry) {
             if ($entry === "." || $entry === "..") {
                 continue;
@@ -5496,7 +5500,7 @@ class ImportClient
                 continue;
             }
             $resolved = normalize_path(
-                strpos($link, "/") === 0 ? $link : $target . "/" . $link,
+                strpos($link, "/") === 0 ? $link : $base . "/" . $link,
             );
             if (!path_is_within_root($resolved, $root)) {
                 continue;
