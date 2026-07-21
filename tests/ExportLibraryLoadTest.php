@@ -33,12 +33,13 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
     }
 
-    public function testPluginRuntimeLoaderReturnsCanonicalExportPathForSymlinkedPluginDirectory(): void
+    public function testPluginRuntimeLoaderSkipsAutoloadAlreadyLoadedThroughSymlinkedPluginDirectory(): void
     {
         $tmp_dir = sys_get_temp_dir() . '/export-runtime-loader-test-' . uniqid('', true);
         $physical_plugin_directory = $tmp_dir . '/physical-plugin';
         $linked_plugin_directory = $tmp_dir . '/linked-plugin';
         $autoload_path = $physical_plugin_directory . '/vendor/autoload.php';
+        $linked_autoload_path = $linked_plugin_directory . '/vendor/autoload.php';
         $export_path = $physical_plugin_directory . '/vendor/wp-php-toolkit/reprint-exporter/src/export.php';
         mkdir(dirname($export_path), 0755, true);
         file_put_contents($autoload_path, "<?php\nclass ComposerAutoloaderInitAliasTest {}\n");
@@ -55,13 +56,13 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertNotFalse($canonical_autoload_path, 'autoload.php must exist');
         $lib_path = realpath(__DIR__ . '/../reprint-exporter-wp/lib.php');
         $this->assertNotFalse($lib_path, 'lib.php must exist');
-        $canonical_autoload_path_encoded = base64_encode($canonical_autoload_path);
+        $linked_autoload_path_encoded = base64_encode($linked_autoload_path);
         $linked_plugin_directory_encoded = base64_encode($linked_plugin_directory . '/');
         $lib_path_encoded = base64_encode($lib_path);
 
         try {
             $php_code = '<?php' . "\n"
-                . 'require_once base64_decode(\'' . $canonical_autoload_path_encoded . '\', true);' . "\n"
+                . 'require_once base64_decode(\'' . $linked_autoload_path_encoded . '\', true);' . "\n"
                 . 'define(\'ABSPATH\', __DIR__ . \'/\');' . "\n"
                 . 'define(\'SITE_EXPORT_PLUGIN_DIR\', base64_decode(\'' . $linked_plugin_directory_encoded . '\', true));' . "\n"
                 . 'require base64_decode(\'' . $lib_path_encoded . '\', true);' . "\n"
