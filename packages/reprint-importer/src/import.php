@@ -4893,6 +4893,7 @@ class ImportClient
 
         $flatten_to = rtrim($flatten_to, "/");
         $force = $options["force"] ?? false;
+        $preserve_local_content = $options["preserve_local_content"] ?? false;
 
         // Ensure the fs root exists
         if (!is_dir($this->fs_root)) {
@@ -5066,10 +5067,13 @@ class ImportClient
 
             $source = $local_abspath . "/" . $entry;
             $target = $flatten_to . "/" . $entry;
-            $this->flatten_place_symlink(
+            // wp-content is the only entry that can hold files the target
+            // owns; the rest of ABSPATH is core and is always replaced.
+            $this->flatten_merge_directory(
                 $source,
                 $target,
                 $force,
+                $preserve_local_content && $entry === "wp-content",
                 $created,
                 $refreshed,
                 $forced,
@@ -5160,10 +5164,11 @@ class ImportClient
                     }
                     $source = $local_content_dir . "/" . $entry;
                     $target = $wp_content_target . "/" . $entry;
-                    $this->flatten_place_symlink(
+                    $this->flatten_merge_directory(
                         $source,
                         $target,
                         $force,
+                        $preserve_local_content,
                         $created,
                         $refreshed,
                         $forced,
@@ -5174,10 +5179,11 @@ class ImportClient
             // Symlink detached sub-components into wp-content
             if ($plugins_detached && is_dir($local_plugins_dir)) {
                 $target = $wp_content_target . "/plugins";
-                $this->flatten_place_symlink(
+                $this->flatten_merge_directory(
                     $local_plugins_dir,
                     $target,
                     $force,
+                    $preserve_local_content,
                     $created,
                     $refreshed,
                     $forced,
@@ -5185,10 +5191,11 @@ class ImportClient
             }
             if ($mu_plugins_detached && is_dir($local_mu_plugins_dir)) {
                 $target = $wp_content_target . "/mu-plugins";
-                $this->flatten_place_symlink(
+                $this->flatten_merge_directory(
                     $local_mu_plugins_dir,
                     $target,
                     $force,
+                    $preserve_local_content,
                     $created,
                     $refreshed,
                     $forced,
@@ -5196,10 +5203,11 @@ class ImportClient
             }
             if ($uploads_detached && is_dir($local_uploads_basedir)) {
                 $target = $wp_content_target . "/uploads";
-                $this->flatten_place_symlink(
+                $this->flatten_merge_directory(
                     $local_uploads_basedir,
                     $target,
                     $force,
+                    $preserve_local_content,
                     $created,
                     $refreshed,
                     $forced,
@@ -5210,10 +5218,11 @@ class ImportClient
             // Simple case: just symlink the whole content_dir as wp-content.
             if (is_dir($local_content_dir)) {
                 $target = $flatten_to . "/wp-content";
-                $this->flatten_place_symlink(
+                $this->flatten_merge_directory(
                     $local_content_dir,
                     $target,
                     $force,
+                    $preserve_local_content,
                     $created,
                     $refreshed,
                     $forced,
@@ -5400,6 +5409,104 @@ class ImportClient
             "FLAT-DOCUMENT-ROOT | Created symlink: {$target} -> {$link_value}",
         );
         $created++;
+    }
+
+    /**
+     * Place $source at $target, merging into an existing directory instead of
+     * replacing it.
+     *
+     * Without $preserve, or when either side is not a real directory, this is
+     * {@see flatten_place_symlink}: one symlink for the whole subtree.
+     *
+     * When both sides are real directories, replacing the target would delete
+     * whatever it already holds, so the directory is kept and the source's
+     * entries are placed inside it:
+     *
+     *   - real directory on both sides -> recurse
+     *   - anything else                -> symlink (the source wins)
+     *   - present only in the target   -> untouched
+     *
+     * Recursion stops as soon as one side is not a real directory, so a subtree
+     * the target does not have still costs a single symlink.
+     */
+    private function flatten_merge_directory(
+        string $source,
+        string $target,
+        bool $force,
+        bool $preserve,
+        int &$created,
+        int &$refreshed,
+        int &$forced
+    ): void {
+        if (
+            !$preserve ||
+            is_link($source) ||
+            !is_dir($source) ||
+            is_link($target) ||
+            !is_dir($target)
+        ) {
+            // A merge implies the source wins on collisions; without this every
+            // path present on both sides would raise, and avoiding that with
+            // --force would replace whole directories instead of merging.
+            $this->flatten_place_symlink(
+                $source,
+                $target,
+                $preserve || $force,
+                $created,
+                $refreshed,
+                $forced,
+            );
+            return;
+        }
+
+        $this->audit_log(
+            "FLAT-DOCUMENT-ROOT | Merging into existing directory: {$target}",
+        );
+
+        foreach (@scandir($source) ?: [] as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            $this->flatten_merge_directory(
+                $source . "/" . $entry,
+                $target . "/" . $entry,
+                $force,
+                $preserve,
+                $created,
+                $refreshed,
+                $forced,
+            );
+        }
+
+        // Walking the source cannot notice entries it no longer has, so links
+        // to removed files would accumulate. Only links pointing back into the
+        // fs root were created here; anything else belongs to the target.
+        $root = $this->get_filesystem_root_path();
+        foreach (@scandir($target) ?: [] as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            $stale = $target . "/" . $entry;
+            // file_exists() follows links, so this is: a link that no longer resolves.
+            if (!is_link($stale) || file_exists($stale)) {
+                continue;
+            }
+            $link = readlink($stale);
+            if ($link === false) {
+                continue;
+            }
+            $resolved = normalize_path(
+                strpos($link, "/") === 0 ? $link : $target . "/" . $link,
+            );
+            if (!path_is_within_root($resolved, $root)) {
+                continue;
+            }
+            if (@unlink($stale)) {
+                $this->audit_log(
+                    "FLAT-DOCUMENT-ROOT | Pruned dangling symlink: {$stale}",
+                );
+            }
+        }
     }
 
     /**
@@ -12583,6 +12690,14 @@ if (
             'type' => 'flag',
             'target' => 'force',
             'help' => 'Remove conflicting non-symlink files and replace with symlinks',
+            'commands' => ['pull', 'flat-docroot'],
+        ],
+        [
+            'name' => 'preserve-local-content',
+            'type' => 'flag',
+            'target' => 'preserve_local_content',
+            'help' => 'Merge wp-content into an existing local one instead of replacing it, ' .
+                'keeping files that exist only locally (the remote wins on conflicts)',
             'commands' => ['pull', 'flat-docroot'],
         ],
 
