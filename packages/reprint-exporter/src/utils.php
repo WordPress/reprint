@@ -17,6 +17,10 @@
 
 // Polyfill for PHP 7.4 which lacks str_starts_with().
 namespace {
+    if (!defined('REPRINT_EXPORTER_AUTOLOAD_LOADED')) {
+        define('REPRINT_EXPORTER_AUTOLOAD_LOADED', true);
+    }
+
     if (!function_exists('str_starts_with')) {
         function str_starts_with(string $haystack, string $needle): bool {
             return $needle === '' || strncmp($haystack, $needle, strlen($needle)) === 0;

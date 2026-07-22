@@ -110,16 +110,7 @@ function _site_export_load_exporter_runtime(): ?string {
             continue;
         }
 
-        $autoload_already_loaded = false;
-        // Composer autoload.php may have already run through a symlinked
-        // plugin path. Match included files by resolved path before loading.
-        foreach (get_included_files() as $included_file) {
-            if (realpath($included_file) === $autoload_path) {
-                $autoload_already_loaded = true;
-                break;
-            }
-        }
-        if (!$autoload_already_loaded) {
+        if (!defined('REPRINT_EXPORTER_AUTOLOAD_LOADED')) {
             require_once $autoload_path;
         }
         return $export_path;
