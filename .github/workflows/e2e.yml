@@ -195,22 +195,40 @@ jobs:
           fi
 
           echo "=== Importer files-pull ==="
+          # One files-pull invocation has no wall-clock self-limit on the CLI
+          # (max_execution_time is 0), so on a slow runner it can still be
+          # mid-download when the shell `timeout` fires and SIGTERMs it
+          # (exit 124). That is a resumable state — the importer saves its
+          # cursor on SIGTERM — so resume and retry, exactly like a normal
+          # partial (exit 2). A forward-progress check on a timeout keeps a
+          # genuine stall from looping silently to the attempt cap.
           files_pull_status=2
           files_pull_attempt=0
-          while [ "$files_pull_status" -eq 2 ] && [ "$files_pull_attempt" -lt 3 ]; do
+          files_pull_max_attempts=6
+          files_pull_prev_count=-1
+          while { [ "$files_pull_status" -eq 2 ] || [ "$files_pull_status" -eq 124 ]; } \
+                && [ "$files_pull_attempt" -lt "$files_pull_max_attempts" ]; do
             files_pull_attempt=$((files_pull_attempt + 1))
-            files_pull_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && files_pull_status=0 || files_pull_status=$?
+            files_pull_output="$(timeout 60 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && files_pull_status=0 || files_pull_status=$?
             echo "$files_pull_output" | head -50
+            files_pull_count="$(find "$FS_ROOT" -type f 2>/dev/null | wc -l | tr -d ' ')"
             if [ "$files_pull_status" -eq 2 ]; then
-              echo "files-pull partial; resuming (attempt ${files_pull_attempt})"
+              echo "files-pull partial at ${files_pull_count} files; resuming (attempt ${files_pull_attempt})"
+            elif [ "$files_pull_status" -eq 124 ]; then
+              if [ "$files_pull_count" -le "$files_pull_prev_count" ]; then
+                echo "files-pull timed out with no forward progress (${files_pull_count} files); treating as a real stall"
+                exit 124
+              fi
+              echo "files-pull timed out mid-download at ${files_pull_count} files; resuming from saved cursor (attempt ${files_pull_attempt})"
             elif [ "$files_pull_status" -ne 0 ]; then
               echo "EXIT: $files_pull_status"
               exit "$files_pull_status"
             fi
+            files_pull_prev_count="$files_pull_count"
           done
-          if [ "$files_pull_status" -eq 2 ]; then
-            echo "EXIT: 2 (files-pull remained partial after ${files_pull_attempt} attempts)"
-            exit 2
+          if [ "$files_pull_status" -eq 2 ] || [ "$files_pull_status" -eq 124 ]; then
+            echo "EXIT: $files_pull_status (files-pull did not complete after ${files_pull_attempt} attempts)"
+            exit "$files_pull_status"
           fi
 
       - name: Run E2E tests
