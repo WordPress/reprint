@@ -7711,6 +7711,85 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "4f4403de2838d10d82ea483293f6a49c2ace1c63",
+      "shortSha": "4f4403d",
+      "date": "2026-07-22T11:29:45+03:00",
+      "message": "Fix flaky tests due to Composer autoload order (#385)",
+      "author": "Atanas Angelov",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.8",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "preflightImporter": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 129.969726000003,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 46324.40016799999,
+          "attempts": 3,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 109499.06565500001,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 35881.607743,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 113.9175680000044,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-pull",
+          "elapsedMs": 263899.512092,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-apply",
+          "elapsedMs": 57263.39523500006,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 165.14334099995904,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-binary-compression",
+          "elapsedMs": 94.35160399996676,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull-large-part-peak-memory",
+          "elapsedMs": 24923.477799999993,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
