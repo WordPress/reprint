@@ -10980,6 +10980,12 @@ class ImportClient
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
+            // Bound the connect phase separately from the total timeout: a
+            // stalled TCP connect would otherwise consume the whole 30s
+            // budget with no connection ever established. No server
+            // legitimately takes 10s just to accept a connection, so a
+            // connect failure here is fast and retryable.
+            CURLOPT_CONNECTTIMEOUT => 10,
             CURLOPT_TIMEOUT => 30,
             CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,

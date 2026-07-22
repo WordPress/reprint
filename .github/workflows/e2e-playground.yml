@@ -116,6 +116,25 @@ jobs:
           BASE="http://127.0.0.1:8081/?reprint-api"
           DIR="/srv/e2e-sites/basic"
 
+          # Warm up the export endpoint so the first request doesn't pay the
+          # PHP-FPM cold start inside the timed preflight. Any HTTP response
+          # (even a 403/503 auth rejection) proves the stack booted; curl
+          # exits non-zero only on a connect/timeout failure.
+          echo "=== Warming up export endpoint ==="
+          warmup_ok=0
+          for warmup_attempt in $(seq 1 30); do
+            if curl -sS -o /dev/null -m 5 "${BASE}&endpoint=preflight&directory=${DIR}"; then
+              warmup_ok=1
+              echo "Export endpoint responded on attempt ${warmup_attempt}"
+              break
+            fi
+            sleep 1
+          done
+          if [ "$warmup_ok" -ne 1 ]; then
+            echo "Export endpoint did not respond within the warmup window"
+            exit 1
+          fi
+
           echo "=== Playground CLI importer preflight ==="
           timeout 120 "$PHP_BINARY" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
 
