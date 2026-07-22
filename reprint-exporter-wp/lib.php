@@ -87,6 +87,12 @@ function _site_export_is_push_endpoint(string $endpoint): bool {
  * @return string|null Absolute path to export.php, or null when the runtime is missing.
  */
 function _site_export_load_exporter_runtime(): ?string {
+    static $loaded_export_path = null;
+
+    if ($loaded_export_path !== null) {
+        return $loaded_export_path;
+    }
+
     $repo_root = dirname(SITE_EXPORT_PLUGIN_DIR);
     $candidates = [
         [
@@ -110,9 +116,8 @@ function _site_export_load_exporter_runtime(): ?string {
             continue;
         }
 
-        if (!defined('REPRINT_EXPORTER_AUTOLOAD_LOADED')) {
-            require_once $autoload_path;
-        }
+        require_once $autoload_path;
+        $loaded_export_path = $export_path;
         return $export_path;
     }
 
@@ -262,7 +267,7 @@ function _site_export_update_push_authorization(bool $enabled): bool {
  * matches AND that the HMAC is valid.
  */
 function _site_export_verify_hmac(string $secret): ?string {
-    if (!class_exists('Site_Export_HMAC_Server')) {
+    if (!class_exists('Site_Export_HMAC_Server', false)) {
         _site_export_load_exporter_runtime();
     }
 
@@ -357,7 +362,7 @@ function _site_export_handle_api_request(array $options = []): void {
     // credentials, so we must not require auth before CORS passes.
     // The class is loaded by the Composer autoloader on demand, but
     // load it eagerly in case the autoloader hasn't been required yet.
-    if (!class_exists('Site_Export_HTTP_Server')) {
+    if (!class_exists('Site_Export_HTTP_Server', false)) {
         _site_export_load_exporter_runtime();
     }
     Site_Export_HTTP_Server::handle_cors_headers_and_terminate_on_options('*');
@@ -424,7 +429,7 @@ function _site_export_handle_api_request(array $options = []): void {
         if (empty($secret) || !is_string($secret)) {
             _site_export_push_error(503, 'not_configured', 'Configure the shared secret in WordPress admin under Tools > Reprint Exporter.');
         }
-        if (!class_exists('Site_Export_HMAC_Server')) {
+        if (!class_exists('Site_Export_HMAC_Server', false)) {
             _site_export_load_exporter_runtime();
         }
         if (!class_exists('Site_Export_HMAC_Server')) {
