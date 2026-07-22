@@ -120,6 +120,29 @@ jobs:
           STATE_DIR="/tmp/e2e-smoke-state"
           FS_ROOT="/tmp/e2e-smoke-fs"
 
+          # Warm up the export endpoint before any time-boxed importer command.
+          # ensureSite only provisions files + DB via wp-cli; the first HTTP
+          # request still pays the full PHP-FPM cold start (worker spawn, WP
+          # bootstrap, Composer autoload, export.php require). Poll until the
+          # stack returns any HTTP response — a 403/503 auth rejection is a
+          # perfectly good "warm" signal; curl exits non-zero only on a
+          # connect/timeout failure. This removes the cold-start stall that
+          # would otherwise land inside the timed preflight below.
+          echo "=== Warming up export endpoint ==="
+          warmup_ok=0
+          for warmup_attempt in $(seq 1 30); do
+            if curl -sS -o /dev/null -m 5 "${BASE}&endpoint=preflight&directory=${DIR}"; then
+              warmup_ok=1
+              echo "Export endpoint responded on attempt ${warmup_attempt}"
+              break
+            fi
+            sleep 1
+          done
+          if [ "$warmup_ok" -ne 1 ]; then
+            echo "Export endpoint did not respond within the warmup window"
+            exit 1
+          fi
+
           if [ "$IMPORTER_PHP" = "php7.4" ] || [ "$IMPORTER_PHP" = "php8.0" ]; then
             echo "=== Importer files-push PHP version gate ==="
             PUSH_STATE_DIR="/tmp/e2e-files-push-version-state"
@@ -149,31 +172,63 @@ jobs:
           fi
 
           echo "=== Importer preflight ==="
-          preflight_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" || {
-            status=$?
+          # The shell timeout is deliberately larger than curl's own 30s
+          # CURLOPT_TIMEOUT so a stalled request produces a clean, diagnosable
+          # curl error the importer can report — rather than an uncatchable
+          # SIGTERM at the exact 30s boundary (the old exit-124 flake). Retry a
+          # few times so a single transient stall doesn't fail the whole job,
+          # mirroring the files-pull loop below.
+          preflight_status=1
+          preflight_attempt=0
+          while [ "$preflight_status" -ne 0 ] && [ "$preflight_attempt" -lt 3 ]; do
+            preflight_attempt=$((preflight_attempt + 1))
+            preflight_output="$(timeout 45 "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && preflight_status=0 || preflight_status=$?
             echo "$preflight_output" | head -50
-            echo "EXIT: $status"
-            exit "$status"
-          }
-          echo "$preflight_output" | head -50
+            if [ "$preflight_status" -ne 0 ]; then
+              echo "preflight failed (exit ${preflight_status}); retrying (attempt ${preflight_attempt})"
+              sleep 2
+            fi
+          done
+          if [ "$preflight_status" -ne 0 ]; then
+            echo "EXIT: $preflight_status (preflight failed after ${preflight_attempt} attempts)"
+            exit "$preflight_status"
+          fi
 
           echo "=== Importer files-pull ==="
+          # One files-pull invocation has no wall-clock self-limit on the CLI
+          # (max_execution_time is 0), so on a slow runner it can still be
+          # mid-download when the shell `timeout` fires and SIGTERMs it
+          # (exit 124). That is a resumable state — the importer saves its
+          # cursor on SIGTERM — so resume and retry, exactly like a normal
+          # partial (exit 2). A forward-progress check on a timeout keeps a
+          # genuine stall from looping silently to the attempt cap.
           files_pull_status=2
           files_pull_attempt=0
-          while [ "$files_pull_status" -eq 2 ] && [ "$files_pull_attempt" -lt 3 ]; do
+          files_pull_max_attempts=6
+          files_pull_prev_count=-1
+          while { [ "$files_pull_status" -eq 2 ] || [ "$files_pull_status" -eq 124 ]; } \
+                && [ "$files_pull_attempt" -lt "$files_pull_max_attempts" ]; do
             files_pull_attempt=$((files_pull_attempt + 1))
-            files_pull_output="$(timeout 30 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && files_pull_status=0 || files_pull_status=$?
+            files_pull_output="$(timeout 60 "$IMPORTER_PHP" "$IMPORTER_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --secret="${SECRET}" 2>&1)" && files_pull_status=0 || files_pull_status=$?
             echo "$files_pull_output" | head -50
+            files_pull_count="$(find "$FS_ROOT" -type f 2>/dev/null | wc -l | tr -d ' ')"
             if [ "$files_pull_status" -eq 2 ]; then
-              echo "files-pull partial; resuming (attempt ${files_pull_attempt})"
+              echo "files-pull partial at ${files_pull_count} files; resuming (attempt ${files_pull_attempt})"
+            elif [ "$files_pull_status" -eq 124 ]; then
+              if [ "$files_pull_count" -le "$files_pull_prev_count" ]; then
+                echo "files-pull timed out with no forward progress (${files_pull_count} files); treating as a real stall"
+                exit 124
+              fi
+              echo "files-pull timed out mid-download at ${files_pull_count} files; resuming from saved cursor (attempt ${files_pull_attempt})"
             elif [ "$files_pull_status" -ne 0 ]; then
               echo "EXIT: $files_pull_status"
               exit "$files_pull_status"
             fi
+            files_pull_prev_count="$files_pull_count"
           done
-          if [ "$files_pull_status" -eq 2 ]; then
-            echo "EXIT: 2 (files-pull remained partial after ${files_pull_attempt} attempts)"
-            exit 2
+          if [ "$files_pull_status" -eq 2 ] || [ "$files_pull_status" -eq 124 ]; then
+            echo "EXIT: $files_pull_status (files-pull did not complete after ${files_pull_attempt} attempts)"
+            exit "$files_pull_status"
           fi
 
       - name: Run E2E tests
