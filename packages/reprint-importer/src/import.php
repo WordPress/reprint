@@ -956,7 +956,9 @@ class ImportClient
             }
             if ($signal_handling_command === 'files-push') {
                 $this->enable_files_push_signal_handling();
-            } else {
+            } elseif ($signal_handling_command !== 'files-diff') {
+                // files-diff must not save the pull command's state from a
+                // shutdown handler; default signal behavior ends the report.
                 pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
                 pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
             }
@@ -1152,7 +1154,7 @@ class ImportClient
      *
      * @param string       $command Canonical CLI command name.
      * @param list<string> $argv    Raw command arguments.
-     * @param string|null  $pair    Files-push pair key, when available.
+     * @param string|null  $pair    Files-diff or files-push pair key, when available.
      */
     public function audit_log_argv(string $command, array $argv, ?string $pair = null): void
     {
@@ -1333,6 +1335,7 @@ class ImportClient
             "pull-files",
             "pull-db",
             "files-pull",
+            "files-diff",
             "files-push",
             "files-index",
             "files-stats",
@@ -1359,8 +1362,12 @@ class ImportClient
             );
         }
 
-        // files-push owns separate pair state and must not load or write the
-        // pull command's .import-state.json file.
+        // files-diff and files-push use local push state and must not load
+        // or write the pull command's .import-state.json file.
+        if ($command === "files-diff") {
+            $this->run_files_diff($options);
+            return;
+        }
         if ($command === "files-push") {
             $this->run_files_push($options);
             return;
@@ -1699,6 +1706,240 @@ class ImportClient
         }
     }
 
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI filesystem paths, never HTML output.
+    /**
+     * Reports local paths changed since the pair's previous local index.
+     *
+     * files-diff makes no network request. It runs one complete PushPlan
+     * against the previous local index a completed files-push published, then
+     * streams the finished push and delete lists from the beginning. Every run
+     * reports the whole diff, so an interrupted report needs no resume state:
+     * running the command again prints the complete report.
+     *
+     * @param array $options {
+     *     Parsed files-diff options and context.
+     *
+     *     @type array $files_diff_context Validated pair context.
+     * }
+     * @phpstan-param array<string,mixed> $options
+     */
+    private function run_files_diff(array $options): void
+    {
+        $context = $options['files_diff_context'] ?? self::prepare_files_pair_context(
+            $this->remote_url,
+            $this->state_dir,
+            $this->fs_root,
+            'files-diff'
+        );
+        if (!is_array($context)) {
+            throw new InvalidArgumentException('files-diff requires its validated command context.');
+        }
+
+        $push_state_directory = $context['push_state_directory'];
+        $previous_local_index = $push_state_directory . '/previous_local_index.jsonl';
+        $missing_previous_local_index_message =
+            'files-diff requires the pair\'s previous local index, which a completed files-push publishes '
+            . 'for the same target URL, state directory, and local tree.';
+        if (!is_dir($push_state_directory)) {
+            throw new RuntimeException($missing_previous_local_index_message);
+        }
+
+        $lock_handle = $this->acquire_files_diff_lock($push_state_directory);
+        $plan_directory = $push_state_directory . '/files-diff-plan';
+        try {
+            if (!is_file($previous_local_index)) {
+                throw new RuntimeException($missing_previous_local_index_message);
+            }
+
+            // Build the complete local-only plan from scratch without target
+            // exclusions. An interrupted files-diff discards it and runs it again.
+            $this->remove_local_plan_directory($plan_directory);
+            if (!mkdir($plan_directory, 0755, true)) {
+                throw new RuntimeException('Failed to create the local plan directory: ' . $plan_directory . '.');
+            }
+            $excluded_paths_path = $plan_directory . '/no_target_exclusions.json';
+            if (file_put_contents($excluded_paths_path, "[]\n") === false) {
+                throw new RuntimeException('Failed to write the empty exclusions file: ' . $excluded_paths_path . '.');
+            }
+            $plan = PushPlan::start(
+                $plan_directory,
+                $context['local_tree'],
+                $previous_local_index,
+                $excluded_paths_path
+            );
+            try {
+                while ($plan->next_step()) {
+                    continue;
+                }
+            } finally {
+                $plan->close();
+            }
+
+            $type_by_plan_type = [
+                'file' => 'file',
+                'directory' => 'dir',
+                'symlink' => 'link',
+            ];
+            $local_paths_to_push_count = 0;
+            foreach (
+                $this->read_planned_local_paths_to_push($plan->get_local_paths_to_push_path())
+                as $entry
+            ) {
+                $line = json_encode([
+                    'command' => 'files-diff',
+                    'action' => 'push',
+                    'path_b64' => $entry['path'],
+                    'type' => $type_by_plan_type[$entry['type']],
+                    'size' => $entry['size'],
+                    'ctime' => $entry['ctime'],
+                ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                if (fwrite($this->progress_fd, $line) !== strlen($line)) {
+                    throw new RuntimeException('Failed to write the files-diff result.');
+                }
+                ++$local_paths_to_push_count;
+            }
+
+            $local_paths_to_delete_count = 0;
+            foreach (
+                $this->read_planned_local_paths_to_delete($plan->get_local_paths_to_delete_path())
+                as $local_path_to_delete
+            ) {
+                $line = json_encode([
+                    'command' => 'files-diff',
+                    'action' => 'delete',
+                    'path_b64' => base64_encode($local_path_to_delete),
+                ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                if (fwrite($this->progress_fd, $line) !== strlen($line)) {
+                    throw new RuntimeException('Failed to write the files-diff result.');
+                }
+                ++$local_paths_to_delete_count;
+            }
+
+            $line = json_encode([
+                'command' => 'files-diff',
+                'status' => 'complete',
+                'local_paths_to_push' => $local_paths_to_push_count,
+                'local_paths_to_delete' => $local_paths_to_delete_count,
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+            if (fwrite($this->progress_fd, $line) !== strlen($line)) {
+                throw new RuntimeException('Failed to write the files-diff result.');
+            }
+            if (!fflush($this->progress_fd)) {
+                throw new RuntimeException('Failed to flush the files-diff result.');
+            }
+        } finally {
+            $this->remove_local_plan_directory($plan_directory);
+            flock($lock_handle, LOCK_UN);
+            fclose($lock_handle);
+        }
+    }
+
+    /**
+     * Reads the completed local paths-to-push list.
+     *
+     * @param string $local_paths_to_push_path Completed plan-owned JSONL path list.
+     * @return Generator Completed plan entries.
+     * @phpstan-return Generator<int,array{path:string,type:'file'|'directory'|'symlink',size:int,ctime:int},mixed,void>
+     */
+    private function read_planned_local_paths_to_push(string $local_paths_to_push_path): Generator
+    {
+        $local_paths_to_push_handle = fopen($local_paths_to_push_path, 'rb');
+        if (!is_resource($local_paths_to_push_handle)) {
+            throw new RuntimeException('Failed to open the completed local paths-to-push list.');
+        }
+        try {
+            while (true) {
+                $line = fgets($local_paths_to_push_handle);
+                if ($line === false) {
+                    if (!feof($local_paths_to_push_handle)) {
+                        throw new RuntimeException('Failed to read the completed local paths-to-push list.');
+                    }
+                    return;
+                }
+                // The plan wrote this list moments ago in this process; its
+                // entry schema is trusted, like every other plan consumer.
+                /** @var array{path:string,type:'file'|'directory'|'symlink',size:int,ctime:int} $entry */
+                $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+                yield $entry;
+            }
+        } finally {
+            fclose($local_paths_to_push_handle);
+        }
+    }
+
+    /**
+     * Reads the completed local paths-to-delete list.
+     *
+     * @param string $local_paths_to_delete_path Completed plan-owned NUL-delimited path list.
+     * @return Generator Completed local paths to delete.
+     * @phpstan-return Generator<int,string,mixed,void>
+     */
+    private function read_planned_local_paths_to_delete(string $local_paths_to_delete_path): Generator
+    {
+        $local_paths_to_delete_handle = fopen($local_paths_to_delete_path, 'rb');
+        if (!is_resource($local_paths_to_delete_handle)) {
+            throw new RuntimeException('Failed to open the completed local paths-to-delete list.');
+        }
+        try {
+            while (true) {
+                $local_path_to_delete = stream_get_line($local_paths_to_delete_handle, 1048576, "\0");
+                if ($local_path_to_delete === false) {
+                    if (!feof($local_paths_to_delete_handle)) {
+                        throw new RuntimeException('Failed to read the completed local paths-to-delete list.');
+                    }
+                    return;
+                }
+                yield $local_path_to_delete;
+            }
+        } finally {
+            fclose($local_paths_to_delete_handle);
+        }
+    }
+
+    /**
+     * Acquires the pair's files-diff lifecycle lock.
+     *
+     * @return resource Open lock handle.
+     */
+    private function acquire_files_diff_lock(string $push_state_directory)
+    {
+        $lock_path = $push_state_directory . '/files-diff.lock';
+        $lock_handle = fopen($lock_path, 'c+b');
+        if (!is_resource($lock_handle)) {
+            throw new RuntimeException('Failed to open the files-diff lifecycle lock: ' . $lock_path . '.');
+        }
+        if (!flock($lock_handle, LOCK_EX | LOCK_NB)) {
+            fclose($lock_handle);
+            throw new RuntimeException('Another files-diff or files-pull process is using this target and local tree.');
+        }
+        return $lock_handle;
+    }
+
+    /** Removes one completed or discarded local plan and confirms every removal. */
+    private function remove_local_plan_directory(string $plan_directory): void
+    {
+        if (!is_dir($plan_directory)) {
+            return;
+        }
+        $plan_files = scandir($plan_directory);
+        if ($plan_files === false) {
+            throw new RuntimeException('Failed to read the local plan directory: ' . $plan_directory . '.');
+        }
+        foreach ($plan_files as $plan_file) {
+            if ($plan_file === '.' || $plan_file === '..') {
+                continue;
+            }
+            $plan_file_path = $plan_directory . '/' . $plan_file;
+            if (!is_file($plan_file_path) || !unlink($plan_file_path)) {
+                throw new RuntimeException('Failed to remove a local plan file: ' . $plan_file_path . '.');
+            }
+        }
+        if (!rmdir($plan_directory)) {
+            throw new RuntimeException('Failed to remove the local plan directory: ' . $plan_directory . '.');
+        }
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
     /**
      * Runs one caller-bounded files-push lifecycle.
      *
@@ -1927,7 +2168,7 @@ class ImportClient
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions are CLI text, not HTML.
     /**
-     * Validates files-push inputs and derives its per-pair state path.
+     * Validates files-push inputs and derives its local push state directory.
      *
      * @param array $options {
      *     Parsed files-push options.
@@ -1942,7 +2183,7 @@ class ImportClient
      *     @type string $target_url           Target exporter API URL.
      *     @type string $local_tree           Canonical local tree being sent.
      *     @type string $pair                 Target/local-tree pair key.
-     *     @type string $push_state_directory Sender state directory for the pair.
+     *     @type string $push_state_directory Local push state directory.
      * }
      * @phpstan-return array{target_url:string,local_tree:string,pair:string,push_state_directory:string}
      */
@@ -1962,17 +2203,58 @@ class ImportClient
             );
         }
 
+        $context = self::prepare_files_pair_context(
+            $target_url,
+            $state_directory,
+            $local_tree,
+            'files-push'
+        );
+        $masked_target_url = self::mask_files_push_url_user_info($target_url);
+        $force_http = $options['force_http'] ?? false;
+        $scheme = strtolower( (string) parse_url($target_url, PHP_URL_SCHEME) );
+        if ($scheme !== 'https' && !( $scheme === 'http' && $force_http === true )) {
+            throw new InvalidArgumentException(
+                'The files-push target must use HTTPS: ' . $masked_target_url
+                . '. Pass --force-http only for a target you trust.'
+            );
+        }
+        return $context;
+    }
+
+    /**
+     * Validates the local inputs shared by files-diff and files-push.
+     *
+     * This helper deliberately does not require a secret or HTTPS. files-diff
+     * identifies the pull source by URL but performs no network request.
+     *
+     * @param string $command Command name used in error messages.
+     * @return array {
+     *     Validated pair context.
+     *
+     *     @type string $target_url           Target exporter API URL.
+     *     @type string $local_tree           Canonical local tree.
+     *     @type string $pair                 Target/local-tree pair key.
+     *     @type string $push_state_directory Local push state directory.
+     * }
+     * @phpstan-return array{target_url:string,local_tree:string,pair:string,push_state_directory:string}
+     */
+    public static function prepare_files_pair_context(
+        string $target_url,
+        string $state_directory,
+        string $local_tree,
+        string $command
+    ): array {
         $masked_target_url = self::mask_files_push_url_user_info($target_url);
         if (strpos($target_url, '#') !== false) {
             throw new InvalidArgumentException(
-                'The files-push target URL must not contain a fragment: ' . $masked_target_url . '.'
+                'The ' . $command . ' target URL must not contain a fragment: ' . $masked_target_url . '.'
             );
         }
         $target_url_user = parse_url($target_url, PHP_URL_USER);
         $target_url_password = parse_url($target_url, PHP_URL_PASS);
         if (is_string($target_url_user) || is_string($target_url_password)) {
             throw new InvalidArgumentException(
-                'The files-push target URL must not contain URL user-info: ' . $masked_target_url . '.'
+                'The ' . $command . ' target URL must not contain URL user-info: ' . $masked_target_url . '.'
             );
         }
         if (is_link($local_tree)) {
@@ -1983,16 +2265,6 @@ class ImportClient
                 'The local tree does not exist or is not a directory: ' . $local_tree . '.'
             );
         }
-
-        $force_http = $options['force_http'] ?? false;
-        $scheme = strtolower( (string) parse_url($target_url, PHP_URL_SCHEME) );
-        if ($scheme !== 'https' && !( $scheme === 'http' && $force_http === true )) {
-            throw new InvalidArgumentException(
-                'The files-push target must use HTTPS: ' . $masked_target_url
-                . '. Pass --force-http only for a target you trust.'
-            );
-        }
-
         $canonical_local_tree = realpath($local_tree);
         if ($canonical_local_tree === false) {
             throw new InvalidArgumentException(
@@ -2036,7 +2308,7 @@ class ImportClient
             || path_is_within_root($push_state_directory, $canonical_local_tree)
         ) {
             throw new InvalidArgumentException(
-                'The push state directory ' . $push_state_directory
+                'The local push state directory ' . $push_state_directory
                 . ' must be outside the local tree ' . $canonical_local_tree . '.'
             );
         }
@@ -12924,6 +13196,27 @@ if (
                 "  .import-state.json                      Resumable state\n" .
                 "  .import-audit.log                       Audit log\n",
         ],
+        "files-diff" => [
+            "level" => "low",
+            "short" => "Show local file changes since the last push",
+            "usage" => "reprint files-diff <target-url> --state-dir=DIR --fs-root=DIR",
+            "description" =>
+                "Shows which local paths a files-push would send or delete, comparing\n" .
+                "the local tree at --fs-root with the pair's previous local index —\n" .
+                "the index a completed files-push publishes for the same target URL,\n" .
+                "state directory, and local tree.\n" .
+                "The output is a local minimized push operation plan before target\n" .
+                "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
+                "default-skipped paths include generated wp-content caches, version-\n" .
+                "control data, node_modules, package-manager caches, OS metadata, and\n" .
+                "editor scratch files.\n" .
+                "Paths remain base64 text in JSONL output so\n" .
+                "arbitrary filesystem names are preserved. No network calls are made\n" .
+                "and no secret is required.\n",
+            "extra" =>
+                "Every run reports the complete diff from the beginning; there is\n" .
+                "no partial resume to continue.\n",
+        ],
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
@@ -13176,9 +13469,9 @@ if (
     );
     $options["command"] = $command;
 
-    $reprint_files_push_command_arguments = array_slice($argv, $option_start_index);
+    $reprint_files_command_arguments = array_slice($argv, $option_start_index);
     if ($command === 'files-push') {
-        foreach ($reprint_files_push_command_arguments as $reprint_files_push_command_argument) {
+        foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
                 ['--force-http', '--verbose', '-v'],
@@ -13190,6 +13483,17 @@ if (
             if (!$reprint_files_push_option_allowed) {
                 $reprint_files_push_option_name = explode('=', $reprint_files_push_command_argument, 2)[0];
                 fwrite(STDERR, "Error: files-push does not accept {$reprint_files_push_option_name}.\n");
+                exit(1);
+            }
+        }
+    } elseif ($command === 'files-diff') {
+        foreach ($reprint_files_command_arguments as $reprint_files_diff_command_argument) {
+            $reprint_files_diff_option_allowed =
+                strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
+                || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0;
+            if (!$reprint_files_diff_option_allowed) {
+                $reprint_files_diff_option_name = explode('=', $reprint_files_diff_command_argument, 2)[0];
+                fwrite(STDERR, "Error: files-diff does not accept {$reprint_files_diff_option_name}.\n");
                 exit(1);
             }
         }
@@ -13227,6 +13531,7 @@ if (
 
     try {
         $reprint_files_push_context = null;
+        $reprint_files_diff_context = null;
         if ($command === 'files-push') {
             $reprint_files_push_context = ImportClient::prepare_files_push_context(
                 $remote_url,
@@ -13234,14 +13539,25 @@ if (
                 $fs_root,
                 $options
             );
+        } elseif ($command === 'files-diff') {
+            $reprint_files_diff_context = ImportClient::prepare_files_pair_context(
+                $remote_url,
+                $state_dir,
+                $fs_root,
+                'files-diff'
+            );
         }
         $client = new ImportClient($remote_url, $state_dir, $fs_root, $command);
-        $reprint_files_push_pair = $reprint_files_push_context['pair'] ?? null;
-        $client->audit_log_argv($command, $argv, $reprint_files_push_pair);
+        $reprint_files_pair = $reprint_files_push_context['pair'] ?? ( $reprint_files_diff_context['pair'] ?? null );
+        $client->audit_log_argv($command, $argv, $reprint_files_pair);
         $client->run(
-            $reprint_files_push_context === null
-                ? $options
-                : $options + ['files_push_context' => $reprint_files_push_context]
+            $options
+                + ( $reprint_files_push_context === null
+                    ? []
+                    : ['files_push_context' => $reprint_files_push_context] )
+                + ( $reprint_files_diff_context === null
+                    ? []
+                    : ['files_diff_context' => $reprint_files_diff_context] )
         );
         // EXIT_AFTER_IMPORT controls whether we hand control back to
         // the caller after pull returns. Default true: standard CLI
