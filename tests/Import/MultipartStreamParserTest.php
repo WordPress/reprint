@@ -3,9 +3,9 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
-use MultipartStreamParser;
+use Reprint\Importer\Protocol\MultipartStreamParser;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/protocol/class-multipart-stream-parser.php';
 
 /**
  * Rigorous test suite for the MultipartStreamParser.

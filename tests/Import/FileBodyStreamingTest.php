@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Protocol\MultipartStreamParser;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -49,7 +50,7 @@ class FileBodyStreamingTest extends TestCase
         $currentChunk = null;
         $makeHandler = $reflection->getMethod('make_chunk_handler');
         $handler = $makeHandler->invokeArgs($client, [$context, &$currentChunk]);
-        $parser = new \MultipartStreamParser('BOUNDARY', $handler);
+        $parser = new MultipartStreamParser('BOUNDARY', $handler);
 
         $body = str_repeat('0123456789abcdef', 64 * 1024);
         $multipart = $this->buildMultipart('BOUNDARY', [
@@ -126,7 +127,7 @@ class FileBodyStreamingTest extends TestCase
         $currentChunk1 = null;
         $makeHandler = $reflection->getMethod('make_chunk_handler');
         $handler1 = $makeHandler->invokeArgs($client, [$context1, &$currentChunk1]);
-        $parser1 = new \MultipartStreamParser('BOUNDARY', $handler1);
+        $parser1 = new MultipartStreamParser('BOUNDARY', $handler1);
 
         $multipart1 = $this->buildMultipart('BOUNDARY', [
             [
@@ -177,7 +178,7 @@ class FileBodyStreamingTest extends TestCase
         };
         $currentChunk2 = null;
         $handler2 = $makeHandler->invokeArgs($client, [$context2, &$currentChunk2]);
-        $parser2 = new \MultipartStreamParser('BOUNDARY', $handler2);
+        $parser2 = new MultipartStreamParser('BOUNDARY', $handler2);
 
         // Pass 2: continuation part for the same file. x-first-chunk=0 is the
         // signal that this is a resume, not a fresh open — handle_file_chunk
