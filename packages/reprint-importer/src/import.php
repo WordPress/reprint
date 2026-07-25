@@ -16,6 +16,8 @@ use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_within_root;
+use function Reprint\Importer\merge_import_index_updates;
+use function Reprint\Importer\merge_previous_local_index_updates;
 
 error_reporting(E_ALL);
 ini_set("display_errors", "stderr");
@@ -62,6 +64,8 @@ require_once __DIR__ . '/lib/target-runtime/load.php';
 
 // External merge sort for large index files when exec() is unavailable
 require_once __DIR__ . '/lib/external-merge-sort.php';
+require_once __DIR__ . '/lib/index-update-functions.php';
+require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
@@ -250,7 +254,6 @@ class ImportClient
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
-
     /**
      * Maximum number of consecutive cURL timeouts with no cursor progress
      * before the importer gives up. This prevents infinite retry loops
@@ -287,23 +290,25 @@ class ImportClient
     private $index_file;
 
     /**
-     * @var string|null Path to .import-index-updates.jsonl — temporary append-only file that
-     * collects index mutations (upserts and deletes) during the current run. Merged into
-     * $index_file at the end of a successful sync.
+     * @var string Path to .import-index-updates.wal — the append-only write-ahead
+     * log for the current files-pull. Applied batches are cleared, but the file
+     * remains until the lifecycle completes or is aborted.
      */
-    private $index_updates_file;
+    private $index_update_wal_path;
 
-    /** @var resource|null Open file handle for $index_updates_file while writing. */
-    private $index_updates_handle;
+    /** @var resource|null Open file handle for $index_update_wal_path while writing. */
+    private $index_update_wal_handle;
 
-    /** @var int Number of entries written to $index_updates_file this run. */
-    private $index_updates_count = 0;
+    private $maintain_previous_local_index = false;
+
+    /** @var int Number of entries written to the open WAL batch. */
+    private $index_update_wal_record_count = 0;
 
     /**
      * Deduplication state for index updates. Consecutive upsert_index_entry() or
-     * delete_index_entry() calls for the same path are collapsed into one write.
+     * delete_index_entry() calls for the same path are collapsed into one WAL write.
      *
-     * @var string|null Last path written to the index updates file.
+     * @var string|null Last path written to the index-update WAL.
      */
     private $last_update_path = null;
 
@@ -556,8 +561,8 @@ class ImportClient
         $this->fs_root = rtrim($fs_root, "/");
         $this->state_file = $this->state_dir . "/.import-state.json";
         $this->index_file = $this->state_dir . "/.import-index.jsonl";
-        $this->index_updates_file =
-            $this->state_dir . "/.import-index-updates.jsonl";
+        $this->index_update_wal_path =
+            $this->state_dir . "/.import-index-updates.wal";
         $this->remote_index_file =
             $this->state_dir . "/.import-remote-index.jsonl";
         $this->download_list_file =
@@ -625,21 +630,19 @@ class ImportClient
     /**
      * Delete a file entry from the index.
      */
-    private function delete_index_entry(string $path): void
+    private function delete_index_entry(
+        string $path,
+        bool $path_deleted_by_files_pull = false
+    ): void
     {
-        $this->record_index_update_deletion($path);
+        $this->record_index_update_deletion($path, $path_deleted_by_files_pull);
     }
 
-    /**
-     * Recover and merge any pending index updates from a previous run.
-     */
-    private function recover_index_updates(): void
+    /** Replays a WAL left by an interrupted batch. */
+    private function replay_index_update_wal(): void
     {
-        if (
-            $this->index_updates_file &&
-            file_exists($this->index_updates_file)
-        ) {
-            $this->finalize_index_updates();
+        if (is_file($this->index_update_wal_path)) {
+            $this->apply_index_update_wal();
         }
     }
 
@@ -883,9 +886,19 @@ class ImportClient
      *   - command: Required. One of the entries in $valid_commands below.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
+     * @param ReprintProcessLock|null $process_lock Lock for this state directory already held by the caller.
      */
-    public function run(array $options = []): void
+    public function run(
+        array $options = [],
+        ?ReprintProcessLock $process_lock = null
+    ): void
     {
+        $process_lock = $process_lock ?? new ReprintProcessLock($this->state_dir);
+        if (!$process_lock->is_held()) {
+            throw new InvalidArgumentException(
+                'ImportClient requires a held Reprint process lock.'
+            );
+        }
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
@@ -952,11 +965,21 @@ class ImportClient
         // files-diff and files-push use local push state and must not load
         // or write the pull command's .import-state.json file.
         if ($command === "files-diff") {
+            if (is_file($this->index_update_wal_path)) {
+                throw new RuntimeException(
+                    'Finish or abort the interrupted files-pull before running files-diff.'
+                );
+            }
             $this->run_files_diff($options);
             return;
         }
         if ($command === "files-push") {
-            $this->run_files_push($options);
+            if (is_file($this->index_update_wal_path)) {
+                throw new RuntimeException(
+                    'Finish or abort the interrupted files-pull before running files-push.'
+                );
+            }
+            $this->run_files_push($options, $process_lock);
             return;
         }
 
@@ -1258,7 +1281,7 @@ class ImportClient
                     return;
 
                 case "files-pull":
-                    $this->run_files_sync();
+                    $this->run_files_sync(true);
                     break;
 
                 case "files-index":
@@ -1295,11 +1318,12 @@ class ImportClient
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI filesystem paths, never HTML output.
     /**
-     * Reports local paths changed since the pair's previous local index.
+     * Reports local paths changed since the pair's latest durable boundary.
      *
      * files-diff makes no network request. It runs one complete PushPlan
-     * against the previous local index a completed files-push published, then
-     * streams the finished push and delete lists from the beginning. Every run
+     * against the pair's previous local index — published by a completed
+     * files-push or maintained by a compatible file-only pull — then streams
+     * the finished push and delete lists from the beginning. Every run
      * reports the whole diff, so an interrupted report needs no resume state:
      * running the command again prints the complete report.
      *
@@ -1325,13 +1349,15 @@ class ImportClient
         $push_state_directory = $context['push_state_directory'];
         $previous_local_index = $push_state_directory . '/previous_local_index.jsonl';
         $missing_previous_local_index_message =
-            'files-diff requires the pair\'s previous local index, which a completed files-push publishes '
-            . 'for the same target URL, state directory, and local tree.';
+            'files-diff requires a fresh completed files-pull or pull-files without --only, with --filter=none, no --remap, '
+            . 'and no --on-fs-root-nonempty=preserve-local, or a completed files-push, '
+            . 'for the same target URL, state directory, and local tree. '
+            . 'The target URL must be the exact exporter API URL used by that pull. '
+            . 'If a standalone files-pull is already complete, run it with --abort and then run it again.';
         if (!is_dir($push_state_directory)) {
             throw new RuntimeException($missing_previous_local_index_message);
         }
 
-        $lock_handle = $this->acquire_files_diff_lock($push_state_directory);
         $plan_directory = $push_state_directory . '/files-diff-plan';
         try {
             if (!is_file($previous_local_index)) {
@@ -1369,7 +1395,7 @@ class ImportClient
             ];
             $local_paths_to_push_count = 0;
             foreach (
-                $this->read_planned_local_paths_to_push($plan->get_local_paths_to_push_path())
+                $plan->read_planned_local_paths_to_push()
                 as $entry
             ) {
                 $line = json_encode([
@@ -1388,7 +1414,7 @@ class ImportClient
 
             $local_paths_to_delete_count = 0;
             foreach (
-                $this->read_planned_local_paths_to_delete($plan->get_local_paths_to_delete_path())
+                $plan->read_planned_local_paths_to_delete()
                 as $local_path_to_delete
             ) {
                 $line = json_encode([
@@ -1416,90 +1442,7 @@ class ImportClient
             }
         } finally {
             $this->remove_local_plan_directory($plan_directory);
-            flock($lock_handle, LOCK_UN);
-            fclose($lock_handle);
         }
-    }
-
-    /**
-     * Reads the completed local paths-to-push list.
-     *
-     * @param string $local_paths_to_push_path Completed plan-owned JSONL path list.
-     * @return Generator Completed plan entries.
-     * @phpstan-return Generator<int,array{path:string,type:'file'|'directory'|'symlink',size:int,ctime:int},mixed,void>
-     */
-    private function read_planned_local_paths_to_push(string $local_paths_to_push_path): Generator
-    {
-        $local_paths_to_push_handle = fopen($local_paths_to_push_path, 'rb');
-        if (!is_resource($local_paths_to_push_handle)) {
-            throw new RuntimeException('Failed to open the completed local paths-to-push list.');
-        }
-        try {
-            while (true) {
-                $line = fgets($local_paths_to_push_handle);
-                if ($line === false) {
-                    if (!feof($local_paths_to_push_handle)) {
-                        throw new RuntimeException('Failed to read the completed local paths-to-push list.');
-                    }
-                    return;
-                }
-                // The plan wrote this list moments ago in this process; its
-                // entry schema is trusted, like every other plan consumer.
-                /** @var array{path:string,type:'file'|'directory'|'symlink',size:int,ctime:int} $entry */
-                $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-                yield $entry;
-            }
-        } finally {
-            fclose($local_paths_to_push_handle);
-        }
-    }
-
-    /**
-     * Reads the completed local paths-to-delete list.
-     *
-     * @param string $local_paths_to_delete_path Completed plan-owned NUL-delimited path list.
-     * @return Generator Completed local paths to delete.
-     * @phpstan-return Generator<int,string,mixed,void>
-     */
-    private function read_planned_local_paths_to_delete(string $local_paths_to_delete_path): Generator
-    {
-        $local_paths_to_delete_handle = fopen($local_paths_to_delete_path, 'rb');
-        if (!is_resource($local_paths_to_delete_handle)) {
-            throw new RuntimeException('Failed to open the completed local paths-to-delete list.');
-        }
-        try {
-            while (true) {
-                $local_path_to_delete = stream_get_line($local_paths_to_delete_handle, 1048576, "\0");
-                if ($local_path_to_delete === false) {
-                    if (!feof($local_paths_to_delete_handle)) {
-                        throw new RuntimeException('Failed to read the completed local paths-to-delete list.');
-                    }
-                    return;
-                }
-                yield $local_path_to_delete;
-            }
-        } finally {
-            fclose($local_paths_to_delete_handle);
-        }
-    }
-
-    /**
-     * Acquires the pair's files-diff lifecycle lock.
-     *
-     * @return resource Open lock handle.
-     */
-    private function acquire_files_diff_lock(string $push_state_directory)
-    {
-        $lock_path = $push_state_directory . '/files-diff.lock';
-        $lock_handle = fopen($lock_path, 'c+b');
-        if (!is_resource($lock_handle)) {
-            throw new RuntimeException('Failed to open the files-diff lifecycle lock: ' . $lock_path . '.');
-        }
-        if (!flock($lock_handle, LOCK_EX | LOCK_NB)) {
-            fclose($lock_handle);
-            throw new RuntimeException('Another files-diff or files-pull process is using this target and local tree.');
-        }
-        return $lock_handle;
     }
 
     /** Removes one completed or discarded local plan and confirms every removal. */
@@ -1531,9 +1474,9 @@ class ImportClient
      * Runs one caller-bounded files-push lifecycle.
      *
      * One open sender performs at most one step per loop turn. A planned stop
-     * cancels any open multipart request before close() releases the lifecycle
-     * lock. Terminal sender outcomes are reported without retrying or opening
-     * a replacement; this process never opens a second sender.
+     * cancels any open multipart request before close() releases sender
+     * resources. Terminal sender outcomes are reported without retrying or
+     * opening a replacement; this process never opens a second sender.
      *
      * @param array $options {
      *     Parsed files-push options and context.
@@ -1542,9 +1485,13 @@ class ImportClient
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
      * }
+     * @param ReprintProcessLock $process_lock Lock held for this command.
      * @phpstan-param array<string,mixed> $options
      */
-    private function run_files_push(array $options): void
+    private function run_files_push(
+        array $options,
+        ReprintProcessLock $process_lock
+    ): void
     {
         $started_at = hrtime(true) / 1000000000;
         $context = $options['files_push_context'] ?? self::prepare_files_push_context(
@@ -1582,8 +1529,8 @@ class ImportClient
 
         $resuming = is_file($context['push_state_directory'] . '/sender.json');
         $sender = $resuming
-            ? PushFilesSender::resume($sender_options)
-            : PushFilesSender::start($sender_options);
+            ? PushFilesSender::resume($sender_options, $process_lock)
+            : PushFilesSender::start($sender_options, $process_lock);
         $status = null;
         $reason = null;
         $detail = null;
@@ -1871,24 +1818,10 @@ class ImportClient
             $push_state_directory = $working_directory . '/' . $push_state_directory;
         }
         $push_state_directory = normalize_path($push_state_directory);
-        $existing_state_path = $push_state_directory;
-        $missing_state_components = [];
-        while (
-            !file_exists($existing_state_path)
-            && !is_link($existing_state_path)
-            && $existing_state_path !== '/'
-        ) {
-            array_unshift($missing_state_components, basename($existing_state_path));
-            $existing_state_path = dirname($existing_state_path);
-        }
-        $canonical_existing_state_path = realpath($existing_state_path);
-        if ($canonical_existing_state_path !== false) {
-            $push_state_directory = normalize_path(
-                $canonical_existing_state_path
-                    . ( $missing_state_components === []
-                        ? ''
-                        : '/' . implode('/', $missing_state_components) )
-            );
+        $canonical_push_state_directory =
+            self::canonicalize_path_with_missing_components($push_state_directory);
+        if ($canonical_push_state_directory !== null) {
+            $push_state_directory = $canonical_push_state_directory;
         }
         if (
             $canonical_local_tree === '/'
@@ -1977,51 +1910,7 @@ class ImportClient
     {
         switch ($command) {
             case "files-pull":
-                // Clear sync progress (cursor, stage, status) and transient
-                // files, but keep the local index and downloaded files intact.
-                // This way the next `files-pull` sees a completed local index
-                // and runs a delta sync rather than re-downloading everything.
-                $this->audit_log(
-                    "RESTART | Clearing files-pull progress (keeping local index and files)",
-                    true,
-                );
-                $this->reset_state();
-
-                // Merge any pending index updates into the main index before
-                // clearing transient state so we don't lose work.
-                $this->recover_index_updates();
-                if (
-                    $this->index_updates_file &&
-                    file_exists($this->index_updates_file)
-                ) {
-                    @unlink($this->index_updates_file);
-                    $this->audit_log("FILE DELETE | {$this->index_updates_file}");
-                }
-                $this->index_updates_file = null;
-                $this->index_updates_handle = null;
-                $this->index_updates_count = 0;
-
-                if (file_exists($this->remote_index_file)) {
-                    @unlink($this->remote_index_file);
-                    $this->audit_log("FILE DELETE | {$this->remote_index_file}");
-                }
-                if (file_exists($this->download_list_file)) {
-                    @unlink($this->download_list_file);
-                    $this->audit_log("FILE DELETE | {$this->download_list_file}");
-                }
-                if (file_exists($this->skipped_download_list_file)) {
-                    @unlink($this->skipped_download_list_file);
-                    $this->audit_log("FILE DELETE | {$this->skipped_download_list_file}");
-                }
-                if (file_exists($this->volatile_files_file)) {
-                    @unlink($this->volatile_files_file);
-                    $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
-                }
-                $this->import_state()->index = new RemoteFileIndexCursorState();
-                $this->import_state()->fetch = new DownloadListFetchProgressState();
-                $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
-
-                $this->save_state($this->state);
+                $this->clear_files_pull_progress();
                 break;
 
             case "files-index":
@@ -2103,6 +1992,51 @@ class ImportClient
         $this->progress->show_lifecycle_line("State cleared for {$command}.\n");
 
         $this->output_progress(["status" => "aborted", "message" => "State cleared for {$command}."]);
+    }
+
+    /**
+     * Clear sync progress and transient files while keeping the local index
+     * and downloaded files, so the next files-pull computes a delta.
+     */
+    public function clear_files_pull_progress(): void
+    {
+        $this->audit_log(
+            "RESTART | Clearing files-pull progress (keeping local index and files)",
+            true,
+        );
+        $had_index_update_wal = is_file($this->index_update_wal_path);
+        // Replay the WAL before clearing the cursor which made its records durable.
+        $this->replay_index_update_wal();
+        if ($had_index_update_wal) {
+            $this->invalidate_previous_local_index();
+        }
+        $this->remove_index_update_wal();
+        $this->maintain_previous_local_index = false;
+        $this->reset_state();
+        $this->index_update_wal_handle = null;
+        $this->index_update_wal_record_count = 0;
+
+        if (file_exists($this->remote_index_file)) {
+            @unlink($this->remote_index_file);
+            $this->audit_log("FILE DELETE | {$this->remote_index_file}");
+        }
+        if (file_exists($this->download_list_file)) {
+            @unlink($this->download_list_file);
+            $this->audit_log("FILE DELETE | {$this->download_list_file}");
+        }
+        if (file_exists($this->skipped_download_list_file)) {
+            @unlink($this->skipped_download_list_file);
+            $this->audit_log("FILE DELETE | {$this->skipped_download_list_file}");
+        }
+        if (file_exists($this->volatile_files_file)) {
+            @unlink($this->volatile_files_file);
+            $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
+        }
+        $this->import_state()->index = new RemoteFileIndexCursorState();
+        $this->import_state()->fetch = new DownloadListFetchProgressState();
+        $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
+
+        $this->save_state($this->state);
     }
 
     /**
@@ -2707,8 +2641,12 @@ class ImportClient
      * - In-progress files-pull → resume from saved state
      *
      * Both modes share the same pipeline: index → diff → fetch.
+     *
+     * @param bool $maintain_previous_local_index Whether files-pull may maintain
+     *                                            the previous local index. True only when files-pull is the
+     *                                            last stage that can change the local tree.
      */
-    public function run_files_sync(): void
+    public function run_files_sync(bool $maintain_previous_local_index = false): void
     {
         $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
 
@@ -2740,12 +2678,41 @@ class ImportClient
             $current_status !== null &&
             $current_status !== "complete";
 
-        $this->recover_index_updates();
+        $files_pair_context =
+            $this->files_pull_pair_context_if_local_tree_exists();
+        $has_previous_local_index =
+            $files_pair_context !== null
+            && is_file(
+                $files_pair_context['push_state_directory']
+                    . '/previous_local_index.jsonl'
+            );
+        // A compatible pull seeds the baseline before opening the WAL. Once
+        // that marker exists, a missing baseline keeps the lifecycle incompatible.
+        $can_maintain_after_resume =
+            !$has_progress
+            || !is_file($this->index_update_wal_path)
+            || $has_previous_local_index;
+        $maintains_previous_local_index =
+            $maintain_previous_local_index
+            && $this->filter === 'none'
+            && $this->remap_rules === []
+            && $this->fs_root_nonempty_behavior !== 'preserve-local'
+            && $can_maintain_after_resume
+            && (
+                $this->pull_only_files_with_path_prefixes === []
+                || $has_previous_local_index
+            );
         $this->assert_files_pull_only_unchanged_while_resuming($has_progress);
         $this->assert_symlink_bundle_directory_unchanged();
+        $this->maintain_previous_local_index = $maintains_previous_local_index;
+        if ($has_progress && $maintains_previous_local_index) {
+            $this->seed_previous_local_index();
+        }
+        $this->replay_index_update_wal();
 
         // Already completed.
         if ($current_status === "complete") {
+            $this->remove_index_update_wal();
             $has_skipped =
                 file_exists($this->skipped_download_list_file) &&
                 filesize($this->skipped_download_list_file) > 0;
@@ -2777,6 +2744,10 @@ class ImportClient
                 $this->import_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
                 $this->import_state()->files_pull_summary = new FilesPullSummaryState();
                 $this->save_state($this->state);
+                // A skipped-earlier fetch changes the tree under a filtered
+                // lifecycle, so the previous local index cannot be maintained.
+                $this->invalidate_previous_local_index();
+                $this->open_index_update_wal();
                 $this->run_files_sync_pipeline();
                 // The deferred tail reopens a completed files-pull. Once the
                 // tail finishes, restore the completed status so later filter
@@ -2786,6 +2757,7 @@ class ImportClient
                 }
                 $this->import_state()->active_resumable_command->completion_state = "complete";
                 $this->save_state($this->state);
+                $this->remove_index_update_wal();
                 return;
             }
 
@@ -2939,6 +2911,13 @@ class ImportClient
         $this->import_state()->active_resumable_command->completion_state = "in_progress";
         $this->save_state($this->state);
 
+        if ($maintains_previous_local_index) {
+            $this->seed_previous_local_index();
+        } else {
+            $this->invalidate_previous_local_index();
+        }
+
+        $this->open_index_update_wal();
         $this->run_files_sync_pipeline();
 
         // Pipeline returns early with partial status if interrupted
@@ -2946,8 +2925,10 @@ class ImportClient
             return;
         }
 
+        $this->import_state()->active_resumable_command->current_stage = null;
         $this->import_state()->active_resumable_command->completion_state = "complete";
         $this->save_state($this->state);
+        $this->remove_index_update_wal();
 
         $this->progress->clear_progress_line();
         $index_size = $this->index_count();
@@ -2972,6 +2953,407 @@ class ImportClient
 
         $this->report_volatile_files();
     }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI filesystem paths, never HTML output.
+    /** Establishes the previous local index before files-pull mutates the tree. */
+    private function seed_previous_local_index(): void
+    {
+        $context = $this->files_pull_pair_context();
+        $previous_local_index =
+            $context['push_state_directory'] . '/previous_local_index.jsonl';
+        if (is_file($previous_local_index)) {
+            return;
+        }
+
+        $updates_path = $this->state_dir . '/.previous-local-index-updates.tmp';
+        $swap_path = $previous_local_index . '.swap';
+        try {
+            $this->write_previous_local_index_updates(
+                $this->index_file,
+                $updates_path,
+                $context,
+                false
+            );
+            merge_previous_local_index_updates(
+                $previous_local_index,
+                $updates_path,
+                $swap_path,
+                $this->state_dir
+            );
+            if (!rename($swap_path, $previous_local_index)) {
+                throw new RuntimeException(
+                    'Failed to publish the previous local index: ' . $previous_local_index . '.'
+                );
+            }
+        } finally {
+            if (is_file($updates_path)) {
+                @unlink($updates_path);
+            }
+            if (is_file($swap_path)) {
+                @unlink($swap_path);
+            }
+        }
+    }
+
+    /**
+     * Returns the current files-pull pair context, creating its local directories.
+     *
+     * @return array {
+     *     @type string $target_url            Normalized exporter API URL.
+     *     @type string $local_tree            Canonical pulled document root.
+     *     @type string $pair                  Target and local-tree pair key.
+     *     @type string $push_state_directory  Local push state directory.
+     *     @type string $remote_document_root  Remote document root without a trailing slash.
+     * }
+     * @phpstan-return array{target_url:string,local_tree:string,pair:string,push_state_directory:string,remote_document_root:string}
+     */
+    private function files_pull_pair_context(): array
+    {
+        $context = $this->files_pull_pair_context_if_local_tree_exists();
+        if ($context === null) {
+            $remote_document_root =
+                $this->import_state()->preflight['data']['runtime']['document_root'] ?? null;
+            if (!is_string($remote_document_root) || $remote_document_root === '') {
+                throw new RuntimeException('files-pull cannot identify the remote document root.');
+            }
+            $local_tree = $this->remote_path_to_local_path_within_import_root(
+                $remote_document_root
+            );
+            if (!is_dir($local_tree) && !mkdir($local_tree, 0755, true)) {
+                throw new RuntimeException(
+                    'Failed to create the pulled local tree: ' . $local_tree . '.'
+                );
+            }
+            $context = $this->files_pull_pair_context_if_local_tree_exists();
+        }
+        if ($context === null) {
+            throw new RuntimeException('files-pull cannot identify the pulled local tree.');
+        }
+        if (
+            !is_dir($context['push_state_directory'])
+            && !mkdir($context['push_state_directory'], 0755, true)
+        ) {
+            throw new RuntimeException(
+                'Failed to create the local push state directory: '
+                . $context['push_state_directory'] . '.'
+            );
+        }
+        return $context;
+    }
+
+    /**
+     * Writes previous-local-index updates from an import index or WAL.
+     *
+     * @param array $context {
+     *     Current files-pull pair context.
+     *
+     *     @type string $local_tree           Canonical pulled document root.
+     *     @type string $push_state_directory Local push state directory.
+     *     @type string $remote_document_root Remote document root without a trailing slash.
+     * }
+     * @phpstan-param array{target_url:string,local_tree:string,pair:string,push_state_directory:string,remote_document_root:string} $context
+     * @return int Number of source records included.
+     */
+    private function write_previous_local_index_updates(
+        string $source_path,
+        string $updates_path,
+        array $context,
+        bool $source_is_wal
+    ): int {
+        $source_handle = is_file($source_path) ? fopen($source_path, 'rb') : null;
+        $updates_handle = fopen($updates_path, 'wb');
+        if (
+            ( is_file($source_path) && !is_resource($source_handle) )
+            || !is_resource($updates_handle)
+        ) {
+            throw new RuntimeException('Failed to open previous-local-index update files.');
+        }
+
+        $position = 0;
+        $updates_written = 0;
+        try {
+            while (true) {
+                $entry = $source_is_wal
+                    ? $this->read_update_line_raw($source_handle)
+                    : $this->read_index_line($source_handle);
+                if ($entry === null) {
+                    break;
+                }
+                if ($source_is_wal && empty($entry['applied_by_files_pull'])) {
+                    continue;
+                }
+                foreach ($this->previous_local_index_updates_for_path_record(
+                    $entry,
+                    $context,
+                    $position
+                ) as $previous_local_index_update) {
+                    $line = json_encode(
+                        $previous_local_index_update,
+                        JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                    ) . "\n";
+                    if (fwrite($updates_handle, $line) !== strlen($line)) {
+                        throw new RuntimeException(
+                            'Failed to write a previous-local-index update.'
+                        );
+                    }
+                    ++$updates_written;
+                }
+                ++$position;
+            }
+            if (!fflush($updates_handle)) {
+                throw new RuntimeException(
+                    'Failed to flush the previous-local-index updates.'
+                );
+            }
+        } finally {
+            if (is_resource($source_handle)) {
+                fclose($source_handle);
+            }
+            fclose($updates_handle);
+        }
+
+        return $updates_written;
+    }
+
+    /**
+     * Returns previous-local-index updates for one import-index or WAL record.
+     *
+     * @param array $update {
+     *     Files-pull path record.
+     *
+     *     @type string      $path        Absolute remote path.
+     *     @type bool        $delete      Whether files-pull deleted the path. Defaults to false.
+     *     @type int         $ctime       Remote ctime for an upsert.
+     *     @type int         $size        Remote size for an upsert.
+     *     @type string|null $type        Remote type for an upsert.
+     *     @type int         $local_ctime Local ctime when the path was applied, when recorded.
+     *     @type int         $local_size  Local size when the path was applied, when recorded.
+     *     @type string      $local_type  Local type when the path was applied, when recorded.
+     * }
+     * @param array $context Pair context for the completing pull.
+     * @phpstan-param array{target_url:string,local_tree:string,pair:string,push_state_directory:string,remote_document_root:string} $context
+     * @param int $position Position of the update in the files-pull stream.
+     * @return \Generator<int,array{op:string,path:string,replace_subtree:bool,position:int,ctime?:int,size?:int,type?:string}>
+     */
+    private function previous_local_index_updates_for_path_record(
+        array $update,
+        array $context,
+        int $position
+    ): \Generator {
+        $remote_path = $update['path'];
+        $local_path = $this->remote_path_to_local_path_within_import_root($remote_path);
+        $path = self::path_remainder_under($local_path, $context['local_tree']);
+        if ($path === null || $path === '') {
+            return;
+        }
+        $path = ltrim($path, '/');
+        if (FileIndexProcessor::path_is_default_skipped($path)) {
+            return;
+        }
+        $current_path = $path;
+        $direct = true;
+        while ($current_path !== '') {
+            if ($direct && !empty($update['delete'])) {
+                $entry = [
+                    'op' => 'D',
+                    'path' => base64_encode($current_path),
+                    'replace_subtree' => true,
+                    'position' => $position,
+                ];
+            } else {
+                if ($direct && isset($update['local_type'])) {
+                    $type = (string) $update['local_type'];
+                    $ctime = (int) $update['local_ctime'];
+                    $size = (int) $update['local_size'];
+                } else {
+                    $absolute_path = $context['local_tree'] . '/' . $current_path;
+                    clearstatcache(true, $absolute_path);
+                    $stat = @lstat($absolute_path);
+                    if ($stat === false && $direct) {
+                        $type = (string) $update['type'];
+                        $ctime = (int) $update['ctime'];
+                        $size = (int) $update['size'];
+                    } elseif ($stat === false) {
+                        $separator = strrpos($current_path, '/');
+                        $current_path = $separator === false
+                            ? ''
+                            : substr($current_path, 0, $separator);
+                        $direct = false;
+                        continue;
+                    } else {
+                        $file_type_bits = $stat['mode'] & FileIndexProcessor::STAT_TYPE_MASK;
+                        if ($file_type_bits === FileIndexProcessor::STAT_TYPE_FILE) {
+                            $type = 'file';
+                        } elseif ($file_type_bits === FileIndexProcessor::STAT_TYPE_DIR) {
+                            $type = 'dir';
+                        } elseif ($file_type_bits === FileIndexProcessor::STAT_TYPE_LINK) {
+                            $type = 'link';
+                        } else {
+                            throw new RuntimeException(
+                                'Cannot record the unsupported pulled local path: '
+                                . base64_encode($current_path) . '.'
+                            );
+                        }
+                        if (!$direct && $type !== 'dir') {
+                            $separator = strrpos($current_path, '/');
+                            $current_path = $separator === false
+                                ? ''
+                                : substr($current_path, 0, $separator);
+                            continue;
+                        }
+                        $ctime = (int) $stat['ctime'];
+                        $size = $type === 'dir' ? 0 : (int) $stat['size'];
+                    }
+                }
+                $entry = [
+                    'op' => 'F',
+                    'path' => base64_encode($current_path),
+                    'ctime' => $ctime,
+                    'size' => $size,
+                    'type' => $type,
+                    'replace_subtree' => $direct && $type !== 'dir',
+                    'position' => $position,
+                ];
+            }
+            yield $entry;
+            $separator = strrpos($current_path, '/');
+            $current_path = $separator === false
+                ? ''
+                : substr($current_path, 0, $separator);
+            $direct = false;
+        }
+    }
+
+    /**
+     * Removes the pair's previous local index before files-pull may mutate the tree.
+     *
+     * A lifecycle that cannot maintain the index removes it before changing
+     * the tree. A files-diff plan directory left behind by an interrupted
+     * process is removed with it.
+     */
+    private function invalidate_previous_local_index(): void
+    {
+        $context = $this->files_pull_pair_context_if_local_tree_exists();
+        if ($context !== null) {
+            $push_state_directory = $context['push_state_directory'];
+        } else {
+            $remote_document_root =
+                $this->import_state()->preflight['data']['runtime']['document_root'] ?? null;
+            if (!is_string($remote_document_root) || $remote_document_root === '') {
+                return;
+            }
+            $remote_document_root = rtrim($remote_document_root, '/');
+            $local_tree = $remote_document_root === ''
+                ? $this->fs_root
+                : $this->fs_root . '/' . ltrim($remote_document_root, '/');
+            if (is_link($local_tree)) {
+                return;
+            }
+            if (strpos($local_tree, '/') !== 0) {
+                $working_directory = getcwd();
+                if ($working_directory === false) {
+                    return;
+                }
+                $local_tree = $working_directory . '/' . $local_tree;
+            }
+            $local_tree = normalize_path($local_tree);
+            $canonical_local_tree =
+                self::canonicalize_path_with_missing_components($local_tree);
+            if ($canonical_local_tree === null) {
+                return;
+            }
+            $canonical_local_tree = rtrim($canonical_local_tree, '/') ?: '/';
+            $target_url = rtrim($this->remote_url, '?&');
+            $pair = hash('sha256', $target_url . "\0" . $canonical_local_tree);
+            $push_state_directory = realpath(
+                $this->state_dir . '/push/' . $pair
+            );
+            if ($push_state_directory === false) {
+                return;
+            }
+        }
+        if (!is_dir($push_state_directory)) {
+            return;
+        }
+        $previous_local_index = $push_state_directory . '/previous_local_index.jsonl';
+        if (is_file($previous_local_index) && !unlink($previous_local_index)) {
+            throw new RuntimeException(
+                'Failed to invalidate the previous local index: ' . $previous_local_index . '.'
+            );
+        }
+        $this->remove_local_plan_directory($push_state_directory . '/files-diff-plan');
+    }
+
+    /**
+     * Derives the files-diff pair context for the current files-pull, when possible.
+     *
+     * The pair's local tree is the pulled document root: the preflight-reported
+     * remote document root joined under this pull's --fs-root. That is the
+     * directory a later files-push receives as its --fs-root.
+     *
+     * @return array|null {
+     *     @type string $target_url            Normalized exporter API URL.
+     *     @type string $local_tree            Canonical pulled document root.
+     *     @type string $pair                  Target and local-tree pair key.
+     *     @type string $push_state_directory  Local push state directory.
+     *     @type string $remote_document_root  Remote document root without a trailing slash.
+     * }
+     * @phpstan-return array{target_url:string,local_tree:string,pair:string,push_state_directory:string,remote_document_root:string}|null
+     */
+    private function files_pull_pair_context_if_local_tree_exists(): ?array
+    {
+        $preflight_data = $this->import_state()->preflight['data'] ?? null;
+        $remote_document_root = is_array($preflight_data)
+            ? ( $preflight_data['runtime']['document_root'] ?? null )
+            : null;
+        if (!is_string($remote_document_root) || $remote_document_root === '') {
+            return null;
+        }
+        $remote_document_root = rtrim($remote_document_root, '/');
+        $local_tree = $remote_document_root === ''
+            ? $this->fs_root
+            : $this->fs_root . '/' . ltrim($remote_document_root, '/');
+        if (!is_dir($local_tree) || is_link($local_tree)) {
+            return null;
+        }
+        try {
+            $files_pair_context = self::prepare_files_pair_context(
+                $this->remote_url,
+                $this->state_dir,
+                $local_tree,
+                'files-diff'
+            );
+        } catch (\InvalidArgumentException $exception) {
+            return null;
+        }
+        $files_pair_context['remote_document_root'] = $remote_document_root;
+        return $files_pair_context;
+    }
+
+    private static function canonicalize_path_with_missing_components(string $path): ?string
+    {
+        $existing_path = $path;
+        $missing_components = [];
+        while (
+            !file_exists($existing_path)
+            && !is_link($existing_path)
+            && $existing_path !== '/'
+        ) {
+            array_unshift($missing_components, basename($existing_path));
+            $existing_path = dirname($existing_path);
+        }
+        $canonical_existing_path = realpath($existing_path);
+        if ($canonical_existing_path === false) {
+            return null;
+        }
+        return normalize_path(
+            $canonical_existing_path
+                . ( $missing_components === []
+                    ? ''
+                    : '/' . implode('/', $missing_components) )
+        );
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
      * Shared index → diff → fetch pipeline used by both initial and delta syncs.
@@ -6054,30 +6436,24 @@ class ImportClient
             // mid-body, the cursor already points to the end of the part
             // while file_bytes_written may still lag; at is_streaming_close
             // the bytes are on disk and we force a per-part checkpoint.
+            // Snapshot the file boundary before handle_file_chunk() may close
+            // the file so a stop after the close still retains its path and size.
             $is_streaming_body = !empty($chunk["is_streaming_body"]);
             $is_streaming_close = !empty($chunk["is_streaming_close"]);
-            if (!$is_streaming_body) {
-                $chunks_since_save++;
-                $force_save = $is_streaming_close;
-                if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                    $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-                    // Track current file for crash recovery
-                    if ($context->file_handle && $context->file_path) {
-                        // Flush to ensure bytes are on disk before saving state
-                        fflush($context->file_handle);
-                        $this->import_state()->current_file = $context->file_path;
-                        $this->import_state()->current_file_bytes = $context->file_bytes_written;
-                    } else {
-                        $this->import_state()->current_file = null;
-                        $this->import_state()->current_file_bytes = null;
-                    }
-                    $this->save_state($this->state);
-                    $chunks_since_save = 0;
+            $file_path_at_completed_part = null;
+            $file_bytes_at_completed_part = null;
+            if (
+                $is_streaming_close
+                && $context->file_handle
+                && $context->file_path
+            ) {
+                if (!fflush($context->file_handle)) {
+                    throw new RuntimeException(
+                        'Failed to flush the pulled file before saving its fetch cursor.'
+                    );
                 }
-            }
-
-            if (isset($chunk["headers"]["x-cursor"])) {
-                $cursor = $chunk["headers"]["x-cursor"];
+                $file_path_at_completed_part = $context->file_path;
+                $file_bytes_at_completed_part = $context->file_bytes_written;
             }
 
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
@@ -6135,6 +6511,44 @@ class ImportClient
                     true,
                 );
             }
+
+            if (!$is_streaming_body) {
+                if (isset($chunk["headers"]["x-cursor"])) {
+                    $cursor = $chunk["headers"]["x-cursor"];
+                }
+                $chunks_since_save++;
+                $force_save = $is_streaming_close;
+                if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+                    if ($file_path_at_completed_part !== null) {
+                        $this->import_state()->current_file =
+                            $file_path_at_completed_part;
+                        $this->import_state()->current_file_bytes =
+                            $file_bytes_at_completed_part;
+                    } elseif ($context->file_handle && $context->file_path) {
+                        // Flush to ensure bytes are on disk before saving state.
+                        if (!fflush($context->file_handle)) {
+                            throw new RuntimeException(
+                                'Failed to flush the pulled file before saving its fetch cursor.'
+                            );
+                        }
+                        // Track the current file for crash recovery.
+                        $this->import_state()->current_file = $context->file_path;
+                        $this->import_state()->current_file_bytes = $context->file_bytes_written;
+                    } else {
+                        $this->import_state()->current_file = null;
+                        $this->import_state()->current_file_bytes = null;
+                    }
+                    if (
+                        $this->index_update_wal_handle
+                        && !fflush($this->index_update_wal_handle)
+                    ) {
+                        throw new RuntimeException('Failed to flush the index-update WAL.');
+                    }
+                    $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
+                    $this->save_state($this->state);
+                    $chunks_since_save = 0;
+                }
+            }
         };
 
         $cursor_before = $cursor;
@@ -6154,11 +6568,13 @@ class ImportClient
             // Save state so the next invocation resumes from the
             // last cursor instead of crashing with exit code 1.
             $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-            $this->finalize_index_updates();
+            $this->apply_index_update_wal();
             if ($context->file_handle && $context->file_path) {
-                fflush($context->file_handle);
-                $this->import_state()->current_file = $context->file_path;
-                $this->import_state()->current_file_bytes = $context->file_bytes_written;
+                if (!fflush($context->file_handle)) {
+                    throw new RuntimeException(
+                        'Failed to flush the partial pulled file after a timeout.'
+                    );
+                }
             }
             $this->import_state()->active_resumable_command->completion_state = "partial";
             $this->save_state($this->state);
@@ -6173,10 +6589,14 @@ class ImportClient
             $context->response_stats ?? [],
         );
         $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-        $this->finalize_index_updates();
+        $this->apply_index_update_wal();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
-            fflush($context->file_handle);
+            if (!fflush($context->file_handle)) {
+                throw new RuntimeException(
+                    'Failed to flush the pulled file before saving its fetch cursor.'
+                );
+            }
             $this->import_state()->current_file = $context->file_path;
             $this->import_state()->current_file_bytes = $context->file_bytes_written;
         } else {
@@ -6502,7 +6922,7 @@ class ImportClient
                 $local = $this->read_index_line($local_handle);
             }
         }
-        $this->begin_index_updates();
+        $this->open_index_update_wal();
         $processed = 0;
 
         while (($line = fgets($remote_handle)) !== false) {
@@ -6527,8 +6947,9 @@ class ImportClient
                 // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-pull --only runs.
                 if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                    $this->delete_local_file_path($local["path"]);
-                    $this->delete_index_entry($local["path"]);
+                    if ($this->delete_local_file_path($local["path"])) {
+                        $this->delete_index_entry($local["path"], true);
+                    }
                 }
                 $local_after = $local["path"];
                 $local = $this->read_index_line($local_handle);
@@ -6574,6 +6995,12 @@ class ImportClient
             if ($processed % 200 === 0) {
                 $this->import_state()->diff->remote_offset = $remote_offset;
                 $this->import_state()->diff->local_after = $local_after;
+                if (
+                    $this->index_update_wal_handle
+                    && !fflush($this->index_update_wal_handle)
+                ) {
+                    throw new RuntimeException('Failed to flush the index-update WAL.');
+                }
                 $this->save_state($this->state);
                 $this->progress->tick_spinner();
             }
@@ -6581,8 +7008,9 @@ class ImportClient
 
         while ($local !== null) {
             if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                $this->delete_local_file_path($local["path"]);
-                $this->delete_index_entry($local["path"]);
+                if ($this->delete_local_file_path($local["path"])) {
+                    $this->delete_index_entry($local["path"], true);
+                }
             }
             $local_after = $local["path"];
             $local = $this->read_index_line($local_handle);
@@ -6599,9 +7027,8 @@ class ImportClient
 
         $this->import_state()->diff->remote_offset = $remote_offset;
         $this->import_state()->diff->local_after = $local_after;
+        $this->apply_index_update_wal();
         $this->save_state($this->state);
-
-        $this->finalize_index_updates();
 
         return !$this->shutdown_requested;
     }
@@ -6973,11 +7400,13 @@ class ImportClient
 
     /**
      * Delete a local file path safely under the fs root.
+     *
+     * @return bool Whether the path is absent after the deletion attempt.
      */
-    private function delete_local_file_path(string $path): void
+    private function delete_local_file_path(string $path): bool
     {
         if ($path === "") {
-            return;
+            return false;
         }
         try {
             $local_path = $this->remote_path_to_local_path_within_import_root($path);
@@ -6986,18 +7415,19 @@ class ImportClient
                 "Security: refusing to delete invalid path '{$path}': " . $e->getMessage(),
                 true,
             );
-            return;
+            return false;
         }
         if (!file_exists($local_path) && !is_link($local_path)) {
-            return;
+            return true;
         }
 
         if ($this->remove_local_path_without_following_symlinks($local_path)) {
             $this->audit_log("Deleted: {$path}", false);
-            return;
+            return true;
         }
 
         $this->audit_log("Failed to delete: {$path}", true);
+        return false;
     }
 
     /**
@@ -7043,7 +7473,7 @@ class ImportClient
     /**
      * Parse one JSON index line into an array.
      */
-    private function parse_index_line(string $line): ?array
+    private function parse_index_line(string $line, bool $assert_absolute_path = true): ?array
     {
         $line = trim($line);
         if ($line === "") {
@@ -7061,52 +7491,38 @@ class ImportClient
         if ($path === "" || $path === false) {
             throw new RuntimeException("Invalid index path (base64 decode failed)");
         }
-        assert_valid_path($path, "index path");
-        return [
+        if ($assert_absolute_path) {
+            assert_valid_path($path, "index path");
+        }
+        $entry = [
             "path" => $path,
             "ctime" => (int) ($data["ctime"] ?? 0),
             "size" => (int) ($data["size"] ?? 0),
             "type" => (string) ($data["type"] ?? "file"),
         ];
+        if (array_key_exists("empty", $data)) {
+            $entry["empty"] = (bool) $data["empty"];
+        }
+        return $entry;
     }
 
-    /**
-     * Start collecting index updates into a temp file for streaming merge.
-     */
-    private function begin_index_updates(): void
+    /** Opens the current index-update WAL for append. */
+    private function open_index_update_wal(): void
     {
-        if ($this->index_updates_handle) {
+        if ($this->index_update_wal_handle) {
             return;
         }
-        $is_new = false;
-        if ($this->index_updates_file === null) {
-            $tmp = tempnam(sys_get_temp_dir(), "index-updates-");
-            if ($tmp === false) {
-                throw new RuntimeException(
-                    "Failed to create temp index updates file",
-                );
-            }
-            $this->index_updates_file = $tmp;
-            $is_new = true;
-        } elseif (!file_exists($this->index_updates_file)) {
-            $dir = dirname($this->index_updates_file);
-            if (!is_dir($dir)) {
-                mkdir($dir, 0755, true);
-            }
-            $is_new = true;
-        }
-        $this->index_updates_handle = fopen($this->index_updates_file, "a");
-        if (!$this->index_updates_handle) {
-            throw new RuntimeException(
-                "Failed to open temp index updates file",
-            );
+        $is_new = !is_file($this->index_update_wal_path);
+        $this->index_update_wal_handle = fopen($this->index_update_wal_path, "a");
+        if (!$this->index_update_wal_handle) {
+            throw new RuntimeException("Failed to open the index-update WAL.");
         }
         if ($is_new) {
             $this->audit_log(
-                "FILE CREATE | {$this->index_updates_file} | index updates buffer",
+                "FILE CREATE | {$this->index_update_wal_path} | index-update WAL",
             );
         }
-        $this->index_updates_count = 0;
+        $this->index_update_wal_record_count = 0;
         $this->last_update_path = null;
         $this->last_update_delete = null;
         $this->last_update_ctime = null;
@@ -7115,7 +7531,7 @@ class ImportClient
     }
 
     /**
-     * Record a file upsert into the index updates stream.
+     * Record a file upsert in the index-update WAL.
      */
     private function record_index_update_file(
         string $path,
@@ -7123,8 +7539,8 @@ class ImportClient
         int $size,
         string $type
     ): void {
-        if (!$this->index_updates_handle) {
-            $this->begin_index_updates();
+        if (!$this->index_update_wal_handle) {
+            $this->open_index_update_wal();
         }
         if (
             $this->last_update_path === $path &&
@@ -7135,23 +7551,53 @@ class ImportClient
         ) {
             return;
         }
+        $update = [
+            "op" => "F",
+            "path" => base64_encode($path),
+            "ctime" => $ctime,
+            "size" => $size,
+            "type" => $type,
+        ];
+        if ($this->maintain_previous_local_index) {
+            $local_path = $this->remote_path_to_local_path_within_import_root($path);
+            clearstatcache(true, $local_path);
+            $stat = @lstat($local_path);
+            if ($stat === false) {
+                throw new RuntimeException("Failed to inspect the pulled local path.");
+            }
+            $file_type_bits = $stat["mode"] & FileIndexProcessor::STAT_TYPE_MASK;
+            if ($file_type_bits === FileIndexProcessor::STAT_TYPE_FILE) {
+                $local_type = "file";
+            } elseif ($file_type_bits === FileIndexProcessor::STAT_TYPE_DIR) {
+                $local_type = "dir";
+            } elseif ($file_type_bits === FileIndexProcessor::STAT_TYPE_LINK) {
+                $local_type = "link";
+            } else {
+                throw new RuntimeException("The pulled local path has an unsupported type.");
+            }
+            if (
+                $local_type === $type
+                && ( $type !== "file" || (int) $stat["size"] === $size )
+            ) {
+                $update["applied_by_files_pull"] = true;
+                $update["local_ctime"] = (int) $stat["ctime"];
+                $update["local_size"] =
+                    $local_type === "dir" ? 0 : (int) $stat["size"];
+                $update["local_type"] = $local_type;
+            }
+        }
         $line = json_encode(
-            [
-                "op" => "F",
-                "path" => base64_encode($path),
-                "ctime" => $ctime,
-                "size" => $size,
-                "type" => $type,
-            ],
+            $update,
             JSON_UNESCAPED_SLASHES,
         );
         if ($line !== false) {
-            $bytes = fwrite($this->index_updates_handle, $line . "\n");
-            if ($bytes === false) {
-                throw new RuntimeException("Failed to write to index updates file (disk full?)");
+            $line .= "\n";
+            $bytes = fwrite($this->index_update_wal_handle, $line);
+            if ($bytes !== strlen($line)) {
+                throw new RuntimeException("Failed to write to the index-update WAL (disk full?).");
             }
         }
-        $this->index_updates_count++;
+        $this->index_update_wal_record_count++;
         $this->last_update_path = $path;
         $this->last_update_delete = false;
         $this->last_update_ctime = $ctime;
@@ -7160,12 +7606,15 @@ class ImportClient
     }
 
     /**
-     * Record a deletion into the index updates stream.
+     * Record a deletion in the index-update WAL.
      */
-    private function record_index_update_deletion(string $path): void
+    private function record_index_update_deletion(
+        string $path,
+        bool $path_deleted_by_files_pull
+    ): void
     {
-        if (!$this->index_updates_handle) {
-            $this->begin_index_updates();
+        if (!$this->index_update_wal_handle) {
+            $this->open_index_update_wal();
         }
         if (
             $this->last_update_path === $path &&
@@ -7173,20 +7622,25 @@ class ImportClient
         ) {
             return;
         }
+        $update = [
+            "op" => "D",
+            "path" => base64_encode($path),
+        ];
+        if ($this->maintain_previous_local_index && $path_deleted_by_files_pull) {
+            $update["applied_by_files_pull"] = true;
+        }
         $line = json_encode(
-            [
-                "op" => "D",
-                "path" => base64_encode($path),
-            ],
+            $update,
             JSON_UNESCAPED_SLASHES,
         );
         if ($line !== false) {
-            $bytes = fwrite($this->index_updates_handle, $line . "\n");
-            if ($bytes === false) {
-                throw new RuntimeException("Failed to write to index updates file (disk full?)");
+            $line .= "\n";
+            $bytes = fwrite($this->index_update_wal_handle, $line);
+            if ($bytes !== strlen($line)) {
+                throw new RuntimeException("Failed to write to the index-update WAL (disk full?).");
             }
         }
-        $this->index_updates_count++;
+        $this->index_update_wal_record_count++;
         $this->last_update_path = $path;
         $this->last_update_delete = true;
         $this->last_update_ctime = null;
@@ -7194,14 +7648,15 @@ class ImportClient
         $this->last_update_type = null;
     }
 
-    /**
-     * Merge the collected updates with the existing sorted index without loading it into memory.
-     */
-    private function finalize_index_updates(): void
+    /** Applies the current WAL to every index maintained by this command. */
+    private function apply_index_update_wal(): void
     {
-        if ($this->index_updates_handle) {
-            fclose($this->index_updates_handle);
-            $this->index_updates_handle = null;
+        if ($this->index_update_wal_handle) {
+            $closed = fclose($this->index_update_wal_handle);
+            $this->index_update_wal_handle = null;
+            if (!$closed) {
+                throw new RuntimeException("Failed to flush the index-update WAL.");
+            }
         }
         $this->last_update_path = null;
         $this->last_update_delete = null;
@@ -7210,130 +7665,139 @@ class ImportClient
         $this->last_update_type = null;
 
         $has_updates =
-            $this->index_updates_count > 0 ||
-            ($this->index_updates_file &&
-                file_exists($this->index_updates_file) &&
-                filesize($this->index_updates_file) > 0);
+            $this->index_update_wal_record_count > 0 ||
+            (is_file($this->index_update_wal_path) &&
+                filesize($this->index_update_wal_path) > 0);
 
         if (!$has_updates) {
-            if (
-                $this->index_updates_file &&
-                file_exists($this->index_updates_file)
-            ) {
-                @unlink($this->index_updates_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->index_updates_file} | no updates to merge",
-                );
-            }
-            $this->index_updates_count = 0;
+            $this->index_update_wal_record_count = 0;
             return;
         }
 
-        $updates_path = $this->index_updates_file;
         $new_index = $this->index_file . ".new";
-
         $this->audit_log(
             "INDEX MERGE START | merging updates into {$this->index_file}",
         );
-
-        $old_handle = file_exists($this->index_file)
-            ? fopen($this->index_file, "r")
-            : null;
-        $upd_handle = fopen($updates_path, "r");
-        $new_handle = fopen($new_index, "w");
-
-        if (!$upd_handle || !$new_handle) {
-            throw new RuntimeException("Failed to merge index updates");
-        }
-
-        $write_line = function ($handle, array $entry): void {
-            $line = json_encode(
-                [
-                    "path" => base64_encode($entry["path"]),
-                    "ctime" => (int) $entry["ctime"],
-                    "size" => (int) $entry["size"],
-                    "type" => (string) $entry["type"],
-                ],
-                JSON_UNESCAPED_SLASHES,
-            );
-            if ($line !== false) {
-                fwrite($handle, $line . "\n");
-            }
-        };
-
-        $old = $this->read_index_line($old_handle);
-        $carry = null;
-        $upd = $this->read_update_line($upd_handle, $carry);
-        $last_written_path = null;
-
-        while ($old !== null || $upd !== null) {
-            if ($upd === null) {
-                if ($last_written_path !== $old["path"]) {
-                    $write_line($new_handle, $old);
-                    $last_written_path = $old["path"];
-                }
-                $old = $this->read_index_line($old_handle);
-                continue;
-            }
-
-            if ($old === null) {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
-                }
-                $upd = $this->read_update_line($upd_handle, $carry);
-                continue;
-            }
-
-            $cmp = strcmp($old["path"], $upd["path"]);
-            if ($cmp === 0) {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
-                }
-                $old = $this->read_index_line($old_handle);
-                $upd = $this->read_update_line($upd_handle, $carry);
-            } elseif ($cmp < 0) {
-                if ($last_written_path !== $old["path"]) {
-                    $write_line($new_handle, $old);
-                    $last_written_path = $old["path"];
-                }
-                $old = $this->read_index_line($old_handle);
-            } else {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
-                }
-                $upd = $this->read_update_line($upd_handle, $carry);
-            }
-        }
-
-        if ($old_handle) {
-            fclose($old_handle);
-        }
-        fclose($upd_handle);
-        fclose($new_handle);
-
+        merge_import_index_updates(
+            $this->index_file,
+            $this->index_update_wal_path,
+            $new_index
+        );
         if (!rename($new_index, $this->index_file)) {
             throw new RuntimeException("Failed to replace index file");
         }
         $this->audit_log("INDEX MERGE COMPLETE | {$this->index_file} updated");
 
-        @unlink($updates_path);
-        $this->audit_log("FILE DELETE | {$updates_path} | updates merged");
-        $this->index_updates_count = 0;
+        $wal_has_previous_local_index_updates = false;
+        $wal_handle = fopen($this->index_update_wal_path, 'rb');
+        if (!is_resource($wal_handle)) {
+            throw new RuntimeException('Failed to inspect the index-update WAL.');
+        }
+        try {
+            while (true) {
+                $update = $this->read_update_line_raw($wal_handle);
+                if ($update === null) {
+                    break;
+                }
+                if ($update['applied_by_files_pull']) {
+                    $wal_has_previous_local_index_updates = true;
+                    break;
+                }
+            }
+        } finally {
+            fclose($wal_handle);
+        }
+        if ($wal_has_previous_local_index_updates) {
+            $context = $this->files_pull_pair_context_if_local_tree_exists();
+            if (
+                $context === null
+                || !is_file(
+                    $context['push_state_directory']
+                        . '/previous_local_index.jsonl'
+                )
+            ) {
+                throw new RuntimeException(
+                    'Cannot publish the index-update WAL without its previous local index.'
+                );
+            }
+            $previous_local_index =
+                $context['push_state_directory'] . '/previous_local_index.jsonl';
+            $updates_path = $this->state_dir . '/.previous-local-index-updates.tmp';
+            $swap_path = $previous_local_index . '.swap';
+            try {
+                $updates_written = $this->write_previous_local_index_updates(
+                    $this->index_update_wal_path,
+                    $updates_path,
+                    $context,
+                    true
+                );
+                if ($updates_written > 0) {
+                    merge_previous_local_index_updates(
+                        $previous_local_index,
+                        $updates_path,
+                        $swap_path,
+                        $this->state_dir
+                    );
+                    if (!rename($swap_path, $previous_local_index)) {
+                        throw new RuntimeException(
+                            'Failed to advance the previous local index: '
+                            . $previous_local_index . '.'
+                        );
+                    }
+                }
+            } finally {
+                if (is_file($updates_path)) {
+                    @unlink($updates_path);
+                }
+                if (is_file($swap_path)) {
+                    @unlink($swap_path);
+                }
+            }
+        }
+        if (file_put_contents($this->index_update_wal_path, '') === false) {
+            throw new RuntimeException("Failed to clear the applied index-update WAL.");
+        }
+        $this->audit_log(
+            "FILE TRUNCATE | {$this->index_update_wal_path} | WAL batch applied"
+        );
+        $this->index_update_wal_record_count = 0;
+    }
+
+    /** Removes the WAL marker after files-pull completes or is aborted. */
+    private function remove_index_update_wal(): void
+    {
+        if (is_resource($this->index_update_wal_handle)) {
+            if (!fclose($this->index_update_wal_handle)) {
+                throw new RuntimeException("Failed to flush the index-update WAL.");
+            }
+            $this->index_update_wal_handle = null;
+        }
+        clearstatcache(true, $this->index_update_wal_path);
+        if (
+            is_file($this->index_update_wal_path)
+            && filesize($this->index_update_wal_path) > 0
+        ) {
+            throw new RuntimeException("Cannot remove an unapplied index-update WAL.");
+        }
+        if (
+            is_file($this->index_update_wal_path)
+            && !unlink($this->index_update_wal_path)
+        ) {
+            throw new RuntimeException("Failed to remove the index-update WAL.");
+        }
+        $this->index_update_wal_record_count = 0;
     }
 
     /**
      * Read one JSON record from the on-disk index.
      */
-    private function read_index_line($handle): ?array
+    private function read_index_line($handle, bool $assert_absolute_path = true): ?array
     {
         if (!$handle) {
             return null;
         }
         while (($line = fgets($handle)) !== false) {
-            $parsed = $this->parse_index_line($line);
+            $parsed = $this->parse_index_line($line, $assert_absolute_path);
             if ($parsed !== null) {
                 return $parsed;
             }
@@ -7350,6 +7814,9 @@ class ImportClient
             return null;
         }
         while (($line = fgets($handle)) !== false) {
+            if (substr($line, -1) !== "\n" && feof($handle)) {
+                return null;
+            }
             $line = trim($line);
             if ($line === "") {
                 continue;
@@ -7374,51 +7841,34 @@ class ImportClient
                     "ctime" => 0,
                     "size" => 0,
                     "type" => null,
+                    "replace_subtree" => !empty($data["replace_subtree"]),
+                    "applied_by_files_pull" => !empty($data["applied_by_files_pull"]),
                 ];
             }
             if ($op === "F") {
-                return [
+                $entry = [
                     "path" => $path,
                     "delete" => false,
                     "ctime" => (int) ($data["ctime"] ?? 0),
                     "size" => (int) ($data["size"] ?? 0),
                     "type" => (string) ($data["type"] ?? "file"),
+                    "replace_subtree" => !empty($data["replace_subtree"]),
+                    "applied_by_files_pull" => !empty($data["applied_by_files_pull"]),
                 ];
+                if (array_key_exists("empty", $data)) {
+                    $entry["empty"] = (bool) $data["empty"];
+                }
+                if (array_key_exists("local_type", $data)) {
+                    $entry["local_ctime"] = (int) $data["local_ctime"];
+                    $entry["local_size"] = (int) $data["local_size"];
+                    $entry["local_type"] = (string) $data["local_type"];
+                }
+                return $entry;
             }
         }
         return null;
     }
 
-    /**
-     * Read one update record, coalescing consecutive updates to the same path.
-     *
-     * @param mixed $handle Update file handle
-     * @param array|null $carry Read-ahead buffer for the next record
-     */
-    private function read_update_line($handle, ?array &$carry = null): ?array
-    {
-        if (!$handle) {
-            return null;
-        }
-        $current = $carry ?? $this->read_update_line_raw($handle);
-        $carry = null;
-        if ($current === null) {
-            return null;
-        }
-
-        while (true) {
-            $next = $this->read_update_line_raw($handle);
-            if ($next === null) {
-                return $current;
-            }
-            if ($next["path"] !== $current["path"]) {
-                $carry = $next;
-                return $current;
-            }
-            // Same path: keep the latest update.
-            $current = $next;
-        }
-    }
     /**
      * Download SQL from remote.
      */
@@ -9196,7 +9646,11 @@ class ImportClient
 
         // Close on last chunk
         if ($is_last && $context->file_handle) {
-            fclose($context->file_handle);
+            $closed = fclose($context->file_handle);
+            $context->file_handle = null;
+            if (!$closed) {
+                throw new RuntimeException("Failed to flush the completed pulled file.");
+            }
 
             // Set file modification time
             if ($context->file_ctime && $context->file_path) {
@@ -9231,7 +9685,6 @@ class ImportClient
                 );
             }
 
-            $context->file_handle = null;
             $context->file_path = null;
             $context->file_ctime = null;
             $context->file_bytes_written = 0;
@@ -9730,10 +10183,12 @@ class ImportClient
                 $context->file_bytes_written = 0;
             }
 
-            if (file_exists($local_path)) {
-                @unlink($local_path);
+            if (
+                ( !file_exists($local_path) && !is_link($local_path) )
+                || $this->remove_local_path_without_following_symlinks($local_path)
+            ) {
+                $this->delete_index_entry($path);
             }
-            $this->delete_index_entry($path);
 
             if ($error_type === "file_changed") {
                 $this->record_volatile_file($path);
@@ -11602,15 +12057,16 @@ class ImportClient
         $this->shutdown_requested = true;
         $this->progress->clear_progress_line();
 
-        // Flush index updates so progress is not lost on interrupt
-        try {
-            $this->finalize_index_updates();
-        } catch (Exception $e) {
-            $this->audit_log(
-                "Failed to finalize index updates on shutdown: " .
-                    $e->getMessage(),
-                true,
-            );
+        if (is_resource($this->index_update_wal_handle)) {
+            try {
+                $this->apply_index_update_wal();
+            } catch (Exception $e) {
+                $this->audit_log(
+                    "Failed to apply the index-update WAL on shutdown: " .
+                        $e->getMessage(),
+                    true,
+                );
+            }
         }
 
         // Log final progress before exit
@@ -12765,6 +13221,8 @@ if (
                 "downloads every file. On subsequent runs, re-indexes the remote tree,\n" .
                 "diffs against the local index, and downloads only what changed.\n" .
                 "Interrupted pulls resume from the last saved cursor.\n" .
+                "The state directory's .reprint.lock is held for the entire command,\n" .
+                "so another local Reprint command cannot use the same state directory.\n" .
                 "\n" .
                 "Runs files-index internally when no index exists yet.\n",
             "extra" =>
@@ -12774,9 +13232,17 @@ if (
                 "                    The skipped file list is saved for later retrieval.\n" .
                 "  skipped-earlier   Pull only files skipped by a prior essential-files run.\n" .
                 "\n" .
+                "A compatible full file-only pull seeds a missing previous local\n" .
+                "index before changing the tree. It then advances only the paths\n" .
+                "applied by each durable WAL batch. A compatible partial pull can\n" .
+                "advance an existing index but cannot seed a missing one. Pending\n" .
+                "local additions, edits, and deletions elsewhere remain pending.\n" .
+                "\n" .
                 "Output files:\n" .
                 "  (fs-root)/                              Downloaded files\n" .
+                "  .reprint.lock                           Local Reprint process lock\n" .
                 "  .import-index.jsonl                     Local file index\n" .
+                "  .import-index-updates.wal               Active files-pull WAL\n" .
                 "  .import-remote-index.jsonl              Remote index snapshot\n" .
                 "  .import-download-list.jsonl             Files pending download\n" .
                 "  .import-download-list-skipped.jsonl     Skipped files (when --filter=essential-files)\n" .
@@ -12785,13 +13251,21 @@ if (
         ],
         "files-diff" => [
             "level" => "low",
-            "short" => "Show local file changes since the last push",
+            "short" => "Show local file changes since the last pull or push",
             "usage" => "reprint files-diff <target-url> --state-dir=DIR --fs-root=DIR",
             "description" =>
-                "Shows which local paths a files-push would send or delete, comparing\n" .
-                "the local tree at --fs-root with the pair's previous local index —\n" .
-                "the index a completed files-push publishes for the same target URL,\n" .
-                "state directory, and local tree.\n" .
+                "Shows which local paths changed since the last synchronization with\n" .
+                "the target, comparing the local tree at --fs-root with the pair's\n" .
+                "previous local index. A compatible file-only pull — files-pull or\n" .
+                "pull-files — maintains that index after each durable WAL batch, and\n" .
+                "every completed files-push advances it, so already-pushed changes\n" .
+                "leave the diff. A compatible partial pull advances only the paths\n" .
+                "it applied when that index already exists; pending local additions,\n" .
+                "edits, and deletions elsewhere stay in the diff.\n" .
+                "The local tree at --fs-root must be the exact document root later\n" .
+                "passed to files-push. Use the exact exporter API URL used by that\n" .
+                "pull; after pull-files received a bare site URL, include the\n" .
+                "site-export-api query which pull-files added.\n" .
                 "The output is a local minimized push operation plan before target\n" .
                 "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
                 "default-skipped paths include generated wp-content caches, version-\n" .
@@ -12799,8 +13273,16 @@ if (
                 "editor scratch files.\n" .
                 "Paths remain base64 text in JSONL output so\n" .
                 "arbitrary filesystem names are preserved. No network calls are made\n" .
-                "and no secret is required.\n",
+                "and no secret is required. The state directory's .reprint.lock is\n" .
+                "held for the entire command.\n",
             "extra" =>
+                "To establish or refresh the previous local index, complete a\n" .
+                "files-push or run a fresh compatible full file-only pull: an " .
+                "unfiltered files-pull or pull-files with no path selection and the\n" .
+                "default path mapping and overwrite behavior.\n" .
+                "A completed standalone files-pull does not run again. First run the\n" .
+                "same files-pull with --abort, then run it once more. Rerunning a\n" .
+                "completed pull-files starts a fresh pipeline.\n" .
                 "Every run reports the complete diff from the beginning; there is\n" .
                 "no partial resume to continue.\n",
         ],
@@ -13117,6 +13599,7 @@ if (
     }
 
     try {
+        $reprint_process_lock = new ReprintProcessLock($state_dir);
         $reprint_files_push_context = null;
         $reprint_files_diff_context = null;
         if ($command === 'files-push') {
@@ -13144,7 +13627,8 @@ if (
                     : ['files_push_context' => $reprint_files_push_context] )
                 + ( $reprint_files_diff_context === null
                     ? []
-                    : ['files_diff_context' => $reprint_files_diff_context] )
+                    : ['files_diff_context' => $reprint_files_diff_context] ),
+            $reprint_process_lock
         );
         // EXIT_AFTER_IMPORT controls whether we hand control back to
         // the caller after pull returns. Default true: standard CLI
@@ -13190,5 +13674,9 @@ if (
         // to see the failure — re-throw so its try/catch around
         // `include $phar` can surface a proper `{type:'error'}` event.
         throw $e;
+    } finally {
+        if (isset($reprint_process_lock)) {
+            $reprint_process_lock->close();
+        }
     }
 }

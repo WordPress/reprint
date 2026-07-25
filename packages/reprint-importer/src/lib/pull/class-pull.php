@@ -122,6 +122,17 @@ class Pull
      */
     public function abort(string $command = 'pull'): void
     {
+        $this->normalize_url();
+        $state = $this->client->get_import_state();
+        if (
+            $command === 'pull-files'
+            || (
+                $command === 'pull'
+                && $state->active_resumable_command->command_name === 'files-pull'
+            )
+        ) {
+            $this->client->clear_files_pull_progress();
+        }
         $this->prepare_repull($command);
         $label = $command === 'pull' ? 'Pull' : $command;
         $message = "{$label} state cleared.";
@@ -358,7 +369,7 @@ class Pull
             $this->print_stage_header($stage);
 
             try {
-                $this->run_stage($stage, $options, $step, $total);
+                $this->run_stage($command, $stage, $options, $step, $total);
             } catch (\Exception $e) {
                 $this->report_failure($command, $stage, $stages, $i, $e);
                 throw new PullFailureReportedException($e->getMessage(), 0, $e);
@@ -394,7 +405,7 @@ class Pull
      * after this method returns, so a thrown exception leaves the stage
      * unfinished at the orchestration level.
      */
-    private function run_stage(string $stage, array $options, int $step, int $total): void
+    private function run_stage(string $command, string $stage, array $options, int $step, int $total): void
     {
         switch ($stage) {
             case 'preflight':
@@ -424,8 +435,11 @@ class Pull
 
             case 'files-pull':
                 $this->client->prepare_files_pull_options($options);
-                $this->run_until_complete('files-pull', function () {
-                    $this->client->run_files_sync();
+                $this->run_until_complete('files-pull', function () use ($command) {
+                    // pull-files ends with this local tree. The complete pull
+                    // pipeline may change it again in later stages, so only
+                    // pull-files can maintain the previous local index.
+                    $this->client->run_files_sync($command === 'pull-files');
                 });
                 $skipped_pending =
                     $options['filter'] === 'essential-files' &&

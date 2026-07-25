@@ -1,5 +1,7 @@
 <?php
 
+use function WordPress\Reprint\Exporter\compare_paths;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 
 /**
@@ -27,10 +29,10 @@
  * ## Change detection
  *
  * ctime is machine-local, so the previous local index must describe the same
- * local machine: PushFilesSender supplies the index saved after the previous
- * push, and files-diff supplies the index captured after the previous pull.
- * File and symlink changes are determined by type, ctime, and size. Directory
- * changes use the indexer's empty-directory marker; non-empty directories are
+ * local machine. Compatible pulls and committed pushes advance that shared
+ * index; PushFilesSender and files-diff each supply it to the plan. File and
+ * symlink changes are determined by type, ctime, and size. Directory changes
+ * use the indexer's empty-directory marker; non-empty directories are
  * represented by their descendants.
  *
  * With no previous local index, every file, symlink, and empty directory is
@@ -194,9 +196,7 @@ class PushPlan
         );
         $plan->cursor = $cursor;
         $position = $plan->cursor["position"];
-        if ($position["phase"] !== "complete") {
-            $plan->excluded_paths = $plan->load_excluded_paths();
-        }
+        $plan->excluded_paths = $plan->load_excluded_paths();
         if ($position["phase"] === "indexing") {
             $plan->open_fresh_local_index_for_continuation();
         } elseif ($position["phase"] === "diffing") {
@@ -229,6 +229,64 @@ class PushPlan
     public function get_local_paths_to_delete_path(): string
     {
         return $this->local_paths_to_delete;
+    }
+
+    /**
+     * Reads the completed local paths-to-push list.
+     *
+     * @return Generator Completed plan entries.
+     * @phpstan-return Generator<int,array{path:string,type:'file'|'directory'|'symlink',size:int,ctime:int},mixed,void>
+     */
+    public function read_planned_local_paths_to_push(): Generator
+    {
+        $local_paths_to_push_handle = fopen($this->local_paths_to_push, 'rb');
+        if (!is_resource($local_paths_to_push_handle)) {
+            throw new RuntimeException('Failed to open the completed local paths-to-push list.');
+        }
+        try {
+            while (true) {
+                $line = fgets($local_paths_to_push_handle);
+                if ($line === false) {
+                    if (!feof($local_paths_to_push_handle)) {
+                        throw new RuntimeException('Failed to read the completed local paths-to-push list.');
+                    }
+                    return;
+                }
+                /** @var array{path:string,type:'file'|'directory'|'symlink',size:int,ctime:int} $entry */
+                $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+                yield $entry;
+            }
+        } finally {
+            fclose($local_paths_to_push_handle);
+        }
+    }
+
+    /**
+     * Reads the completed local paths-to-delete list.
+     *
+     * @return Generator Completed local paths to delete.
+     * @phpstan-return Generator<int,string,mixed,void>
+     */
+    public function read_planned_local_paths_to_delete(): Generator
+    {
+        $local_paths_to_delete_handle = fopen($this->local_paths_to_delete, 'rb');
+        if (!is_resource($local_paths_to_delete_handle)) {
+            throw new RuntimeException('Failed to open the completed local paths-to-delete list.');
+        }
+        try {
+            while (true) {
+                $local_path_to_delete = stream_get_line($local_paths_to_delete_handle, 1048576, "\0");
+                if ($local_path_to_delete === false) {
+                    if (!feof($local_paths_to_delete_handle)) {
+                        throw new RuntimeException('Failed to read the completed local paths-to-delete list.');
+                    }
+                    return;
+                }
+                yield $local_path_to_delete;
+            }
+        } finally {
+            fclose($local_paths_to_delete_handle);
+        }
     }
 
     /**
@@ -536,13 +594,16 @@ class PushPlan
         if ($entry_fresh_index !== null || $entry_previous_local_index !== null) {
             // Base64 does not preserve byte order ('0' sorts before 'A'
             // in ASCII but encodes a higher value), so ordering uses the
-            // decoded path bytes.
+            // decoded filesystem path components.
             if ($entry_previous_local_index === null) {
                 $path_comparison = -1;
             } elseif ($entry_fresh_index === null) {
                 $path_comparison = 1;
             } else {
-                $path_comparison = strcmp($entry_fresh_index["path"], $entry_previous_local_index["path"]);
+                $path_comparison = compare_paths(
+                    $entry_fresh_index["path"],
+                    $entry_previous_local_index["path"]
+                );
             }
 
             $current_shape = null;
@@ -554,21 +615,15 @@ class PushPlan
             if ($path_comparison >= 0) {
                 $previous_local_index_shape = $this->entry_shape($entry_previous_local_index);
 
-                // Byte sorting can put a sibling such as `a-other` before
-                // `a/child`. Every retained non-empty directory has a later
-                // descendant, so adjacent previous-index entries can pass at
-                // most the top sibling range.
-                if ($this->deleted_directory_stack_entry !== null) {
+                while ($this->deleted_directory_stack_entry !== null) {
                     $descendant_prefix = $this->deleted_directory_stack_entry["path"] . "/";
-                    if (
-                        strpos($entry_previous_local_index["path"], $descendant_prefix) !== 0
-                        && strcmp($entry_previous_local_index["path"], $descendant_prefix) > 0
-                    ) {
-                        $deleted_directory_stack_top_byte_offset = $this->deleted_directory_stack_entry["previous_byte_offset"];
-                        $this->deleted_directory_stack_entry = $this->read_deleted_directory_stack_entry(
-                            $deleted_directory_stack_top_byte_offset
-                        );
+                    if (strpos($entry_previous_local_index["path"], $descendant_prefix) === 0) {
+                        break;
                     }
+                    $deleted_directory_stack_top_byte_offset = $this->deleted_directory_stack_entry["previous_byte_offset"];
+                    $this->deleted_directory_stack_entry = $this->read_deleted_directory_stack_entry(
+                        $deleted_directory_stack_top_byte_offset
+                    );
                 }
             }
 

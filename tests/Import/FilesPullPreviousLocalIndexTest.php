@@ -284,6 +284,59 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($diff['stdout']));
     }
 
+    public function testIncompatibleFilesPullDoesNotStartMaintainingAfterResume(): void
+    {
+        $this->completeEligiblePull();
+        $abort = $this->runFilesPull(['--abort']);
+        $this->assertSame(0, $abort['exit'], $abort['output']);
+        $addedPath = 'added-before-incompatible-resume.txt';
+        $this->writeRemoteOverrides([
+            'added_paths' => [$addedPath],
+        ]);
+        $blockedIndexOutput = $this->stateDirectory . '/.import-index.jsonl.new';
+        file_put_contents($blockedIndexOutput, '');
+        chmod($blockedIndexOutput, 0400);
+        if (is_writable($blockedIndexOutput)) {
+            $this->markTestSkipped('This runner cannot make the importer-index output unwritable.');
+        }
+        try {
+            $failed = $this->runFilesPull([
+                '--on-fs-root-nonempty=preserve-local',
+            ]);
+        } finally {
+            chmod($blockedIndexOutput, 0600);
+            unlink($blockedIndexOutput);
+        }
+
+        $this->assertSame(1, $failed['exit'], $failed['output']);
+        $this->assertSame(
+            'added remote contents',
+            file_get_contents($this->localTree . '/' . $addedPath)
+        );
+        $this->assertFileExists(
+            $this->stateDirectory . '/.import-index-updates.wal'
+        );
+        $previousLocalIndex =
+            $this->pushStateDirectory() . '/previous_local_index.jsonl';
+        $this->assertFileDoesNotExist($previousLocalIndex);
+
+        $resumed = $this->runFilesPull([
+            '--on-fs-root-nonempty=error',
+        ]);
+
+        $this->assertSame(0, $resumed['exit'], $resumed['output']);
+        $this->assertFileDoesNotExist(
+            $this->stateDirectory . '/.import-index-updates.wal'
+        );
+        $this->assertFileDoesNotExist($previousLocalIndex);
+        $diff = $this->runFilesDiff();
+        $this->assertSame(1, $diff['exit'], $diff['output']);
+        $this->assertStringContainsString(
+            'fresh completed files-pull',
+            $diff['output']
+        );
+    }
+
     public function testInterruptedPullKeepsTheWALMarkerUntilResume(): void
     {
         $this->completeEligiblePull();

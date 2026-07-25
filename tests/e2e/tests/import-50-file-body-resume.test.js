@@ -134,6 +134,15 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
             `Expected a partial file (0 < size < ${fileSize}), got ${partialSize}`);
     });
 
+    it('state records current_file and current_file_bytes for resume', () => {
+        const stateFile = join(tempDir, '.import-state.json');
+        assert.ok(existsSync(stateFile), 'Expected import state file to exist');
+        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        assert.ok(state.current_file, 'Expected state.current_file to be set after a mid-file crash');
+        assert.ok(typeof state.current_file_bytes === 'number' && state.current_file_bytes > 0,
+            `Expected state.current_file_bytes > 0, got ${state.current_file_bytes}`);
+    });
+
     it('resume completes after removing the hook', () => {
         removeTestHooks(site);
 

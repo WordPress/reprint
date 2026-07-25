@@ -184,6 +184,32 @@ function normalize_path(string $path): string
 }
 
 /**
+ * Compares paths in the component order emitted by depth-first traversal.
+ *
+ * @param string $left_path  First path.
+ * @param string $right_path Second path.
+ * @return int A value below, equal to, or above zero.
+ */
+function compare_paths(string $left_path, string $right_path): int
+{
+    return strcmp(
+        path_sort_key($left_path),
+        path_sort_key($right_path)
+    );
+}
+
+/**
+ * Returns a strcmp-compatible key for depth-first path order.
+ *
+ * @param string $path Filesystem path.
+ * @return string Sort key.
+ */
+function path_sort_key(string $path): string
+{
+    return str_replace("/", "\0", $path);
+}
+
+/**
  * Normalizes document-root-relative excluded paths.
  *
  * Rejects non-string, empty, absolute, NUL-containing, backslash-containing,

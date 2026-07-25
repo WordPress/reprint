@@ -324,6 +324,10 @@ class CurlTimeoutRecoveryTest extends TestCase
             "fetch",
         ));
 
+        // The timeout leaves half of the next 256-byte part on disk after its
+        // 512-byte cursor was advertised. Both saved boundaries must remain at
+        // the previous completed part so resume truncates the extra 128 bytes
+        // before replaying that part instead of skipping unconfirmed bytes.
         $state = $this->readState();
         $this->assertSame(
             256,

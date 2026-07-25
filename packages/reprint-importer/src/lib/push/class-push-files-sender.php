@@ -1,5 +1,7 @@
 <?php
 
+use function Reprint\Importer\merge_previous_local_index_updates;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Sender failures are CLI/API values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
@@ -7,27 +9,30 @@
 /**
  * Drives one local-files push through bounded planning and streaming requests.
  *
- * PushFilesSender owns the only caller-visible lifecycle. It holds the lock,
- * creates and removes the target push session, drives its internal PushPlan,
- * streams the selected paths, commits the push, and saves the completed fresh
- * local index as the pair's previous local index. The target owns the
+ * PushFilesSender owns the only caller-visible push lifecycle. Its caller holds
+ * the Reprint process lock while the sender creates and removes the target push
+ * session, drives its internal PushPlan, streams the selected paths, commits the
+ * push, and advances the pair's previous local index with the committed paths.
+ * An initial full push publishes its fresh local index. The target owns the
  * upload cursor for every path and for the deletion list. Durable sender state
  * retains the top-level phase, the selected path-list cursor, and learned
  * request limits and the PushPlan cursor needed after a process restart.
  *
  * ## Usage
  *
- *  1. Start a new sender with `start()`, or continue an unfinished sender with
- *     `resume()`. Both methods acquire the lifecycle lock.
+ *  1. Acquire the Reprint process lock, then start a new sender with `start()`
+ *     or continue an unfinished sender with `resume()`.
  *  2. Call `next_step()` while the current process has enough time and memory
  *     for another step.
- *  3. Call `close()` to release the lifecycle lock, even when more work remains.
+ *  3. Call `close()` and release the Reprint process lock, even when more work
+ *     remains.
  *
  * Example:
  *
+ *     $process_lock = new ReprintProcessLock($state_directory);
  *     $sender = $first_run
- *         ? PushFilesSender::start($options)
- *         : PushFilesSender::resume($options);
+ *         ? PushFilesSender::start($options, $process_lock)
+ *         : PushFilesSender::resume($options, $process_lock);
  *     try {
  *         while ($has_time_remaining() && $has_memory_available()) {
  *             if (!$sender->next_step()) {
@@ -40,27 +45,34 @@
  *             $sender->cancel();
  *         }
  *         $sender->close();
+ *         $process_lock->close();
  *     }
  *
  * The caller may cancel whenever next_step() returns true. cancel() abandons an
  * open multipart request and returns the in-memory sender to its preceding
- * durable boundary. close() only releases resources and the lock; it never
- * finishes an open request. If a process stops without closing, the next
+ * durable boundary. close() only releases sender resources; it never finishes
+ * an open request or releases the caller's process lock. If a process stops
+ * without closing, the next
  * process starts from the preceding durable boundary and reads
  * receiver-confirmed work before sending more data.
  *
  * A new sender calls `push_create` to learn target-owned exclusions before
- * starting PushPlan. The plan builds the fresh local index and diffs it against
- * the pair's previous local index, one bounded step at a time. That index is
- * saved by the previous successful push and also read by files-diff. After planning
+ * starting PushPlan. The pair's previous local index is shared with the pull
+ * side: a compatible file-only pull publishes it too, and files-diff reads it.
+ * Because a pull may replace that file between sender processes, the
+ * `starting_plan` step copies the current previous local index into
+ * `plan/previous_local_index.jsonl` while the caller holds the Reprint process
+ * lock. The plan then diffs the fresh local index against that immutable
+ * snapshot, one bounded step at a time. After planning
  * completes, local files, symlinks, and empty directories stream through
  * multipart requests. The raw deletion list follows, and repeated `push_commit`
  * calls let the target install the work in bounded steps. A confirmed commit
- * enters another phase which saves the fresh local index as the pair's
- * previous local index through a swap file. Index completion, plan completion,
- * local-index saving, and plan discard each have a separate durable phase. A
- * stopped process therefore repeats only an idempotent boundary action rather
- * than a group of unrelated transitions.
+ * enters another phase which merges those operations into the latest previous
+ * local index through a swap file. With no prior index, it publishes the
+ * complete fresh local index. Index completion, plan completion,
+ * local-index publication, and plan discard each have a separate durable
+ * phase. A stopped process therefore repeats only an idempotent boundary
+ * action rather than a group of unrelated transitions.
  *
  * sender.json owns the top-level phase and the cursor returned by
  * PushPlan. PushFilesSender stores that cursor after every completed planning
@@ -99,15 +111,17 @@
  * the current path phase ends. An open sender retains that request, its
  * path-list handles, and its current local file handle between steps.
  *
- * Saving a complete local index after commit is the deliberate exception to
- * bounded steps.
+ * Copying the previous local index while starting a plan and publishing the
+ * committed paths after commit are the deliberate exceptions to bounded steps.
  * A representative index entry is about 150 bytes, so one million paths produce
  * roughly 150 MB. Even a 10 MiB/s drive copies that in about 15 seconds. Keeping
  * two copy cursors, two retained handles, and per-chunk state writes for larger
  * installations is not justified until measurements show otherwise. PHP's
- * copy() streams the bytes through a swap file, and rename() atomically moves
- * the completed copy into place. This accepts that a 1 MiB/s drive reaches 30
- * seconds at roughly 200,000 paths. A stopped copy is repeated by the next call.
+ * copy() and the merge stream bytes through swap files, and rename() atomically
+ * moves each completed index into place. This accepts that a 1 MiB/s drive
+ * reaches 30 seconds at roughly 200,000 paths. A stopped snapshot copy is
+ * refreshed while `starting_plan` remains durable; a stopped post-commit merge
+ * is repeated by the next call.
  *
  * The sender has no overall time limit. The caller decides whether to take
  * another step. Network operations apply connect, no-progress, and response
@@ -130,20 +144,20 @@ final class PushFilesSender
     /** @var string Sender-owned active plan directory. */
     private string $plan_directory;
 
-    /** @var string Pair's previous local index, saved after a successful push and read by files-diff. */
+    /** @var string Pair-owned index advanced by successful pulls and pushes. */
     private string $previous_local_index;
 
     /** @var string Path where the serialized sender state is stored. */
     private string $state_path;
 
-    /** @var string Advisory lock file for one open lifecycle. */
-    private string $lock_path;
-
     /** @var string Target exclusions stored once for the active push. */
     private string $excluded_paths_path;
 
-    /** @var resource|null Exclusive lock held from start() or resume() through close(). */
-    private $lock_handle = null;
+    /** @var ReprintProcessLock Reprint process lock owned by the caller. */
+    private ReprintProcessLock $process_lock;
+
+    /** @var bool Whether close() released this sender's resources. */
+    private bool $closed = false;
 
     /** @var resource|null Open local_paths_to_push list retained while pushing local paths. */
     private $local_paths_to_push_handle = null;
@@ -218,11 +232,10 @@ final class PushFilesSender
     private array $push_stream_client_options;
 
     /**
-     * Starts a new sender and acquires exclusive ownership of its push state.
+     * Starts a new sender while the caller holds the Reprint process lock.
      *
      * The returned sender begins in `creating`. An existing active state is
-     * rejected so unfinished work cannot be replaced. The returned sender
-     * retains its lock until close().
+     * rejected so unfinished work cannot be replaced.
      *
      * @param array $options {
      *     Push, push stream client, and local-file options.
@@ -239,17 +252,17 @@ final class PushFilesSender
      *     @type array                   $request_sizer_options    Optional PushRequestSizer bounds.
      * }
      * @phpstan-param array<string,mixed> $options
+     * @param ReprintProcessLock $process_lock Lock for the containing state directory.
      * @return self Open sender at its initial durable state.
      */
-    public static function start(array $options): self
+    public static function start(array $options, ReprintProcessLock $process_lock): self
     {
-        $sender = new self($options);
+        $sender = new self($options, $process_lock);
         if (!is_dir($sender->push_state_directory) && !@mkdir($sender->push_state_directory, 0755, true) && !is_dir($sender->push_state_directory)) {
             throw new RuntimeException(
                 'Failed to create the local push state directory: ' . $sender->push_state_directory
             );
         }
-        $sender->lock_handle = $sender->acquire_lock();
         try {
             clearstatcache(true, $sender->state_path);
             if (is_file($sender->state_path)) {
@@ -276,25 +289,25 @@ final class PushFilesSender
     }
 
     /**
-     * Resumes an unfinished sender while holding its exclusive lifecycle lock.
+     * Resumes an unfinished sender while the caller holds the process lock.
      *
-     * The active state is read once under the acquired lock. next_step() then
+     * The active state is read once under the lock. next_step() then
      * works from that in-memory state, storing each later durable boundary
      * without reopening sender.json.
      *
      * @param array<string,mixed> $options Options documented by start().
+     * @param ReprintProcessLock  $process_lock Lock for the containing state directory.
      * @return self Open sender at its last durable state.
      */
-    public static function resume(array $options): self
+    public static function resume(array $options, ReprintProcessLock $process_lock): self
     {
-        $sender = new self($options);
+        $sender = new self($options, $process_lock);
         if (!is_dir($sender->push_state_directory)) {
             throw new LogicException(
                 'Cannot resume a push files sender without unfinished active state: '
                 . $sender->state_path
             );
         }
-        $sender->lock_handle = $sender->acquire_lock();
         try {
             $state = $sender->load_state();
             if ($state === null) {
@@ -319,10 +332,11 @@ final class PushFilesSender
      * Configures the paths and push stream client options shared by start() and resume().
      *
      * @param array<string,mixed> $options Options documented by start().
+     * @param ReprintProcessLock  $process_lock Lock for the containing state directory.
      *
      * @throws InvalidArgumentException If local path or push stream client options are invalid.
      */
-    private function __construct(array $options)
+    private function __construct(array $options, ReprintProcessLock $process_lock)
     {
         $docroot = $options['docroot'] ?? null;
         $push_state_directory = $options['push_state_directory'] ?? null;
@@ -331,6 +345,9 @@ final class PushFilesSender
         }
         if (!is_string($push_state_directory) || $push_state_directory === '') {
             throw new InvalidArgumentException('PushFilesSender requires a push_state_directory.');
+        }
+        if (!$process_lock->is_held()) {
+            throw new InvalidArgumentException('PushFilesSender requires a held Reprint process lock.');
         }
         $request_sizer_options = $options['request_sizer_options'] ?? [];
         if (!is_array($request_sizer_options)) {
@@ -353,11 +370,11 @@ final class PushFilesSender
             throw new InvalidArgumentException('PushFilesSender requires a real docroot directory.');
         }
         $this->docroot = rtrim($canonical_docroot, '/');
+        $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->plan_directory = $this->push_state_directory . '/plan';
         $this->previous_local_index = $this->push_state_directory . '/previous_local_index.jsonl';
         $this->state_path = $this->push_state_directory . '/sender.json';
-        $this->lock_path = $this->push_state_directory . '/sender.lock';
         $this->excluded_paths_path = $this->push_state_directory . '/excluded_paths.json';
         $this->request_sizer_options = $request_sizer_options;
         $this->push_stream_client_options = $push_stream_client_options;
@@ -366,7 +383,7 @@ final class PushFilesSender
     /**
      * Performs the next step for the current phase.
      *
-     * start() or resume() has already acquired the lifecycle lock and loaded the
+     * start() or resume() has received the caller's process lock and loaded the
      * durable state, so this method only dispatches its current phase. Every
      * phase step is bounded except the deliberate completed-index copy described
      * in the class documentation. A caller stopping after this method returns
@@ -382,7 +399,7 @@ final class PushFilesSender
         if ($this->status !== 'continue') {
             return false;
         }
-        if (!is_resource($this->lock_handle)) {
+        if ($this->closed || !$this->process_lock->is_held()) {
             throw new LogicException('Cannot call next_step() after close().');
         }
 
@@ -497,7 +514,7 @@ final class PushFilesSender
     }
 
     /**
-     * Releases open resources and the lifecycle lock without finishing a request.
+     * Releases sender resources without finishing a request.
      *
      * The caller uses cancel() first when stopping with an open multipart
      * request. Durable state remains available to resume unless next_step()
@@ -516,10 +533,7 @@ final class PushFilesSender
         }
         $this->upload_request_stage = 'closed';
         $this->state_before_upload_request = null;
-        if (is_resource($this->lock_handle)) {
-            $this->release_lock($this->lock_handle);
-        }
-        $this->lock_handle = null;
+        $this->closed = true;
     }
 
     /**
@@ -576,13 +590,35 @@ final class PushFilesSender
 
     /**
      * Creates PushPlan and stores its initial cursor with the planning phase.
+     *
+     * A pull may replace the pair's previous local index between sender
+     * processes, so the plan never reads that file directly. The Reprint
+     * process lock prevents another command from replacing it while this step
+     * copies it into the plan. Repeating `starting_plan` refreshes a snapshot
+     * whose cursor was not stored.
      */
     private function start_plan(): void
     {
+        $plan_previous_local_index = $this->plan_directory . '/previous_local_index.jsonl';
+        clearstatcache(true, $this->previous_local_index);
+        if (is_file($this->previous_local_index)) {
+            $this->copy_through_swap_file(
+                $this->previous_local_index,
+                $plan_previous_local_index
+            );
+        } elseif (
+            is_file($plan_previous_local_index)
+            && !unlink($plan_previous_local_index)
+        ) {
+            throw new RuntimeException(
+                'Failed to remove the stale plan-owned previous local index: '
+                . $plan_previous_local_index . '.'
+            );
+        }
         $this->plan = PushPlan::start(
             $this->plan_directory,
             $this->docroot,
-            $this->previous_local_index,
+            $plan_previous_local_index,
             $this->excluded_paths_path
         );
         $this->state['push_plan_cursor'] = $this->plan->get_cursor();
@@ -1183,20 +1219,62 @@ final class PushFilesSender
     }
 
     /**
-     * Saves the committed fresh local index as the pair's previous local index.
+     * Publishes committed paths or the first complete fresh local index.
      *
-     * If the process stops before the next phase is stored, repeating the
-     * deliberate whole-index copy is safe and leaves readers on either the old
-     * or complete new index.
+     * If a pull advanced another path between sender processes, merging into
+     * the latest index preserves it. Repeating this merge after interruption is
+     * idempotent. If an incompatible pull removed a baseline which the plan
+     * used, leaving it absent is safer than publishing only the planned paths.
      */
     private function save_previous_local_index(): void
     {
-        $fresh_local_index = $this->plan->get_fresh_local_index_path();
+        $plan_previous_local_index =
+            $this->plan_directory . '/previous_local_index.jsonl';
+        if (
+            is_file($plan_previous_local_index)
+            && !is_file($this->previous_local_index)
+        ) {
+            $this->state['push_plan_cursor'] = null;
+            $this->state['phase'] = 'completing';
+            $this->store_state($this->state);
+            return;
+        }
         try {
-            $this->copy_through_swap_file(
-                $fresh_local_index,
-                $this->previous_local_index
+            if (
+                !is_file($plan_previous_local_index)
+                && !is_file($this->previous_local_index)
+            ) {
+                $this->copy_through_swap_file(
+                    $this->plan->get_fresh_local_index_path(),
+                    $this->previous_local_index
+                );
+                $this->state['push_plan_cursor'] = null;
+                $this->state['phase'] = 'completing';
+                $this->store_state($this->state);
+                return;
+            }
+            $updates_path =
+                $this->plan_directory . '/previous_local_index_updates.jsonl';
+            $this->write_committed_previous_local_index_updates($updates_path);
+            $updated_previous_local_index =
+                $this->previous_local_index . '.swap';
+            merge_previous_local_index_updates(
+                $this->previous_local_index,
+                $updates_path,
+                $updated_previous_local_index,
+                $this->plan_directory
             );
+            if (
+                !@rename(
+                    $updated_previous_local_index,
+                    $this->previous_local_index
+                )
+            ) {
+                throw new RuntimeException(
+                    'Failed to publish the updated previous local index: '
+                    . $this->previous_local_index . '.'
+                );
+            }
         } catch (RuntimeException $exception) {
             $this->fail('local_io_error', $exception->getMessage());
             return;
@@ -1204,6 +1282,114 @@ final class PushFilesSender
         $this->state['push_plan_cursor'] = null;
         $this->state['phase'] = 'completing';
         $this->store_state($this->state);
+    }
+
+    /**
+     * Writes F/D updates for committed paths.
+     *
+     * Deletions precede F entries so a same-path replacement retains the
+     * subtree removal while ending with the planned type, size, and ctime.
+     * Directory ctime and size do not select push work, so structural ancestor
+     * entries use zero values and the merger derives their empty state.
+     */
+    private function write_committed_previous_local_index_updates(
+        string $updates_path
+    ): void {
+        $updates_handle = fopen($updates_path, 'wb');
+        if (!is_resource($updates_handle)) {
+            throw new RuntimeException(
+                'Failed to open the previous-local-index updates.'
+            );
+        }
+        try {
+            $position = 0;
+            $write_update = static function (array $update) use (
+                $updates_handle,
+                &$position
+            ): void {
+                $update['position'] = $position;
+                ++$position;
+                $line = json_encode(
+                    $update,
+                    JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                ) . "\n";
+                if (fwrite($updates_handle, $line) !== strlen($line)) {
+                    throw new RuntimeException(
+                        'Failed to write a previous-local-index update.'
+                    );
+                }
+            };
+            $write_ancestor_updates = static function (
+                string $local_path
+            ) use ($write_update): void {
+                while (true) {
+                    $separator = strrpos($local_path, '/');
+                    if ($separator === false) {
+                        return;
+                    }
+                    $local_path = substr($local_path, 0, $separator);
+                    $write_update([
+                        'op' => 'F',
+                        'path' => base64_encode($local_path),
+                        'ctime' => 0,
+                        'size' => 0,
+                        'type' => 'dir',
+                        'replace_subtree' => false,
+                    ]);
+                }
+            };
+
+            foreach (
+                $this->plan->read_planned_local_paths_to_delete()
+                as $local_path_to_delete
+            ) {
+                $write_update([
+                    'op' => 'D',
+                    'path' => base64_encode($local_path_to_delete),
+                    'replace_subtree' => true,
+                ]);
+            }
+
+            $index_type_by_local_path_type = [
+                'file' => 'file',
+                'directory' => 'dir',
+                'symlink' => 'link',
+            ];
+            foreach (
+                $this->plan->read_planned_local_paths_to_push()
+                as $local_path_to_push
+            ) {
+                $local_path = base64_decode(
+                    $local_path_to_push['path'],
+                    true
+                );
+                if ($local_path === false) {
+                    throw new RuntimeException(
+                        'Failed to decode a path in the local paths-to-push file.'
+                    );
+                }
+                $write_update([
+                    'op' => 'F',
+                    'path' => $local_path_to_push['path'],
+                    'ctime' => $local_path_to_push['ctime'],
+                    'size' => $local_path_to_push['size'],
+                    'type' => $index_type_by_local_path_type[
+                        $local_path_to_push['type']
+                    ],
+                    'replace_subtree' =>
+                        $local_path_to_push['type'] !== 'directory',
+                ]);
+                $write_ancestor_updates($local_path);
+            }
+
+            if (!fflush($updates_handle)) {
+                throw new RuntimeException(
+                    'Failed to flush the previous-local-index updates.'
+                );
+            }
+        } finally {
+            fclose($updates_handle);
+        }
     }
 
     /**
@@ -1571,38 +1757,6 @@ final class PushFilesSender
         if (is_file($this->state_path) && !unlink($this->state_path)) {
             throw new RuntimeException('Failed to remove active state: ' . $this->state_path);
         }
-    }
-
-    /**
-     * Acquires non-blocking exclusive ownership of one lifecycle.
-     *
-     * @return resource Open locked handle retained until close().
-     */
-    private function acquire_lock()
-    {
-        $lock_handle = fopen($this->lock_path, 'c+');
-        if (!is_resource($lock_handle)) {
-            throw new RuntimeException('Failed to open the lifecycle lock: ' . $this->lock_path);
-        }
-        if (!flock($lock_handle, LOCK_EX | LOCK_NB)) {
-            fclose($lock_handle);
-            throw new RuntimeException(
-                'Cannot start or resume this push files sender while another process holds its lock: '
-                . $this->lock_path
-            );
-        }
-        return $lock_handle;
-    }
-
-    /**
-     * Releases and closes a lock returned by acquire_lock().
-     *
-     * @param resource $lock_handle Open locked handle.
-     */
-    private function release_lock($lock_handle): void
-    {
-        flock($lock_handle, LOCK_UN);
-        fclose($lock_handle);
     }
 
     /**

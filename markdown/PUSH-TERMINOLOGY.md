@@ -84,6 +84,32 @@ failure key is `non_recoverable_commit_failure`.
 These JSON records are unversioned while their schemas are still under
 development. There are no compatibility aliases or migration paths.
 
+## Local Reprint process lock
+
+Every local Reprint command workflow runs under the **Reprint process lock** at
+`<state-dir>/.reprint.lock`. Use `.reprint.lock` and `$process_lock`. The lock
+is non-blocking and state-directory-wide: pull, push, diff, and other local
+Reprint processes cannot run concurrently against the same state directory,
+even when their target or local-tree pairs differ.
+
+The production CLI acquires the Reprint process lock before it prepares pair
+context, constructs `ImportClient`, or writes the command audit entry. It
+passes the open lock to `ImportClient::run()` and releases it after the command.
+A direct `ImportClient::run()` call acquires the lock when its caller supplies
+none. `PushFilesSender::start()` and `PushFilesSender::resume()` receive that
+open lock from the caller; sender `close()` does not release it. This local
+lock is separate from the receiver's push-session and commit locks.
+
+## Pull index-update WAL
+
+Call the single pull-side write-ahead log the **index-update WAL**. It lives at
+`<state-dir>/.import-index-updates.wal`; use `.import-index-updates.wal`,
+`$index_update_wal_path`, and `$index_update_wal_handle`.
+Applied batch records are cleared, but the empty WAL remains as a marker until
+files-pull completes. A retained WAL is consumed only while resuming or
+aborting the interrupted files-pull, including through a high-level pull
+command; unrelated commands do not consume it.
+
 ## Local push state
 
 The local machine keeps planning and active state outside the receiver push
@@ -102,24 +128,51 @@ directory. Under `<state-dir>/push/<pair-key>/`, use these names verbatim:
 | Sender-owned excluded paths | `excluded_paths.json`, `$excluded_paths_path` |
 | Deleted-directory stack | `deleted_directories_stack.jsonl`, `$deleted_directories_stack` |
 | Active state | `sender.json`, `$state_path` |
-| Lifecycle lock file | `sender.lock`, `$lock_path` |
-| Files-diff lifecycle lock | `files-diff.lock` |
-| Open lifecycle lock | `$lock_handle` |
+| Plan-owned previous-local-index snapshot | `plan/previous_local_index.jsonl` |
+| Plan-owned committed previous-local-index updates | `plan/previous_local_index_updates.jsonl` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
-`sender.json`, `sender.lock`, `excluded_paths.json`, and
+`sender.json`, `excluded_paths.json`, and
 `previous_local_index.jsonl` live directly under the local push state
 directory. The sender creates `plan/` for one active plan. PushPlan copies the
 sender-owned exclusions to `plan/excluded_paths.json` when it starts.
 `fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
-`local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
+`local_paths_to_delete`, `deleted_directories_stack.jsonl`, and the
+post-commit `previous_local_index_updates.jsonl` live inside it.
 
-The **previous local index** describes the local tree as the pair's last
-completed push observed it. The sender saves it after a successful commit, and
-`files-diff` reads it. PushPlan diffs its fresh local index against the copy
-its caller supplies. `byte_offset_in_previous_local_index` is the position
-from which its current lookahead entry is read again after resume.
+The **previous local index** is the pair's shared local baseline for deciding
+later local push work. After a successful commit, the sender merges only the
+committed push and delete operations and their required ancestors into the
+latest baseline. This preserves paths which a compatible pull advanced between
+sender processes when they are outside the committed operations. If a later
+incompatible pull removed the baseline, the sender leaves it absent rather
+than publishing an incomplete index. A compatible full file-only pull seeds a
+missing baseline from the current import index before mutating the tree, then
+advances it after each durable WAL batch. A compatible partial `--only` pull
+advances an existing baseline but cannot seed one. `files-diff` reads the
+baseline, and PushPlan diffs its fresh local index against the plan-start
+snapshot its caller supplies.
+`byte_offset_in_previous_local_index` is the position from which its current
+lookahead entry is read again after resume.
+
+A file-only pull which cannot maintain the previous local index removes it
+before mutating the tree. A maintaining pull writes the current index-update
+batch to `.import-index-updates.wal`, publishes it into the import index, then
+publishes only the F/D records applied by that pull and their required
+ancestors into the previous local index. File records include the local path
+type, size, and ctime observed when applied; target deletions are included
+after the local path is absent. Once both indexes contain a batch, its WAL
+records are cleared but the empty WAL remains as the files-pull lifecycle
+marker. A files-pull resume replays any completed records; both publications
+are idempotent, and an unterminated final record is discarded. Aborting an
+unfinished pull invalidates the previous local index before removing the WAL
+because a path may have changed before its record was appended.
+
+Entries outside the paths applied by a partial pull remain unchanged, so
+pending local additions, edits, and deletions elsewhere stay pending.
+Directory emptiness comes from descendants retained by the merge. Paths
+outside the files-push scope are not admitted.
 
 The PushPlan cursor is stored in `sender.json`. It contains the plan
 directory, local tree root, previous local index, and current
@@ -134,12 +187,17 @@ paths. `sender.json` phases are `creating`, `starting_plan`,
 `saving_previous_local_index`, `completing`,
 `removing`, and `discarding_plan`. It stores the push session ID, selected
 path-list cursor, receiver part limit, and request-sizing state. The index diff
-completes before local paths are sent. The index copy after a successful commit
-has no separate copy cursor and is repeated after interruption. After the index
-is saved or the target confirms removal, the sender clears the PushPlan
-cursor, then removes the entire plan directory and its exclusions file. It
-does not ask PushPlan to manage terminal cleanup; PushPlan only closes its open
-handles.
+completes before local paths are sent. After a successful commit, the sender
+writes F/D updates from the committed path lists and their required ancestors,
+then merges them into the latest previous local index. If neither the plan
+snapshot nor the latest baseline exists, it publishes the complete fresh local
+index. Once a baseline exists, later changes under excluded paths remain
+pending. The plan-start baseline
+snapshot and post-commit merge have no separate cursors and are repeated after
+interruption. After the updates are published or the target confirms removal,
+the sender clears the PushPlan cursor, then removes the entire plan directory
+and its exclusions file. It does not ask PushPlan to manage terminal cleanup;
+PushPlan only closes its open handles.
 
 A request failure ends the current sender run. The active state remains in
 place so a later push command can resume from the last durable boundary. Only
@@ -157,13 +215,13 @@ them in memory for later steps in the same lifecycle. It does not copy them into
 `push.json` remains the receiver-owned push identity and policy, while
 `commit.json` and `$commit_state` remain the receiver commit checkpoint.
 
-`PushFilesSender::start()` and `PushFilesSender::resume()` acquire
-`sender.lock`; `PushFilesSender::close()` releases it. `next_step()` does not
-acquire or release the lock and does not reread `sender.json`. A sender retains
-one multipart request across steps. A caller stopping between steps calls
-`cancel()` to discard that request and return to the preceding durable
-boundary, then calls `close()` to release resources and the lock. `close()`
-never finishes an open request. In `pushing_paths` or
+`PushFilesSender::start()` and `PushFilesSender::resume()` require the
+caller-owned Reprint process lock. `next_step()` does not acquire or release
+the lock and does not reread `sender.json`. A sender retains one multipart
+request across steps. A caller stopping between steps calls `cancel()` to
+discard that request and return to the preceding durable boundary, then calls
+`close()` to release sender resources. `close()` never finishes an open
+request. In `pushing_paths` or
 `pushing_deletes`, one step sends at most one multipart part. `next_step()`
 returns true while another step may be performed and false when `get_status()`
 reports `complete`, `restart`, or `failed`.
@@ -173,7 +231,13 @@ reports `complete`, `restart`, or `failed`.
 The local-only command is `files-diff`. Its `target URL`, `local tree`, `pair
 key`, and `local push state directory` have the same meanings and pair-key
 formula as `files-push`. It reads the pair's `previous_local_index.jsonl`,
-which a completed files-push publishes, and never changes it.
+advanced by committed files-push operations and compatible file-only pull
+batches, and never changes it. A compatible full file-only pull can establish
+a missing baseline. A compatible partial `--only` pull advances only an
+existing baseline and only the paths it applied, leaving pending changes
+elsewhere in the diff. The target URL is the exact exporter API URL used by the
+file-only pull, including the `site-export-api` query which `pull-files` adds
+to a bare site URL.
 
 Each JSONL change record has `command: "files-diff"`, an `action` of `push` or
 `delete`, and `path_b64`. A push record also has the local path `type`, `size`,
@@ -184,10 +248,11 @@ and metadata-only changes to non-empty directories select no operation. The
 final record has `status: "complete"`, `local_paths_to_push`, and
 `local_paths_to_delete`.
 
-files-diff persists nothing between runs. It runs one complete PushPlan under
-`files-diff.lock` in `files-diff-plan/`, streams both finished path lists from
-the beginning, and removes the plan directory before exiting. An interrupted
-report is not resumed; running the command again prints the complete report.
+files-diff persists nothing between runs. It runs one complete PushPlan in
+`files-diff-plan/` while its command holds the state-directory-wide Reprint
+process lock, streams both finished path lists from the beginning, and removes
+the plan directory before exiting. An interrupted report is not resumed;
+running the command again prints the complete report.
 
 ## Files-push CLI names
 
