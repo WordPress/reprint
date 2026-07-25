@@ -1,6 +1,9 @@
 <?php
 
 use function Reprint\Importer\merge_previous_local_index_updates;
+use function WordPress\Reprint\Exporter\assert_valid_document_root_relative_path;
+use function WordPress\Reprint\Exporter\compare_paths;
+use function WordPress\Reprint\Exporter\path_is_within_root;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Sender failures are CLI/API values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
@@ -13,10 +16,11 @@ use function Reprint\Importer\merge_previous_local_index_updates;
  * the Reprint process lock while the sender creates and removes the target push
  * session, drives its internal PushPlan, streams the selected paths, commits the
  * push, and advances the pair's previous local index with the committed paths.
- * An initial full push publishes its fresh local index. The target owns the
- * upload cursor for every path and for the deletion list. Durable sender state
- * retains the top-level phase, the selected path-list cursor, and learned
- * request limits and the PushPlan cursor needed after a process restart.
+ * An initial files-push without --only publishes its fresh local index; an
+ * initial selected push leaves the baseline absent. The target owns the upload
+ * cursor for every path and for the deletion list. Durable sender state retains
+ * the top-level phase, selected-path fingerprint, selected path-list cursor,
+ * learned request limits, and PushPlan cursor needed after a process restart.
  *
  * ## Usage
  *
@@ -68,11 +72,12 @@ use function Reprint\Importer\merge_previous_local_index_updates;
  * multipart requests. The raw deletion list follows, and repeated `push_commit`
  * calls let the target install the work in bounded steps. A confirmed commit
  * enters another phase which merges those operations into the latest previous
- * local index through a swap file. With no prior index, it publishes the
- * complete fresh local index. Index completion, plan completion,
- * local-index publication, and plan discard each have a separate durable
- * phase. A stopped process therefore repeats only an idempotent boundary
- * action rather than a group of unrelated transitions.
+ * local index through a swap file. With no prior index, files-push without
+ * --only publishes the complete fresh local index and a selected push leaves
+ * the baseline absent. Index completion, plan completion, local-index
+ * publication, and plan discard each have a separate durable phase. A stopped
+ * process therefore repeats only an idempotent boundary action rather than a
+ * group of unrelated transitions.
  *
  * sender.json owns the top-level phase and the cursor returned by
  * PushPlan. PushFilesSender stores that cursor after every completed planning
@@ -131,7 +136,7 @@ use function Reprint\Importer\merge_previous_local_index_updates;
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_previous_local_index'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_previous_local_index'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,selected_paths_fingerprint:string,local_paths_to_push_byte_offset:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
@@ -155,6 +160,12 @@ final class PushFilesSender
 
     /** @var ReprintProcessLock Reprint process lock owned by the caller. */
     private ReprintProcessLock $process_lock;
+
+    /** @var list<string> Canonical document-root-relative paths selected by the caller. */
+    private array $selected_paths;
+
+    /** @var string SHA-256 fingerprint of the canonical selected paths. */
+    private string $selected_paths_fingerprint;
 
     /** @var bool Whether close() released this sender's resources. */
     private bool $closed = false;
@@ -250,6 +261,7 @@ final class PushFilesSender
      *     @type int|float|string        $stall_timeout           No-upload-progress seconds. Default 60.
      *     @type int|float|string        $response_timeout        No-response-progress seconds. Default 300.
      *     @type array                   $request_sizer_options    Optional PushRequestSizer bounds.
+     *     @type list<string>            $selected_paths          Document-root-relative selected paths. Empty selects all paths.
      * }
      * @phpstan-param array<string,mixed> $options
      * @param ReprintProcessLock $process_lock Lock for the containing state directory.
@@ -276,6 +288,7 @@ final class PushFilesSender
                 'push_session_id' => bin2hex(random_bytes(16)),
                 'phase' => 'creating',
                 'push_plan_cursor' => null,
+                'selected_paths_fingerprint' => $sender->selected_paths_fingerprint,
                 'local_paths_to_push_byte_offset' => 0,
                 'max_part_bytes' => null,
                 'request_sizer_state' => $sender->push_stream_client->get_request_sizer_state(),
@@ -317,9 +330,21 @@ final class PushFilesSender
                 );
             }
             $sender->state = $state;
+            $selected_paths_fingerprint = $state['selected_paths_fingerprint'] ?? null;
+            if (
+                !is_string($selected_paths_fingerprint)
+                || $selected_paths_fingerprint !== $sender->selected_paths_fingerprint
+            ) {
+                throw new InvalidArgumentException(
+                    'Resume files-push with the same --only paths used to start this sender.'
+                );
+            }
             $sender->push_stream_client = $sender->create_push_stream_client($state);
             if ($state['push_plan_cursor'] !== null) {
-                $sender->plan = PushPlan::resume($state['push_plan_cursor']);
+                $sender->plan = PushPlan::resume(
+                    $state['push_plan_cursor'],
+                    $sender->selected_paths
+                );
             }
             return $sender;
         } catch (Throwable $throwable) {
@@ -353,6 +378,13 @@ final class PushFilesSender
         if (!is_array($request_sizer_options)) {
             throw new InvalidArgumentException('request_sizer_options must be an array.');
         }
+        $selected_paths = $options['selected_paths'] ?? [];
+        if (!is_array($selected_paths)) {
+            throw new InvalidArgumentException(
+                'PushFilesSender selected_paths must be an array; observed '
+                . gettype($selected_paths) . '.'
+            );
+        }
 
         $push_stream_client_options = [
             'base_url' => $options['base_url'] ?? null,
@@ -376,8 +408,53 @@ final class PushFilesSender
         $this->previous_local_index = $this->push_state_directory . '/previous_local_index.jsonl';
         $this->state_path = $this->push_state_directory . '/sender.json';
         $this->excluded_paths_path = $this->push_state_directory . '/excluded_paths.json';
+        $this->selected_paths = $this->normalize_selected_paths($selected_paths);
+        $this->selected_paths_fingerprint = hash(
+            'sha256',
+            implode("\0", $this->selected_paths)
+        );
         $this->request_sizer_options = $request_sizer_options;
         $this->push_stream_client_options = $push_stream_client_options;
+    }
+
+    /**
+     * Validates, sorts, deduplicates, and collapses selected paths.
+     *
+     * @param array<mixed> $selected_paths Selected paths supplied by a caller.
+     * @return list<string> Canonical selected paths in component order.
+     */
+    private function normalize_selected_paths(array $selected_paths): array
+    {
+        foreach ($selected_paths as $selected_path) {
+            assert_valid_document_root_relative_path(
+                $selected_path,
+                'A files-push --only path'
+            );
+        }
+
+        usort(
+            $selected_paths,
+            static function (string $first_path, string $second_path): int {
+                return compare_paths($first_path, $second_path);
+            }
+        );
+        $canonical_selected_paths = [];
+        foreach ($selected_paths as $selected_path) {
+            $canonical_selected_path = $canonical_selected_paths[
+                count($canonical_selected_paths) - 1
+            ] ?? null;
+            if (
+                $canonical_selected_path !== null
+                && path_is_within_root(
+                    $selected_path,
+                    $canonical_selected_path
+                )
+            ) {
+                continue;
+            }
+            $canonical_selected_paths[] = $selected_path;
+        }
+        return $canonical_selected_paths;
     }
 
     /**
@@ -619,7 +696,8 @@ final class PushFilesSender
             $this->plan_directory,
             $this->docroot,
             $plan_previous_local_index,
-            $this->excluded_paths_path
+            $this->excluded_paths_path,
+            $this->selected_paths
         );
         $this->state['push_plan_cursor'] = $this->plan->get_cursor();
         $this->state['phase'] = 'planning';
@@ -1244,10 +1322,12 @@ final class PushFilesSender
                 !is_file($plan_previous_local_index)
                 && !is_file($this->previous_local_index)
             ) {
-                $this->copy_through_swap_file(
-                    $this->plan->get_fresh_local_index_path(),
-                    $this->previous_local_index
-                );
+                if ($this->selected_paths === []) {
+                    $this->copy_through_swap_file(
+                        $this->plan->get_fresh_local_index_path(),
+                        $this->previous_local_index
+                    );
+                }
                 $this->state['push_plan_cursor'] = null;
                 $this->state['phase'] = 'completing';
                 $this->store_state($this->state);

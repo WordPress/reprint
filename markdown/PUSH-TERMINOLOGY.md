@@ -130,6 +130,9 @@ directory. Under `<state-dir>/push/<pair-key>/`, use these names verbatim:
 | Active state | `sender.json`, `$state_path` |
 | Plan-owned previous-local-index snapshot | `plan/previous_local_index.jsonl` |
 | Plan-owned committed previous-local-index updates | `plan/previous_local_index_updates.jsonl` |
+| Selected paths | `selected_paths`, `$selected_paths` |
+| Selected-path fingerprint | `selected_paths_fingerprint`, `$selected_paths_fingerprint` |
+| Blocked selected subtree path | `blocked_selected_subtree_path`, `$blocked_selected_subtree_path` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
@@ -147,12 +150,13 @@ committed push and delete operations and their required ancestors into the
 latest baseline. This preserves paths which a compatible pull advanced between
 sender processes when they are outside the committed operations. If a later
 incompatible pull removed the baseline, the sender leaves it absent rather
-than publishing an incomplete index. A compatible full file-only pull seeds a
-missing baseline from the current import index before mutating the tree, then
-advances it after each durable WAL batch. A compatible partial `--only` pull
-advances an existing baseline but cannot seed one. `files-diff` reads the
-baseline, and PushPlan diffs its fresh local index against the plan-start
-snapshot its caller supplies.
+than publishing an incomplete index. A selected push updates only its committed
+operations and cannot seed a missing baseline. A compatible full file-only pull
+seeds a missing baseline from the current import index before mutating the
+tree, then advances it after each durable WAL batch. A compatible partial
+`--only` pull advances an existing baseline but cannot seed one. `files-diff`
+reads the baseline, and PushPlan diffs its fresh local index against the
+plan-start snapshot its caller supplies.
 `byte_offset_in_previous_local_index` is the position from which its current
 lookahead entry is read again after resume.
 
@@ -174,25 +178,27 @@ pending local additions, edits, and deletions elsewhere stay pending.
 Directory emptiness comes from descendants retained by the merge. Paths
 outside the files-push scope are not admitted.
 
-The PushPlan cursor is stored in `sender.json`. It contains the plan
-directory, local tree root, previous local index, and current
-planning position. During `indexing`, that position contains the
-FileIndexProcessor cursor and the committed byte offset in
-`fresh_local_index.jsonl`. During `diffing`, it contains the index offsets,
-output offsets, and the active byte offset in
-`deleted_directories_stack.jsonl`. The stack file is append-only; each entry
-links to the preceding active directory. The exclusions have a maximum of 100
-paths. `sender.json` phases are `creating`, `starting_plan`,
+The PushPlan cursor is stored in `sender.json`. It contains the plan directory,
+local tree root, previous local index, positions of selected paths which contain
+at least one fresh index entry, and current planning position. During
+`indexing`, that position contains the FileIndexProcessor cursor and the
+committed byte offset in `fresh_local_index.jsonl`. During `diffing`, it
+contains the index offsets, output offsets, the active byte offset in
+`deleted_directories_stack.jsonl`, and any selected subtree blocked by a
+receiver exclusion. The stack file is append-only; each entry links to the
+preceding active directory. The exclusions have a maximum of 100 paths.
+`sender.json` phases are `creating`, `starting_plan`,
 `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
 `saving_previous_local_index`, `completing`,
 `removing`, and `discarding_plan`. It stores the push session ID, selected
-path-list cursor, receiver part limit, and request-sizing state. The index diff
-completes before local paths are sent. After a successful commit, the sender
-writes F/D updates from the committed path lists and their required ancestors,
-then merges them into the latest previous local index. If neither the plan
-snapshot nor the latest baseline exists, it publishes the complete fresh local
-index. Once a baseline exists, later changes under excluded paths remain
-pending. The plan-start baseline
+path-list cursor, selected-path fingerprint, receiver part limit, and
+request-sizing state. The index diff completes before local paths are sent.
+After a successful commit, the sender writes F/D updates from the committed
+path lists and their required ancestors, then merges them into the latest
+previous local index. If neither the plan snapshot nor the latest baseline
+exists, files-push without `--only` publishes the complete fresh local index
+and a selected push leaves the baseline absent. Once a baseline exists, later
+changes under excluded paths remain pending. The plan-start baseline
 snapshot and post-commit merge have no separate cursors and are repeated after
 interruption. After the updates are published or the target confirms removal,
 the sender clears the PushPlan cursor, then removes the entire plan directory
@@ -273,6 +279,13 @@ receiver-confirmed upload positions remain receiver-owned; they are not a
 files-push cursor and are not copied into `.import-state.json` or
 `.import-status.json`.
 
+Each repeatable `--only=PATH` selects one document-root-relative path and its
+descendants. Sorting, deduplication, and removing descendants covered by a
+selected ancestor gives equivalent selections one fingerprint. A resumed
+sender requires that same fingerprint. A selected subtree stays pending when
+installing it would require replacing an old scalar ancestor protected by a
+receiver exclusion.
+
 Files-push lifecycle lines use these command-first names verbatim: `START
 files-push`, `RESUME files-push`, `PHASE files-push`, `PARTIAL files-push`,
 `INTERRUPTED files-push`, `COMPLETE files-push`, `RESTART files-push`, `FAILED
@@ -292,6 +305,8 @@ Use these names verbatim inside `PushFilesSender`:
 | --- | --- |
 | Local path to push | `LocalPathToPush`, `$local_path_to_push`, `read_next_local_path_to_push()` |
 | Local path to delete | `LocalPathToDelete`, `$local_path_to_delete`, `read_next_local_path_to_delete()` |
+| Selected paths | `$selected_paths`, `normalize_selected_paths()` |
+| Selected-path fingerprint | `$selected_paths_fingerprint` |
 | Push stream client | `$push_stream_client`, `create_push_stream_client()` |
 | Push stream client options | `$push_stream_client_options` |
 | Request sizer options | `request_sizer_options`, `$request_sizer_options` |

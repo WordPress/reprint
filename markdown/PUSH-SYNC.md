@@ -90,11 +90,13 @@ tree**:
 The previous local index is the pair's shared local baseline for deciding later
 local push work. A committed files-push merges only its committed push and
 delete operations and their required ancestors into the latest baseline,
-preserving other paths advanced by a compatible pull between sender processes. A
-compatible full file-only pull — standalone `files-pull` or the terminal file
-stage of `pull-files` — seeds a missing baseline from the current import index
-before mutating the tree, then advances it after every durable pull batch. A
-compatible partial
+preserving other paths advanced by a compatible pull between sender processes.
+Caller-selected push paths restrict those committed operations. An initial
+selected push leaves a missing baseline absent, because the unselected tree is
+not a complete starting point. A compatible full file-only pull — standalone
+`files-pull` or the terminal file stage of `pull-files` — seeds a missing
+baseline from the current import index before mutating the tree, then advances
+it after every durable pull batch. A compatible partial
 `--only` pull advances an existing baseline but cannot seed one because the
 unselected tree is not a complete starting point. The index records the local
 path type, size, and ctime; remote values cannot stand in because ctime belongs
@@ -171,13 +173,18 @@ A push plan is an internal part of the sender lifecycle:
    writes files, symlinks, and empty directories with their planned type, size,
    and ctime to
    `plan/local_paths_to_push.jsonl`, and writes raw NUL-delimited paths to
-   `plan/local_paths_to_delete`.
+   `plan/local_paths_to_delete`. Caller-selected paths restrict both lists to
+   those paths and their descendants. A selected fresh descendant also selects
+   deletion of an old scalar ancestor which must become its directory. If a
+   receiver exclusion prevents that transition, the dependent selected subtree
+   stays pending.
 5. The sender closes the plan before consuming those two files.
 6. After the receiver commits successfully, the sender writes F/D updates for
    the committed push and delete lists, then merges them into the latest
    `previous_local_index.jsonl` through a swap file. If neither the plan
-   snapshot nor the latest baseline exists, it publishes the complete fresh
-   local index. It then removes
+   snapshot nor the latest baseline exists, files-push without `--only`
+   publishes the complete fresh local index; a selected push leaves the
+   baseline absent. It then removes
    the complete `plan/` directory and the sender-owned exclusions file. After
    the target confirms removal of a discarded push session, the sender removes
    the same files without changing the pair's previous local index.
@@ -197,20 +204,23 @@ stopped snapshot or merge is repeated by the next sender run. Keeping another
 cursor and retained handle for these full-index operations is not justified
 until measurements from materially larger installations show that it matters.
 
-The cursor contains the plan directory, local tree root, previous local
-index, and current planning position. During indexing, that
-position contains the `FileIndexProcessor` cursor and committed fresh-index byte
-offset. During diffing, each step flushes only the path list or append-only
-deleted-directory stack changed by that step before updating the two index
-offsets, two output byte offsets, and active stack byte offset. Each stack entry
-links to the preceding active directory, so continuation reads only the top
-entry. A later process passes the stored cursor to `PushPlan::resume()`. The
-plan uses its private exclusions copy, discards bytes beyond the stored output
-offsets, and continues from the retained internal phase.
+The cursor contains the plan directory, local tree root, previous local index,
+positions of selected paths which contain at least one fresh index entry, and
+current planning position. During indexing, that position contains the
+`FileIndexProcessor` cursor and committed fresh-index byte offset. During
+diffing, each step flushes only the path list or append-only deleted-directory
+stack changed by that step before updating the two index offsets, two output
+byte offsets, active stack byte offset, and any selected subtree blocked by a
+receiver exclusion. Each stack entry links to the preceding active directory,
+so continuation reads only the top entry. A later process passes the stored
+cursor to `PushPlan::resume()`. The plan uses its private exclusions copy,
+discards bytes beyond the stored output offsets, and continues from the
+retained internal phase.
 
-The first push to a site has no previous local index or previously
-pushed rows. Every current file, symlink, and empty directory is selected, and
-no local deletion can be detected yet.
+The first push to a site has no previous local index or previously pushed rows.
+Files-push without `--only` selects every current file, symlink, and empty
+directory. A selected push sends only its selected operations and leaves the
+baseline absent. No local deletion can be detected yet.
 
 Push is intentionally local-wins. If a developer edited the remote site
 outside Reprint, a later push of the same path or row overwrites that remote
@@ -382,7 +392,7 @@ upload begins until both indexes have been consumed and the two path lists are
 stable.
 
 `sender.json` contains no copied receiver cursor. It stores the push session
-and phase, the PushPlan cursor, the next byte offset in
+and phase, the selected-path fingerprint, the PushPlan cursor, the next byte offset in
 `local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
 sizing state. Its phases are `creating`, `starting_plan`, `planning`,
 `pushing_paths`, `pushing_deletes`, `committing`,
@@ -432,11 +442,12 @@ baseline with the plan's older full-tree snapshot. A compatible pull completed
 between sender processes therefore preserves paths outside the committed
 operations. If a later incompatible pull removed the baseline, the sender
 leaves it absent rather than publishing an incomplete index. If no baseline
-existed at plan start and none exists at publication, the sender also records
-the complete fresh local index, including the initial state under target
-exclusions. Once a baseline exists, later changes under excluded paths remain
-pending instead of being marked synchronized. The sender then removes the
-entire plan directory before deleting active sender state.
+existed at plan start and none exists at publication, files-push without
+`--only` records the complete fresh local index, including the initial state
+under target exclusions. A selected sender leaves it absent. Once a baseline
+exists, later changes under excluded paths remain pending instead of being
+marked synchronized. The sender then removes the entire plan directory before
+deleting active sender state.
 
 Each local-path upload or deletion step sends at most one multipart part. A file
 part contains one bounded chunk, a deletion-list part contains one complete
@@ -471,6 +482,12 @@ the operator passes `--force-http`. It does not run pull preflight, read or
 write `.import-state.json`, show a plan, ask for confirmation, transfer a
 database, retry a failed request, or start a replacement sender after a
 `restart` outcome.
+
+Repeating `--only=PATH` selects document-root-relative paths for one sender
+lifecycle. A selected path covers itself and its descendants. Sorting,
+deduplication, and removing descendants covered by an earlier selected ancestor
+give equivalent selections one fingerprint. Resuming with another selection is
+rejected before a request.
 
 The command derives one pair key without general URL normalization:
 
@@ -534,7 +551,8 @@ pipeline when it is run again. A compatible full file-only pull can establish a
 missing baseline. A compatible partial `--only` pull advances the baseline only
 when it already exists. Each durable WAL batch merges only the paths the pull
 applied, so local additions, edits, and deletions left elsewhere stay in the
-diff.
+diff. A completed files-push without `--only` can also establish a missing
+baseline; a selected files-push cannot.
 
 Output is JSONL. Each selected current file, symlink, or empty directory has
 `action: "push"`, `path_b64`, `type`, `size`, and `ctime`; its type is `file`,

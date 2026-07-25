@@ -209,6 +209,8 @@ function path_sort_key(string $path): string
     return str_replace("/", "\0", $path);
 }
 
+// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These validation exceptions are never rendered, and arbitrary path bytes are represented as base64.
+
 /**
  * Normalizes document-root-relative excluded paths.
  *
@@ -221,34 +223,11 @@ function path_sort_key(string $path): string
  */
 function normalize_excluded_paths(array $excluded_paths): array
 {
-    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These validation exceptions are never rendered, and arbitrary path bytes are represented as base64.
     $normalized_excluded_paths = [];
     foreach ($excluded_paths as $path) {
-        if (!is_string($path)) {
-            throw new InvalidArgumentException('Each excluded path must be a string; observed ' . gettype($path) . '.');
-        }
-        if ($path === '') {
-            throw new InvalidArgumentException('Excluded path must not be empty.');
-        }
-        if ($path[0] === '/') {
-            throw new InvalidArgumentException('Excluded path must be document-root-relative: ' . base64_encode($path) . '.');
-        }
-        if (strpos($path, "\0") !== false) {
-            throw new InvalidArgumentException('Excluded path must not contain a NUL byte: ' . base64_encode($path) . '.');
-        }
+        assert_valid_document_root_relative_path($path, 'Excluded path');
         if (strpos($path, '\\') !== false) {
             throw new InvalidArgumentException('Excluded path must not contain a backslash: ' . base64_encode($path) . '.');
-        }
-        foreach (explode('/', $path) as $segment) {
-            if ($segment === '') {
-                throw new InvalidArgumentException('Excluded path must not contain an empty component: ' . base64_encode($path) . '.');
-            }
-            if ($segment === '.') {
-                throw new InvalidArgumentException('Excluded path must not contain a dot component: ' . base64_encode($path) . '.');
-            }
-            if ($segment === '..') {
-                throw new InvalidArgumentException('Excluded path must not contain a parent component: ' . base64_encode($path) . '.');
-            }
         }
         $normalized_excluded_paths[] = $path;
     }
@@ -262,6 +241,57 @@ function normalize_excluded_paths(array $excluded_paths): array
         );
     }
     return $normalized_excluded_paths;
+}
+
+/**
+ * Validates one document-root-relative path.
+ *
+ * @param mixed  $path  Path supplied by a caller.
+ * @param string $label Description used in validation errors.
+ * @phpstan-assert string $path
+ */
+function assert_valid_document_root_relative_path($path, string $label): void
+{
+    if (!is_string($path)) {
+        throw new InvalidArgumentException(
+            $label . ' must be a string; observed ' . gettype($path) . '.'
+        );
+    }
+    if ($path === '') {
+        throw new InvalidArgumentException($label . ' must not be empty.');
+    }
+    if ($path[0] === '/') {
+        throw new InvalidArgumentException(
+            $label . ' must be document-root-relative: '
+            . base64_encode($path) . '.'
+        );
+    }
+    if (strpos($path, "\0") !== false) {
+        throw new InvalidArgumentException(
+            $label . ' must not contain a NUL byte: '
+            . base64_encode($path) . '.'
+        );
+    }
+    foreach (explode('/', $path) as $path_component) {
+        if ($path_component === '') {
+            throw new InvalidArgumentException(
+                $label . ' must not contain an empty component: '
+                . base64_encode($path) . '.'
+            );
+        }
+        if ($path_component === '.') {
+            throw new InvalidArgumentException(
+                $label . ' must not contain a dot component: '
+                . base64_encode($path) . '.'
+            );
+        }
+        if ($path_component === '..') {
+            throw new InvalidArgumentException(
+                $label . ' must not contain a parent component: '
+                . base64_encode($path) . '.'
+            );
+        }
+    }
 }
 // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
