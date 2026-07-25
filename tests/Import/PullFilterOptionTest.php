@@ -90,7 +90,7 @@ class PullFilterFakeClient extends \ImportClient
         $this->save_import_state();
     }
 
-    public function run_files_sync(): void
+    public function run_files_sync(bool $maintain_previous_local_index = false): void
     {
         $state = $this->get_import_state();
         if (

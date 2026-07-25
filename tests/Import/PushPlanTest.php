@@ -307,7 +307,7 @@ final class PushPlanTest extends TestCase
         $this->assertSame("a\0b.txt\0", file_get_contents($this->planPath('local_paths_to_delete')));
     }
 
-    public function testSeenDeletedDirectorySurvivesAnInterleavedSiblingCursor(): void
+    public function testSeenDeletedDirectorySurvivesResumeBeforeTheNextSibling(): void
     {
         $this->savePreviousLocalIndex($this->writeIndex([
             'a' => [1, 0, 'dir', false],
@@ -315,7 +315,6 @@ final class PushPlanTest extends TestCase
         ]));
         $entries = [];
         for ($index = 0; $index < 3; ++$index) {
-            // `-` sorts before `/`, placing these siblings between a and a/child.txt.
             $entries[sprintf('a-%04d.txt', $index)] = [2, 1, 'file'];
         }
         $current = $this->writeIndex($entries);
@@ -331,7 +330,7 @@ final class PushPlanTest extends TestCase
         $this->assertCount(3, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
     }
 
-    public function testReplacementRootSurvivesLexicallyInterleavedSiblingPaths(): void
+    public function testReplacementRootSurvivesSiblingPaths(): void
     {
         $this->savePreviousLocalIndex($this->writeIndex([
             'a' => [1, 0, 'dir', false],
@@ -339,7 +338,6 @@ final class PushPlanTest extends TestCase
         ]));
         $current = $this->writeIndex([
             'a' => [2, 1, 'file'],
-            // `-` sorts before `/`, so this sibling appears before a/child.txt.
             'a-other' => [2, 1, 'file'],
         ]);
 
@@ -349,6 +347,27 @@ final class PushPlanTest extends TestCase
         $this->assertPathCounts(2, 1);
         $this->assertSame(['a', 'a-other'], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
         $this->assertSame("a\0", file_get_contents($this->planPath('local_paths_to_delete')));
+    }
+
+    public function testDescendantChangesDoNotReplanAnUnchangedSibling(): void
+    {
+        $this->savePreviousLocalIndex($this->writeIndex([
+            'a' => [1, 0, 'dir', false],
+            'a/child.txt' => [1, 1, 'file'],
+            'a-other' => [1, 1, 'file'],
+        ]));
+        $current = $this->writeIndex([
+            'a' => [2, 0, 'dir', false],
+            'a/new-child.txt' => [2, 1, 'file'],
+            'a-other' => [1, 1, 'file'],
+        ]);
+
+        $plan = $this->startPlan($current);
+        $this->planToCompletion($plan);
+
+        $this->assertPathCounts(1, 1);
+        $this->assertSame(['a/new-child.txt'], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
+        $this->assertSame("a/child.txt\0", file_get_contents($this->planPath('local_paths_to_delete')));
     }
 
     public function testNewChangedDeletedAndUnchangedPathsArePlannedTogether(): void
@@ -889,7 +908,13 @@ final class PushPlanTest extends TestCase
      */
     private function writeIndex(array $entries): string
     {
-        uksort($entries, 'strcmp');
+        uksort(
+            $entries,
+            static fn(string $left, string $right): int => strcmp(
+                str_replace('/', "\0", $left),
+                str_replace('/', "\0", $right)
+            )
+        );
         $lines = '';
         foreach ($entries as $path => $entry) {
             $lines .= $this->indexLine(

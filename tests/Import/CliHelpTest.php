@@ -63,6 +63,12 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('previous local index', $output);
         $this->assertStringContainsString('completed files-push', $output);
+        $this->assertStringContainsString('compatible file-only', $output);
+        $this->assertStringContainsString('files-pull or pull-files', $output);
+        $this->assertStringContainsString('maintains that index after each durable WAL batch', $output);
+        $this->assertStringContainsString('default path mapping', $output);
+        $this->assertStringContainsString('overwrite behavior', $output);
+        $this->assertStringContainsString('same files-pull with --abort', $output);
         $this->assertStringContainsString('push operation plan', $output);
         $this->assertStringContainsString('default-skipped paths', $output);
         $this->assertStringContainsString('No network calls', $output);

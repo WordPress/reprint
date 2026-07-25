@@ -155,6 +155,9 @@ PHP, var_export($requestsLog, true)));
     {
         $data = array(
             'ok' => true,
+            'runtime' => array(
+                'document_root' => '/var/www/html',
+            ),
             'database' => array(
                 'wp' => array(
                     'paths_urls' => array(

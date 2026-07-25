@@ -251,7 +251,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         ]);
 
         [$client, $reflection] = $this->prepareClient(
-            InterruptedAfterStreamedPartCloseClient::class,
+            InterruptedStreamedPartClient::class,
         );
 
         $downloadFilesFetch = $reflection->getMethod('download_file_fetch');
@@ -288,6 +288,49 @@ class CurlTimeoutRecoveryTest extends TestCase
             $savedCursorBytes,
             'A hard-crash checkpoint must not put the saved cursor behind the bytes retained on disk',
         );
+    }
+
+    public function testFileFetchTimeoutKeepsThePreviousPartBoundary()
+    {
+        $trackedPath = $this->fs_root . '/uploads/large.bin';
+        mkdir(dirname($trackedPath), 0755, true);
+        file_put_contents($trackedPath, str_repeat('a', 256));
+
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
+            "fetch" => [
+                "offset" => 0,
+                "next_offset" => 100,
+                "batch_file" => null,
+                "cursor" => self::fileCursorForBytes(256),
+            ],
+            "current_file" => $trackedPath,
+            "current_file_bytes" => 256,
+        ]);
+
+        [$client, $reflection] = $this->prepareClient(
+            InterruptedStreamedPartClient::class,
+        );
+        $downloadFilesFetch = $reflection->getMethod('download_file_fetch');
+
+        $this->assertFalse($downloadFilesFetch->invoke(
+            $client,
+            ["timeout_during_part" => true],
+            self::fileCursorForBytes(256),
+            "fetch",
+        ));
+
+        $state = $this->readState();
+        $this->assertSame(
+            256,
+            self::fileCursorBytes($state["fetch"]["cursor"] ?? null),
+        );
+        $this->assertSame(256, $state["current_file_bytes"] ?? null);
+        $this->assertSame(384, filesize($trackedPath));
     }
 
     // ---------------------------------------------------------------
@@ -626,11 +669,9 @@ class TimeoutTestClient extends \ImportClient
 }
 
 /**
- * Test double that simulates a process dying immediately after a streamed
- * file part-complete checkpoint. This is a hard crash, so download_file_fetch()
- * must not get a chance to do its normal final save.
+ * Test double that interrupts a streamed file part before or after its close.
  */
-class InterruptedAfterStreamedPartCloseClient extends \ImportClient
+class InterruptedStreamedPartClient extends \ImportClient
 {
     protected function fetch_streaming(
         string $url,
@@ -651,11 +692,17 @@ class InterruptedAfterStreamedPartCloseClient extends \ImportClient
             "x-last-chunk" => "0",
         ];
 
+        $timeout_during_part = !empty($post_data["timeout_during_part"]);
         ($context->on_chunk)([
             "headers" => $headers,
-            "body" => str_repeat('b', 256),
+            "body" => str_repeat('b', $timeout_during_part ? 128 : 256),
             "is_streaming_body" => true,
         ]);
+        if ($timeout_during_part) {
+            throw new \CurlTimeoutException(
+                "cURL error: Operation timed out while receiving a streamed file part"
+            );
+        }
         ($context->on_chunk)([
             "headers" => $headers,
             "body" => "",

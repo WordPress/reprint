@@ -4,10 +4,9 @@
  * Specifically guards the contract introduced by the "stream file parts
  * directly to disk" change: now that bytes hit the local file before a
  * multipart part finishes, a request cut mid-body leaves a partially-
- * written file on disk. The importer must resume that exact file —
- * not start over (truncation) and not append duplicates (overlap) —
- * and the server-side cursor must cooperate by skipping the bytes the
- * importer already has.
+ * written file on disk. The importer resumes from the last completed
+ * multipart part, replaying unconfirmed bytes without gaps or
+ * duplication.
  *
  * Setup: a 2 MiB random binary file. With --file-chunk-max=262144, the
  * file is sliced into eight chunks. A test_hook_before_file_chunk hook
@@ -133,15 +132,6 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
         const partialSize = statSync(localPath).size;
         assert.ok(partialSize > 0 && partialSize < fileSize,
             `Expected a partial file (0 < size < ${fileSize}), got ${partialSize}`);
-    });
-
-    it('state records current_file and current_file_bytes for resume', () => {
-        const stateFile = join(tempDir, '.import-state.json');
-        assert.ok(existsSync(stateFile), 'Expected import state file to exist');
-        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.ok(state.current_file, 'Expected state.current_file to be set after a mid-file crash');
-        assert.ok(typeof state.current_file_bytes === 'number' && state.current_file_bytes > 0,
-            `Expected state.current_file_bytes > 0, got ${state.current_file_bytes}`);
     });
 
     it('resume completes after removing the hook', () => {
