@@ -25,6 +25,9 @@ final class PushPlanTest extends TestCase
     /** @var array<string,array<string,mixed>> Last tree shape created by materializeLocalTree(). */
     private array $materializedIndexEntries = [];
 
+    /** @var list<string> Paths selected for the active plan. */
+    private array $selectedPaths = [];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -167,6 +170,138 @@ final class PushPlanTest extends TestCase
         $this->assertFalse($freshLocalIndexEntries['full']['empty']);
         $this->assertFalse($freshLocalIndexEntries['private']['empty']);
         $this->assertArrayNotHasKey('empty', $freshLocalIndexEntries['public.txt']);
+    }
+
+    public function testSelectedPathsFilterPushAndDeleteOperations(): void
+    {
+        $this->savePreviousLocalIndex($this->writeIndex([
+            'gone' => [1, 0, 'dir', false],
+            'gone/selected.txt' => [1, 3, 'file'],
+            'gone/sibling.txt' => [1, 3, 'file'],
+            'removed.txt' => [1, 3, 'file'],
+            'selected.txt' => [1, 3, 'file'],
+            'unchanged-for-now.txt' => [1, 3, 'file'],
+        ]));
+        $current = $this->writeIndex([
+            'chosen' => [2, 0, 'dir', false],
+            'chosen/new.txt' => [2, 3, 'file'],
+            'later.txt' => [2, 3, 'file'],
+            'selected.txt' => [2, 4, 'file'],
+            'unchanged-for-now.txt' => [2, 4, 'file'],
+        ]);
+
+        $plan = $this->startPlan(
+            $current,
+            [],
+            ['chosen', 'gone/selected.txt', 'selected.txt']
+        );
+        $this->planToCompletion($plan);
+
+        $this->assertSame(
+            ['chosen/new.txt', 'selected.txt'],
+            $this->listPaths($plan->get_local_paths_to_push_path())
+        );
+        $this->assertSame(
+            ['gone/selected.txt'],
+            $this->localPathsToDelete($plan->get_local_paths_to_delete_path())
+        );
+    }
+
+    public function testSelectedDescendantIncludesOnlyTheRequiredAncestorTransitionAfterResume(): void
+    {
+        $this->savePreviousLocalIndex($this->writeIndex([
+            'swap' => [1, 3, 'file'],
+        ]));
+        $current = $this->writeIndex([
+            'swap' => [2, 0, 'dir', false],
+            'swap/selected.txt' => [2, 3, 'file'],
+            'swap/unselected.txt' => [2, 3, 'file'],
+        ]);
+
+        $plan = $this->startPlan($current, [], ['swap/selected.txt']);
+        $this->assertSame(
+            [0],
+            $plan->get_cursor()['selected_path_positions_with_fresh_entries'] ?? null
+        );
+        $plan->close();
+        $resumedPlan = $this->resumePlan();
+        $this->planToCompletion($resumedPlan);
+
+        $this->assertSame(
+            ['swap/selected.txt'],
+            $this->listPaths($resumedPlan->get_local_paths_to_push_path())
+        );
+        $this->assertSame(
+            ['swap'],
+            $this->localPathsToDelete($resumedPlan->get_local_paths_to_delete_path())
+        );
+    }
+
+    public function testMissingSelectedDescendantDoesNotDeleteItsScalarAncestor(): void
+    {
+        $this->savePreviousLocalIndex($this->writeIndex([
+            'swap' => [1, 3, 'file'],
+        ]));
+        $current = $this->writeIndex([
+            'swap' => [2, 0, 'dir', false],
+            'swap/unselected.txt' => [2, 3, 'file'],
+        ]);
+
+        $plan = $this->startPlan($current, [], ['swap/missing.txt']);
+        $this->planToCompletion($plan);
+
+        $this->assertSame([], $this->listPaths($plan->get_local_paths_to_push_path()));
+        $this->assertSame([], $this->localPathsToDelete($plan->get_local_paths_to_delete_path()));
+    }
+
+    /**
+     * @dataProvider selectionsBlockedByAnExcludedAncestorTransition
+     * @param list<string> $selectedPaths
+     */
+    public function testExcludedAncestorTransitionLeavesItsSelectedSubtreePending(
+        array $selectedPaths
+    ): void {
+        $this->savePreviousLocalIndex($this->writeIndex([
+            'swap' => [1, 3, 'file'],
+        ]));
+        $current = $this->writeIndex([
+            'swap' => [2, 0, 'dir', false],
+            'swap/excluded.txt' => [2, 3, 'file'],
+            'swap/selected.txt' => [2, 3, 'file'],
+            'z-selected-too.txt' => [2, 3, 'file'],
+        ]);
+
+        $plan = $this->startPlan(
+            $current,
+            ['swap/excluded.txt'],
+            $selectedPaths
+        );
+        $this->assertTrue($this->nextPlanStep($plan));
+        $this->assertSame(
+            'swap',
+            $this->planCursor()['blocked_selected_subtree_path'] ?? null
+        );
+        $plan->close();
+        $resumedPlan = $this->resumePlan();
+        $this->planToCompletion($resumedPlan);
+
+        $this->assertSame(
+            ['z-selected-too.txt'],
+            $this->listPaths($resumedPlan->get_local_paths_to_push_path())
+        );
+        $this->assertSame(
+            [],
+            $this->localPathsToDelete($resumedPlan->get_local_paths_to_delete_path())
+        );
+    }
+
+    /** @return array<string,array{0:list<string>}> */
+    public static function selectionsBlockedByAnExcludedAncestorTransition(): array
+    {
+        return [
+            'selected descendant' => [['swap/selected.txt', 'z-selected-too.txt']],
+            'selected ancestor' => [['swap', 'z-selected-too.txt']],
+        ];
     }
 
     public function testUnchangedIndexProducesEmptyPlans(): void
@@ -546,11 +681,13 @@ final class PushPlanTest extends TestCase
             'plan_directory',
             'local_tree_root',
             'previous_local_index',
+            'selected_path_positions_with_fresh_entries',
             'position',
         ], array_keys($cursor));
         $this->assertSame($this->planDirectory(), $cursor['plan_directory']);
         $this->assertSame(realpath($this->localTreeRoot()), $cursor['local_tree_root']);
         $this->assertSame($this->previousLocalIndexPath(), $cursor['previous_local_index']);
+        $this->assertSame([], $cursor['selected_path_positions_with_fresh_entries']);
         $this->assertSame([
             'phase',
             'byte_offset_in_fresh_index',
@@ -558,6 +695,7 @@ final class PushPlanTest extends TestCase
             'byte_offset_in_local_paths_to_push',
             'byte_offset_in_local_paths_to_delete',
             'deleted_directory_stack_top_byte_offset',
+            'blocked_selected_subtree_path',
         ], array_keys($cursor['position']));
         $this->assertSame(
             filesize($this->planPath('local_paths_to_push.jsonl')),
@@ -662,9 +800,17 @@ final class PushPlanTest extends TestCase
     //  Helpers
     // ------------------------------------------------------------------
 
-    /** @param list<string> $excludedPaths */
-    private function startPlan(?string $treeDescriptionPath = null, array $excludedPaths = []): PushPlan
+    /**
+     * @param list<string> $excludedPaths
+     * @param list<string> $selectedPaths
+     */
+    private function startPlan(
+        ?string $treeDescriptionPath = null,
+        array $excludedPaths = [],
+        array $selectedPaths = []
+    ): PushPlan
     {
+        $this->selectedPaths = $selectedPaths;
         if ($treeDescriptionPath === null) {
             $treeDescriptionPath = $this->tempDir . '/empty-tree.jsonl';
             if (!is_file($treeDescriptionPath)) {
@@ -686,7 +832,8 @@ final class PushPlanTest extends TestCase
             $this->planDirectory(),
             $this->localTreeRoot(),
             $this->previousLocalIndexPath(),
-            $this->excludedPathsPath()
+            $this->excludedPathsPath(),
+            $selectedPaths
         );
         $this->cursor = $plan->get_cursor();
         for ($step = 0; $step < 100; ++$step) {
@@ -700,7 +847,7 @@ final class PushPlanTest extends TestCase
 
     private function resumePlan(): PushPlan
     {
-        return PushPlan::resume($this->cursor);
+        return PushPlan::resume($this->cursor, $this->selectedPaths);
     }
 
     private function savePreviousLocalIndex(string $treeDescriptionPath): void

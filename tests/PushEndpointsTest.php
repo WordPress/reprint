@@ -1395,6 +1395,172 @@ final class PushEndpointsTest extends TestCase {
         $this->assertFileExists($push_state_directory . '/previous_local_index.jsonl');
     }
 
+    public function testSelectedFilesPushPreservesPendingWorkOutsideItsPaths(): void
+    {
+        $this->writeDocrootConfiguration([
+            'document_root' => $this->docroot,
+            'maximum_part_bytes' => 1024,
+        ]);
+        $local_docroot = $this->root . '/selected-local-docroot';
+        $state_directory = $this->root . '/selected-state';
+        mkdir($local_docroot . '/selected', 0700, true);
+        mkdir($local_docroot . '/pending', 0700, true);
+        mkdir($local_docroot . '/swap', 0700, true);
+        file_put_contents($local_docroot . '/selected/edit.txt', 'new selected');
+        file_put_contents($local_docroot . '/pending/add.txt', 'pending addition');
+        file_put_contents($local_docroot . '/pending/edit.txt', 'new pending');
+        file_put_contents($local_docroot . '/swap/selected.txt', 'selected child');
+        file_put_contents($local_docroot . '/swap/unselected.txt', 'unselected child');
+
+        mkdir($this->docroot . '/selected', 0700, true);
+        mkdir($this->docroot . '/pending', 0700, true);
+        file_put_contents($this->docroot . '/selected/edit.txt', 'old selected');
+        file_put_contents($this->docroot . '/selected/delete.txt', 'delete selected');
+        file_put_contents($this->docroot . '/pending/edit.txt', 'old pending');
+        file_put_contents($this->docroot . '/pending/delete.txt', 'delete pending');
+        file_put_contents($this->docroot . '/swap', 'old scalar');
+
+        $previous_local_index_path = $this->root . '/selected-previous-index.jsonl';
+        $this->writeIndex($previous_local_index_path, [
+            'pending' => [1, 0, 'dir', false],
+            'pending/delete.txt' => [1, 14, 'file'],
+            'pending/edit.txt' => [1, 11, 'file'],
+            'selected' => [1, 0, 'dir', false],
+            'selected/delete.txt' => [1, 15, 'file'],
+            'selected/edit.txt' => [1, 12, 'file'],
+            'swap' => [1, 10, 'file'],
+        ]);
+        $push_state_directory = $this->filesPushStateDirectory(
+            $local_docroot,
+            $state_directory
+        );
+        $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
+
+        $selected = $this->runFilesPushCli(
+            $local_docroot,
+            $state_directory,
+            [],
+            ['--only=selected', '--only', 'swap/selected.txt']
+        );
+
+        $this->assertSame(0, $selected['exit'], $selected['output']);
+        $this->assertSame('new selected', file_get_contents($this->docroot . '/selected/edit.txt'));
+        $this->assertFileDoesNotExist($this->docroot . '/selected/delete.txt');
+        $this->assertSame('old pending', file_get_contents($this->docroot . '/pending/edit.txt'));
+        $this->assertFileExists($this->docroot . '/pending/delete.txt');
+        $this->assertFileDoesNotExist($this->docroot . '/pending/add.txt');
+        $this->assertSame('selected child', file_get_contents($this->docroot . '/swap/selected.txt'));
+        $this->assertFileDoesNotExist($this->docroot . '/swap/unselected.txt');
+
+        $diff = $this->runFilesDiffCli($local_docroot, $state_directory);
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $diff_records = array_map(
+            static fn(string $line): array => json_decode($line, true, 512, JSON_THROW_ON_ERROR),
+            preg_split('/\R/', trim($diff['stdout'])) ?: []
+        );
+        $pending_actions = [];
+        foreach ($diff_records as $record) {
+            if (isset($record['action'], $record['path_b64'])) {
+                $pending_actions[$record['action']][] = base64_decode($record['path_b64'], true);
+            }
+        }
+        $this->assertSame(
+            ['pending/add.txt', 'pending/edit.txt', 'swap/unselected.txt'],
+            $pending_actions['push'] ?? []
+        );
+        $this->assertSame(['pending/delete.txt'], $pending_actions['delete'] ?? []);
+
+        $remaining = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(0, $remaining['exit'], $remaining['output']);
+        $this->assertSame('pending addition', file_get_contents($this->docroot . '/pending/add.txt'));
+        $this->assertSame('new pending', file_get_contents($this->docroot . '/pending/edit.txt'));
+        $this->assertFileDoesNotExist($this->docroot . '/pending/delete.txt');
+        $this->assertSame('unselected child', file_get_contents($this->docroot . '/swap/unselected.txt'));
+    }
+
+    public function testInitialSelectedFilesPushLeavesTheBaselineAbsent(): void
+    {
+        $local_docroot = $this->root . '/initial-selected-local-docroot';
+        $state_directory = $this->root . '/initial-selected-state';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/selected.txt', 'selected');
+        file_put_contents($local_docroot . '/pending.txt', 'pending');
+
+        $selected = $this->runFilesPushCli(
+            $local_docroot,
+            $state_directory,
+            [],
+            ['--only=selected.txt']
+        );
+
+        $this->assertSame(0, $selected['exit'], $selected['output']);
+        $this->assertSame('selected', file_get_contents($this->docroot . '/selected.txt'));
+        $this->assertFileDoesNotExist($this->docroot . '/pending.txt');
+        $push_state_directory = $this->filesPushStateDirectory(
+            $local_docroot,
+            $state_directory
+        );
+        $this->assertFileDoesNotExist(
+            $push_state_directory . '/previous_local_index.jsonl'
+        );
+
+        $diff = $this->runFilesDiffCli($local_docroot, $state_directory);
+        $this->assertSame(1, $diff['exit'], $diff['output']);
+        $this->assertStringContainsString(
+            'files-push without --only',
+            $diff['output']
+        );
+
+        $remaining = $this->runFilesPushCli($local_docroot, $state_directory);
+
+        $this->assertSame(0, $remaining['exit'], $remaining['output']);
+        $this->assertSame('pending', file_get_contents($this->docroot . '/pending.txt'));
+        $this->assertFileExists(
+            $push_state_directory . '/previous_local_index.jsonl'
+        );
+    }
+
+    public function testFilesPushRejectsChangedSelectedPathsWhileResuming(): void
+    {
+        $local_docroot = $this->root . '/selected-resume-local-docroot';
+        mkdir($local_docroot . '/directory', 0700, true);
+        file_put_contents($local_docroot . '/directory/file.txt', 'value');
+        $push_state_directory = $this->root . '/selected-resume-state';
+        $sender = $this->startSender(
+            $this->senderOptions(
+                $local_docroot,
+                $push_state_directory,
+                ['directory/file.txt', 'directory', 'directory']
+            )
+        );
+        $this->closeSender($sender);
+        $state = $this->loadActiveState($push_state_directory);
+        $this->assertIsArray($state);
+        $this->assertMatchesRegularExpression(
+            '/^[a-f0-9]{64}$/',
+            $state['selected_paths_fingerprint'] ?? ''
+        );
+        $request_count = $this->countEndpointRequests('push_create');
+
+        try {
+            $this->resumeSender(
+                $this->senderOptions($local_docroot, $push_state_directory, ['other.txt'])
+            );
+            $this->fail('A different selection resumed the active sender.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('same --only paths', $exception->getMessage());
+        }
+        $this->assertSame($request_count, $this->countEndpointRequests('push_create'));
+        $this->assertFileExists($push_state_directory . '/sender.json');
+
+        $resumed = $this->resumeSender(
+            $this->senderOptions($local_docroot, $push_state_directory, ['directory'])
+        );
+        $this->closeSender($resumed);
+        $this->assertSame($request_count, $this->countEndpointRequests('push_create'));
+    }
+
     /**
      * Continues a partial file from the successful upload response without another status request.
      */
@@ -3055,12 +3221,14 @@ final class PushEndpointsTest extends TestCase {
     private function runFilesPushCli(
         string $local_docroot,
         string $state_directory,
-        array $ini_settings = []
+        array $ini_settings = [],
+        array $extra_arguments = []
     ): array {
         [$process, $pipes] = $this->startFilesPushCli(
             $local_docroot,
             $state_directory,
-            $ini_settings
+            $ini_settings,
+            $extra_arguments
         );
         return $this->finishFilesPushCli($process, $pipes);
     }
@@ -3074,7 +3242,8 @@ final class PushEndpointsTest extends TestCase {
     private function startFilesPushCli(
         string $local_docroot,
         string $state_directory,
-        array $ini_settings = []
+        array $ini_settings = [],
+        array $extra_arguments = []
     ): array {
         $command = [PHP_BINARY];
         foreach ($ini_settings as $name => $value) {
@@ -3089,7 +3258,7 @@ final class PushEndpointsTest extends TestCase {
             '--fs-root=' . $local_docroot,
             '--secret=' . self::SECRET,
             '--force-http',
-        ]);
+        ], $extra_arguments);
         $process = proc_open(
             $command,
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
@@ -3399,7 +3568,8 @@ final class PushEndpointsTest extends TestCase {
      */
     private function senderOptions(
         string $local_docroot,
-        string $push_state_directory
+        string $push_state_directory,
+        array $selected_paths = []
     ): array
     {
         $this->writeDocrootConfiguration([
@@ -3421,6 +3591,7 @@ final class PushEndpointsTest extends TestCase {
             'connect_timeout' => 3,
             'stall_timeout' => 3,
             'response_timeout' => 5,
+            'selected_paths' => $selected_paths,
         ];
     }
 
@@ -3601,11 +3772,13 @@ final class PushEndpointsTest extends TestCase {
      */
     private function runSender(
         string $local_docroot,
-        string $push_state_directory
+        string $push_state_directory,
+        array $selected_paths = []
     ): array {
         $options = $this->senderOptions(
             $local_docroot,
-            $push_state_directory
+            $push_state_directory,
+            $selected_paths
         );
         $sender = is_file($push_state_directory . '/sender.json')
             ? $this->resumeSender($options)
