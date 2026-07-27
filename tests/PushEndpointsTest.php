@@ -3302,7 +3302,11 @@ final class PushEndpointsTest extends TestCase {
         ];
     }
 
-    /** @param array<string,mixed> $options */
+    /**
+     * Starts a sender and retains its process lock until closeSender().
+     *
+     * @param array<string,mixed> $options
+     */
     private function startSender(array $options): PushFilesSender
     {
         $process_lock = new ReprintProcessLock($this->root);
@@ -3316,7 +3320,11 @@ final class PushEndpointsTest extends TestCase {
         return $sender;
     }
 
-    /** @param array<string,mixed> $options */
+    /**
+     * Resumes a sender and retains its process lock until closeSender().
+     *
+     * @param array<string,mixed> $options
+     */
     private function resumeSender(array $options): PushFilesSender
     {
         $process_lock = new ReprintProcessLock($this->root);
@@ -3330,6 +3338,9 @@ final class PushEndpointsTest extends TestCase {
         return $sender;
     }
 
+    /**
+     * Closes a sender and releases its retained process lock.
+     */
     private function closeSender(PushFilesSender $sender): void
     {
         $object_id = spl_object_id($sender);

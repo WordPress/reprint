@@ -5,13 +5,28 @@
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
 
 /**
- * Prevents concurrent Reprint processes from using one state directory.
+ * Serializes local Reprint commands which share one state directory.
+ *
+ * Construction acquires the non-blocking exclusive lock at
+ * `<state-directory>/.reprint.lock`. The caller retains this object for the
+ * complete command and calls close() when the command ends.
  */
 final class ReprintProcessLock
 {
-    /** @var resource|null */
+    /** @var resource|null Open lock handle, or null after close(). */
     private $handle;
 
+    /**
+     * Acquires the state directory's Reprint process lock.
+     *
+     * The state directory is created when absent. Lock acquisition is
+     * non-blocking, so construction fails while another process owns it.
+     *
+     * @param string $state_directory Local Reprint state directory.
+     *
+     * @throws RuntimeException When the directory or lock cannot be created,
+     *                          opened, or acquired.
+     */
     public function __construct(string $state_directory)
     {
         if (
@@ -39,11 +54,21 @@ final class ReprintProcessLock
         }
     }
 
+    /**
+     * Indicates whether this object still holds the process lock.
+     *
+     * @return bool True while the lock handle remains open.
+     */
     public function is_held(): bool
     {
         return is_resource($this->handle);
     }
 
+    /**
+     * Releases the process lock and closes its handle.
+     *
+     * Repeated calls have no effect.
+     */
     public function close(): void
     {
         if (!is_resource($this->handle)) {
@@ -54,6 +79,9 @@ final class ReprintProcessLock
         $this->handle = null;
     }
 
+    /**
+     * Releases the process lock when the owner leaves scope.
+     */
     public function __destruct()
     {
         $this->close();

@@ -878,13 +878,18 @@ class ImportClient
     }
 
     /**
-     * Run the import process with explicit command validation.
+     * Runs one import command while holding the state directory's process lock.
+     *
+     * CLI callers pass the lock acquired before pair setup and audit logging.
+     * Direct callers may omit it; this method then acquires the lock before
+     * reading or writing command state. A supplied lock remains caller-owned.
      *
      * @param array $options Options:
      *   - command: Required. One of the entries in $valid_commands below.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
-     * @param ReprintProcessLock|null $process_lock Lock for this state directory already held by the caller.
+     * @param ReprintProcessLock|null $process_lock Optional lock already held
+     *                                               for this state directory.
      */
     public function run(
         array $options = [],
@@ -1520,9 +1525,10 @@ class ImportClient
      * Runs one caller-bounded files-push lifecycle.
      *
      * One open sender performs at most one step per loop turn. A planned stop
-     * cancels any open multipart request before close() releases the lifecycle
-     * lock. Terminal sender outcomes are reported without retrying or opening
-     * a replacement; this process never opens a second sender.
+     * cancels any open multipart request before close() releases sender
+     * resources. The caller retains the Reprint process lock throughout.
+     * Terminal sender outcomes are reported without retrying or opening a
+     * replacement; this process never opens a second sender.
      *
      * @param array $options {
      *     Parsed files-push options and context.
@@ -1531,7 +1537,7 @@ class ImportClient
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
      * }
-     * @param ReprintProcessLock $process_lock Lock held for this command.
+     * @param ReprintProcessLock $process_lock Lock held for the command's state directory.
      * @phpstan-param array<string,mixed> $options
      */
     private function run_files_push(
@@ -13090,6 +13096,8 @@ if (
     }
 
     try {
+        // Acquire the lock before pair setup and audit writes so each command
+        // owns every local state transition for its complete invocation.
         $reprint_process_lock = new ReprintProcessLock($state_dir);
         $reprint_files_push_context = null;
         $reprint_files_diff_context = null;
