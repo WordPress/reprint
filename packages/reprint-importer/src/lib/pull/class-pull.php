@@ -122,6 +122,16 @@ class Pull
      */
     public function abort(string $command = 'pull'): void
     {
+        $state = $this->client->get_import_state();
+        if (
+            $command === 'pull-files'
+            || (
+                $command === 'pull'
+                && $state->active_resumable_command->command_name === 'files-pull'
+            )
+        ) {
+            $this->client->clear_files_pull_progress();
+        }
         $this->prepare_repull($command);
         $label = $command === 'pull' ? 'Pull' : $command;
         $message = "{$label} state cleared.";

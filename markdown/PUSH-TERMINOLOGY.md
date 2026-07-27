@@ -100,6 +100,16 @@ none. `PushFilesSender::start()` and `PushFilesSender::resume()` receive that
 open lock from the caller; sender `close()` does not release it. This local
 lock is separate from the receiver's push-session and commit locks.
 
+## Pull index-update WAL
+
+Call the single pull-side write-ahead log the **index-update WAL**. It lives at
+`<state-dir>/.import-index-updates.wal`; use `.import-index-updates.wal`,
+`$index_update_wal_path`, and `$index_update_wal_handle`.
+Applied batch records are cleared, but the empty WAL remains as a marker until
+files-pull completes. A retained WAL is consumed only while resuming or
+aborting the interrupted files-pull, including through a high-level pull
+command; unrelated commands do not consume it.
+
 ## Local push state
 
 The local machine keeps planning and active state outside the receiver push
