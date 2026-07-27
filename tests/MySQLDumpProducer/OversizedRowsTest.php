@@ -336,6 +336,60 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
     }
 
     /**
+     * Fetching oversized chunks must compare a text primary key without
+     * passing its latin1 bytes through the utf8mb4 connection charset.
+     */
+    public function testReentrancyWithLatin1TextPrimaryKeyInOversizedRow(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE reentrant_large_text_key (
+                id VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_bin PRIMARY KEY,
+                content LONGBLOB
+            )
+        ");
+
+        $id = "\x80\xE9";
+        $content = random_bytes(20 * 1024);
+        $encoded_id = base64_encode($id);
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO reentrant_large_text_key (id, content)
+             VALUES (CONVERT(FROM_BASE64('{$encoded_id}') USING latin1), ?)"
+        );
+        $stmt->execute([$content]);
+
+        $options = [
+            "max_statement_size" => 8 * 1024,
+            "batch_size" => 1,
+        ];
+        $producer = $this->createProducer($options);
+        $fragments = [];
+
+        while ($producer->next_sql_fragment()) {
+            $fragments[] = $producer->get_sql_fragment();
+
+            if (!$producer->is_finished()) {
+                $options["cursor"] = $producer->get_reentrancy_cursor();
+                $producer = $this->createProducer($options);
+            }
+        }
+
+        $sql = implode("\n", $fragments);
+        $import_pdo = $this->executeDumpInNewDatabase($sql);
+        $this->assertSame(
+            strtoupper(bin2hex($id)),
+            $import_pdo
+                ->query("SELECT HEX(id) FROM reentrant_large_text_key")
+                ->fetchColumn()
+        );
+        $this->assertSame(
+            $content,
+            $import_pdo
+                ->query("SELECT content FROM reentrant_large_text_key")
+                ->fetchColumn()
+        );
+    }
+
+    /**
      * Test with base64 string encoding.
      */
     public function testBase64EncodingWithLargeData(): void
