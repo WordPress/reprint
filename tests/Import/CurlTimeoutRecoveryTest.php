@@ -418,11 +418,20 @@ class CurlTimeoutRecoveryTest extends TestCase
     // Exception hierarchy
     // ---------------------------------------------------------------
 
-    public function testCurlTimeoutExceptionExtendsRuntimeException()
+    public function testInterruptionExceptionHierarchy()
     {
-        $e = new \CurlTimeoutException("Operation timed out");
-        $this->assertInstanceOf(\RuntimeException::class, $e);
-        $this->assertInstanceOf(\InterruptedResponseException::class, $e);
+        $interrupted = new \InterruptedResponseException("Response ended early");
+        $this->assertInstanceOf(\RuntimeException::class, $interrupted);
+        $this->assertNotInstanceOf(
+            \TransientInterruptionException::class,
+            $interrupted,
+        );
+
+        $transient = new \TransientInterruptionException("Connection reset");
+        $this->assertInstanceOf(\InterruptedResponseException::class, $transient);
+
+        $timeout = new \CurlTimeoutException("Operation timed out");
+        $this->assertInstanceOf(\TransientInterruptionException::class, $timeout);
     }
 
     // ---------------------------------------------------------------
@@ -454,7 +463,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "abc",
-            new \InterruptedResponseException("Response ended early"),
+            new \TransientInterruptionException("Response ended early"),
         );
         $this->assertEquals(
             1,
@@ -467,7 +476,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "abc",
-            new \InterruptedResponseException("Response ended early"),
+            new \TransientInterruptionException("Response ended early"),
         );
         $this->assertEquals(
             2,
@@ -496,7 +505,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "def",
-            new \InterruptedResponseException("Response ended early"),
+            new \TransientInterruptionException("Response ended early"),
         );
         $this->assertEquals(
             0,
@@ -527,7 +536,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "abc",
-            new \InterruptedResponseException("Response ended early"),
+            new \TransientInterruptionException("Response ended early"),
         );
     }
 
