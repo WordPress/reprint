@@ -84,6 +84,22 @@ failure key is `non_recoverable_commit_failure`.
 These JSON records are unversioned while their schemas are still under
 development. There are no compatibility aliases or migration paths.
 
+## Local Reprint process lock
+
+Every local Reprint command workflow runs under the **Reprint process lock** at
+`<state-dir>/.reprint.lock`. Use `.reprint.lock` and `$process_lock`. The lock
+is non-blocking and state-directory-wide: pull, push, diff, and other local
+Reprint processes cannot run concurrently against the same state directory,
+even when their target or local-tree pairs differ.
+
+The production CLI acquires the Reprint process lock before it prepares pair
+context, constructs `ImportClient`, or writes the command audit entry. It
+passes the open lock to `ImportClient::run()` and releases it after the command.
+A direct `ImportClient::run()` call acquires the lock when its caller supplies
+none. `PushFilesSender::start()` and `PushFilesSender::resume()` receive that
+open lock from the caller; sender `close()` does not release it. This local
+lock is separate from the receiver's push-session and commit locks.
+
 ## Local push state
 
 The local machine keeps planning and active state outside the receiver push
@@ -102,13 +118,10 @@ directory. Under `<state-dir>/push/<pair-key>/`, use these names verbatim:
 | Sender-owned excluded paths | `excluded_paths.json`, `$excluded_paths_path` |
 | Deleted-directory stack | `deleted_directories_stack.jsonl`, `$deleted_directories_stack` |
 | Active state | `sender.json`, `$state_path` |
-| Lifecycle lock file | `sender.lock`, `$lock_path` |
-| Files-diff lifecycle lock | `files-diff.lock` |
-| Open lifecycle lock | `$lock_handle` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
-`sender.json`, `sender.lock`, `excluded_paths.json`, and
+`sender.json`, `excluded_paths.json`, and
 `previous_local_index.jsonl` live directly under the local push state
 directory. The sender creates `plan/` for one active plan. PushPlan copies the
 sender-owned exclusions to `plan/excluded_paths.json` when it starts.
@@ -157,13 +170,13 @@ them in memory for later steps in the same lifecycle. It does not copy them into
 `push.json` remains the receiver-owned push identity and policy, while
 `commit.json` and `$commit_state` remain the receiver commit checkpoint.
 
-`PushFilesSender::start()` and `PushFilesSender::resume()` acquire
-`sender.lock`; `PushFilesSender::close()` releases it. `next_step()` does not
-acquire or release the lock and does not reread `sender.json`. A sender retains
-one multipart request across steps. A caller stopping between steps calls
-`cancel()` to discard that request and return to the preceding durable
-boundary, then calls `close()` to release resources and the lock. `close()`
-never finishes an open request. In `pushing_paths` or
+`PushFilesSender::start()` and `PushFilesSender::resume()` require the
+caller-owned Reprint process lock. `next_step()` does not acquire or release
+the lock and does not reread `sender.json`. A sender retains one multipart
+request across steps. A caller stopping between steps calls `cancel()` to
+discard that request and return to the preceding durable boundary, then calls
+`close()` to release sender resources. `close()` never finishes an open
+request. In `pushing_paths` or
 `pushing_deletes`, one step sends at most one multipart part. `next_step()`
 returns true while another step may be performed and false when `get_status()`
 reports `complete`, `restart`, or `failed`.
@@ -184,10 +197,11 @@ and metadata-only changes to non-empty directories select no operation. The
 final record has `status: "complete"`, `local_paths_to_push`, and
 `local_paths_to_delete`.
 
-files-diff persists nothing between runs. It runs one complete PushPlan under
-`files-diff.lock` in `files-diff-plan/`, streams both finished path lists from
-the beginning, and removes the plan directory before exiting. An interrupted
-report is not resumed; running the command again prints the complete report.
+files-diff persists nothing between runs. It runs one complete PushPlan in
+`files-diff-plan/` while its command holds the state-directory-wide Reprint
+process lock, streams both finished path lists from the beginning, and removes
+the plan directory before exiting. An interrupted report is not resumed;
+running the command again prints the complete report.
 
 ## Files-push CLI names
 

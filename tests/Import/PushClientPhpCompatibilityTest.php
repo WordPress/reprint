@@ -17,15 +17,20 @@ class PushClientPhpCompatibilityTest extends TestCase
     public function testPushLibsStayParseableOnPhp74(): void
     {
         $phpcs_path = realpath(__DIR__ . '/../../vendor/bin/phpcs');
+        $process_lock_path = realpath(
+            __DIR__ . '/../../packages/reprint-importer/src/lib/class-reprint-process-lock.php'
+        );
         $upload_lib_path = realpath(__DIR__ . '/../../packages/reprint-importer/src/lib/upload');
         $push_lib_path = realpath(__DIR__ . '/../../packages/reprint-importer/src/lib/push');
         $this->assertNotFalse($phpcs_path, 'vendor/bin/phpcs is missing; run composer install');
+        $this->assertNotFalse($process_lock_path);
         $this->assertNotFalse($upload_lib_path);
         $this->assertNotFalse($push_lib_path);
 
         exec(
             escapeshellarg($phpcs_path)
                 . ' --standard=PHPCompatibility --runtime-set testVersion 7.4- -q '
+                . escapeshellarg($process_lock_path) . ' '
                 . escapeshellarg($upload_lib_path) . ' '
                 . escapeshellarg($push_lib_path) . ' 2>&1',
             $scan_output,

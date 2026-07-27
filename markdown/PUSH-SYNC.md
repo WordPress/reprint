@@ -273,13 +273,21 @@ configuration; request parameters cannot select any of them.
 ## Local files sender
 
 `PushFilesSender` joins the durable `PushPlan` to the receiver's push session.
+Every local Reprint command workflow runs under `<state-dir>/.reprint.lock`.
+The production CLI acquires this non-blocking lock before it prepares pair
+context, constructs `ImportClient`, or writes the command audit entry. It
+passes the open lock to `ImportClient::run()` and releases it after the command.
+A direct `ImportClient::run()` call acquires the lock when its caller supplies
+none. The one state-directory-wide Reprint process lock prevents concurrent
+pull, push, diff, and other local Reprint processes from using that site state,
+regardless of their target or local-tree pair.
+
 An active push keeps these files under `<state-dir>/push/<pair-key>/`:
 
 ```text
 previous_local_index.jsonl          index saved after the previous commit
 excluded_paths.json                 sender-owned target exclusions
 sender.json                         active push state
-sender.lock                         lifecycle lock
 plan/
   excluded_paths.json               target exclusions for the active push
   fresh_local_index.jsonl           plan-owned fresh local index
@@ -289,20 +297,20 @@ plan/
 ```
 
 The sender has an explicit start/step/cancel/close lifecycle.
-`PushFilesSender::start()` rejects unfinished active state, writes the initial
-`creating` state, and acquires `sender.lock`. `PushFilesSender::resume()`
-acquires the same lock and reads the unfinished state once. The returned sender
-keeps that state in memory while `next_step()` performs bounded work. When the
-caller stops between steps, `cancel()` discards an open multipart request and
-returns to the preceding durable boundary. `close()` then releases the lock.
-`close()` never finishes a request or advances the workflow. A second local
-process cannot start or resume the same sender
-until the open sender is closed. `next_step()` returns true while another step
-may be performed and false after completion, restart, or failure; the caller
-reads that outcome from the sender. The caller may stop after any true return
-and close the sender. If the process stops without closing, the next process
-uses the preceding sender boundary and receiver-confirmed cursors to account
-for later remote work.
+Its caller acquires the Reprint process lock and passes the open lock to
+`PushFilesSender::start()` or `PushFilesSender::resume()`.
+`PushFilesSender::start()` rejects unfinished active state and writes the
+initial `creating` state. `PushFilesSender::resume()` reads the unfinished state
+once. The returned sender keeps that state in memory while `next_step()`
+performs bounded work. When the caller stops between steps, `cancel()` discards
+an open multipart request and returns to the preceding durable boundary.
+`close()` releases sender resources but not the caller-owned Reprint process
+lock, and never finishes a request or advances the workflow. `next_step()`
+returns true while another step may be performed and false after completion,
+restart, or failure; the caller reads that outcome from the sender. The caller
+may stop after any true return and close the sender. If the process stops
+without closing, the next process uses the preceding sender boundary and
+receiver-confirmed cursors to account for later remote work.
 
 During PushPlan's internal `indexing` phase, the plan retains one
 `FileIndexProcessor` and the open fresh local index across steps. A
@@ -312,7 +320,7 @@ processor cursor before continuing. The sender lazily opens
 It retains those handles across `next_step()` calls, lets each handle advance
 with the work, and seeks only when a newly opened or receiver-confirmed offset
 differs. It closes each handle when its phase or file ends and closes any
-remaining handles before `close()` releases the lifecycle lock.
+remaining handles before `close()` returns.
 
 The sender creates the push session and stores its exclusion policy before it
 starts PushPlan. Each internal `indexing` step completes one traversal event,
@@ -376,8 +384,8 @@ Each local-path upload or deletion step sends at most one multipart part. A file
 part contains one bounded chunk, a deletion-list part contains one complete
 path, and a directory or symlink part contains one complete value. The sender
 retains one multipart request across successive steps until its body budget is
-spent or the caller explicitly cancels it. `close()` only releases resources
-and the lifecycle lock. The sender
+spent or the caller explicitly cancels it. `close()` only releases sender
+resources. The sender
 derives Content-Length from the bytes actually read and never reads another
 local path to push until the current one is complete. Receiver
 contention, offset gaps, and transport failures end the current sender run. The
@@ -451,7 +459,8 @@ formula, including its trailing `?` and `&` trim, so another URL query or
 local tree cannot reuse the index. It accepts only `--state-dir` and
 `--fs-root`; it needs no secret, performs no preflight, and makes no network
 request. It runs one complete PushPlan against `previous_local_index.jsonl` in
-`files-diff-plan/` and holds `files-diff.lock` for the run.
+`files-diff-plan/` while the command holds the state-directory-wide Reprint
+process lock.
 
 Output is JSONL. Each selected current file, symlink, or empty directory has
 `action: "push"`, `path_b64`, `type`, `size`, and `ctime`; its type is `file`,
