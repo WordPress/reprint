@@ -145,7 +145,6 @@ describe('Import: SiteGround plugin stripping', () => {
 
             const sourceDomain = new URL(getSiteUrl(site)).origin;
             const result = runImporter(importUrl(), tempDir, 'db-apply', {
-                secret: getSiteSecret(site),
                 extraArgs: [
                     '--target-engine=mysql',
                     `--target-db=${getDbName(site)}_import`,
@@ -201,7 +200,6 @@ describe('Import: SiteGround plugin stripping', () => {
         beforeAll(() => {
             const flatDir = join(tempDir, 'flattened');
             const flatResult = runImporter(importUrl(), tempDir, 'flat-docroot', {
-                secret: getSiteSecret(site),
                 extraArgs: [`--flatten-to=${flatDir}`],
             });
             assert.equal(flatResult.exitCode, 0,

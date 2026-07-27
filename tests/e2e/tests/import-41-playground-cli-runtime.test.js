@@ -91,7 +91,6 @@ describe('Import: Playground CLI runtime', () => {
     it('db-apply imports into SQLite', () => {
         const sourceDomain = new URL(getSiteUrl(site)).origin;
         const result = runImporter(importUrl(), tempDir, 'db-apply', {
-            secret: getSiteSecret(site),
             extraArgs: [
                 '--target-engine=sqlite',
                 `--target-sqlite-path=${join(fsRootDir(tempDir), getSiteDir(site), 'wp-content', 'database', '.ht.sqlite')}`,

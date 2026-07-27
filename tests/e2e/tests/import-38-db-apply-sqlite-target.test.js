@@ -43,7 +43,6 @@ describe('Import: SQLite db-apply target', () => {
             `Expected db-pull exit 0, got ${syncResult.exitCode}\nstderr: ${syncResult.stderr}\nstdout: ${syncResult.stdout}`);
 
         const applyResult = runImporter(importUrl(), tempDir, 'db-apply', {
-            secret: getSiteSecret(site),
             extraArgs: [
                 '--target-engine=sqlite',
                 `--target-sqlite-path=${sqlitePath}`,

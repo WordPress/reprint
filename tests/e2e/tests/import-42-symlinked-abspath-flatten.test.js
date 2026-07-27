@@ -135,7 +135,6 @@ require ABSPATH . 'wp-blog-header.php';
         beforeAll(() => {
             flattenTo = join(tempDir, 'flattened');
             const result = runImporter(importUrl(), tempDir, 'flat-docroot', {
-                secret: getSiteSecret(site),
                 extraArgs: [`--flatten-to=${flattenTo}`],
             });
             assert.equal(

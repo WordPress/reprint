@@ -136,7 +136,12 @@ async function provisionDatabase() {
     await conn.end();
 }
 
-function runStage(stage, stateDir, extraArgs = [], { phpBinary = PHP_BINARY, env = {} } = {}) {
+function runStage(
+    stage,
+    stateDir,
+    extraArgs = [],
+    { authenticate = true, phpBinary = PHP_BINARY, env = {} } = {},
+) {
     const url = `${getSiteUrl(SITE)}&directory=${getSiteDir(SITE)}`;
     const importerPath = stage === 'preflight' ? PREFLIGHT_IMPORTER_PATH : IMPORTER_PATH;
     const args = [
@@ -145,7 +150,7 @@ function runStage(stage, stateDir, extraArgs = [], { phpBinary = PHP_BINARY, env
         url,
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
-        `--secret=${getSiteSecret(SITE)}`,
+        ...(authenticate ? [`--secret=${getSiteSecret(SITE)}`] : []),
         ...extraArgs,
     ];
 
@@ -326,6 +331,7 @@ function runPlaygroundSqliteDbApplyBenchmark() {
         '--target-db=playground_sqlite_bench',
         '--new-site-url=http://localhost:9999',
     ], {
+        authenticate: false,
         phpBinary: PLAYGROUND_PHP_BINARY,
         env: playgroundPhpEnv(),
     });
@@ -628,15 +634,15 @@ async function main() {
         { name: 'preflight', extra: [] },
         { name: 'files-pull', extra: [] },
         { name: 'db-pull', extra: [] },
-        { name: 'db-apply', extra: dbApplyArgs },
-        { name: 'apply-runtime', extra: runtimeArgs },
+        { name: 'db-apply', extra: dbApplyArgs, authenticate: false },
+        { name: 'apply-runtime', extra: runtimeArgs, authenticate: false },
     ];
 
     const results = [];
-    for (const { name, extra } of stages) {
+    for (const { name, extra, authenticate } of stages) {
         if (!shouldRun(name)) continue;
         console.log(`-> ${name}`);
-        const r = runStage(name, stateDir, extra);
+        const r = runStage(name, stateDir, extra, { authenticate });
         results.push(r);
         console.log(`   ${r.ok ? 'ok' : 'FAIL'} in ${fmtMs(r.elapsedMs)} (attempts=${r.attempts})`);
         if (!r.ok) {

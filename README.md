@@ -420,7 +420,7 @@ the SQL dump into a target database while rewriting all URLs in one pass.
 MySQL target:
 
 ```bash
-php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --target-user=root --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com
 ```
@@ -428,7 +428,7 @@ php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" -
 SQLite target:
 
 ```bash
-php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --target-engine=sqlite --target-sqlite-path="$STATE_DIR/wordpress.sqlite" \
     --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com
@@ -444,7 +444,7 @@ are recalculated, JSON is re-encoded, and block comment attributes are updated.
 You can map multiple domains by repeating the flag:
 
 ```bash
-php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --target-user=root --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com \
     --rewrite-url https://cdn.old-site.com https://cdn.new-site.com
