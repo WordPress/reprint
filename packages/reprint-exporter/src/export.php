@@ -2828,7 +2828,7 @@ function endpoint_file_fetch(
     $decoded = json_decode($raw, true);
     if (!is_array($decoded)) {
         throw new InvalidArgumentException(
-            "file_list must be a JSON array of paths"
+            "file_list must be a JSON array of path entries"
         );
     }
     $paths = [];

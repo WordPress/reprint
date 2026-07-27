@@ -604,7 +604,11 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}) {
         url.searchParams.set(k, String(v));
     }
 
-    const fileListJson = JSON.stringify(filePaths);
+    const fileListJson = JSON.stringify(
+        filePaths.map(path => ({
+            path: Buffer.from(path).toString('base64'),
+        }))
+    );
 
     // Create form data with file upload
     const formData = new FormData();

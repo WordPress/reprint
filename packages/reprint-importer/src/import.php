@@ -2211,7 +2211,14 @@ class ImportClient
             if ($tmp === false) {
                 continue;
             }
-            file_put_contents($tmp, json_encode($dir_files, JSON_UNESCAPED_SLASHES));
+            $file_list = [];
+            foreach ($dir_files as $path) {
+                $file_list[] = ["path" => base64_encode($path)];
+            }
+            file_put_contents(
+                $tmp,
+                json_encode($file_list, JSON_UNESCAPED_SLASHES)
+            );
 
             $post_data = [
                 "file_list" => new \CURLFile($tmp, "application/json", "file_list"),

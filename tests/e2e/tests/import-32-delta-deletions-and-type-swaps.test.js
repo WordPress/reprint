@@ -162,6 +162,7 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
 
         const result = runImporter(importUrl(), tempDir, 'files-sync', {
             secret: getSiteSecret(site),
+            extraArgs: ['--on-conflict=remote-wins'],
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
