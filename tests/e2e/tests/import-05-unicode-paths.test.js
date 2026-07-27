@@ -11,7 +11,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch,
     assertFileCount, assertSiteMirror,
-    fsRootDir,
+    fsRootDir, PHP_BINARY,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -93,7 +93,11 @@ describe('Import: Unicode Paths', () => {
 
     it('file hashes match source', () => {
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
-        assertTreesMatch(getSiteDir(site), importedRoot);
+        // Playground turns invalid UTF-8 filename bytes into replacement characters.
+        const exclude = PHP_BINARY.includes('playground-php.sh')
+            ? ['invalid']
+            : [];
+        assertTreesMatch(getSiteDir(site), importedRoot, { exclude });
     });
 
     it('indexed at least 3000 files from remote', () => {
