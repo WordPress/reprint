@@ -14,7 +14,7 @@ class CliArgumentParser {
 	/**
 	 * @param array<int,string> $arguments Process arguments.
 	 */
-	public function parse( CliCommand $command, array $arguments ): CliParsedInput {
+	public function parse( CliCommand $command, array $arguments ): CliInvocation {
 		$argument_index       = 2;
 		$positional_arguments = [];
 		foreach ( $command->get_positional_arguments() as $argument ) {
@@ -108,11 +108,13 @@ class CliArgumentParser {
 			++$argument_index;
 		}
 
-		return new CliParsedInput(
+		return CliInvocation::from_parsed_input(
+			$command,
 			$positional_arguments,
 			$state_directory,
 			$filesystem_root,
-			$options
+			$options,
+			$arguments
 		);
 	}
 

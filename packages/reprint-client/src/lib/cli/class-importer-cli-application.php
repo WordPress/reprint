@@ -17,8 +17,6 @@ class ImporterCliApplication {
 	private $command_registry;
 	/** @var CliArgumentParser */
 	private $argument_parser;
-	/** @var CliInvocationValidator */
-	private $invocation_validator;
 	/** @var CliHelpRenderer */
 	private $help_renderer;
 	/** @var ImporterVersionProvider */
@@ -29,14 +27,12 @@ class ImporterCliApplication {
 	public function __construct(
 		CliCommandRegistry $command_registry,
 		CliArgumentParser $argument_parser,
-		CliInvocationValidator $invocation_validator,
 		CliHelpRenderer $help_renderer,
 		ImporterVersionProvider $version_provider,
 		CliOutput $output
 	) {
 		$this->command_registry     = $command_registry;
 		$this->argument_parser      = $argument_parser;
-		$this->invocation_validator = $invocation_validator;
 		$this->help_renderer        = $help_renderer;
 		$this->version_provider     = $version_provider;
 		$this->output               = $output;
@@ -58,7 +54,6 @@ class ImporterCliApplication {
 		return new self(
 			$command_registry,
 			new CliArgumentParser(),
-			new CliInvocationValidator(),
 			new CliHelpRenderer( $command_registry, $version_provider ),
 			$version_provider,
 			new CliOutput( $standard_output, $standard_error )
@@ -108,12 +103,7 @@ class ImporterCliApplication {
 				return 0;
 			}
 
-			$parsed_input = $this->argument_parser->parse( $command, $arguments );
-			$invocation   = $this->invocation_validator->validate(
-				$command,
-				$parsed_input,
-				$arguments
-			);
+			$invocation = $this->argument_parser->parse( $command, $arguments );
 
 			return $this->run_business_command( $invocation, $rethrow_execution_error );
 		} catch ( CliInputException $error ) {

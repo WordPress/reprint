@@ -9,7 +9,6 @@ use Reprint\Importer\Cli\CliArgumentParser;
 use Reprint\Importer\Cli\CliCommandRegistry;
 use Reprint\Importer\Cli\CliHelpRenderer;
 use Reprint\Importer\Cli\CliInvocation;
-use Reprint\Importer\Cli\CliInvocationValidator;
 use Reprint\Importer\Cli\CliOutput;
 use Reprint\Importer\Cli\ImporterCliApplication;
 use Reprint\Importer\Cli\ImporterVersionProvider;
@@ -259,7 +258,6 @@ final class ImporterCliApplicationTest extends TestCase {
         return new CliRecordingImporterApplication(
             $commandRegistry,
             new CliArgumentParser(),
-            new CliInvocationValidator(),
             new CliHelpRenderer($commandRegistry, $versionProvider),
             $versionProvider,
             new CliOutput($this->standardOutput, $this->standardError)
