@@ -161,6 +161,7 @@ class FileBodyStreamingTest extends TestCase
             'resume_fetched_file_staging'
         );
         $resumeStaging->invoke($client, $fetchState, $context2);
+        clearstatcache(true, $stagingPath);
         $this->assertSame($halfwayPoint, filesize($stagingPath));
         $handleFileChunk->invoke($client, [
             'headers' => [

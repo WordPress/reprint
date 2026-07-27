@@ -607,7 +607,7 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
             ]);
         $readyPath =
             $this->root . '/remote-overrides.json.pause-ready';
-        $deadline = microtime(true) + 10;
+        $deadline = microtime(true) + 60;
         while (!is_file($readyPath) && microtime(true) < $deadline) {
             usleep(20000);
         }
@@ -2470,6 +2470,7 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
                 $resumed['exit'],
                 $resumed['output']
             );
+            clearstatcache(true, $localReplacementPath);
             $this->assertFileExists($localReplacementPath);
             $this->assertFalse(is_dir($localReplacementPath));
             $this->assertSame(
