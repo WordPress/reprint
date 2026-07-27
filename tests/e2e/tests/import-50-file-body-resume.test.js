@@ -14,8 +14,11 @@
  * exits PHP on the second chunk, which forces the failure mid-file
  * (the first chunk has been written, the file is incomplete).
  *
- * After removing the hook, files-sync resumes and completes. Final
- * assertion: SHA-256 of the imported file equals the source.
+ * The source exits before it writes the boundary which would confirm the
+ * first part. The importer must leave its cursor at the preceding boundary,
+ * replay the unconfirmed bytes, and replace rather than append them. After
+ * removing the hook, files-sync resumes and completes. Final assertion:
+ * SHA-256 of the imported file equals the source.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -120,9 +123,10 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
                 '--file-chunk-start=262144',
                 '--file-chunk-max=262144',
             ],
+            autoResume: false,
         });
-        assert.notEqual(result.exitCode, 0,
-            `Expected first run to fail due to mid-file exit\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+        assert.equal(result.exitCode, 2,
+            `Expected first run to retain partial progress after the interrupted response\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
     });
 
     it('partial file is on disk and smaller than source', () => {
@@ -135,13 +139,20 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
             `Expected a partial file (0 < size < ${fileSize}), got ${partialSize}`);
     });
 
-    it('state records current_file and current_file_bytes for resume', () => {
+    it('state does not checkpoint the unconfirmed file part', () => {
         const stateFile = join(tempDir, '.import-state.json');
         assert.ok(existsSync(stateFile), 'Expected import state file to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.ok(state.current_file, 'Expected state.current_file to be set after a mid-file crash');
-        assert.ok(typeof state.current_file_bytes === 'number' && state.current_file_bytes > 0,
-            `Expected state.current_file_bytes > 0, got ${state.current_file_bytes}`);
+        assert.equal(
+            state.current_file,
+            null,
+            'Expected the unconfirmed file part to remain outside the checkpoint',
+        );
+        assert.equal(
+            state.current_file_bytes,
+            null,
+            'Expected the checkpoint not to claim the unconfirmed file bytes',
+        );
     });
 
     it('resume completes after removing the hook', () => {

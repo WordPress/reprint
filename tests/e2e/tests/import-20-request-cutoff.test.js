@@ -53,14 +53,31 @@ describe('Import: Request Cutoff', () => {
         cleanupTempDir(tempDir);
     });
 
-    it('first importer run fails due to cutoff', () => {
+    it('first importer run exits partial after cutoff', () => {
         const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const result = runImporter(url, tempDir, 'files-sync', {
             secret: getSiteSecret(site),
             extraArgs: ['--max-exec=10'],
+            autoResume: false,
         });
-        // First run should fail because exit(1) was called
-        assert.notEqual(result.exitCode, 0, 'Expected first run to fail due to cutoff');
+        assert.equal(
+            result.exitCode,
+            2,
+            `Expected exit 2 after the interrupted file index response\nstderr: ${result.stderr}\nstdout: ${result.stdout}`,
+        );
+
+        const stateFile = join(tempDir, '.import-state.json');
+        const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+        assert.equal(
+            state.active_resumable_command.completion_state,
+            'partial',
+            'Expected files-pull to retain a partial checkpoint',
+        );
+        assert.equal(
+            state.active_resumable_command.current_stage,
+            'index',
+            'Expected files-pull to remain in the index stage',
+        );
     });
 
     it('hook state shows scan_count reached 5', () => {

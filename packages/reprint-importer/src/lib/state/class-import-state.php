@@ -372,7 +372,7 @@ class ImportState
     public ?int $mysql_port = null;
     public ?string $mysql_user = null;
     public ?string $mysql_database = null;
-    public int $consecutive_timeouts = 0;
+    public int $consecutive_interrupted_responses = 0;
     public AdaptiveTuningState $tuning;
     public PullPipelineCheckpointState $pull_pipeline;
 
@@ -423,7 +423,10 @@ class ImportState
         $state->mysql_port = isset($data['mysql_port']) ? (int) $data['mysql_port'] : null;
         $state->mysql_user = isset($data['mysql_user']) ? (string) $data['mysql_user'] : null;
         $state->mysql_database = isset($data['mysql_database']) ? (string) $data['mysql_database'] : null;
-        $state->consecutive_timeouts = (int) ($data['consecutive_timeouts'] ?? 0);
+        $state->consecutive_interrupted_responses = (int) (
+            $data['consecutive_interrupted_responses']
+            ?? 0
+        );
         $state->tuning = self::adaptive_tuning_from($data['tuning'] ?? []);
         $state->pull_pipeline = self::pull_pipeline_checkpoint_from($data['pull_pipeline'] ?? []);
         return $state;
@@ -462,7 +465,7 @@ class ImportState
             'mysql_port' => $this->mysql_port,
             'mysql_user' => $this->mysql_user,
             'mysql_database' => $this->mysql_database,
-            'consecutive_timeouts' => $this->consecutive_timeouts,
+            'consecutive_interrupted_responses' => $this->consecutive_interrupted_responses,
             'tuning' => $this->tuning->to_array(),
             'pull_pipeline' => $this->pull_pipeline->to_array(),
         ];

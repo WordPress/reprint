@@ -252,11 +252,11 @@ class ImportClient
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
 
     /**
-     * Maximum number of consecutive cURL timeouts with no cursor progress
-     * before the importer gives up. This prevents infinite retry loops
-     * when the remote server is genuinely unresponsive.
+     * Maximum number of consecutive interrupted responses with no cursor
+     * progress before the importer gives up. This prevents endless resumption
+     * when the source cannot complete a response.
      */
-    private const MAX_CONSECUTIVE_TIMEOUTS = 3;
+    private const MAX_CONSECUTIVE_INTERRUPTED_RESPONSES = 3;
 
     /** @var string Export server URL. */
     public $remote_url;
@@ -3732,7 +3732,7 @@ class ImportClient
 
             $this->download_db_index();
 
-            // Timeout during db-index — state already saved, exit partial.
+            // Interrupted response during db-index — state already saved, exit partial.
             if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
                 return;
             }
@@ -3757,7 +3757,7 @@ class ImportClient
 
         $this->download_sql();
 
-        // Timeout during SQL download — state already saved, exit partial.
+        // Interrupted response during SQL download — state already saved, exit partial.
         if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
             return;
         }
@@ -5934,6 +5934,12 @@ class ImportClient
         $this->save_state($this->state);
 
         $this->download_db_index();
+        if (
+            $this->import_state()->active_resumable_command->completion_state ===
+            "partial"
+        ) {
+            return;
+        }
 
         $this->import_state()->active_resumable_command->completion_state = "complete";
         $this->save_state($this->state);
@@ -6147,24 +6153,30 @@ class ImportClient
                 $post_data,
                 "file_fetch",
             );
-        } catch (CurlTimeoutException $e) {
-            // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
-            // with no progress, so we don't retry forever.
-            $this->assert_can_retry_consecutive_timeout("file_fetch", $cursor_before, $cursor);
-            // Save state so the next invocation resumes from the
-            // last cursor instead of crashing with exit code 1.
-            $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-            $this->finalize_index_updates();
-            if ($context->file_handle && $context->file_path) {
+        } catch (InterruptedResponseException $e) {
+            // A streaming body may have written bytes for a multipart part
+            // whose cursor is not durable yet. Keep the checkpoint saved by
+            // the last complete part; the next invocation truncates any later
+            // bytes before resuming.
+            $durable_cursor =
+                $this->get_download_list_fetch_state($state_key)->cursor;
+            $this->assert_can_resume_after_interrupted_response(
+                "file_fetch",
+                $cursor_before,
+                $durable_cursor,
+                $e,
+            );
+            if ($context->file_handle) {
                 fflush($context->file_handle);
-                $this->import_state()->current_file = $context->file_path;
-                $this->import_state()->current_file_bytes = $context->file_bytes_written;
+                fclose($context->file_handle);
+                $context->file_handle = null;
             }
+            $this->finalize_index_updates();
             $this->import_state()->active_resumable_command->completion_state = "partial";
             $this->save_state($this->state);
             return false;
         }
-        $this->import_state()->consecutive_timeouts = 0;
+        $this->import_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
 
         $this->finalize_tuned_request(
@@ -6404,17 +6416,20 @@ class ImportClient
         $request_start = microtime(true);
         try {
             $this->fetch_streaming($url, $cursor, $context, null, "file_index");
-        } catch (CurlTimeoutException $e) {
-            // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
-            // with no progress, so we don't retry forever.
-            $this->assert_can_retry_consecutive_timeout("file_index", $cursor_before, $cursor);
+        } catch (InterruptedResponseException $e) {
+            $this->assert_can_resume_after_interrupted_response(
+                "file_index",
+                $cursor_before,
+                $cursor,
+                $e,
+            );
             fclose($handle);
             $this->import_state()->index->cursor = $cursor;
             $this->import_state()->active_resumable_command->completion_state = "partial";
             $this->save_state($this->state);
             return false;
         }
-        $this->import_state()->consecutive_timeouts = 0;
+        $this->import_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
         $this->finalize_tuned_request(
             "file_index",
@@ -7780,9 +7795,12 @@ class ImportClient
                 try {
                     $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
                 } catch (CurlTimeoutException $e) {
-                    // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
-                    // with no progress, so we don't retry forever.
-                    $this->assert_can_retry_consecutive_timeout("sql_chunk", $cursor_before, $cursor);
+                    $this->assert_can_resume_after_interrupted_response(
+                        "sql_chunk",
+                        $cursor_before,
+                        $cursor,
+                        $e,
+                    );
                     // Save state so the next invocation resumes from the
                     // last cursor instead of crashing with exit code 1.
                     if ($sql_handle) {
@@ -7800,56 +7818,34 @@ class ImportClient
                     $sql_buffer = "";
                     $curl_timed_out = true;
                     break;
-                } catch (RuntimeException $e) {
+                } catch (InterruptedResponseException $e) {
                     // The server may crash mid-response (max_execution_time,
-                    // OOM, fatal error). This surfaces as either:
-                    //  - "missing completion chunk" (response ended without it)
-                    //  - cURL error 18/52/56 (partial transfer / recv error)
-                    //  - "missing multipart boundary" (proxy error page)
-                    // Treat these as a retryable partial response: save state
-                    // so the next invocation resumes from the cursor. Unlike
-                    // a timeout (where the buffer is discarded and re-fetched),
-                    // we keep $sql_buffer intact here so the .sql-buffer file
-                    // is preserved — the next run reloads it and continues
-                    // accumulating from where the server left off.
-                    $msg = $e->getMessage();
-                    // Only retry connection-level curl errors that indicate
-                    // the server crashed or the connection was interrupted.
-                    // Do NOT retry content-encoding errors (e.g. gzip
-                    // corruption, CURLE_BAD_CONTENT_ENCODING=61) — those
-                    // will fail identically on every retry.
-                    //   18 = CURLE_PARTIAL_FILE (transfer closed mid-stream)
-                    //   52 = CURLE_GOT_NOTHING (empty response)
-                    //   56 = CURLE_RECV_ERROR (connection reset / recv failure)
-                    $is_retryable_curl = preg_match(
-                        '/cURL error \((\d+)\):/', $msg, $curl_match
-                    ) && in_array((int) $curl_match[1], [18, 52, 56]);
-                    $is_retryable =
-                        strpos($msg, "missing completion chunk") !== false ||
-                        $is_retryable_curl ||
-                        strpos($msg, "missing multipart boundary") !== false;
-                    if ($is_retryable) {
-                        $this->audit_log(
-                            "INCOMPLETE RESPONSE | " . $msg .
-                            " | buffered_sql=" . strlen($sql_buffer) . " bytes" .
-                            " — will save state for retry",
-                            true,
-                        );
-                        $this->assert_can_retry_consecutive_timeout("sql_chunk", $cursor_before, $cursor);
-                        if ($sql_handle) {
-                            fflush($sql_handle);
-                        }
-                        $this->import_state()->active_resumable_command->remote_cursor = $cursor;
-                        $this->import_state()->sql_bytes = $sql_bytes_written;
-                        $this->import_state()->sql_statements_counted = $sql_statements_counted;
-                        $this->import_state()->active_resumable_command->completion_state = "partial";
-                        $this->save_state($this->state);
-                        $curl_timed_out = true;
-                        break;
+                    // OOM, fatal error). Keep $sql_buffer intact so the next
+                    // invocation reloads it and continues from the last
+                    // complete response part.
+                    $this->audit_log(
+                        "SQL BUFFER | buffered_sql=" . strlen($sql_buffer) .
+                        " bytes | saving state after interrupted response",
+                        true,
+                    );
+                    $this->assert_can_resume_after_interrupted_response(
+                        "sql_chunk",
+                        $cursor_before,
+                        $cursor,
+                        $e,
+                    );
+                    if ($sql_handle) {
+                        fflush($sql_handle);
                     }
-                    throw $e;
+                    $this->import_state()->active_resumable_command->remote_cursor = $cursor;
+                    $this->import_state()->sql_bytes = $sql_bytes_written;
+                    $this->import_state()->sql_statements_counted = $sql_statements_counted;
+                    $this->import_state()->active_resumable_command->completion_state = "partial";
+                    $this->save_state($this->state);
+                    $curl_timed_out = true;
+                    break;
                 }
-                $this->import_state()->consecutive_timeouts = 0;
+                $this->import_state()->consecutive_interrupted_responses = 0;
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
                     "sql_chunk",
@@ -8335,10 +8331,13 @@ class ImportClient
                         null,
                         "db_index",
                     );
-                } catch (CurlTimeoutException $e) {
-                    // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
-                    // with no progress, so we don't retry forever.
-                    $this->assert_can_retry_consecutive_timeout("db_index", $cursor_before, $cursor);
+                } catch (InterruptedResponseException $e) {
+                    $this->assert_can_resume_after_interrupted_response(
+                        "db_index",
+                        $cursor_before,
+                        $cursor,
+                        $e,
+                    );
                     fflush($handle);
                     $this->import_state()->active_resumable_command->remote_cursor = $cursor;
                     $this->import_state()->db_index->file = $tables_file;
@@ -8350,7 +8349,7 @@ class ImportClient
                     $this->save_state($this->state);
                     return;
                 }
-                $this->import_state()->consecutive_timeouts = 0;
+                $this->import_state()->consecutive_interrupted_responses = 0;
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
                     "db_index",
@@ -10263,8 +10262,11 @@ class ImportClient
     }
 
     /**
-     * Check for curl errors after curl_exec and record timeout state.
-     * Throws RuntimeException on any curl error.
+     * Check for cURL errors after curl_exec and record timeout state.
+     *
+     * @throws CurlTimeoutException        When the request times out.
+     * @throws InterruptedResponseException When the response ends early.
+     * @throws RuntimeException            For every other cURL error.
      */
     private function check_curl_error($ch): void
     {
@@ -10281,49 +10283,63 @@ class ImportClient
         if ($this->last_curl_timeout) {
             throw new CurlTimeoutException("cURL error: {$error}");
         }
+        // These errors mean the response ended before cURL could finish
+        // receiving it. Content-decoding failures such as
+        // CURLE_BAD_CONTENT_ENCODING (61) remain fatal because the same bytes
+        // will fail again after resumption.
+        //   18 = CURLE_PARTIAL_FILE (transfer closed mid-stream)
+        //   52 = CURLE_GOT_NOTHING (empty response)
+        //   56 = CURLE_RECV_ERROR (connection reset / receive failure)
+        if (in_array($errno, [18, 52, 56], true)) {
+            throw new InterruptedResponseException(
+                "cURL error ({$errno}): {$error}",
+            );
+        }
         throw new RuntimeException("cURL error ($errno): {$error}");
     }
 
     /**
-     * Track consecutive cURL timeouts and decide whether to retry or give up.
+     * Track consecutive interrupted responses and decide whether to resume.
      *
-     * Compares the cursor before and after the request. If the cursor advanced
-     * (we got some data before stalling), the counter resets — the stall was
-     * transient and resuming makes sense. If the cursor didn't move, the
-     * counter increments. After MAX_CONSECUTIVE_TIMEOUTS with no progress,
-     * throws a RuntimeException so the runner sees exit code 1 and stops.
+     * Compares the cursor before and after the request. A cursor advance means
+     * the request produced another durable part, so the counter resets. If the
+     * cursor did not move, the counter increments. After
+     * MAX_CONSECUTIVE_INTERRUPTED_RESPONSES with no progress, the runner stops.
      *
-     * @param string $phase   Human-readable phase name for logs (e.g. "sql_chunk")
-     * @param ?string $cursor_before Cursor value at the start of the request
-     * @param ?string $cursor_after  Cursor value when the timeout fired
+     * @param string                       $phase         Human-readable phase name.
+     * @param ?string                      $cursor_before Cursor at request start.
+     * @param ?string                      $cursor_after  Last durable cursor.
+     * @param InterruptedResponseException $exception     Response failure.
      */
-    protected function assert_can_retry_consecutive_timeout(
+    protected function assert_can_resume_after_interrupted_response(
         string $phase,
         ?string $cursor_before,
-        ?string $cursor_after
+        ?string $cursor_after,
+        InterruptedResponseException $exception
     ): void {
         if ($cursor_after !== null && $cursor_after !== $cursor_before) {
-            // Progress was made — reset the counter.
-            $this->import_state()->consecutive_timeouts = 0;
+            $this->import_state()->consecutive_interrupted_responses = 0;
         } else {
-            $this->import_state()->consecutive_timeouts =
-                ($this->import_state()->consecutive_timeouts ?? 0) + 1;
+            $this->import_state()->consecutive_interrupted_responses++;
         }
 
-        $count = $this->import_state()->consecutive_timeouts;
+        $count = $this->import_state()->consecutive_interrupted_responses;
 
         $this->audit_log(
-            "CURL TIMEOUT | {$phase} | consecutive_timeouts={$count}/" .
-                self::MAX_CONSECUTIVE_TIMEOUTS .
+            "INTERRUPTED RESPONSE | {$phase} | " .
+                "consecutive_interrupted_responses={$count}/" .
+                self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES .
                 " | cursor_moved=" .
-                ($cursor_after !== $cursor_before ? "yes" : "no"),
+                ($cursor_after !== $cursor_before ? "yes" : "no") .
+                " | " . $exception->getMessage(),
             true,
         );
 
-        if ($count >= self::MAX_CONSECUTIVE_TIMEOUTS) {
+        if ($count >= self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES) {
             throw new RuntimeException(
-                "Remote server appears unreachable: {$count} consecutive " .
-                "cURL timeouts with no progress during {$phase}. Giving up.",
+                "The remote response ended before completion {$count} " .
+                "consecutive times without cursor progress during {$phase}. " .
+                "Giving up.",
             );
         }
     }
@@ -10958,14 +10974,14 @@ class ImportClient
 
         if (!$parser) {
             $snippet = $error_body ? substr($error_body, 0, 500) : "";
-            throw new RuntimeException(
+            throw new InterruptedResponseException(
                 "Invalid response: missing multipart boundary. " .
                     ($snippet !== "" ? "Body: {$snippet}" : ""),
             );
         }
 
         if (!$context->saw_completion) {
-            throw new RuntimeException(
+            throw new InterruptedResponseException(
                 "Invalid response: missing completion chunk from server.",
             );
         }
@@ -11087,11 +11103,9 @@ class ImportClient
             "mysql_port" => null,
             "mysql_user" => null,
             "mysql_database" => null,
-            // Consecutive cURL timeout counter — tracks how many times in a
-            // row a timeout fired without the cursor advancing. After
-            // MAX_CONSECUTIVE_TIMEOUTS with no progress, the importer gives
-            // up instead of retrying forever.
-            "consecutive_timeouts" => 0,
+            // Stop resuming after repeated interrupted responses without
+            // cursor progress.
+            "consecutive_interrupted_responses" => 0,
             // Adaptive tuning state/config
             "tuning" => [
                 "config" => [],
@@ -11737,12 +11751,18 @@ class StreamingContext
 class PreserveLocalSkipException extends RuntimeException {}
 
 /**
+ * Thrown when a streaming response loses its framing or ends before a valid
+ * completion part.
+ */
+class InterruptedResponseException extends RuntimeException {}
+
+/**
  * Thrown when a cURL request times out (CURLE_OPERATION_TIMEDOUT).
  * Callers catch this to save state and exit with "partial" status instead
  * of crashing with a fatal error — the next invocation resumes from the
  * last saved cursor.
  */
-class CurlTimeoutException extends RuntimeException {}
+class CurlTimeoutException extends InterruptedResponseException {}
 
 // ============================================================================
 // CLI Entry Point
@@ -12632,7 +12652,7 @@ if (
                 "  6. Runtime   — generate server config (default: php-builtin)\n" .
                 "  7. Start     — launch the selected runtime when supported\n" .
                 "\n" .
-                "Each step retries automatically on server timeouts. If the process is\n" .
+                "Each step resumes automatically after an interrupted response. If the process is\n" .
                 "interrupted, re-run the same command to resume from where it left off.\n" .
                 "Running pull again after completion performs a delta sync.\n" .
                 "\n" .

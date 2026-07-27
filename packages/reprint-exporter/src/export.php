@@ -1023,6 +1023,10 @@ function endpoint_db_index(
 
     $creds = resolve_db_credentials();
 
+    if (getenv('SITE_EXPORT_TEST_MODE')) {
+        _e2e_load_test_hooks_if_needed($config);
+    }
+
     $tables_per_batch = $config["tables_per_batch"] ?? 1000;
     $tables_per_batch = require_int_range(
         "tables_per_batch",
@@ -1129,6 +1133,12 @@ function endpoint_db_index(
     }
 
     try {
+        if (getenv('SITE_EXPORT_TEST_MODE')) {
+            $hook_status = $aborted ? "partial" : $status;
+            $hook_args = [$hook_status, $gz, $boundary];
+            _e2e_call_hook('test_hook_before_completion', $hook_args);
+        }
+
         $gz->write(
             "--{$boundary}\r\n" .
             "Content-Type: application/octet-stream\r\n" .

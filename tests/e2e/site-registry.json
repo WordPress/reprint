@@ -136,6 +136,9 @@
     },
     "adversarial-database": {
       "port": 8124
+    },
+    "db-index-interruption": {
+      "port": 8125
     }
   }
 }
