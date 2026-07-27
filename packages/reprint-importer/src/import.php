@@ -1350,7 +1350,7 @@ class ImportClient
         $previous_local_index = $push_state_directory . '/previous_local_index.jsonl';
         $missing_previous_local_index_message =
             'files-diff requires a fresh completed files-pull or pull-files without --only, with --filter=none, no --remap, '
-            . 'and no --on-fs-root-nonempty=preserve-local, or a completed files-push, '
+            . 'and no --on-fs-root-nonempty=preserve-local, or a completed files-push without --only, '
             . 'for the same target URL, state directory, and local tree. '
             . 'The target URL must be the exact exporter API URL used by that pull. '
             . 'If a standalone files-pull is already complete, run it with --abort and then run it again.';
@@ -1481,9 +1481,10 @@ class ImportClient
      * @param array $options {
      *     Parsed files-push options and context.
      *
-     *     @type string $secret             HMAC shared secret.
-     *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
-     *     @type array  $files_push_context Optional context already validated by the CLI entry point.
+     *     @type string       $secret             HMAC shared secret.
+     *     @type bool         $force_http         Whether the operator allowed a plain-HTTP target.
+     *     @type list<string> $only               Document-root-relative selected paths.
+     *     @type array        $files_push_context Optional context already validated by the CLI entry point.
      * }
      * @param ReprintProcessLock $process_lock Lock held for this command.
      * @phpstan-param array<string,mixed> $options
@@ -1525,6 +1526,7 @@ class ImportClient
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['force_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,
+            'selected_paths' => $options['only'] ?? [],
         ];
 
         $resuming = is_file($context['push_state_directory'] . '/sender.json');
@@ -12576,11 +12578,10 @@ if (
             'name' => 'only',
             'type' => 'value-or-next',
             'target' => 'only',
-            'placeholder' => 'SOURCE',
+            'placeholder' => 'PATH',
             'repeatable' => true,
-            'help' => 'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path); ' .
-                'repeat for several. Default pulls everything',
-            'commands' => ['pull-files', 'files-pull'],
+            'help' => 'Restrict file work to PATH; pulls accept a :token: or absolute source path, while files-push accepts a document-root-relative path. Repeat for several paths',
+            'commands' => ['pull-files', 'files-pull', 'files-push'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
@@ -13289,12 +13290,15 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <target-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
+            "usage" => "reprint files-push <target-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--only=PATH ...] [--force-http] [--verbose]",
             "description" =>
                 "Sends the existing local tree at --fs-root to the target exporter API.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
                 "It does not require pull preflight.\n" .
+                "\n" .
+                "Repeat --only with document-root-relative paths to send just the\n" .
+                "changes at or below those paths. Other changes remain pending.\n" .
                 "\n" .
                 "Each process runs one sender until it completes, reaches a caller time or\n" .
                 "memory boundary, or receives a signal handled by this PHP runtime.\n" .
@@ -13540,7 +13544,19 @@ if (
 
     $reprint_files_command_arguments = array_slice($argv, $option_start_index);
     if ($command === 'files-push') {
-        foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
+        $reprint_files_push_argument_count =
+            count($reprint_files_command_arguments);
+        for (
+            $reprint_files_push_argument_index = 0;
+            $reprint_files_push_argument_index < $reprint_files_push_argument_count;
+            ++$reprint_files_push_argument_index
+        ) {
+            $reprint_files_push_command_argument =
+                $reprint_files_command_arguments[$reprint_files_push_argument_index];
+            if ($reprint_files_push_command_argument === '--only') {
+                ++$reprint_files_push_argument_index;
+                continue;
+            }
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
                 ['--force-http', '--verbose', '-v'],
@@ -13548,7 +13564,8 @@ if (
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_push_command_argument, '--fs-root=') === 0
-                || strpos($reprint_files_push_command_argument, '--secret=') === 0;
+                || strpos($reprint_files_push_command_argument, '--secret=') === 0
+                || strpos($reprint_files_push_command_argument, '--only=') === 0;
             if (!$reprint_files_push_option_allowed) {
                 $reprint_files_push_option_name = explode('=', $reprint_files_push_command_argument, 2)[0];
                 fwrite(STDERR, "Error: files-push does not accept {$reprint_files_push_option_name}.\n");

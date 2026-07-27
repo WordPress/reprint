@@ -126,6 +126,77 @@ final class FilesPushCommandTest extends TestCase
         );
     }
 
+    public function testFilesPushAcceptsBothOnlyOptionForms(): void
+    {
+        foreach ([['--only=missing.txt'], ['--only', 'missing.txt']] as $onlyOption) {
+            $result = $this->runFilesPush(
+                'https://127.0.0.1:1/?reprint-api=1',
+                array_merge(['--secret=token'], $onlyOption)
+            );
+
+            $this->assertSame(1, $result['exit'], $result['output']);
+            $this->assertStringNotContainsString('does not accept --only', $result['output']);
+            $this->assertStringNotContainsString('Unknown option', $result['output']);
+        }
+    }
+
+    public function testFilesPushNamesPathWhenOnlyHasNoValue(): void
+    {
+        $result = $this->runFilesPush(
+            'https://example.test/?reprint-api=1',
+            ['--secret=token', '--only']
+        );
+
+        $this->assertSame(1, $result['exit']);
+        $this->assertStringContainsString('--only requires one argument: PATH', $result['output']);
+        $this->assertNoSenderState($this->stateDirectory);
+    }
+
+    /**
+     * @dataProvider invalidOnlyPaths
+     * @param array<mixed> $selectedPaths
+     */
+    public function testFilesPushRejectsInvalidOnlyPathsBeforeStartingSender(
+        array $selectedPaths,
+        string $expectedMessage
+    ): void {
+        $processLock = new \ReprintProcessLock($this->stateDirectory);
+        $sender = null;
+        try {
+            $sender = \PushFilesSender::start([
+                'docroot' => $this->localTree,
+                'push_state_directory' => $this->stateDirectory . '/push/test',
+                'base_url' => 'https://example.test/?reprint-api=1',
+                'hmac_client' => new \Site_Export_HMAC_Client('token'),
+                'selected_paths' => $selectedPaths,
+            ], $processLock);
+            $this->fail('The invalid --only path was accepted.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString($expectedMessage, $exception->getMessage());
+        } finally {
+            if ($sender instanceof \PushFilesSender) {
+                $sender->close();
+            }
+            $processLock->close();
+        }
+
+        $this->assertNoSenderState($this->stateDirectory);
+    }
+
+    /** @return array<string,array{0:array<mixed>,1:string}> */
+    public static function invalidOnlyPaths(): array
+    {
+        return [
+            'empty path' => [[''], 'must not be empty'],
+            'absolute path' => [['/absolute.txt'], 'document-root-relative'],
+            'NUL byte' => [["nul\0byte"], 'NUL byte'],
+            'empty component' => [['directory//file.txt'], 'empty component'],
+            'dot component' => [['directory/./file.txt'], 'dot component'],
+            'parent component' => [['directory/../file.txt'], 'parent component'],
+            'non-string' => [[123], 'must be a string; observed integer'],
+        ];
+    }
+
     public function testFilesPushRejectsInvalidInputsBeforeStartingSender(): void
     {
         $missingSecret = $this->runFilesPush('https://example.test/?reprint-api=1', []);
@@ -255,6 +326,7 @@ final class FilesPushCommandTest extends TestCase
                 'push_session_id' => str_repeat('1', 32),
                 'phase' => 'starting_plan',
                 'push_plan_cursor' => null,
+                'selected_paths_fingerprint' => hash('sha256', ''),
                 'local_paths_to_push_byte_offset' => 0,
                 'max_part_bytes' => null,
                 'request_sizer_state' => [

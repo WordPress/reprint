@@ -1,6 +1,7 @@
 <?php
 
 use function WordPress\Reprint\Exporter\compare_paths;
+use function WordPress\Reprint\Exporter\path_is_within_root;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 
@@ -35,9 +36,10 @@ use function WordPress\Reprint\Exporter\compare_paths;
  * use the indexer's empty-directory marker; non-empty directories are
  * represented by their descendants.
  *
- * With no previous local index, every file, symlink, and empty directory is
- * selected, and no deletion can be detected. Excluded paths are omitted from
- * both path lists but remain in the fresh local index.
+ * With no previous local index, every in-scope file, symlink, and empty
+ * directory is new, and no deletion can be detected. Caller-selected paths
+ * restrict both operation lists. Excluded paths are omitted from both lists
+ * but remain in the fresh local index.
  *
  * The index reader trusts the entry values produced by the indexer. It retains
  * failure handling for reading lines, decoding JSON, and decoding base64 paths.
@@ -60,10 +62,10 @@ use function WordPress\Reprint\Exporter\compare_paths;
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
  * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
  * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
- * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_index:int,byte_offset_in_previous_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_stack_top_byte_offset:int|null}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_index:int,byte_offset_in_previous_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_stack_top_byte_offset:int|null,blocked_selected_subtree_path:string|null}
  * @phpstan-type CompleteCursor array{phase:'complete'}
  * @phpstan-type PushPlanPosition IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
- * @phpstan-type PushPlanCursor array{plan_directory:string,local_tree_root:string,previous_local_index:string,position:PushPlanPosition}
+ * @phpstan-type PushPlanCursor array{plan_directory:string,local_tree_root:string,previous_local_index:string,selected_path_positions_with_fresh_entries:list<int>,position:PushPlanPosition}
  * @phpstan-type DeletedDirectoryStackEntry array{path:string,previous_byte_offset:int|null}
  */
 class PushPlan
@@ -94,6 +96,12 @@ class PushPlan
 
     /** @var list<string> Receiver-owned paths that the plan must not push or delete. */
     private array $excluded_paths = [];
+
+    /** @var list<string> Document-root-relative paths selected by the caller. */
+    private array $selected_paths = [];
+
+    /** @var list<int> Positions of selected paths which contain at least one fresh index entry. */
+    private array $selected_path_positions_with_fresh_entries = [];
 
     /** @var PushPlanCursor Current cursor returned to the caller. */
     private array $cursor;
@@ -141,15 +149,22 @@ class PushPlan
      * @param string $local_tree_root              Canonical local tree root.
      * @param string $previous_local_index Previous local index this plan diffs against.
      * @param string $excluded_paths_path          Caller-owned target exclusions file.
+     * @param list<string> $selected_paths         Canonical selected paths. Empty selects all paths.
      * @return self Open plan positioned at the initial indexing cursor.
      */
     public static function start(
         string $plan_directory,
         string $local_tree_root,
         string $previous_local_index,
-        string $excluded_paths_path
+        string $excluded_paths_path,
+        array $selected_paths = []
     ): self {
-        $plan = new self($plan_directory, $local_tree_root, $previous_local_index);
+        $plan = new self(
+            $plan_directory,
+            $local_tree_root,
+            $previous_local_index,
+            $selected_paths
+        );
         if (!@copy($excluded_paths_path, $plan->excluded_paths_file)) {
             throw new RuntimeException("Failed to copy excluded paths into the push plan: {$excluded_paths_path}");
         }
@@ -169,6 +184,7 @@ class PushPlan
             "plan_directory" => $plan->plan_directory,
             "local_tree_root" => $plan->local_tree_root,
             "previous_local_index" => $plan->previous_local_index,
+            "selected_path_positions_with_fresh_entries" => [],
             "position" => [
                 "phase" => "indexing",
                 "file_index_cursor" => $plan->file_index_processor->get_cursor(),
@@ -187,13 +203,29 @@ class PushPlan
      * @phpstan-param PushPlanCursor $cursor Cursor previously returned by get_cursor().
      * @return self Open plan positioned at its last durable cursor.
      */
-    public static function resume(array $cursor): self
+    public static function resume(array $cursor, array $selected_paths = []): self
     {
         $plan = new self(
             $cursor["plan_directory"],
             $cursor["local_tree_root"],
-            $cursor["previous_local_index"]
+            $cursor["previous_local_index"],
+            $selected_paths
         );
+        foreach (
+            $cursor["selected_path_positions_with_fresh_entries"]
+            as $selected_path_position
+        ) {
+            if (
+                !is_int($selected_path_position)
+                || !array_key_exists($selected_path_position, $selected_paths)
+            ) {
+                throw new RuntimeException(
+                    "The push plan selected-path position does not identify a selected path."
+                );
+            }
+        }
+        $plan->selected_path_positions_with_fresh_entries =
+            $cursor["selected_path_positions_with_fresh_entries"];
         $plan->cursor = $cursor;
         $position = $plan->cursor["position"];
         $plan->excluded_paths = $plan->load_excluded_paths();
@@ -303,11 +335,13 @@ class PushPlan
      * @param string $plan_directory              Caller-owned active plan directory.
      * @param string $local_tree_root              Canonical local tree root.
      * @param string $previous_local_index Previous local index this plan diffs against.
+     * @param list<string> $selected_paths         Canonical selected paths.
      */
     private function __construct(
         string $plan_directory,
         string $local_tree_root,
-        string $previous_local_index
+        string $previous_local_index,
+        array $selected_paths
     ) {
         $plan_directory = rtrim($plan_directory, "/");
         if (!is_dir($plan_directory)) {
@@ -316,6 +350,7 @@ class PushPlan
         $this->plan_directory = $plan_directory;
         $this->set_local_tree_root($local_tree_root);
         $this->previous_local_index = $previous_local_index;
+        $this->selected_paths = $selected_paths;
         $this->local_paths_to_push = $plan_directory . "/local_paths_to_push.jsonl";
         $this->local_paths_to_delete = $plan_directory . "/local_paths_to_delete";
         $this->fresh_local_index = $plan_directory . "/fresh_local_index.jsonl";
@@ -502,6 +537,8 @@ class PushPlan
             "file_index_cursor" => $this->file_index_processor->get_cursor(),
             "fresh_local_index_byte_offset" => $fresh_local_index_byte_offset,
         ];
+        $this->cursor["selected_path_positions_with_fresh_entries"] =
+            $this->selected_path_positions_with_fresh_entries;
     }
 
     /**
@@ -519,6 +556,7 @@ class PushPlan
             "byte_offset_in_local_paths_to_push" => 0,
             "byte_offset_in_local_paths_to_delete" => 0,
             "deleted_directory_stack_top_byte_offset" => null,
+            "blocked_selected_subtree_path" => null,
         ];
         $this->open_plan_files();
     }
@@ -543,6 +581,20 @@ class PushPlan
         }
 
         $local_path = substr($index_entry["path"], strlen($this->local_tree_root) + 1);
+        foreach ($this->selected_paths as $selected_path_position => $selected_path) {
+            if (path_is_within_root($local_path, $selected_path)) {
+                if (
+                    !in_array(
+                        $selected_path_position,
+                        $this->selected_path_positions_with_fresh_entries,
+                        true
+                    )
+                ) {
+                    $this->selected_path_positions_with_fresh_entries[] =
+                        $selected_path_position;
+                }
+            }
+        }
         $fresh_local_index_entry = [
             "path" => base64_encode($local_path),
             "ctime" => $index_entry["ctime"],
@@ -574,6 +626,8 @@ class PushPlan
         $byte_offset_in_fresh_index = $cursor["byte_offset_in_fresh_index"];
         $byte_offset_in_previous_local_index = $cursor["byte_offset_in_previous_local_index"];
         $deleted_directory_stack_top_byte_offset = $cursor["deleted_directory_stack_top_byte_offset"];
+        $blocked_selected_subtree_path =
+            $cursor["blocked_selected_subtree_path"];
         $local_paths_to_push_changed = false;
         $local_paths_to_delete_changed = false;
         $deleted_directories_stack_changed = false;
@@ -605,6 +659,21 @@ class PushPlan
                     $entry_previous_local_index["path"]
                 );
             }
+            $current_path = $path_comparison <= 0
+                ? $entry_fresh_index["path"]
+                : $entry_previous_local_index["path"];
+            if (
+                $blocked_selected_subtree_path !== null
+                && !path_is_within_root(
+                    $current_path,
+                    $blocked_selected_subtree_path
+                )
+            ) {
+                $blocked_selected_subtree_path = null;
+            }
+            $current_path_is_selected =
+                $blocked_selected_subtree_path === null
+                && $this->path_is_selected($current_path);
 
             $current_shape = null;
             if ($path_comparison <= 0) {
@@ -633,6 +702,7 @@ class PushPlan
                 // descendants.
                 if (
                     $current_shape !== "non_empty_directory"
+                    && $current_path_is_selected
                     && !$this->path_conflicts_with_excluded_paths($entry_fresh_index["path"])
                 ) {
                     $this->append_local_path_to_push($entry_fresh_index);
@@ -642,7 +712,8 @@ class PushPlan
                 // A deleted non-empty directory emits one root. Its later
                 // descendant entries are already covered by that path.
                 if (
-                    !$this->path_conflicts_with_excluded_paths($entry_previous_local_index["path"])
+                    $current_path_is_selected
+                    && !$this->path_conflicts_with_excluded_paths($entry_previous_local_index["path"])
                     && !$this->deleted_directory_stack_covers_path(
                         $entry_previous_local_index["path"],
                         $this->deleted_directory_stack_entry
@@ -678,9 +749,30 @@ class PushPlan
                 $needs_push = $empty_directory_needs_push
                     || $changed_file_or_symlink_needs_push;
                 $path_is_excluded = $this->path_conflicts_with_excluded_paths($entry_fresh_index["path"]);
+                $scalar_becomes_non_empty_directory =
+                    $current_shape === "non_empty_directory"
+                    && (
+                        $previous_local_index_shape === "file"
+                        || $previous_local_index_shape === "symlink"
+                    );
+                $required_ancestor_transition = !$current_path_is_selected
+                    && $blocked_selected_subtree_path === null
+                    && $scalar_becomes_non_empty_directory
+                    && $this->path_is_ancestor_of_selected_path_with_fresh_entry(
+                        $entry_fresh_index["path"]
+                    );
+                if (
+                    $path_is_excluded
+                    && $scalar_becomes_non_empty_directory
+                    && ( $current_path_is_selected || $required_ancestor_transition )
+                ) {
+                    $blocked_selected_subtree_path =
+                        $entry_fresh_index["path"];
+                }
 
                 if (
                     $needs_delete
+                    && ( $current_path_is_selected || $required_ancestor_transition )
                     && !$path_is_excluded
                     && !$this->deleted_directory_stack_covers_path(
                         $entry_previous_local_index["path"],
@@ -697,7 +789,7 @@ class PushPlan
                         $deleted_directories_stack_changed = true;
                     }
                 }
-                if ($needs_push && !$path_is_excluded) {
+                if ($needs_push && $current_path_is_selected && !$path_is_excluded) {
                     $this->append_local_path_to_push($entry_fresh_index);
                     $local_paths_to_push_changed = true;
                 }
@@ -738,6 +830,7 @@ class PushPlan
                 "byte_offset_in_local_paths_to_push" => ftell($this->local_paths_to_push_handle),
                 "byte_offset_in_local_paths_to_delete" => ftell($this->local_paths_to_delete_handle),
                 "deleted_directory_stack_top_byte_offset" => $deleted_directory_stack_top_byte_offset,
+                "blocked_selected_subtree_path" => $blocked_selected_subtree_path,
             ];
         $this->cursor["position"] = $cursor_after_step;
         return !$complete;
@@ -979,6 +1072,35 @@ class PushPlan
     private function deleted_directory_stack_covers_path(string $path, ?array $entry): bool
     {
         return $entry !== null && strpos($path, $entry["path"] . "/") === 0;
+    }
+
+    /** Returns whether a path is selected directly or through a selected ancestor. */
+    private function path_is_selected(string $path): bool
+    {
+        if ($this->selected_paths === []) {
+            return true;
+        }
+        foreach ($this->selected_paths as $selected_path) {
+            if (path_is_within_root($path, $selected_path)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Returns whether a path is an ancestor needed by selected fresh work. */
+    private function path_is_ancestor_of_selected_path_with_fresh_entry(string $path): bool
+    {
+        foreach ($this->selected_path_positions_with_fresh_entries as $selected_path_position) {
+            $selected_path = $this->selected_paths[$selected_path_position];
+            if (
+                $selected_path !== $path
+                && path_is_within_root($selected_path, $path)
+            ) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

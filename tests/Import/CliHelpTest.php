@@ -21,7 +21,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('--filter=MODE', $output);
         $this->assertStringContainsString('--remap SOURCE TARGET', $output);
-        $this->assertStringContainsString('--only=SOURCE', $output);
+        $this->assertStringContainsString('--only=PATH', $output);
     }
 
     public function testPullDbHelpShowsRequiredAndDatabaseOptions(): void
@@ -51,7 +51,7 @@ class CliHelpTest extends TestCase
         $this->assertStringNotContainsString('--abort', $output);
         $this->assertStringNotContainsString('--filter', $output);
         $this->assertStringNotContainsString('--remap', $output);
-        $this->assertStringNotContainsString('--only', $output);
+        $this->assertStringContainsString('--only=PATH', $output);
     }
 
     public function testFilesDiffHelpShowsOnlyItsLocalCommandOptions(): void
