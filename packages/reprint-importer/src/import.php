@@ -17,7 +17,6 @@ use function WordPress\Reprint\Exporter\compare_paths;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_within_root;
-use function WordPress\Reprint\Exporter\path_sort_key;
 use function Reprint\Importer\merge_import_index_updates;
 use function Reprint\Importer\merge_previous_local_index_updates;
 
@@ -66,7 +65,6 @@ require_once __DIR__ . '/lib/target-runtime/load.php';
 
 // External merge sort for large index files when exec() is unavailable
 require_once __DIR__ . '/lib/external-merge-sort.php';
-require_once __DIR__ . '/lib/class-external-merge-sort-processor.php';
 require_once __DIR__ . '/lib/index-update-functions.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 
@@ -80,7 +78,6 @@ require_once __DIR__ . '/lib/state/class-import-state.php';
 require_once __DIR__ . '/lib/upload/class-push-request-sizer.php';
 require_once __DIR__ . '/lib/upload/class-multipart-push-stream-client.php';
 require_once __DIR__ . '/lib/push/class-push-plan.php';
-require_once __DIR__ . '/lib/pull/class-files-pull-conflict-processor.php';
 require_once __DIR__ . '/lib/push/class-push-files-sender.php';
 
 // High-level pull commands — orchestrate lower-level commands into pipelines
@@ -147,33 +144,6 @@ function reprint_apply_curl_ca_bundle($ch): ?string {
     curl_setopt($ch, CURLOPT_CAINFO, $cafile);
     return $cafile;
 }
-
-/**
- * The wire-protocol version this importer speaks.
- *
- * Both the export plugin (server) and the importer (client) are deployed
- * independently.  These two constants let them detect incompatibility at
- * preflight time instead of producing silent corruption.
- *
- * Bump this whenever a change to the wire protocol (cursor encoding,
- * multipart structure, header names, endpoint parameters, response format)
- * would break an older export plugin.
- */
-// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound -- Shared CLI protocol name.
-define('IMPORT_PROTOCOL_VERSION', 2);
-
-/**
- * The oldest *export plugin* protocol version this importer can talk to.
- *
- * During preflight-assert the importer checks that the remote's
- * protocol_version is >= this value; if not, it tells the user to
- * update the export plugin.
- *
- * Raise this when you drop backward-compatibility with old export plugins.
- * Keep it equal to IMPORT_PROTOCOL_VERSION if no backward compat is needed.
- */
-// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound -- Shared CLI protocol name.
-define('IMPORT_MIN_EXPORT_VERSION', 2);
 
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -259,7 +229,6 @@ class ImportClient
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
-    private const FILES_PULL_STAGING_VERSION = 1;
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
     /**
      * Maximum number of consecutive cURL timeouts with no cursor progress
@@ -403,7 +372,7 @@ class ImportClient
     private $export_directories_cache = null;
 
     /**
-     * @var bool When true, ask the server to ship content which matches built-in
+     * @var bool When true, ask the server to ship the default-skipped
      * generated content (wp-content/cache, .git, node_modules, etc.).
      *
      * The server's file-index endpoint filters these by default so a
@@ -414,6 +383,9 @@ class ImportClient
      * with no source).
      */
     private $include_caches = false;
+
+    /** @var string How files-pull handles overlapping local and remote changes. */
+    private $files_pull_conflict_policy = 'stop';
 
     /**
      * @var string Controls behavior when the fs root is non-empty at import start.
@@ -464,12 +436,6 @@ class ImportClient
      * (every detected root).
      */
     private $pull_only_files_with_path_prefixes = [];
-
-    /** @var string How files-pull handles paths changed both locally and remotely. */
-    private $files_pull_conflict_policy = 'stop';
-
-    /** @var bool Whether the current invocation explicitly selected a conflict policy. */
-    private $files_pull_conflict_policy_was_explicit = false;
 
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
@@ -916,23 +882,9 @@ class ImportClient
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
         $this->include_caches = $options["include_caches"] ?? false;
+        $this->files_pull_conflict_policy =
+            $options['on_conflict'] ?? 'stop';
         $this->extra_directory = $options["extra_directory"] ?? null;
-        $this->files_pull_conflict_policy_was_explicit =
-            array_key_exists('on_conflict', $options);
-        $this->files_pull_conflict_policy = $options['on_conflict'] ?? 'stop';
-        if (!in_array(
-            $this->files_pull_conflict_policy,
-            ['stop', 'remote-wins', 'our-wins'],
-            true
-        )) {
-            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option validation.
-            throw new InvalidArgumentException(
-                'Invalid --on-conflict value: '
-                . $this->files_pull_conflict_policy
-                . '. Valid values: stop, remote-wins, our-wins'
-            );
-            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-        }
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
             if (!in_array($this->fs_root_nonempty_behavior, ['error', 'preserve-local'])) {
@@ -1286,9 +1238,7 @@ class ImportClient
         }
 
         // All other commands require a prior preflight run.
-        $this->require_preflight(
-            !$abort && $command !== 'preflight-assert'
-        );
+        $this->require_preflight();
 
         if (in_array($command, ["files-pull", "files-index"], true)) {
             $this->prepare_files_pull_options($options, $command === "files-pull" && !$abort);
@@ -2035,71 +1985,15 @@ class ImportClient
             "RESTART | Clearing files-pull progress (keeping local index and files)",
             true,
         );
-        $this->assert_files_pull_abort_has_no_quarantined_directory();
-        $fetch_batch_artifacts = [];
-        $fetch_may_have_mutated_local_tree =
-            $this->import_state()->files_pull_staging_version
-                !== self::FILES_PULL_STAGING_VERSION;
-        foreach (
-            [
-                $this->import_state()->fetch,
-                $this->import_state()->fetch_skipped,
-            ] as $fetch_state
-        ) {
-            if ($fetch_state->batch_file !== null) {
-                $fetch_batch_artifacts[] =
-                    $fetch_state->batch_file;
-                $fetch_batch_artifacts[] =
-                    $fetch_state->batch_file
-                    . '.planned-local-state.jsonl';
-            }
-            $fetch_may_have_mutated_local_tree =
-                $fetch_may_have_mutated_local_tree
-                || $fetch_state->batch_file !== null
-                || $fetch_state->cursor !== null
-                || $fetch_state->applying_path !== null
-                || $fetch_state->staged_file !== null
-                || $fetch_state->pending_file_install !== null;
-        }
-        // A killed abort must not resume fetch state whose local cleanup has
-        // already started. Only the final clean-state save restores the
-        // current staging version.
-        $this->import_state()->files_pull_staging_version = 0;
-        $this->save_state($this->state, false);
-        $pending_local_action_is_ambiguous =
-            $this->reconcile_pending_local_action_before_abort();
-        clearstatcache(true, $this->index_update_wal_path);
-        $wal_size =
-            is_file($this->index_update_wal_path)
-                ? @filesize($this->index_update_wal_path)
-                : 0;
-        $had_index_update_wal =
-            $wal_size === false || $wal_size > 0;
+        $had_index_update_wal = is_file($this->index_update_wal_path);
         // Replay the WAL before clearing the cursor which made its records durable.
         $this->replay_index_update_wal();
-        if (
-            $had_index_update_wal
-            || $pending_local_action_is_ambiguous
-            || $fetch_may_have_mutated_local_tree
-        ) {
+        if ($had_index_update_wal) {
             $this->invalidate_previous_local_index();
         }
-        $this->discard_fetched_file_staging_before_abort(
-            $this->import_state()->fetch
-        );
-        $this->discard_fetched_file_staging_before_abort(
-            $this->import_state()->fetch_skipped
-        );
         $this->remove_index_update_wal();
-        foreach ($fetch_batch_artifacts as $fetch_batch_artifact) {
-            $this->remove_owned_files_pull_path(
-                $fetch_batch_artifact
-            );
-        }
         $this->maintain_previous_local_index = false;
         $this->reset_state();
-        $this->import_state()->files_pull_staging_version =
-            self::FILES_PULL_STAGING_VERSION;
         $this->index_update_wal_handle = null;
         $this->index_update_wal_record_count = 0;
 
@@ -2107,6 +2001,7 @@ class ImportClient
             @unlink($this->remote_index_file);
             $this->audit_log("FILE DELETE | {$this->remote_index_file}");
         }
+        @unlink($this->files_pull_conflicts_path());
         if (file_exists($this->download_list_file)) {
             @unlink($this->download_list_file);
             $this->audit_log("FILE DELETE | {$this->download_list_file}");
@@ -2119,243 +2014,11 @@ class ImportClient
             @unlink($this->volatile_files_file);
             $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
         }
-        $this->remove_files_pull_conflict_preparation();
         $this->import_state()->index = new RemoteFileIndexCursorState();
         $this->import_state()->fetch = new DownloadListFetchProgressState();
         $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
 
         $this->save_state($this->state);
-        foreach (['fetch', 'fetch_skipped'] as $state_key) {
-            $this->remove_owned_files_pull_path(
-                $this->retained_local_subtree_stack_path($state_key)
-            );
-            $fetch_state =
-                $this->get_download_list_fetch_state($state_key);
-            $this->remove_owned_files_pull_path(
-                $this->pending_fetched_file_destination_stack_path(
-                    $fetch_state
-                )
-            );
-        }
-    }
-
-    /**
-     * Removes an open private staging file before files-pull state is reset.
-     *
-     * @return bool Whether the destination may have changed.
-     */
-    private function discard_fetched_file_staging_before_abort(
-        DownloadListFetchProgressState $fetch_state
-    ): bool {
-        $record = $fetch_state->pending_file_install
-            ?? $fetch_state->staged_file;
-        if ($record === null) {
-            return false;
-        }
-        $destination_removal_may_have_changed_tree =
-            $fetch_state->pending_file_install !== null
-            && $record['destination_removal'] !== null;
-        if ($destination_removal_may_have_changed_tree) {
-            $this->clear_unstarted_fetched_file_destination_removal(
-                $fetch_state
-            );
-            $record = $fetch_state->pending_file_install;
-            if ($record === null) {
-                throw new LogicException(
-                    'The fetched-file staging state is missing during abort.'
-                );
-            }
-        }
-        if ($record['discard_started']) {
-            $this->discard_fetched_file_staging($fetch_state, null);
-            return $destination_removal_may_have_changed_tree;
-        }
-        $paths = $this->fetched_file_staging_paths($record);
-        clearstatcache(true, $paths['staging']);
-        if (@lstat($paths['staging']) !== false) {
-            $this->discard_fetched_file_staging($fetch_state, null);
-            return $destination_removal_may_have_changed_tree;
-        }
-        if (
-            $fetch_state->pending_file_install === null
-            && $record['staging_dev'] === null
-            && $record['staging_ino'] === null
-        ) {
-            $fetch_state->staged_file = null;
-            return false;
-        }
-        clearstatcache(true, $paths['destination']);
-        $destination_stat = @lstat($paths['destination']);
-        $was_installed =
-            $fetch_state->pending_file_install !== null
-            && is_array($destination_stat)
-            && !is_link($paths['destination'])
-            && $this->stat_is_regular_file($destination_stat)
-            && (int) $destination_stat['dev']
-                === (
-                    $record['installed_dev']
-                        ?? $record['staging_dev']
-                )
-            && (int) $destination_stat['ino']
-                === (
-                    $record['installed_ino']
-                        ?? $record['staging_ino']
-                )
-            && (int) $destination_stat['size']
-                === $record['staging_bytes'];
-        $fetch_state->staged_file = null;
-        $fetch_state->pending_file_install = null;
-        if (!$was_installed) {
-            throw new RuntimeException(
-                'The saved files-pull staging file is missing during abort.'
-            );
-        }
-        return true;
-    }
-
-    /**
-     * Rejects abort before it could strand a quarantined local directory.
-     */
-    private function assert_files_pull_abort_has_no_quarantined_directory(): void
-    {
-        foreach (
-            [
-                $this->import_state()->fetch,
-                $this->import_state()->fetch_skipped,
-            ] as $fetch_state
-        ) {
-            $pending_install = $fetch_state->pending_file_install;
-            if (
-                $pending_install === null
-                || $pending_install['destination_removal'] === null
-            ) {
-                continue;
-            }
-            $paths = $this->fetched_file_staging_paths(
-                $pending_install
-            );
-            $destination_removal =
-                $pending_install['destination_removal'];
-            $quarantine_path =
-                $this->pending_fetched_file_quarantine_path(
-                    $destination_removal
-                );
-            clearstatcache(true, $quarantine_path);
-            $quarantine_stat = @lstat($quarantine_path);
-            if ($quarantine_stat === false) {
-                continue;
-            }
-            if (
-                is_link($quarantine_path)
-                || !$this->stat_is_directory($quarantine_stat)
-                || (int) $quarantine_stat['dev']
-                    !== $destination_removal['directory_dev']
-                || (int) $quarantine_stat['ino']
-                    !== $destination_removal['directory_ino']
-            ) {
-                throw new RuntimeException(
-                    'Cannot abort files-pull because the quarantine path '
-                    . 'does not match the saved local directory.'
-                );
-            }
-            throw new RuntimeException(
-                'Cannot abort files-pull while a local directory is '
-                . 'quarantined. Resume files-pull until the pending fetched '
-                . 'file settles, then abort files-pull.'
-            );
-        }
-    }
-
-    /**
-     * Clears a destination-removal intent which has not moved its directory.
-     */
-    private function clear_unstarted_fetched_file_destination_removal(
-        DownloadListFetchProgressState $fetch_state
-    ): void {
-        $pending_install = $fetch_state->pending_file_install;
-        if (
-            $pending_install === null
-            || $pending_install['destination_removal'] === null
-        ) {
-            throw new LogicException(
-                'Cannot clear a closed fetched-file quarantine intent.'
-            );
-        }
-        $paths = $this->fetched_file_staging_paths(
-            $pending_install
-        );
-        $destination_removal =
-            $pending_install['destination_removal'];
-        $quarantine_path =
-            $this->pending_fetched_file_quarantine_path(
-                $destination_removal
-            );
-        clearstatcache(true, $quarantine_path);
-        if (@lstat($quarantine_path) !== false) {
-            throw new RuntimeException(
-                'Cannot discard the staged fetched file while its local '
-                . 'directory remains quarantined.'
-            );
-        }
-        $pending_install['destination_removal'] = null;
-        $fetch_state->pending_file_install = $pending_install;
-        $this->save_state($this->state, false);
-        $this->remove_owned_files_pull_path(
-            $this->pending_fetched_file_destination_stack_path(
-                $fetch_state
-            )
-        );
-    }
-
-    /**
-     * Reconciles a saved deletion without changing the local tree during abort.
-     *
-     * @return bool Whether partial mutation or a later local change makes the
-     * previous local index unsafe to retain.
-     */
-    private function reconcile_pending_local_action_before_abort(): bool
-    {
-        $action = $this->import_state()->diff->pending_local_action;
-        if ($action === null) {
-            return false;
-        }
-        $path = base64_decode($action['path_b64']);
-        try {
-            $local_state = $this->capture_local_path_state($path);
-        } catch (RuntimeException $error) {
-            $this->audit_log(
-                'FILES PULL ABORT | pending local action could not be '
-                . 'inspected | path_b64='
-                . $action['path_b64']
-                . ' | error='
-                . $error->getMessage(),
-                true
-            );
-            return true;
-        }
-        if ($local_state === null) {
-            $this->delete_index_entry($path, true);
-            if (
-                !is_resource($this->index_update_wal_handle)
-                || !fflush($this->index_update_wal_handle)
-            ) {
-                throw new RuntimeException(
-                    'Failed to flush the completed local deletion before abort.'
-                );
-            }
-            return false;
-        }
-        if ($local_state === $action['accepted_local_state']) {
-            $this->import_state()->diff->pending_local_action = null;
-            return false;
-        }
-        $this->audit_log(
-            'FILES PULL ABORT | pending local action has ambiguous local '
-            . 'state | path_b64='
-            . $action['path_b64'],
-            true
-        );
-        return true;
     }
 
     /**
@@ -2422,16 +2085,6 @@ class ImportClient
         $wp_version = $payload["database"]["wp"]["wp_version"] ?? null;
         if (is_string($wp_version) && $wp_version !== "") {
             $this->import_state()->version = $wp_version;
-        }
-
-        // Bind compatibility checks to this response, not an older preflight.
-        $this->import_state()->remote_protocol_version = null;
-        $this->import_state()->remote_protocol_min_version = null;
-        if (isset($payload["protocol_version"])) {
-            $this->import_state()->remote_protocol_version = (int) $payload["protocol_version"];
-        }
-        if (isset($payload["protocol_min_version"])) {
-            $this->import_state()->remote_protocol_min_version = (int) $payload["protocol_min_version"];
         }
 
         // Detect webhost environment from preflight data.
@@ -2568,6 +2221,7 @@ class ImportClient
             $context = new StreamingContext();
             $context->file_handle = null;
             $context->file_path = null;
+            $context->file_ctime = null;
 
             $context->on_chunk = function ($chunk) use ($target_dir, $context, &$downloaded) {
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
@@ -2665,9 +2319,7 @@ class ImportClient
      * Assert that a preflight has already been run and stored in state.
      * All commands except preflight/preflight-assert call this before starting work.
      */
-    private function require_preflight(
-        bool $assert_protocol_compatible = true
-    ): void
+    private function require_preflight(): void
     {
         $entry = $this->import_state()->preflight ?? null;
         if (!is_array($entry) || empty($entry["data"])) {
@@ -2675,48 +2327,7 @@ class ImportClient
                 "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
             );
         }
-        if ($assert_protocol_compatible) {
-            $this->assert_remote_protocol_compatible();
-        }
     }
-
-    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI protocol diagnostics contain observed integer versions.
-    /** Refuses remote work when the saved exporter protocol is incompatible. */
-    public function assert_remote_protocol_compatible(): void
-    {
-        $remote_version =
-            $this->import_state()->remote_protocol_version;
-        $remote_minimum =
-            $this->import_state()->remote_protocol_min_version;
-        if ($remote_version === null) {
-            throw new RuntimeException(
-                'The remote export plugin does not report a protocol '
-                . 'version. Update the export plugin.'
-            );
-        }
-        if ($remote_version < IMPORT_MIN_EXPORT_VERSION) {
-            throw new RuntimeException(
-                'Remote protocol v'
-                . $remote_version
-                . ' is too old; this importer requires exporter protocol v'
-                . IMPORT_MIN_EXPORT_VERSION
-                . ' or newer. Update the export plugin.'
-            );
-        }
-        if (
-            $remote_minimum !== null
-            && IMPORT_PROTOCOL_VERSION < $remote_minimum
-        ) {
-            throw new RuntimeException(
-                'Importer protocol v'
-                . IMPORT_PROTOCOL_VERSION
-                . ' is too old; the remote requires importer protocol v'
-                . $remote_minimum
-                . ' or newer. Update the importer.'
-            );
-        }
-    }
-    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
      * Command: preflight
@@ -2779,32 +2390,7 @@ class ImportClient
             $all_pass = false;
         }
 
-        // 3. Protocol version compatibility
-        $remote_ver = $this->import_state()->remote_protocol_version ?? null;
-        $remote_min = $this->import_state()->remote_protocol_min_version ?? null;
-        if ($remote_ver === null) {
-            $proto_ok = false;
-            $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";
-        } elseif ($remote_ver < IMPORT_MIN_EXPORT_VERSION) {
-            $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} is too old (client requires >= v" . IMPORT_MIN_EXPORT_VERSION . "). Update the export plugin.";
-        } elseif (IMPORT_PROTOCOL_VERSION < $remote_min) {
-            $proto_ok = false;
-            $proto_detail = "Client protocol v" . IMPORT_PROTOCOL_VERSION . " is too old (remote requires >= v{$remote_min}). Update the importer.";
-        } else {
-            $proto_ok = true;
-            $proto_detail = "remote v{$remote_ver}, client v" . IMPORT_PROTOCOL_VERSION;
-        }
-        $checks[] = [
-            "label" => "Protocol compatible",
-            "pass" => $proto_ok,
-            "detail" => $proto_detail,
-        ];
-        if (!$proto_ok) {
-            $all_pass = false;
-        }
-
-        // 4. Filesystem accessible
+        // 3. Filesystem accessible
         $fs = $data["filesystem"] ?? null;
         $fs_ok = is_array($fs) && !empty($fs["ok"]);
         $checks[] = [
@@ -2818,7 +2404,7 @@ class ImportClient
             $all_pass = false;
         }
 
-        // 5. Database accessible
+        // 4. Database accessible
         $db = $data["database"] ?? null;
         $db_ok = is_array($db) && !empty($db["connected"]);
         $checks[] = [
@@ -3011,17 +2597,6 @@ class ImportClient
      */
     public function run_files_sync(bool $maintain_previous_local_index = false): void
     {
-        $this->assert_remote_protocol_compatible();
-        if (
-            $this->import_state()->files_pull_staging_version
-                !== self::FILES_PULL_STAGING_VERSION
-        ) {
-            throw new RuntimeException(
-                'This files-pull was saved without this importer\'s '
-                . 'private regular-file staging schema. Abort this '
-                . 'files-pull lifecycle, then rerun it.'
-            );
-        }
         $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
 
         // A full `pull` leaves active_resumable_command on its last stage
@@ -3051,9 +2626,6 @@ class ImportClient
             $state_command === "files-pull" &&
             $current_status !== null &&
             $current_status !== "complete";
-        if ($has_progress) {
-            $this->restore_files_pull_conflict_policy();
-        }
 
         $files_pair_context =
             $this->files_pull_pair_context_if_local_tree_exists();
@@ -3080,36 +2652,6 @@ class ImportClient
                 $this->pull_only_files_with_path_prefixes === []
                 || $has_previous_local_index
             );
-        if ($has_progress) {
-            $saved_maintains_previous_local_index =
-                $this->import_state()->diff
-                    ->maintain_previous_local_index;
-            if ($saved_maintains_previous_local_index === null) {
-                $saved_maintains_previous_local_index =
-                    is_file($this->index_update_wal_path)
-                        ? $has_previous_local_index
-                        : $maintains_previous_local_index;
-                $this->import_state()->diff
-                    ->maintain_previous_local_index =
-                        $saved_maintains_previous_local_index;
-                $this->save_state($this->state, false);
-            }
-            if (
-                $saved_maintains_previous_local_index
-                !== $maintains_previous_local_index
-            ) {
-                throw new RuntimeException(
-                    'The current files-pull options do not match the '
-                    . 'previous-local-index decision saved for this lifecycle. '
-                    . 'Resume with the original command context and '
-                    . '--filter, --include-caches, --remap, --only, and '
-                    . '--on-fs-root-nonempty options, or abort this '
-                    . 'files-pull lifecycle.'
-                );
-            }
-            $maintains_previous_local_index =
-                $saved_maintains_previous_local_index;
-        }
         $this->assert_files_pull_only_unchanged_while_resuming($has_progress);
         $this->assert_symlink_bundle_directory_unchanged();
         $this->maintain_previous_local_index = $maintains_previous_local_index;
@@ -3121,13 +2663,6 @@ class ImportClient
         // Already completed.
         if ($current_status === "complete") {
             $this->remove_index_update_wal();
-            $had_saved_conflict_preparation =
-                $this->import_state()->diff
-                    ->conflict_processor_cursor !== null;
-            $this->remove_files_pull_conflict_preparation();
-            if ($had_saved_conflict_preparation) {
-                $this->save_state($this->state, false);
-            }
             $has_skipped =
                 file_exists($this->skipped_download_list_file) &&
                 filesize($this->skipped_download_list_file) > 0;
@@ -3136,7 +2671,6 @@ class ImportClient
             // --filter=essential-files run skipped.  This is the only way to
             // resume downloading those files — no implicit behavior.
             if ($this->filter === "skipped-earlier") {
-                $this->restore_files_pull_conflict_policy();
                 if (!$has_skipped) {
                     throw new RuntimeException(
                         "--filter=skipped-earlier was requested but there is no skipped file list. " .
@@ -3171,7 +2705,9 @@ class ImportClient
                 if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
                     return;
                 }
-                $this->complete_files_sync_lifecycle(false);
+                $this->import_state()->active_resumable_command->completion_state = "complete";
+                $this->save_state($this->state);
+                $this->remove_index_update_wal();
                 return;
             }
 
@@ -3279,11 +2815,6 @@ class ImportClient
             $this->import_state()->active_resumable_command->current_stage = "index";
             $this->import_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
             $this->import_state()->diff = new FileDiffProgressState();
-            $this->import_state()->diff->conflict_policy =
-                $this->files_pull_conflict_policy;
-            $this->import_state()->diff
-                ->maintain_previous_local_index =
-                    $maintains_previous_local_index;
             $this->import_state()->index = new RemoteFileIndexCursorState();
             $this->import_state()->fetch = new DownloadListFetchProgressState();
             $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
@@ -3344,19 +2875,10 @@ class ImportClient
             return;
         }
 
-        $this->complete_files_sync_lifecycle($is_delta);
-    }
-
-    /**
-     * Marks a fully finalized files-pull lifecycle complete.
-     */
-    private function complete_files_sync_lifecycle(bool $is_delta): void
-    {
-        $this->remove_files_pull_conflict_preparation();
-        $this->remove_index_update_wal();
-        $this->import_state()->active_resumable_command->completion_state = "complete";
         $this->import_state()->active_resumable_command->current_stage = null;
+        $this->import_state()->active_resumable_command->completion_state = "complete";
         $this->save_state($this->state);
+        $this->remove_index_update_wal();
 
         $this->progress->clear_progress_line();
         $index_size = $this->index_count();
@@ -3382,60 +2904,7 @@ class ImportClient
         $this->report_volatile_files();
     }
 
-    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol failures are CLI text, never HTML output.
-    /**
-     * Restores the conflict policy selected for the open files-pull lifecycle.
-     */
-    private function restore_files_pull_conflict_policy(): void
-    {
-        $saved_policy = $this->import_state()->diff->conflict_policy;
-        if ($saved_policy === null) {
-            $stage = $this->import_state()
-                ->active_resumable_command->current_stage;
-            if ($stage !== 'index') {
-                $this->files_pull_conflict_policy = 'remote-wins';
-                $this->import_state()->diff->conflict_policy =
-                    'remote-wins';
-                $this->import_state()->diff->conflict_policy_locked =
-                    true;
-            } else {
-                $this->import_state()->diff->conflict_policy =
-                    $this->files_pull_conflict_policy;
-            }
-            $this->save_state($this->state);
-            return;
-        }
-        if (!$this->files_pull_conflict_policy_was_explicit) {
-            $this->files_pull_conflict_policy = $saved_policy;
-            return;
-        }
-        if ($this->files_pull_conflict_policy === $saved_policy) {
-            return;
-        }
-        if ($this->import_state()->diff->conflict_policy_locked) {
-            throw new RuntimeException(
-                'Cannot change --on-conflict from '
-                . $saved_policy
-                . ' to '
-                . $this->files_pull_conflict_policy
-                . ' after files-pull started applying its conflict policy. '
-                . 'Abort this files-pull lifecycle, then rerun files-pull '
-                . 'with --on-conflict='
-                . $this->files_pull_conflict_policy
-                . '.'
-            );
-        }
-        if (
-            $saved_policy === 'remote-wins'
-            || $this->files_pull_conflict_policy === 'remote-wins'
-        ) {
-            $this->remove_files_pull_conflict_plan();
-        }
-        $this->import_state()->diff->conflict_policy =
-            $this->files_pull_conflict_policy;
-        $this->save_state($this->state);
-    }
-
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI filesystem paths, never HTML output.
     /** Establishes the previous local index before files-pull mutates the tree. */
     private function seed_previous_local_index(): void
     {
@@ -3628,7 +3097,7 @@ class ImportClient
             return;
         }
         $path = ltrim($path, '/');
-        if (FileIndexProcessor::path_matches_built_in_exclusion($path)) {
+        if (FileIndexProcessor::path_is_default_skipped($path)) {
             return;
         }
         $current_path = $path;
@@ -3845,55 +3314,33 @@ class ImportClient
     private function run_files_sync_pipeline(): void
     {
         $stage = $this->import_state()->active_resumable_command->current_stage ?? "index";
-        if ($stage === 'fetch' || $stage === 'fetch-skipped') {
-            $this->remove_files_pull_conflict_preparation();
-        }
 
         if ($stage === "index") {
-            $next_stage =
-                $this->follow_symlinks
-                    ? 'follow-symlinks'
-                    : 'prepare-diff';
-            $complete = $this->download_remote_index(
-                null,
-                $next_stage
-            );
+            $complete = $this->download_remote_index();
             if (!$complete) {
                 $this->import_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state($this->state);
                 return;
             }
-            $stage = $next_stage;
-        }
-
-        if ($stage === 'follow-symlinks') {
-            $this->discover_symlink_targets();
-            if ($this->shutdown_requested) {
-                $this->import_state()->active_resumable_command->completion_state = "partial";
-                $this->save_state($this->state);
-                return;
+            if ($this->follow_symlinks) {
+                $this->discover_symlink_targets();
+                if ($this->shutdown_requested) {
+                    $this->import_state()->active_resumable_command->completion_state = "partial";
+                    $this->save_state($this->state);
+                    return;
+                }
             }
-            $this->import_state()->active_resumable_command->current_stage =
-                'prepare-diff';
-            $this->save_state($this->state);
-            $stage = 'prepare-diff';
-        }
-
-        if ($stage === 'prepare-diff') {
             $this->sort_index_file($this->remote_index_file);
-            $files_pull_conflict_policy =
-                $this->import_state()->diff->conflict_policy
-                ?? $this->files_pull_conflict_policy;
-            $maintain_previous_local_index =
-                $this->import_state()->diff
-                    ->maintain_previous_local_index;
-            $next_diff = new FileDiffProgressState();
-            $next_diff->local_offset = 0;
-            $next_diff->conflict_policy =
-                $files_pull_conflict_policy;
-            $next_diff->maintain_previous_local_index =
-                $maintain_previous_local_index;
-            $this->copy_local_index_for_files_pull_diff();
+            $stage =
+                $this->maintain_previous_local_index
+                && is_file($this->index_file)
+                && filesize($this->index_file) > 0
+                    ? "conflicts"
+                    : "diff";
+            $this->import_state()->active_resumable_command->current_stage =
+                $stage;
+            $this->import_state()->diff = new FileDiffProgressState();
+            @unlink($this->files_pull_conflicts_path());
             if (file_exists($this->download_list_file)) {
                 @unlink($this->download_list_file);
                 $this->audit_log(
@@ -3906,10 +3353,30 @@ class ImportClient
                     "FILE DELETE | {$this->skipped_download_list_file} | clearing before diff stage",
                 );
             }
-            $this->import_state()->diff = $next_diff;
-            $this->import_state()->active_resumable_command->current_stage = "diff";
             $this->save_state($this->state);
+        }
+
+        if ($stage === "conflicts") {
+            $conflict_count = $this->prepare_files_pull_conflicts();
+            if ($conflict_count === null) {
+                $this->import_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state($this->state);
+                return;
+            }
+            if (
+                $conflict_count > 0
+                && $this->files_pull_conflict_policy === 'stop'
+            ) {
+                throw new RuntimeException(
+                    "files-pull stopped before changing the local tree because {$conflict_count} remote changes overlap local changes. "
+                    . 'Re-run with --on-conflict=remote-wins or --on-conflict=our-wins.'
+                );
+            }
             $stage = "diff";
+            $this->import_state()->active_resumable_command->current_stage =
+                $stage;
+            $this->import_state()->diff = new FileDiffProgressState();
+            $this->save_state($this->state);
         }
 
         if ($stage === "diff") {
@@ -3933,11 +3400,10 @@ class ImportClient
             } elseif ($has_skipped) {
                 $stage = "fetch-skipped";
             } else {
-                $stage = "finalize";
+                $stage = null;
             }
             $this->import_state()->active_resumable_command->current_stage = $stage;
             $this->save_state($this->state);
-            $this->remove_files_pull_conflict_preparation();
 
             // In pull mode, finalize the scanning line with a checkmark
             // and start the download progress on a fresh line.
@@ -3997,14 +3463,13 @@ class ImportClient
                 // Essential files are done — mark the sync as complete.
                 // The skipped list stays on disk for a later
                 // --filter=skipped-earlier run.
-                $this->import_state()->active_resumable_command->current_stage =
-                    'finalize';
+                $this->import_state()->active_resumable_command->current_stage = null;
                 $this->save_state($this->state);
                 $this->audit_log(
                     "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_download_list_file} — run with --filter=skipped-earlier to download them",
                     true,
                 );
-                $stage = 'finalize';
+                $stage = null;
             } elseif ($has_skipped) {
                 // Skipped list exists but filter is "none" — download now.
                 $this->import_state()->active_resumable_command->current_stage = "fetch-skipped";
@@ -4016,14 +3481,10 @@ class ImportClient
                 );
                 $this->write_status_file();
             } else {
-                $this->import_state()->active_resumable_command->current_stage =
-                    'finalize';
+                $this->import_state()->active_resumable_command->current_stage = null;
                 $this->save_state($this->state);
-                $stage = 'finalize';
+                $stage = null;
             }
-            $this->remove_owned_files_pull_path(
-                $this->retained_local_subtree_stack_path('fetch')
-            );
         }
 
         if ($stage === "fetch-skipped") {
@@ -4036,18 +3497,12 @@ class ImportClient
                 $this->save_state($this->state);
                 return;
             }
-            $this->import_state()->active_resumable_command->current_stage =
-                'finalize';
+            $this->import_state()->active_resumable_command->current_stage = null;
             $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
             // Tail fully fetched; clear the flag so a later skipped-earlier run
             // doesn't treat the now-empty tail as pending.
             $this->import_state()->pull_pipeline->skipped_pending = false;
             $this->save_state($this->state);
-            $this->remove_owned_files_pull_path(
-                $this->retained_local_subtree_stack_path(
-                    'fetch_skipped'
-                )
-            );
 
             if (file_exists($this->skipped_download_list_file)) {
                 @unlink($this->skipped_download_list_file);
@@ -4063,33 +3518,6 @@ class ImportClient
         if ($this->follow_symlinks) {
             $this->recreate_intermediate_symlinks();
         }
-    }
-
-    /** Copies the mutable local index to the immutable diff input. */
-    private function copy_local_index_for_files_pull_diff(): string
-    {
-        $snapshot_path =
-            $this->state_dir . '/.files-pull-diff-local-index.jsonl';
-        $temporary_path = $snapshot_path . '.swap';
-        $this->remove_owned_files_pull_path($temporary_path);
-        if (is_file($this->index_file)) {
-            if (!copy($this->index_file, $temporary_path)) {
-                throw new RuntimeException(
-                    'Failed to copy the local index for the files-pull diff.'
-                );
-            }
-        } elseif (file_put_contents($temporary_path, '') === false) {
-            throw new RuntimeException(
-                'Failed to initialize the local index for the files-pull diff.'
-            );
-        }
-        $this->remove_owned_files_pull_path($snapshot_path);
-        if (!rename($temporary_path, $snapshot_path)) {
-            throw new RuntimeException(
-                'Failed to publish the local index for the files-pull diff.'
-            );
-        }
-        return $snapshot_path;
     }
 
     /**
@@ -4579,7 +4007,6 @@ class ImportClient
      */
     public function run_db_sync(): void
     {
-        $this->assert_remote_protocol_compatible();
         $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
         $sql_file = $this->state_dir . "/db.sql";
 
@@ -5389,7 +4816,7 @@ class ImportClient
         }
 
         // Require preflight data so we know where WP components live
-        $this->require_preflight(false);
+        $this->require_preflight();
         $preflight = $this->import_state()->preflight["data"] ?? [];
 
         // Extract WordPress directory paths from preflight
@@ -6898,29 +6325,41 @@ class ImportClient
      *
      * @param array|null $post_data Optional POST data
      * @param string|null $cursor Cursor for resumption within the current batch
-     * @param string $planned_local_state_path Batch sidecar with planned local path states.
      */
     private function download_file_fetch(
         ?array $post_data,
         ?string $cursor,
-        string $state_key,
-        string $planned_local_state_path
+        string $state_key = "fetch"
     ): bool {
         $fetch_state = $this->get_download_list_fetch_state($state_key);
         $cursor = $cursor ?? $fetch_state->cursor;
         $complete = false;
         $chunks_since_save = 0;
-        $this->reconcile_discarded_fetched_file_staging(
-            $fetch_state
-        );
-        if (
-            !$this->reconcile_pending_fetched_file_install(
-                $fetch_state
-            )
-        ) {
-            return false;
+
+        // Crash recovery: if we have a tracked file that's larger than expected,
+        // truncate it. This happens if we crashed after writing but before saving
+        // the new cursor, so we'll re-fetch the same data.
+        $tracked_file = $this->import_state()->current_file ?? null;
+        $tracked_bytes = $this->import_state()->current_file_bytes ?? null;
+        if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
+            $actual_size = filesize($tracked_file);
+            if ($actual_size > $tracked_bytes) {
+                $this->audit_log(
+                    sprintf(
+                        "CRASH RECOVERY | Truncating %s from %d to %d bytes",
+                        $tracked_file,
+                        $actual_size,
+                        $tracked_bytes,
+                    ),
+                    true,
+                );
+                $handle = fopen($tracked_file, "r+");
+                if ($handle) {
+                    ftruncate($handle, $tracked_bytes);
+                    fclose($handle);
+                }
+            }
         }
-        $cursor = $fetch_state->cursor;
 
         $params = $this->get_tuned_params("file_fetch");
         // Always send directory[] – see comment in download_remote_index().
@@ -6935,32 +6374,26 @@ class ImportClient
         $context = new StreamingContext();
         $context->file_handle = null;
         $context->file_path = null;
-        $context->planned_local_state_handle =
-            fopen($planned_local_state_path, 'rb');
-        if (!is_resource($context->planned_local_state_handle)) {
-            throw new RuntimeException(
-                'Failed to open the fetch batch planned-local-state file.'
-            );
-        }
-        $context->planned_local_state_offset =
-            $fetch_state->planned_local_state_offset;
-        if (
-            $context->planned_local_state_offset > 0
-            && fseek(
-                $context->planned_local_state_handle,
-                $context->planned_local_state_offset
-            ) !== 0
-        ) {
-            fclose($context->planned_local_state_handle);
-            $context->planned_local_state_handle = null;
-            throw new RuntimeException(
-                'Failed to seek to the fetch batch planned-local-state offset.'
-            );
-        }
-        $context->fetch_state_key = $state_key;
+        $context->file_ctime = null;
 
-        if ($fetch_state->staged_file !== null) {
-            $this->resume_fetched_file_staging($fetch_state, $context);
+        // Resume recovery: if a file was partially downloaded in a previous
+        // request, re-open it in append mode so continuation chunks (where
+        // is_first=false) can still be written.  Without this, the context
+        // starts with file_handle=null and non-first chunks are silently dropped.
+        if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
+            $context->file_handle = fopen($tracked_file, "ab");
+            if ($context->file_handle) {
+                $context->file_path = $tracked_file;
+                $context->file_bytes_written = $tracked_bytes;
+                $this->audit_log(
+                    sprintf(
+                        "RESUME FILE | Re-opened %s at %d bytes for continued download",
+                        $tracked_file,
+                        $tracked_bytes,
+                    ),
+                    true,
+                );
+            }
         }
 
         $context->on_chunk = function ($chunk) use (
@@ -6983,9 +6416,25 @@ class ImportClient
             // mid-body, the cursor already points to the end of the part
             // while file_bytes_written may still lag; at is_streaming_close
             // the bytes are on disk and we force a per-part checkpoint.
-            $context->path_settled_in_current_chunk = false;
+            // Snapshot the file boundary before handle_file_chunk() may close
+            // the file so a stop after the close still retains its path and size.
             $is_streaming_body = !empty($chunk["is_streaming_body"]);
             $is_streaming_close = !empty($chunk["is_streaming_close"]);
+            $file_path_at_completed_part = null;
+            $file_bytes_at_completed_part = null;
+            if (
+                $is_streaming_close
+                && $context->file_handle
+                && $context->file_path
+            ) {
+                if (!fflush($context->file_handle)) {
+                    throw new RuntimeException(
+                        'Failed to flush the pulled file before saving its fetch cursor.'
+                    );
+                }
+                $file_path_at_completed_part = $context->file_path;
+                $file_bytes_at_completed_part = $context->file_bytes_written;
+            }
 
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
@@ -6994,23 +6443,20 @@ class ImportClient
             } elseif ($chunk_type === "file") {
                 $this->handle_file_chunk($chunk, $context);
             } elseif ($chunk_type === "directory") {
-                $this->handle_directory_chunk($chunk, $context);
+                $this->handle_directory_chunk($chunk);
             } elseif ($chunk_type === "symlink") {
-                $this->handle_symlink_chunk($chunk, $context);
+                $this->handle_symlink_chunk($chunk);
             } elseif ($chunk_type === "missing") {
-                $this->handle_missing_file_chunk($chunk, $context);
+                $path = base64_decode($chunk["headers"]["x-file-path"] ?? "");
+                if ($path) {
+                    $this->audit_log("Missing on server: {$path}", true);
+                }
+                // @TODO: Cleanup the local file that we may have started downloading.
             } elseif ($chunk_type === "error") {
                 $this->handle_error_chunk($chunk, "files", $context);
             } elseif ($chunk_type === "progress") {
                 $this->handle_progress($chunk, "files");
             } elseif ($chunk_type === "completion") {
-                if (
-                    ( $chunk["headers"]["x-status"] ?? "" ) === "complete"
-                ) {
-                    $this->assert_fetch_planned_local_state_settled(
-                        $context
-                    );
-                }
                 $complete =
                     ($chunk["headers"]["x-status"] ?? "") === "complete";
                 $context->saw_completion = true;
@@ -7047,50 +6493,30 @@ class ImportClient
             }
 
             if (!$is_streaming_body) {
-                $planned_local_path_complete =
-                    $context->planned_local_state_checked_path !== null
-                    && (
-                        in_array(
-                            $chunk_type,
-                            ['directory', 'symlink', 'missing', 'error'],
-                            true
-                        )
-                        || (
-                            $chunk_type === 'file'
-                            && (
-                                $chunk['headers']['x-last-chunk']
-                                ?? '0'
-                            ) === '1'
-                        )
-                    );
                 if (isset($chunk["headers"]["x-cursor"])) {
                     $cursor = $chunk["headers"]["x-cursor"];
                 }
                 $chunks_since_save++;
-                $force_save =
-                    $is_streaming_close
-                    || $context->planned_local_state_checked_path !== null;
+                $force_save = $is_streaming_close;
                 if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                    $fetch_state =
-                        $this->get_download_list_fetch_state($state_key);
-                    if (
-                        !$context->path_settled_in_current_chunk
-                        && $fetch_state->staged_file !== null
-                        && is_resource($context->file_handle)
-                    ) {
-                        $this->record_fetched_file_staging_boundary(
-                            $fetch_state,
-                            $context
-                        );
-                    }
-                    $fetch_state->planned_local_state_offset =
-                        $context->planned_local_state_offset;
-                    if (
-                        $planned_local_path_complete
-                    ) {
-                        $fetch_state->applying_path = null;
-                        $fetch_state->applying_expected_local_state =
-                            null;
+                    if ($file_path_at_completed_part !== null) {
+                        $this->import_state()->current_file =
+                            $file_path_at_completed_part;
+                        $this->import_state()->current_file_bytes =
+                            $file_bytes_at_completed_part;
+                    } elseif ($context->file_handle && $context->file_path) {
+                        // Flush to ensure bytes are on disk before saving state.
+                        if (!fflush($context->file_handle)) {
+                            throw new RuntimeException(
+                                'Failed to flush the pulled file before saving its fetch cursor.'
+                            );
+                        }
+                        // Track the current file for crash recovery.
+                        $this->import_state()->current_file = $context->file_path;
+                        $this->import_state()->current_file_bytes = $context->file_bytes_written;
+                    } else {
+                        $this->import_state()->current_file = null;
+                        $this->import_state()->current_file_bytes = null;
                     }
                     if (
                         $this->index_update_wal_handle
@@ -7101,10 +6527,6 @@ class ImportClient
                     $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
                     $this->save_state($this->state);
                     $chunks_since_save = 0;
-                    if ($planned_local_path_complete) {
-                        $context->planned_local_state_checked_path = null;
-                        $context->planned_local_state_checked_result = null;
-                    }
                 }
             }
         };
@@ -7119,16 +6541,6 @@ class ImportClient
                 $post_data,
                 "file_fetch",
             );
-        } catch (FilesPullLocalStepPendingException $error) {
-            $this->apply_index_update_wal();
-            if (is_resource($context->file_handle)) {
-                fclose($context->file_handle);
-                $context->file_handle = null;
-            }
-            $this->import_state()->active_resumable_command
-                ->completion_state = "partial";
-            $this->save_state($this->state);
-            return false;
         } catch (CurlTimeoutException $e) {
             // Throws RuntimeException after MAX_CONSECUTIVE_TIMEOUTS
             // with no progress, so we don't retry forever.
@@ -7136,22 +6548,17 @@ class ImportClient
             // Save state so the next invocation resumes from the
             // last cursor instead of crashing with exit code 1.
             $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-            $this->get_download_list_fetch_state($state_key)
-                ->planned_local_state_offset =
-                    $context->planned_local_state_offset;
             $this->apply_index_update_wal();
-            if (is_resource($context->file_handle)) {
-                fclose($context->file_handle);
-                $context->file_handle = null;
+            if ($context->file_handle && $context->file_path) {
+                if (!fflush($context->file_handle)) {
+                    throw new RuntimeException(
+                        'Failed to flush the partial pulled file after a timeout.'
+                    );
+                }
             }
             $this->import_state()->active_resumable_command->completion_state = "partial";
             $this->save_state($this->state);
             return false;
-        } finally {
-            if (is_resource($context->planned_local_state_handle)) {
-                fclose($context->planned_local_state_handle);
-                $context->planned_local_state_handle = null;
-            }
         }
         $this->import_state()->consecutive_timeouts = 0;
         $wall_time = microtime(true) - $request_start;
@@ -7162,26 +6569,19 @@ class ImportClient
             $context->response_stats ?? [],
         );
         $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-        $this->get_download_list_fetch_state($state_key)
-            ->planned_local_state_offset =
-                $context->planned_local_state_offset;
-        if ($context->planned_local_state_checked_path === null) {
-            $fetch_state =
-                $this->get_download_list_fetch_state($state_key);
-            $fetch_state->applying_path = null;
-            $fetch_state->applying_expected_local_state = null;
-        }
         $this->apply_index_update_wal();
-        $fetch_state =
-            $this->get_download_list_fetch_state($state_key);
-        if (
-            $fetch_state->staged_file !== null
-            && is_resource($context->file_handle)
-        ) {
-            $this->record_fetched_file_staging_boundary(
-                $fetch_state,
-                $context
-            );
+        // Update file tracking: track in-progress file, or clear if complete/no active file
+        if ($context->file_handle && $context->file_path) {
+            if (!fflush($context->file_handle)) {
+                throw new RuntimeException(
+                    'Failed to flush the pulled file before saving its fetch cursor.'
+                );
+            }
+            $this->import_state()->current_file = $context->file_path;
+            $this->import_state()->current_file_bytes = $context->file_bytes_written;
+        } else {
+            $this->import_state()->current_file = null;
+            $this->import_state()->current_file_bytes = null;
         }
         $this->save_state($this->state);
 
@@ -7191,10 +6591,8 @@ class ImportClient
     /**
      * Download the remote index stream and write to disk.
      */
-    private function download_remote_index(
-        ?string $list_dir_override = null,
-        ?string $completion_stage = null
-    ): bool {
+    private function download_remote_index(?string $list_dir_override = null): bool
+    {
         $cursor = $this->import_state()->index->cursor;
 
         $roots = $this->get_root_directories_from_preflight();
@@ -7425,33 +6823,8 @@ class ImportClient
         );
         fclose($handle);
 
-        $previous_signal_mask = [];
-        $signals_blocked =
-            $complete
-            && $completion_stage !== null
-            && function_exists('pcntl_sigprocmask')
-            && pcntl_sigprocmask(
-                SIG_BLOCK,
-                [SIGINT, SIGTERM],
-                $previous_signal_mask
-            );
-        try {
-            $this->import_state()->index->cursor =
-                $complete ? null : $cursor;
-            if ($complete && $completion_stage !== null) {
-                $this->import_state()
-                    ->active_resumable_command->current_stage =
-                        $completion_stage;
-            }
-            $this->save_state($this->state);
-        } finally {
-            if ($signals_blocked) {
-                pcntl_sigprocmask(
-                    SIG_SETMASK,
-                    $previous_signal_mask
-                );
-            }
-        }
+        $this->import_state()->index->cursor = $complete ? null : $cursor;
+        $this->save_state($this->state);
 
         return $complete;
     }
@@ -7466,338 +6839,64 @@ class ImportClient
         }
 
         $diff = $this->import_state()->diff;
-        $local_index_snapshot_path =
-            $this->state_dir . '/.files-pull-diff-local-index.jsonl';
-        if ($diff->local_offset === null) {
-            $local_index_snapshot_path =
-                $this->copy_local_index_for_files_pull_diff();
-        }
-
-        if ($this->import_state()->diff->pending_local_action !== null) {
-            $this->apply_pending_local_action();
-        }
-
-        $conflicts_path = $this->prepare_files_pull_conflicts(
-            $local_index_snapshot_path
-        );
-        if ($conflicts_path === null) {
-            return false;
-        }
-        $conflicts_handle = fopen($conflicts_path, 'rb');
-        if (!is_resource($conflicts_handle)) {
-            throw new RuntimeException('Failed to open the files-pull conflict list.');
-        }
+        $remote_offset = $diff->remote_offset;
+        $local_after = $diff->local_after;
         $conflict_offset = $diff->conflict_offset;
-        if (
-            $conflict_offset > 0
-            && fseek($conflicts_handle, $conflict_offset) !== 0
-        ) {
-            fclose($conflicts_handle);
-            throw new RuntimeException(
-                'Failed to seek to the first unread files-pull conflict.'
-            );
-        }
-        $read_conflict_path = static function (
-            $handle,
-            int &$path_offset
-        ): ?string {
-            while (true) {
-                $line_offset = ftell($handle);
-                if (!is_int($line_offset)) {
-                    throw new RuntimeException(
-                        'Failed to determine a files-pull conflict boundary.'
-                    );
-                }
-                $line = fgets($handle);
-                if ($line === false) {
-                    if (!feof($handle)) {
-                        throw new RuntimeException(
-                            'Failed to read a files-pull conflict.'
-                        );
-                    }
-                    $path_offset = $line_offset;
-                    return null;
-                }
-                if (trim($line) === '') {
-                    continue;
-                }
-                $record = json_decode(
-                    $line,
-                    true,
-                    512,
-                    JSON_THROW_ON_ERROR
-                );
-                $path_offset = $line_offset;
-                return base64_decode($record['path']);
-            }
-        };
+        $conflicts_handle = null;
+        $conflict_path = null;
         $next_conflict_offset = $conflict_offset;
-        $next_conflict_path = $read_conflict_path(
-            $conflicts_handle,
-            $next_conflict_offset
-        );
         if (
-            $this->files_pull_conflict_policy === 'stop'
-            && $next_conflict_path !== null
+            $this->files_pull_conflict_policy === 'our-wins'
+            && is_file($this->files_pull_conflicts_path())
         ) {
-            fclose($conflicts_handle);
-            $context = $this->files_pull_pair_context();
-            $relative_path = self::path_remainder_under(
-                $next_conflict_path,
-                $context['remote_document_root']
+            $conflicts_handle =
+                fopen($this->files_pull_conflicts_path(), 'rb');
+            if (!is_resource($conflicts_handle)) {
+                throw new RuntimeException(
+                    'Failed to open the files-pull conflict list.'
+                );
+            }
+            fseek($conflicts_handle, $conflict_offset);
+            $conflict_path = stream_get_line(
+                $conflicts_handle,
+                1048576,
+                "\0"
             );
-            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Arbitrary path bytes are represented as base64.
-            throw new RuntimeException(
-                'The remote and local path both changed since the previous local index: '
-                . 'path_b64='
-                . base64_encode(
-                    $relative_path === null
-                        ? $next_conflict_path
-                        : ltrim($relative_path, '/')
-                )
-                . '. Rerun with --on-conflict=remote-wins or '
-                . '--on-conflict=our-wins.'
-            );
-            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            $next_conflict_offset = ftell($conflicts_handle);
         }
-        if (!$this->import_state()->diff->conflict_policy_locked) {
-            $this->import_state()->diff->conflict_policy_locked = true;
-            $this->save_state($this->state);
-        }
-        $retained_local_subtree_stack_path =
-            $this->retained_local_subtree_stack_path('diff');
-        $retained_local_subtree_top_offset =
-            $diff->retained_local_subtree_top_offset;
-        $retained_local_subtree_stack_offset =
-            $diff->retained_local_subtree_stack_offset;
-        $retained_local_subtree =
-            $retained_local_subtree_top_offset === null
-                ? null
-                : $this->read_retained_local_subtree(
-                    $retained_local_subtree_stack_path,
-                    $retained_local_subtree_top_offset
-                );
-        $path_is_in_retained_local_subtree = function (
-            string $path
-        ) use (
-            $retained_local_subtree_stack_path,
-            &$retained_local_subtree,
-            &$retained_local_subtree_top_offset
-        ): bool {
-            while ($retained_local_subtree !== null) {
-                if (
-                    $path === $retained_local_subtree['path']
-                    || str_starts_with(
-                        $path,
-                        $retained_local_subtree['path'] . '/'
-                    )
-                ) {
-                    return true;
-                }
-                if (
-                    strcmp(
-                        $path,
-                        $retained_local_subtree['path'] . '/'
-                    ) <= 0
-                ) {
-                    return false;
-                }
-                $retained_local_subtree_top_offset =
-                    $retained_local_subtree['previous_offset'];
-                $retained_local_subtree =
-                    $retained_local_subtree_top_offset === null
-                        ? null
-                        : $this->read_retained_local_subtree(
-                            $retained_local_subtree_stack_path,
-                            $retained_local_subtree_top_offset
-                        );
-            }
-            return false;
-        };
-        $retain_local_subtree = function (string $path) use (
-            $path_is_in_retained_local_subtree,
-            $retained_local_subtree_stack_path,
-            &$retained_local_subtree,
-            &$retained_local_subtree_top_offset,
-            &$retained_local_subtree_stack_offset
-        ): void {
-            if ($this->files_pull_conflict_policy !== 'our-wins') {
-                return;
-            }
-            if ($path_is_in_retained_local_subtree($path)) {
-                return;
-            }
-            $retained_local_subtree =
-                $this->append_retained_local_subtree(
-                    $retained_local_subtree_stack_path,
-                    $path,
-                    $retained_local_subtree_top_offset,
-                    $retained_local_subtree_stack_offset
-                );
-            $retained_local_subtree_top_offset =
-                $retained_local_subtree['offset'];
-            $retained_local_subtree_stack_offset =
-                $retained_local_subtree['next_offset'];
-        };
-        $should_apply_planned_remote_change = function (
-            string $path,
-            bool $validate_local_state,
-            ?array $expected_local_state
-        ) use ($retain_local_subtree): bool {
-            $should_apply =
-                $this->should_apply_remote_change_after_planning(
-                    $path,
-                    $validate_local_state,
-                    $expected_local_state
-                );
-            if (!$should_apply) {
-                $retain_local_subtree($path);
-            }
-            return $should_apply;
-        };
-        $path_has_conflict = static function (string $path) use (
+        $path_has_conflict = function (string $path) use (
             $conflicts_handle,
-            $read_conflict_path,
-            &$next_conflict_path,
+            &$conflict_path,
+            &$conflict_offset,
             &$next_conflict_offset
         ): bool {
-            while (
-                $next_conflict_path !== null
-                && strcmp($next_conflict_path, $path) < 0
-            ) {
-                $next_conflict_path = $read_conflict_path(
-                    $conflicts_handle,
-                    $next_conflict_offset
-                );
-            }
-            if ($next_conflict_path !== $path) {
+            if (!is_resource($conflicts_handle)) {
                 return false;
             }
-            $next_conflict_path = $read_conflict_path(
+            while (
+                is_string($conflict_path)
+                && compare_paths($conflict_path, $path) < 0
+            ) {
+                $conflict_offset = $next_conflict_offset;
+                $conflict_path = stream_get_line(
+                    $conflicts_handle,
+                    1048576,
+                    "\0"
+                );
+                $next_conflict_offset = ftell($conflicts_handle);
+            }
+            if ($conflict_path !== $path) {
+                return false;
+            }
+            $conflict_offset = $next_conflict_offset;
+            $conflict_path = stream_get_line(
                 $conflicts_handle,
-                $next_conflict_offset
+                1048576,
+                "\0"
             );
+            $next_conflict_offset = ftell($conflicts_handle);
             return true;
         };
-
-        $remote_offset = $diff->remote_offset;
-        $legacy_local_after = $diff->local_after;
-        $migrate_legacy_local_offset =
-            $diff->local_offset === null;
-        $local_offset = $diff->local_offset ?? 0;
-        $download_list_offset = $diff->download_list_offset;
-        if ($download_list_offset === null) {
-            $download_list_offset =
-                $remote_offset > 0
-                && is_file($this->download_list_file)
-                    ? (int) filesize($this->download_list_file)
-                    : 0;
-        }
-        $skipped_download_list_offset =
-            $diff->skipped_download_list_offset;
-        if ($skipped_download_list_offset === null) {
-            $skipped_download_list_offset =
-                $remote_offset > 0
-                && is_file($this->skipped_download_list_file)
-                    ? (int) filesize($this->skipped_download_list_file)
-                    : 0;
-        }
-        $planned_local_index_path =
-            $this->state_dir . '/.files-pull-planned-local-index.jsonl';
-        $planned_local_handle = null;
-        $planned_local_entry = null;
-        $planned_local_offset = $diff->planned_local_offset;
-        $validate_planned_local_state =
-            $this->maintain_previous_local_index
-            && $this->files_pull_conflict_policy !== 'remote-wins'
-            && is_file($planned_local_index_path);
-        if ($validate_planned_local_state) {
-            $planned_local_handle =
-                fopen($planned_local_index_path, 'rb');
-            if (!is_resource($planned_local_handle)) {
-                throw new RuntimeException(
-                    'Failed to open the planned local index for application.'
-                );
-            }
-            if (
-                $planned_local_offset > 0
-                && fseek(
-                    $planned_local_handle,
-                    $planned_local_offset
-                ) !== 0
-            ) {
-                throw new RuntimeException(
-                    'Failed to seek to the planned local index offset.'
-                );
-            }
-            $planned_local_entry =
-                $this->read_index_line($planned_local_handle);
-        }
-        $planned_remote_root = $validate_planned_local_state
-            ? $this->files_pull_pair_context()['remote_document_root']
-            : null;
-        $planned_local_state_for_path = function (
-            string $path
-        ) use (
-            $planned_local_handle,
-            $planned_remote_root,
-            &$planned_local_entry,
-            &$planned_local_offset
-        ): array {
-            if (
-                !is_resource($planned_local_handle)
-                || $planned_remote_root === null
-                || self::path_remainder_under(
-                    $path,
-                    $planned_remote_root
-                ) === null
-            ) {
-                return [
-                    'validate' => false,
-                    'expected' => null,
-                ];
-            }
-            while (
-                $planned_local_entry !== null
-                && strcmp(
-                    $planned_local_entry['path'],
-                    $path
-                ) < 0
-            ) {
-                $planned_local_offset = ftell($planned_local_handle);
-                $planned_local_entry =
-                    $this->read_index_line($planned_local_handle);
-            }
-            $expected_local_state = null;
-            if (
-                $planned_local_entry !== null
-                && $planned_local_entry['path'] === $path
-            ) {
-                $expected_local_state = $planned_local_entry;
-                unset($expected_local_state['path']);
-                $planned_local_offset = ftell($planned_local_handle);
-                $planned_local_entry =
-                    $this->read_index_line($planned_local_handle);
-            }
-            return [
-                'validate' => true,
-                'expected' => $expected_local_state,
-            ];
-        };
-        $pending_directory_stack_path =
-            $this->state_dir
-            . '/.files-pull-deleted-directory-stack.jsonl';
-        $pending_directory_top_offset =
-            $diff->pending_deleted_directory_top_offset;
-        $pending_directory_stack_offset =
-            $diff->pending_deleted_directory_stack_offset;
-        $pending_directory =
-            $pending_directory_top_offset === null
-                ? null
-                : $this->read_pending_deleted_directory(
-                    $pending_directory_stack_path,
-                    $pending_directory_top_offset
-                );
         $download_mode = $remote_offset > 0 ? "a" : "w";
         if ($download_mode === "w") {
             $this->audit_log(
@@ -7808,18 +6907,9 @@ class ImportClient
                 "FILE APPEND | {$this->download_list_file} | resuming download list build",
             );
         }
-        $download_handle = fopen($this->download_list_file, 'c+b');
+        $download_handle = fopen($this->download_list_file, $download_mode);
         if (!$download_handle) {
             throw new RuntimeException("Failed to open download list file");
-        }
-        if (
-            !ftruncate($download_handle, $download_list_offset)
-            || fseek($download_handle, $download_list_offset) !== 0
-        ) {
-            fclose($download_handle);
-            throw new RuntimeException(
-                'Failed to restore the durable download-list boundary.'
-            );
         }
 
         // When --filter=essential-files is active, uploads go to a separate
@@ -7836,27 +6926,10 @@ class ImportClient
                     "FILE APPEND | {$this->skipped_download_list_file} | resuming skipped download list build",
                 );
             }
-            $skipped_handle =
-                fopen($this->skipped_download_list_file, 'c+b');
+            $skipped_handle = fopen($this->skipped_download_list_file, $download_mode);
             if (!$skipped_handle) {
                 fclose($download_handle);
                 throw new RuntimeException("Failed to open skipped download list file");
-            }
-            if (
-                !ftruncate(
-                    $skipped_handle,
-                    $skipped_download_list_offset
-                )
-                || fseek(
-                    $skipped_handle,
-                    $skipped_download_list_offset
-                ) !== 0
-            ) {
-                fclose($download_handle);
-                fclose($skipped_handle);
-                throw new RuntimeException(
-                    'Failed to restore the durable skipped-list boundary.'
-                );
             }
             $uploads_basedir = $this->get_uploads_basedir();
             $this->audit_log(
@@ -7873,259 +6946,22 @@ class ImportClient
             fseek($remote_handle, $remote_offset);
         }
 
-        $local_handle = fopen($local_index_snapshot_path, 'rb');
-        if (!is_resource($local_handle)) {
-            throw new RuntimeException(
-                'Failed to open the local index for the files-pull diff.'
-            );
-        }
-        if (
-            $local_offset > 0
-            && fseek($local_handle, $local_offset) !== 0
-        ) {
-            throw new RuntimeException(
-                'Failed to seek to the local files-pull diff boundary.'
-            );
-        }
-        $local_next_offset = $local_offset;
-        $read_local_entry = function () use (
-            $local_handle,
-            &$local_next_offset
-        ): ?array {
-            $entry = $this->read_index_line($local_handle);
-            $next_offset = ftell($local_handle);
-            if (!is_int($next_offset)) {
-                throw new RuntimeException(
-                    'Failed to determine the next local index boundary.'
-                );
-            }
-            $local_next_offset = $next_offset;
-            return $entry;
-        };
-        $local = $read_local_entry();
-        if (
-            $migrate_legacy_local_offset
-            && $legacy_local_after !== null
-        ) {
+        $local_handle = file_exists($this->index_file)
+            ? fopen($this->index_file, "r")
+            : null;
+        $local = $this->read_index_line($local_handle);
+        if ($local_after) {
             while (
                 $local !== null &&
-                strcmp($local["path"], $legacy_local_after) <= 0
+                strcmp($local["path"], $local_after) <= 0
             ) {
-                $local_offset = $local_next_offset;
-                $local = $read_local_entry();
+                $local = $this->read_index_line($local_handle);
             }
-        }
-        if ($migrate_legacy_local_offset) {
-            $this->import_state()->diff->local_offset =
-                $local_offset;
-            $this->import_state()->diff->local_after = null;
-            $this->save_state($this->state, false);
         }
         $this->open_index_update_wal();
-
-        $save_diff_boundary = function (
-            bool $update_runtime_status,
-            int $boundary_remote_offset,
-            int $boundary_local_offset,
-            ?int $boundary_pending_directory_top_offset,
-            ?array $pending_local_action
-        ) use (
-            $download_handle,
-            $skipped_handle,
-            &$remote_offset,
-            &$local_offset,
-            &$planned_local_offset,
-            &$download_list_offset,
-            &$skipped_download_list_offset,
-            &$pending_directory_top_offset,
-            &$pending_directory_stack_offset,
-            &$next_conflict_offset,
-            &$retained_local_subtree_top_offset,
-            &$retained_local_subtree_stack_offset
-        ): void {
-            if (
-                !fflush($download_handle)
-                || (
-                    is_resource($skipped_handle)
-                    && !fflush($skipped_handle)
-                )
-            ) {
-                throw new RuntimeException(
-                    'Failed to flush a download list before its boundary.'
-                );
-            }
-            if (
-                is_resource($this->index_update_wal_handle)
-                && !fflush($this->index_update_wal_handle)
-            ) {
-                throw new RuntimeException(
-                    'Failed to flush the index-update WAL.'
-                );
-            }
-            $previous_signal_mask = [];
-            $signals_blocked =
-                function_exists('pcntl_sigprocmask')
-                && pcntl_sigprocmask(
-                    SIG_BLOCK,
-                    [SIGINT, SIGTERM],
-                    $previous_signal_mask
-                );
-            try {
-                $remote_offset = $boundary_remote_offset;
-                $local_offset = $boundary_local_offset;
-                $pending_directory_top_offset =
-                    $boundary_pending_directory_top_offset;
-                $this->import_state()->diff->remote_offset =
-                    $remote_offset;
-                $this->import_state()->diff->local_offset =
-                    $local_offset;
-                $this->import_state()->diff->planned_local_offset =
-                    $planned_local_offset;
-                $this->import_state()->diff->conflict_offset =
-                    $next_conflict_offset;
-                $this->import_state()->diff
-                    ->retained_local_subtree_top_offset =
-                        $retained_local_subtree_top_offset;
-                $this->import_state()->diff
-                    ->retained_local_subtree_stack_offset =
-                        $retained_local_subtree_stack_offset;
-                $this->import_state()->diff->download_list_offset =
-                    $download_list_offset;
-                $this->import_state()->diff
-                    ->skipped_download_list_offset =
-                        $skipped_download_list_offset;
-                $this->import_state()->diff
-                    ->pending_deleted_directory_top_offset =
-                        $pending_directory_top_offset;
-                $this->import_state()->diff
-                    ->pending_deleted_directory_stack_offset =
-                        $pending_directory_stack_offset;
-                $this->import_state()->diff->pending_local_action =
-                    $pending_local_action;
-                $this->save_state(
-                    $this->state,
-                    $update_runtime_status
-                );
-            } finally {
-                if ($signals_blocked) {
-                    pcntl_sigprocmask(
-                        SIG_SETMASK,
-                        $previous_signal_mask
-                    );
-                }
-            }
-        };
-        $stage_local_action = function (
-            string $kind,
-            string $path,
-            bool $validate_local_state,
-            ?array $expected_local_state,
-            int $post_remote_offset,
-            int $post_local_offset,
-            ?int $post_pending_directory_top_offset
-        ) use (
-            $save_diff_boundary,
-            $retain_local_subtree
-        ): bool {
-            $accepted_local_state =
-                $this->capture_local_path_state($path);
-            if (
-                $accepted_local_state !== null
-                && !$this
-                    ->should_apply_remote_change_after_planning_with_local_state(
-                        $path,
-                        $validate_local_state,
-                        $expected_local_state,
-                        $accepted_local_state
-                    )
-            ) {
-                $retain_local_subtree($path);
-                return false;
-            }
-
-            $pending_local_action = [
-                'kind' => $kind,
-                'path_b64' => base64_encode($path),
-                'accepted_local_state' => $accepted_local_state,
-            ];
-            $save_diff_boundary(
-                false,
-                $post_remote_offset,
-                $post_local_offset,
-                $post_pending_directory_top_offset,
-                $pending_local_action
-            );
-            return $this->apply_pending_local_action();
-        };
-        $finalize_pending_deleted_directories = function (
-            ?string $next_path,
-            int $post_remote_offset
-        ) use (
-            $pending_directory_stack_path,
-            $stage_local_action,
-            &$local_offset,
-            &$pending_directory,
-            &$pending_directory_top_offset,
-            $path_is_in_retained_local_subtree
-        ): void {
-            while ($pending_directory !== null) {
-                if (
-                    $next_path !== null
-                    && (
-                        $next_path === $pending_directory['path']
-                        || strpos(
-                            $next_path,
-                            $pending_directory['path'] . '/'
-                        ) === 0
-                    )
-                ) {
-                    return;
-                }
-
-                $next_pending_directory_top_offset =
-                    $pending_directory['previous_offset'];
-                if (
-                    !$path_is_in_retained_local_subtree(
-                        $pending_directory['path']
-                    )
-                ) {
-                    $stage_local_action(
-                        'remove_empty_directory',
-                        $pending_directory['path'],
-                        true,
-                        [
-                            'type' => 'dir',
-                            'empty' => true,
-                        ],
-                        $post_remote_offset,
-                        $local_offset,
-                        $next_pending_directory_top_offset
-                    );
-                }
-                $pending_directory_top_offset =
-                    $next_pending_directory_top_offset;
-                $pending_directory =
-                    $pending_directory_top_offset === null
-                        ? null
-                        : $this->read_pending_deleted_directory(
-                            $pending_directory_stack_path,
-                            $pending_directory_top_offset
-                        );
-            }
-        };
         $processed = 0;
 
-        while (true) {
-            $remote_line_start = ftell($remote_handle);
-            if (!is_int($remote_line_start)) {
-                throw new RuntimeException(
-                    'Failed to determine the current remote index boundary.'
-                );
-            }
-            $line = fgets($remote_handle);
-            if ($line === false) {
-                break;
-            }
+        while (($line = fgets($remote_handle)) !== false) {
             if ($this->shutdown_requested) {
                 break;
             }
@@ -8134,13 +6970,7 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $remote_line_end = ftell($remote_handle);
-            if (!is_int($remote_line_end)) {
-                throw new RuntimeException(
-                    'Failed to determine the next remote index boundary.'
-                );
-            }
-            $remote_offset = $remote_line_end;
+            $remote_offset = ftell($remote_handle);
             $remote = $this->parse_index_line($line);
             if (!$remote) {
                 continue;
@@ -8150,1606 +6980,375 @@ class ImportClient
                 $local !== null &&
                 strcmp($local["path"], $remote["path"]) < 0
             ) {
-                $finalize_pending_deleted_directories(
-                    $local["path"],
-                    $remote_line_start
-                );
                 // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-pull --only runs.
                 if (
-                    !$path_is_in_retained_local_subtree(
+                    $this->is_file_path_selected_by_pull_only_files(
                         $local["path"]
                     )
-                    && $this->is_file_path_selected_by_pull_only_files(
-                        $local["path"]
-                    )
+                    && !$path_has_conflict($local["path"])
                 ) {
-                    $has_conflict = $path_has_conflict($local["path"]);
-                    $planned_local_state =
-                        $planned_local_state_for_path($local["path"]);
-                    if (
-                        $has_conflict
-                        && $this->files_pull_conflict_policy === 'our-wins'
-                    ) {
-                        $this->audit_log(
-                            'FILE CONFLICT | path_b64='
-                            . base64_encode($local["path"])
-                            . ' | policy=our-wins | local path retained'
-                        );
-                        $retain_local_subtree($local["path"]);
-                    } elseif (
-                        $should_apply_planned_remote_change(
-                            $local["path"],
-                            $planned_local_state['validate'],
-                            $planned_local_state['expected']
-                        )
-                    ) {
-                        if (
-                            $local['type'] === 'dir'
-                            && $this->files_pull_conflict_policy
-                                !== 'remote-wins'
-                        ) {
-                            if (
-                                $pending_directory === null
-                                || $pending_directory['path']
-                                    !== $local["path"]
-                            ) {
-                                $pending_directory =
-                                    $this->append_pending_deleted_directory(
-                                        $pending_directory_stack_path,
-                                        $local["path"],
-                                        $pending_directory_top_offset,
-                                        $pending_directory_stack_offset
-                                    );
-                                $pending_directory_top_offset =
-                                    $pending_directory['offset'];
-                                $pending_directory_stack_offset =
-                                    $pending_directory['next_offset'];
-                            }
-                        } else {
-                            $stage_local_action(
-                                'delete_path',
-                                $local["path"],
-                                $planned_local_state['validate'],
-                                $planned_local_state['expected'],
-                                $remote_line_start,
-                                $local_next_offset,
-                                $pending_directory_top_offset
-                            );
-                        }
+                    if ($this->delete_local_file_path($local["path"])) {
+                        $this->delete_index_entry($local["path"], true);
                     }
                 }
-                $local_offset = $local_next_offset;
-                $local = $read_local_entry();
+                $local_after = $local["path"];
+                $local = $this->read_index_line($local_handle);
             }
 
-            $finalize_pending_deleted_directories(
-                $remote["path"],
-                $remote_line_start
-            );
             if ($local !== null && $local["path"] === $remote["path"]) {
                 if (
-                    !$path_is_in_retained_local_subtree(
-                        $remote["path"]
-                    )
-                    && (
-                        $local["ctime"] !== $remote["ctime"]
-                        || $local["size"] !== $remote["size"]
-                        || $local["type"] !== $remote["type"]
-                    )
+                    $local["ctime"] !== $remote["ctime"] ||
+                    $local["size"] !== $remote["size"] ||
+                    $local["type"] !== $remote["type"]
                 ) {
                     // File is in both indexes but changed on the remote.
                     // Always re-download — this file is in our local index,
                     // meaning we synced it before; preserve-local does not
                     // protect files we own.
-                    $has_conflict = $path_has_conflict($remote["path"]);
-                    $planned_local_state =
-                        $planned_local_state_for_path($remote["path"]);
-                    if (
-                        $has_conflict
-                        && $this->files_pull_conflict_policy === 'our-wins'
-                    ) {
-                        $this->audit_log(
-                            'FILE CONFLICT | path_b64='
-                            . base64_encode($remote["path"])
-                            . ' | policy=our-wins | local path retained'
-                        );
-                        $retain_local_subtree($remote["path"]);
-                    } elseif (
-                        $should_apply_planned_remote_change(
-                            $remote["path"],
-                            $planned_local_state['validate'],
-                            $planned_local_state['expected']
-                        )
-                    ) {
-                        $target_handle =
-                            $skipped_handle !== null
-                            && $this->is_uploads_path(
-                                $remote["path"],
-                                $uploads_basedir
-                            )
-                                ? $skipped_handle
-                                : $download_handle;
-                        $expected_local_state_for_fetch =
-                            $planned_local_state['expected'];
-                        if (
-                            $planned_local_state['validate']
-                            && $local['type'] === 'dir'
-                            && $remote['type'] !== 'dir'
-                        ) {
-                            $expected_local_state_for_fetch = [
-                                'type' => 'dir',
-                                'empty' => true,
-                            ];
-                        }
+                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
+                        ? $skipped_handle
+                        : $download_handle;
+                    if (!$path_has_conflict($remote["path"])) {
                         $this->append_download_list(
                             $remote["path"],
                             $target_handle,
-                            $planned_local_state['validate'],
-                            $expected_local_state_for_fetch,
                         );
-                        $target_offset = ftell($target_handle);
-                        if (!is_int($target_offset)) {
-                            throw new RuntimeException(
-                                'Failed to determine a download-list boundary.'
-                            );
-                        }
-                        if ($target_handle === $download_handle) {
-                            $download_list_offset = $target_offset;
-                        } else {
-                            $skipped_download_list_offset =
-                                $target_offset;
-                        }
                     }
                 }
-                $local_offset = $local_next_offset;
-                $local = $read_local_entry();
+                $local_after = $local["path"];
+                $local = $this->read_index_line($local_handle);
             } elseif (
                 $local === null ||
                 strcmp($local["path"], $remote["path"]) > 0
             ) {
-                $remote_path_is_retained =
-                    $path_is_in_retained_local_subtree(
-                        $remote["path"]
-                    );
-                if ($remote_path_is_retained) {
-                    $skip_reason = null;
-                } else {
-                    $skip_reason =
-                        $this->should_skip_for_preserve_local(
-                            $remote["path"]
-                        );
-                }
-                if (
-                    !$remote_path_is_retained
-                    && $skip_reason
-                ) {
+                $skip_reason = $this->should_skip_for_preserve_local($remote["path"]);
+                if ($skip_reason) {
                     $this->audit_log($skip_reason, true);
                     $this->emit_skip_progress($remote["path"]);
-                } elseif (!$remote_path_is_retained) {
-                    $has_conflict = $path_has_conflict($remote["path"]);
-                    $planned_local_state =
-                        $planned_local_state_for_path($remote["path"]);
-                    if (
-                        $has_conflict
-                        && $this->files_pull_conflict_policy === 'our-wins'
-                    ) {
-                        $this->audit_log(
-                            'FILE CONFLICT | path_b64='
-                            . base64_encode($remote["path"])
-                            . ' | policy=our-wins | local path retained'
-                        );
-                        $retain_local_subtree($remote["path"]);
-                    } elseif (
-                        $should_apply_planned_remote_change(
-                            $remote["path"],
-                            $planned_local_state['validate'],
-                            $planned_local_state['expected']
-                        )
-                    ) {
-                        $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
-                            ? $skipped_handle
-                            : $download_handle;
-                        $this->append_download_list(
-                            $remote["path"],
-                            $target_handle,
-                            $planned_local_state['validate'],
-                            $planned_local_state['expected']
-                        );
-                        $target_offset = ftell($target_handle);
-                        if (!is_int($target_offset)) {
-                            throw new RuntimeException(
-                                'Failed to determine a download-list boundary.'
-                            );
-                        }
-                        if ($target_handle === $download_handle) {
-                            $download_list_offset = $target_offset;
-                        } else {
-                            $skipped_download_list_offset =
-                                $target_offset;
-                        }
-                    }
+                } elseif (!$path_has_conflict($remote["path"])) {
+                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
+                        ? $skipped_handle
+                        : $download_handle;
+                    $this->append_download_list($remote["path"], $target_handle);
                 }
             }
 
-            $remote_offset = $remote_line_end;
             $processed++;
             if ($processed % 200 === 0) {
-                $save_diff_boundary(
-                    true,
-                    $remote_offset,
-                    $local_offset,
-                    $pending_directory_top_offset,
-                    $this->import_state()->diff->pending_local_action
-                );
+                $this->import_state()->diff->remote_offset = $remote_offset;
+                $this->import_state()->diff->local_after = $local_after;
+                $this->import_state()->diff->conflict_offset =
+                    $conflict_offset;
+                if (
+                    $this->index_update_wal_handle
+                    && !fflush($this->index_update_wal_handle)
+                ) {
+                    throw new RuntimeException('Failed to flush the index-update WAL.');
+                }
+                $this->save_state($this->state);
                 $this->progress->tick_spinner();
             }
         }
 
-        while ($local !== null && !$this->shutdown_requested) {
-            $finalize_pending_deleted_directories(
-                $local["path"],
-                $remote_offset
-            );
+        while ($local !== null) {
             if (
-                !$path_is_in_retained_local_subtree($local["path"])
-                && $this->is_file_path_selected_by_pull_only_files(
+                $this->is_file_path_selected_by_pull_only_files(
                     $local["path"]
                 )
+                && !$path_has_conflict($local["path"])
             ) {
-                $has_conflict = $path_has_conflict($local["path"]);
-                $planned_local_state =
-                    $planned_local_state_for_path($local["path"]);
-                if (
-                    $has_conflict
-                    && $this->files_pull_conflict_policy === 'our-wins'
-                ) {
-                    $this->audit_log(
-                        'FILE CONFLICT | path_b64='
-                        . base64_encode($local["path"])
-                        . ' | policy=our-wins | local path retained'
-                    );
-                    $retain_local_subtree($local["path"]);
-                } elseif (
-                    $should_apply_planned_remote_change(
-                        $local["path"],
-                        $planned_local_state['validate'],
-                        $planned_local_state['expected']
-                    )
-                ) {
-                    if (
-                        $local['type'] === 'dir'
-                        && $this->files_pull_conflict_policy
-                            !== 'remote-wins'
-                    ) {
-                        if (
-                            $pending_directory === null
-                            || $pending_directory['path']
-                                !== $local["path"]
-                        ) {
-                            $pending_directory =
-                                $this->append_pending_deleted_directory(
-                                    $pending_directory_stack_path,
-                                    $local["path"],
-                                    $pending_directory_top_offset,
-                                    $pending_directory_stack_offset
-                                );
-                            $pending_directory_top_offset =
-                                $pending_directory['offset'];
-                            $pending_directory_stack_offset =
-                                $pending_directory['next_offset'];
-                        }
-                    } else {
-                        $stage_local_action(
-                            'delete_path',
-                            $local["path"],
-                            $planned_local_state['validate'],
-                            $planned_local_state['expected'],
-                            $remote_offset,
-                            $local_next_offset,
-                            $pending_directory_top_offset
-                        );
-                    }
+                if ($this->delete_local_file_path($local["path"])) {
+                    $this->delete_index_entry($local["path"], true);
                 }
             }
-            $local_offset = $local_next_offset;
-            $local = $read_local_entry();
+            $local_after = $local["path"];
+            $local = $this->read_index_line($local_handle);
         }
-        if (!$this->shutdown_requested) {
-            $finalize_pending_deleted_directories(
-                null,
-                $remote_offset
-            );
+
+        if ($local_handle) {
+            fclose($local_handle);
         }
-        $diff_complete =
-            !$this->shutdown_requested
-            && $local === null
-            && feof($remote_handle);
-        $save_diff_boundary(
-            true,
-            $remote_offset,
-            $local_offset,
-            $pending_directory_top_offset,
-            $this->import_state()->diff->pending_local_action
-        );
-        fclose($local_handle);
-        if (is_resource($planned_local_handle)) {
-            fclose($planned_local_handle);
+        if (is_resource($conflicts_handle)) {
+            fclose($conflicts_handle);
         }
         fclose($remote_handle);
         fclose($download_handle);
         if ($skipped_handle !== null) {
             fclose($skipped_handle);
         }
-        fclose($conflicts_handle);
+
+        $this->import_state()->diff->remote_offset = $remote_offset;
+        $this->import_state()->diff->local_after = $local_after;
+        $this->import_state()->diff->conflict_offset =
+            $conflict_offset;
         $this->apply_index_update_wal();
+        $this->save_state($this->state);
 
-        return $diff_complete;
-    }
-
-    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI state keys and filesystem paths, never HTML output.
-    /** Returns the private linked-stack path for retained local subtrees. */
-    private function retained_local_subtree_stack_path(
-        string $state_key
-    ): string {
-        return $this->state_dir
-            . '/.files-pull-'
-            . str_replace('_', '-', $state_key)
-            . '-retained-subtrees.jsonl';
+        if (!$this->shutdown_requested) {
+            @unlink($this->files_pull_conflicts_path());
+        }
+        return !$this->shutdown_requested;
     }
 
     /**
-     * Appends one retained subtree to its durable linked stack.
+     * Builds the sorted list of remote changes which overlap local changes.
      *
-     * @return array {
-     *     @type string   $path            Retained remote path.
-     *     @type int|null $previous_offset Previous linked stack entry.
-     *     @type int      $offset          Offset of this linked entry.
-     *     @type int      $next_offset     Durable end after this entry.
-     * }
-     */
-    private function append_retained_local_subtree(
-        string $stack_path,
-        string $path,
-        ?int $previous_offset,
-        int $durable_offset
-    ): array {
-        $handle = fopen($stack_path, 'c+b');
-        if (!is_resource($handle)) {
-            throw new RuntimeException(
-                'Failed to open the retained-subtree stack.'
-            );
-        }
-        try {
-            if (
-                !ftruncate($handle, $durable_offset)
-                || fseek($handle, $durable_offset) !== 0
-            ) {
-                throw new RuntimeException(
-                    'Failed to restore the retained-subtree stack.'
-                );
-            }
-            $line = json_encode(
-                [
-                    'path_b64' => base64_encode($path),
-                    'previous_offset' => $previous_offset,
-                ],
-                JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-            ) . "\n";
-            if (
-                fwrite($handle, $line) !== strlen($line)
-                || !fflush($handle)
-            ) {
-                throw new RuntimeException(
-                    'Failed to append the retained-subtree stack.'
-                );
-            }
-            $next_offset = ftell($handle);
-            if (!is_int($next_offset)) {
-                throw new RuntimeException(
-                    'Failed to determine the retained-subtree boundary.'
-                );
-            }
-            return [
-                'path' => $path,
-                'previous_offset' => $previous_offset,
-                'offset' => $durable_offset,
-                'next_offset' => $next_offset,
-            ];
-        } finally {
-            fclose($handle);
-        }
-    }
-
-    /**
-     * Reads one retained subtree from its durable linked stack.
+     * The plan is disposable because this phase has not changed the local
+     * tree. An interrupted run removes it and starts this comparison again.
      *
-     * @return array {
-     *     @type string   $path            Retained remote path.
-     *     @type int|null $previous_offset Previous linked stack entry.
-     * }
+     * @return int|null Conflict count, or null when interrupted.
      */
-    private function read_retained_local_subtree(
-        string $stack_path,
-        int $offset
-    ): array {
-        $handle = fopen($stack_path, 'rb');
-        if (!is_resource($handle)) {
-            throw new RuntimeException(
-                'Failed to open the retained-subtree stack.'
-            );
-        }
-        try {
-            if (fseek($handle, $offset) !== 0) {
-                throw new RuntimeException(
-                    'Failed to seek in the retained-subtree stack.'
-                );
-            }
-            $line = fgets($handle);
-            if ($line === false) {
-                throw new RuntimeException(
-                    'Failed to read a retained-subtree entry.'
-                );
-            }
-            $record = json_decode(
-                $line,
-                true,
-                512,
-                JSON_THROW_ON_ERROR
-            );
-            return [
-                'path' => base64_decode($record['path_b64']),
-                'previous_offset' =>
-                    isset($record['previous_offset'])
-                        ? (int) $record['previous_offset']
-                        : null,
-            ];
-        } finally {
-            fclose($handle);
-        }
-    }
-
-    /**
-     * Appends one directory to the durable deletion stack.
-     *
-     * @return array {
-     *     @type string   $path            Remote directory path.
-     *     @type int|null $previous_offset Previous linked stack entry.
-     *     @type int      $offset          Offset of this linked entry.
-     *     @type int      $next_offset     Durable end after this entry.
-     * }
-     */
-    private function append_pending_deleted_directory(
-        string $stack_path,
-        string $path,
-        ?int $previous_offset,
-        int $durable_offset
-    ): array {
-        $handle = fopen($stack_path, 'c+b');
-        if (!is_resource($handle)) {
-            throw new RuntimeException(
-                'Failed to open the pending deleted-directory stack.'
-            );
-        }
-        try {
-            if (
-                !ftruncate($handle, $durable_offset)
-                || fseek($handle, $durable_offset) !== 0
-            ) {
-                throw new RuntimeException(
-                    'Failed to restore the pending deleted-directory stack.'
-                );
-            }
-            $line = json_encode(
-                [
-                    'path_b64' => base64_encode($path),
-                    'previous_offset' => $previous_offset,
-                ],
-                JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-            ) . "\n";
-            if (
-                fwrite($handle, $line) !== strlen($line)
-                || !fflush($handle)
-            ) {
-                throw new RuntimeException(
-                    'Failed to append the pending deleted-directory stack.'
-                );
-            }
-            $next_offset = ftell($handle);
-            if (!is_int($next_offset)) {
-                throw new RuntimeException(
-                    'Failed to determine the deleted-directory stack boundary.'
-                );
-            }
-            return [
-                'path' => $path,
-                'previous_offset' => $previous_offset,
-                'offset' => $durable_offset,
-                'next_offset' => $next_offset,
-            ];
-        } finally {
-            fclose($handle);
-        }
-    }
-
-    /**
-     * Reads one linked directory from the durable deletion stack.
-     *
-     * @return array {
-     *     @type string   $path            Remote directory path.
-     *     @type int|null $previous_offset Previous linked stack entry.
-     * }
-     */
-    private function read_pending_deleted_directory(
-        string $stack_path,
-        int $offset
-    ): array {
-        $handle = fopen($stack_path, 'rb');
-        if (!is_resource($handle)) {
-            throw new RuntimeException(
-                'Failed to open the pending deleted-directory stack.'
-            );
-        }
-        try {
-            if (fseek($handle, $offset) !== 0) {
-                throw new RuntimeException(
-                    'Failed to seek in the pending deleted-directory stack.'
-                );
-            }
-            $line = fgets($handle);
-            if ($line === false) {
-                throw new RuntimeException(
-                    'Failed to read a pending deleted-directory entry.'
-                );
-            }
-            $record = json_decode(
-                $line,
-                true,
-                512,
-                JSON_THROW_ON_ERROR
-            );
-            return [
-                'path' => base64_decode($record['path_b64']),
-                'previous_offset' =>
-                    isset($record['previous_offset'])
-                        ? (int) $record['previous_offset']
-                        : null,
-            ];
-        } finally {
-            fclose($handle);
-        }
-    }
-
-    /** Removes conflict-planning files after a durable lifecycle boundary. */
-    private function remove_files_pull_conflict_preparation(): void
+    private function prepare_files_pull_conflicts(): ?int
     {
-        $this->remove_files_pull_conflict_plan();
-        $this->remove_owned_files_pull_path(
-            $this->state_dir
-                . '/.files-pull-diff-local-index.jsonl'
-        );
-        $this->remove_owned_files_pull_path(
-            $this->state_dir
-                . '/.files-pull-diff-local-index.jsonl.swap'
-        );
-    }
-
-    /** Removes a conflict plan without removing its immutable diff input. */
-    private function remove_files_pull_conflict_plan(): void
-    {
-        $paths = [
-            $this->state_dir . '/.files-pull-conflicts.jsonl',
-            $this->state_dir . '/.files-pull-conflicts.jsonl.tmp',
-            $this->state_dir . '/.files-pull-planned-local-index.jsonl',
-            $this->state_dir
-                . '/.files-pull-planned-local-index.jsonl.tmp',
-            $this->state_dir
-                . '/.files-pull-deleted-directory-stack.jsonl',
-            $this->retained_local_subtree_stack_path('diff'),
-            $this->state_dir . '/.files-pull-local-changes.tmp',
-            $this->state_dir . '/.files-pull-remote-changes.tmp',
-            $this->state_dir . '/.files-pull-fresh-local-index.tmp',
-        ];
-        foreach (['stop', 'remote-wins', 'our-wins'] as $policy) {
-            $paths[] =
-                $this->state_dir
-                . '/.files-pull-conflicts-'
-                . $policy
-                . '.jsonl';
-            $paths[] =
-                $this->state_dir
-                . '/.files-pull-conflicts-'
-                . $policy
-                . '.jsonl.tmp';
-        }
-        foreach ($paths as $path) {
-            $this->remove_owned_files_pull_path($path);
-        }
-        $this->remove_owned_files_pull_tree(
-            $this->state_dir . '/.files-pull-conflict-plan'
-        );
-        $this->import_state()->diff->conflict_processor_cursor = null;
-    }
-
-    /** Removes one exact files-pull artifact and confirms its absence. */
-    private function remove_owned_files_pull_path(string $path): void
-    {
-        clearstatcache(true, $path);
-        if (!file_exists($path) && !is_link($path)) {
-            return;
-        }
-        if (!@unlink($path)) {
-            throw new RuntimeException(
-                'Failed to remove a files-pull artifact: '
-                . $path
-                . '.'
-            );
-        }
-        clearstatcache(true, $path);
-        if (file_exists($path) || is_link($path)) {
-            throw new RuntimeException(
-                'A removed files-pull artifact is still present: '
-                . $path
-                . '.'
-            );
-        }
-    }
-
-    /** Recursively removes one owned files-pull directory without following links. */
-    private function remove_owned_files_pull_tree(string $path): void
-    {
-        clearstatcache(true, $path);
-        if (!file_exists($path) && !is_link($path)) {
-            return;
-        }
-        if (is_link($path) || !is_dir($path)) {
-            $this->remove_owned_files_pull_path($path);
-            return;
-        }
-        $handle = @opendir($path);
-        if (!is_resource($handle)) {
-            throw new RuntimeException(
-                'Failed to open a files-pull artifact directory: '
-                . $path
-                . '.'
-            );
-        }
-        try {
-            while (true) {
-                $entry = readdir($handle);
-                if ($entry === false) {
-                    break;
-                }
-                if ($entry === '.' || $entry === '..') {
-                    continue;
-                }
-                $child = $path . '/' . $entry;
-                if (is_dir($child) && !is_link($child)) {
-                    $this->remove_owned_files_pull_tree($child);
-                } else {
-                    $this->remove_owned_files_pull_path($child);
-                }
-            }
-        } finally {
-            closedir($handle);
-        }
-        if (!@rmdir($path)) {
-            throw new RuntimeException(
-                'Failed to remove a files-pull artifact directory: '
-                . $path
-                . '.'
-            );
-        }
-        clearstatcache(true, $path);
-        if (file_exists($path)) {
-            throw new RuntimeException(
-                'A removed files-pull artifact directory is still present: '
-                . $path
-                . '.'
-            );
-        }
-    }
-    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-
-    /**
-     * Advances resumable conflict preparation and returns its published list.
-     *
-     * @param string $previous_remote_index Immutable local-index snapshot from
-     *                                      before this diff started.
-     * @return string|null Published conflict list, or null while preparation remains open.
-     */
-    private function prepare_files_pull_conflicts(
-        string $previous_remote_index
-    ): ?string {
-        $conflicts_path =
-            $this->state_dir . '/.files-pull-conflicts.jsonl';
-        if (is_file($conflicts_path)) {
-            return $conflicts_path;
-        }
-
-        $legacy_conflicts_path =
-            $this->state_dir
-            . '/.files-pull-conflicts-'
-            . $this->files_pull_conflict_policy
-            . '.jsonl';
-        $legacy_temporary_paths = [
-            $this->state_dir . '/.files-pull-local-changes.tmp',
-            $this->state_dir . '/.files-pull-remote-changes.tmp',
-            $this->state_dir . '/.files-pull-fresh-local-index.tmp',
-        ];
-        if (
-            is_file($legacy_conflicts_path)
-            || array_filter($legacy_temporary_paths, 'is_file') !== []
-        ) {
-            return $this->prepare_legacy_files_pull_conflicts(
-                $previous_remote_index
-            );
-        }
-
-        $context =
-            $this->files_pull_pair_context_if_local_tree_exists();
-        $previous_local_index = $context === null
-            ? null
-            : $context['push_state_directory']
-                . '/previous_local_index.jsonl';
-        if (
-            $this->files_pull_conflict_policy === 'remote-wins'
-            || !$this->maintain_previous_local_index
-            || $previous_local_index === null
-            || !is_file($previous_local_index)
-        ) {
-            $temporary_path = $conflicts_path . '.tmp';
-            if (file_put_contents($temporary_path, '') === false) {
-                throw new RuntimeException(
-                    'Failed to initialize the files-pull conflict list.'
-                );
-            }
-            if (!rename($temporary_path, $conflicts_path)) {
-                @unlink($temporary_path);
-                throw new RuntimeException(
-                    'Failed to publish the files-pull conflict list.'
-                );
-            }
-            return $conflicts_path;
-        }
-
+        $context = $this->files_pull_pair_context();
+        $previous_local_index =
+            $context['push_state_directory']
+            . '/previous_local_index.jsonl';
         $plan_directory =
-            $this->state_dir . '/.files-pull-conflict-plan';
-        $planned_local_index_path =
-            $this->state_dir
-            . '/.files-pull-planned-local-index.jsonl';
-        $cursor =
-            $this->import_state()->diff->conflict_processor_cursor;
-        $processor = null;
-        try {
-            if ($cursor === null) {
-                $this->remove_owned_files_pull_tree($plan_directory);
-                if (!mkdir($plan_directory, 0755, true)) {
-                    throw new RuntimeException(
-                        'Failed to create the files-pull conflict plan directory.'
-                    );
-                }
-                $this->remove_owned_files_pull_path(
-                    $planned_local_index_path
-                );
-                $processor = FilesPullConflictProcessor::start(
-                    $plan_directory,
-                    $context['local_tree'],
-                    $previous_local_index,
-                    $previous_remote_index,
-                    $this->remote_index_file,
-                    $context['remote_document_root'],
-                    $this->pull_only_files_with_path_prefixes,
-                    $conflicts_path,
-                    $planned_local_index_path
-                );
-                $this->import_state()->diff
-                    ->conflict_processor_cursor =
-                        $processor->get_cursor();
-                $this->save_state($this->state);
-            } else {
-                $processor =
-                    FilesPullConflictProcessor::resume($cursor);
-            }
-            while (!$this->shutdown_requested) {
-                if (function_exists('pcntl_signal_dispatch')) {
-                    pcntl_signal_dispatch();
-                }
-                $has_next_step = $processor->next_step();
-                $this->import_state()->diff
-                    ->conflict_processor_cursor =
-                        $processor->get_cursor();
-                $this->save_state($this->state, false);
-                if (!$has_next_step) {
-                    if (
-                        !is_file($processor->get_conflicts_path())
-                        || !is_file(
-                            $processor->get_planned_local_index_path()
-                        )
-                    ) {
-                        throw new RuntimeException(
-                            'Files-pull conflict preparation completed '
-                            . 'without publishing its outputs.'
-                        );
-                    }
-                    return $processor->get_conflicts_path();
-                }
-            }
-            return null;
-        } finally {
-            if ($processor !== null) {
-                $processor->close();
-            }
-        }
-    }
-
-    /**
-     * Completes conflict preparation retained by an older in-progress lifecycle.
-     *
-     * The compatibility path keeps the older whole-operation implementation
-     * only for state which already published or began writing its artifacts.
-     */
-    private function prepare_legacy_files_pull_conflicts(
-        string $previous_remote_index
-    ): string {
-        $conflicts_path =
-            $this->state_dir
-            . '/.files-pull-conflicts-'
-            . $this->files_pull_conflict_policy
-            . '.jsonl';
-        $planned_local_index_path =
-            $this->state_dir . '/.files-pull-planned-local-index.jsonl';
-        if (
-            is_file($conflicts_path)
-            && (
-                $this->files_pull_conflict_policy === 'remote-wins'
-                || !$this->maintain_previous_local_index
-                || is_file($planned_local_index_path)
-            )
-        ) {
-            return $conflicts_path;
-        }
-        if (is_file($conflicts_path) && !unlink($conflicts_path)) {
+            $context['push_state_directory']
+            . '/files-pull-conflicts';
+        $conflicts_path = $this->files_pull_conflicts_path();
+        $swap_path = $conflicts_path . '.swap';
+        $this->remove_local_plan_directory($plan_directory);
+        if (!mkdir($plan_directory, 0755, true)) {
             throw new RuntimeException(
-                'Failed to discard an incomplete files-pull conflict plan.'
+                'Failed to create the files-pull conflict plan.'
+            );
+        }
+        $excluded_paths_path =
+            $plan_directory . '/no_target_exclusions.json';
+        if (file_put_contents($excluded_paths_path, "[]\n") === false) {
+            throw new RuntimeException(
+                'Failed to create the files-pull conflict exclusions.'
             );
         }
 
-        $conflicts_temporary_path = $conflicts_path . '.tmp';
-        $local_changes_path =
-            $this->state_dir . '/.files-pull-local-changes.tmp';
-        $remote_changes_path =
-            $this->state_dir . '/.files-pull-remote-changes.tmp';
-        $fresh_local_index_path =
-            $this->state_dir . '/.files-pull-fresh-local-index.tmp';
-        $planned_local_index_temporary_path =
-            $planned_local_index_path . '.tmp';
+        $plan = PushPlan::start(
+            $plan_directory,
+            $context['local_tree'],
+            $previous_local_index,
+            $excluded_paths_path
+        );
         try {
-            foreach ([
-                $conflicts_temporary_path,
-                $local_changes_path,
-                $remote_changes_path,
-                $fresh_local_index_path,
-                $planned_local_index_temporary_path,
-            ] as $temporary_path) {
-                if (is_file($temporary_path) && !unlink($temporary_path)) {
-                    throw new RuntimeException(
-                        'Failed to remove a files-pull conflict temporary file: '
-                        . $temporary_path . '.'
-                    );
+            while ($plan->next_step()) {
+                if ($this->shutdown_requested) {
+                    return null;
                 }
             }
-
-            $context = $this->files_pull_pair_context_if_local_tree_exists();
-            $previous_local_index = $context === null
-                ? null
-                : $context['push_state_directory']
-                    . '/previous_local_index.jsonl';
-            if (
-                $this->files_pull_conflict_policy === 'remote-wins'
-                || !$this->maintain_previous_local_index
-                || $previous_local_index === null
-                || !is_file($previous_local_index)
-            ) {
-                if (file_put_contents($conflicts_temporary_path, '') === false) {
-                    throw new RuntimeException(
-                        'Failed to initialize the files-pull conflict list.'
-                    );
-                }
-                if (!rename($conflicts_temporary_path, $conflicts_path)) {
-                    throw new RuntimeException(
-                        'Failed to publish the files-pull conflict list.'
-                    );
-                }
-                return $conflicts_path;
-            }
-
-            $fresh_local_index_handle =
-                fopen($fresh_local_index_path, 'wb');
-            if (!is_resource($fresh_local_index_handle)) {
+            $local_changes =
+                $this->files_pull_local_change_paths($plan);
+            $local_changes->rewind();
+            $local_path = $local_changes->valid()
+                ? $local_changes->current()
+                : null;
+            $conflicts_handle = fopen($swap_path, 'wb');
+            if (!is_resource($conflicts_handle)) {
                 throw new RuntimeException(
-                    'Failed to open the fresh local index for files-pull.'
+                    'Failed to create the files-pull conflict list.'
                 );
             }
-            $file_index_processor = FileIndexProcessor::start(
-                [$context['local_tree']],
-                $context['local_tree'],
-                false,
-                false,
-                $context['push_state_directory']
-            );
+            $conflict_count = 0;
             try {
-                while ($file_index_processor->next_index_step()) {
-                    if (
-                        $file_index_processor->get_step_status()
-                        === FileIndexProcessor::STATUS_DIRECTORY_ERROR
-                    ) {
-                        $directory_error =
-                            $file_index_processor->get_directory_error();
-                        throw new RuntimeException(
-                            $directory_error['message']
-                            . ': '
-                            . base64_encode($directory_error['path'])
-                            . '.'
-                        );
-                    }
-                    if (
-                        $file_index_processor->get_step_status()
-                        !== FileIndexProcessor::STATUS_INDEXED
-                    ) {
-                        continue;
-                    }
-                    foreach (
-                        $file_index_processor->get_index_entries()
-                        as $index_entry
-                    ) {
-                        $relative_path = substr(
-                            $index_entry['path'],
-                            strlen($context['local_tree']) + 1
-                        );
-                        $fresh_entry = [
-                            'path' => base64_encode($relative_path),
-                            'ctime' => $index_entry['ctime'],
-                            'size' => $index_entry['size'],
-                            'type' => $index_entry['type'],
-                        ];
-                        if ($index_entry['type'] === 'dir') {
-                            $fresh_entry['empty'] =
-                                $index_entry['empty'];
-                        }
-                        $line = json_encode(
-                            $fresh_entry,
-                            JSON_UNESCAPED_SLASHES
-                                | JSON_THROW_ON_ERROR
-                        ) . "\n";
-                        if (
-                            fwrite($fresh_local_index_handle, $line)
-                            !== strlen($line)
-                        ) {
-                            throw new RuntimeException(
-                                'Failed to write the fresh local index '
-                                . 'for files-pull.'
-                            );
-                        }
-                    }
-                }
-                if (!fflush($fresh_local_index_handle)) {
-                    throw new RuntimeException(
-                        'Failed to flush the fresh local index for files-pull.'
-                    );
-                }
-            } finally {
-                $file_index_processor->close();
-                fclose($fresh_local_index_handle);
-            }
-
-            $fresh_local_index_handle =
-                fopen($fresh_local_index_path, 'rb');
-            $planned_local_index_handle =
-                fopen($planned_local_index_temporary_path, 'wb');
-            if (
-                !is_resource($fresh_local_index_handle)
-                || !is_resource($planned_local_index_handle)
-            ) {
-                if (is_resource($fresh_local_index_handle)) {
-                    fclose($fresh_local_index_handle);
-                }
-                if (is_resource($planned_local_index_handle)) {
-                    fclose($planned_local_index_handle);
-                }
-                throw new RuntimeException(
-                    'Failed to open the planned local index for files-pull.'
-                );
-            }
-            try {
-                while (true) {
-                    $planned_local_entry =
-                        $this->read_index_line(
-                            $fresh_local_index_handle,
-                            false
-                        );
-                    if ($planned_local_entry === null) {
-                        break;
-                    }
-                    $planned_local_entry['path'] =
-                        $context['remote_document_root']
-                        . '/'
-                        . $planned_local_entry['path'];
-                    $line = json_encode(
-                        [
-                            'path' =>
-                                base64_encode(
-                                    $planned_local_entry['path']
-                                ),
-                            'ctime' => $planned_local_entry['ctime'],
-                            'size' => $planned_local_entry['size'],
-                            'type' => $planned_local_entry['type'],
-                        ] + (
-                            $planned_local_entry['type'] === 'dir'
-                                ? [
-                                    'empty' =>
-                                        (bool) (
-                                            $planned_local_entry['empty']
-                                            ?? false
-                                        ),
-                                ]
-                                : []
-                        ),
-                        JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-                    ) . "\n";
-                    if (
-                        fwrite($planned_local_index_handle, $line)
-                        !== strlen($line)
-                    ) {
-                        throw new RuntimeException(
-                            'Failed to write the planned local index '
-                            . 'for files-pull.'
-                        );
-                    }
-                }
-                if (!fflush($planned_local_index_handle)) {
-                    throw new RuntimeException(
-                        'Failed to flush the planned local index '
-                        . 'for files-pull.'
-                    );
-                }
-            } finally {
-                fclose($fresh_local_index_handle);
-                fclose($planned_local_index_handle);
-            }
-            $planned_local_index_sorter = new ExternalMergeSort(
-                static function (string $line): string {
-                    $entry = json_decode(
-                        $line,
-                        true,
-                        512,
-                        JSON_THROW_ON_ERROR
-                    );
-                    return base64_decode($entry['path']);
-                },
-                8 * 1024 * 1024,
-                true,
-                $this->state_dir
-            );
-            $planned_local_index_sorter->sort(
-                $planned_local_index_temporary_path
-            );
-            if (
-                !rename(
-                    $planned_local_index_temporary_path,
-                    $planned_local_index_path
-                )
-            ) {
-                throw new RuntimeException(
-                    'Failed to publish the planned local index '
-                    . 'for files-pull.'
-                );
-            }
-
-            $previous_local_handle =
-                fopen($previous_local_index, 'rb');
-            $fresh_local_handle =
-                fopen($fresh_local_index_path, 'rb');
-            $local_changes_handle = fopen($local_changes_path, 'wb');
-            if (
-                !is_resource($previous_local_handle)
-                || !is_resource($fresh_local_handle)
-                || !is_resource($local_changes_handle)
-            ) {
-                if (is_resource($previous_local_handle)) {
-                    fclose($previous_local_handle);
-                }
-                if (is_resource($fresh_local_handle)) {
-                    fclose($fresh_local_handle);
-                }
-                if (is_resource($local_changes_handle)) {
-                    fclose($local_changes_handle);
-                }
-                throw new RuntimeException(
-                    'Failed to open the local files-pull indexes.'
-                );
-            }
-            $write_local_change = static function (
-                string $path,
-                $handle
-            ): void {
-                $line = json_encode(
-                    ['path' => base64_encode($path)],
-                    JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-                ) . "\n";
-                if (fwrite($handle, $line) !== strlen($line)) {
-                    throw new RuntimeException(
-                        'Failed to write a local files-pull change.'
-                    );
-                }
-            };
-            try {
-                $previous_local =
-                    $this->read_index_line($previous_local_handle, false);
-                $fresh_local =
-                    $this->read_index_line($fresh_local_handle, false);
-                while (
-                    $previous_local !== null
-                    || $fresh_local !== null
+                foreach (
+                    $this->files_pull_remote_changes($context)
+                    as $remote_change
                 ) {
-                    if ($previous_local === null) {
-                        $comparison = 1;
-                    } elseif ($fresh_local === null) {
-                        $comparison = -1;
-                    } else {
-                        $comparison = compare_paths(
-                            $previous_local['path'],
-                            $fresh_local['path']
-                        );
-                    }
-
-                    if ($comparison < 0) {
-                        $write_local_change(
-                            $previous_local['path'],
-                            $local_changes_handle
-                        );
-                        $previous_local = $this->read_index_line(
-                            $previous_local_handle,
-                            false
-                        );
-                    } elseif ($comparison > 0) {
-                        $write_local_change(
-                            $fresh_local['path'],
-                            $local_changes_handle
-                        );
-                        $fresh_local = $this->read_index_line(
-                            $fresh_local_handle,
-                            false
-                        );
-                    } else {
-                        $local_path_changed =
-                            $previous_local['type']
-                                !== $fresh_local['type'];
-                        if (
-                            !$local_path_changed
-                            && $fresh_local['type'] === 'dir'
-                        ) {
-                            $local_path_changed =
-                                (bool) (
-                                    $previous_local['empty'] ?? false
-                                )
-                                !== (bool) (
-                                    $fresh_local['empty'] ?? false
-                                );
-                        } elseif (!$local_path_changed) {
-                            $local_path_changed =
-                                $previous_local['ctime']
-                                    !== $fresh_local['ctime']
-                                || $previous_local['size']
-                                    !== $fresh_local['size'];
-                        }
-                        if ($local_path_changed) {
-                            $write_local_change(
-                                $fresh_local['path'],
-                                $local_changes_handle
-                            );
-                        }
-                        $previous_local = $this->read_index_line(
-                            $previous_local_handle,
-                            false
-                        );
-                        $fresh_local = $this->read_index_line(
-                            $fresh_local_handle,
-                            false
-                        );
-                    }
-                }
-                if (!fflush($local_changes_handle)) {
-                    throw new RuntimeException(
-                        'Failed to flush the local files-pull changes.'
-                    );
-                }
-            } finally {
-                fclose($previous_local_handle);
-                fclose($fresh_local_handle);
-                fclose($local_changes_handle);
-            }
-
-            $previous_remote_handle =
-                fopen($previous_remote_index, 'rb');
-            $current_remote_handle = fopen($this->remote_index_file, 'rb');
-            $remote_changes_handle = fopen($remote_changes_path, 'wb');
-            if (
-                !is_resource($previous_remote_handle)
-                || !is_resource($current_remote_handle)
-                || !is_resource($remote_changes_handle)
-            ) {
-                if (is_resource($previous_remote_handle)) {
-                    fclose($previous_remote_handle);
-                }
-                if (is_resource($current_remote_handle)) {
-                    fclose($current_remote_handle);
-                }
-                if (is_resource($remote_changes_handle)) {
-                    fclose($remote_changes_handle);
-                }
-                throw new RuntimeException(
-                    'Failed to open the remote files-pull changes.'
-                );
-            }
-            $write_remote_change = function (
-                array $remote_entry,
-                bool $replace_subtree
-            ) use (
-                $context,
-                $remote_changes_handle
-            ): void {
-                if (
-                    !$this->is_file_path_selected_by_pull_only_files(
-                        $remote_entry['path']
-                    )
-                ) {
-                    return;
-                }
-                $local_path =
-                    $this->remote_path_to_local_path_within_import_root(
-                        $remote_entry['path']
-                    );
-                $relative_path = self::path_remainder_under(
-                    $local_path,
-                    $context['local_tree']
-                );
-                if ($relative_path === null || $relative_path === '') {
-                    return;
-                }
-                $relative_path = ltrim($relative_path, '/');
-                if (
-                    FileIndexProcessor::path_matches_built_in_exclusion(
-                        $relative_path
-                    )
-                ) {
-                    return;
-                }
-                $line = json_encode(
-                    [
-                        'path' => base64_encode($relative_path),
-                        'remote_path' =>
-                            base64_encode($remote_entry['path']),
-                        'replace_subtree' => $replace_subtree,
-                    ],
-                    JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-                ) . "\n";
-                if (
-                    fwrite($remote_changes_handle, $line)
-                    !== strlen($line)
-                ) {
-                    throw new RuntimeException(
-                        'Failed to write a remote files-pull change.'
-                    );
-                }
-            };
-            try {
-                $previous_remote =
-                    $this->read_index_line($previous_remote_handle);
-                $current_remote =
-                    $this->read_index_line($current_remote_handle);
-                while (
-                    $previous_remote !== null
-                    || $current_remote !== null
-                ) {
-                    if ($previous_remote === null) {
-                        $comparison = 1;
-                    } elseif ($current_remote === null) {
-                        $comparison = -1;
-                    } else {
-                        $comparison = strcmp(
-                            $previous_remote['path'],
-                            $current_remote['path']
-                        );
-                    }
-
-                    if ($comparison < 0) {
-                        $write_remote_change($previous_remote, true);
-                        $previous_remote =
-                            $this->read_index_line($previous_remote_handle);
-                    } elseif ($comparison > 0) {
-                        $write_remote_change(
-                            $current_remote,
-                            $current_remote['type'] !== 'dir'
-                        );
-                        $current_remote =
-                            $this->read_index_line($current_remote_handle);
-                    } else {
-                        if (
-                            $previous_remote['ctime']
-                                !== $current_remote['ctime']
-                            || $previous_remote['size']
-                                !== $current_remote['size']
-                            || $previous_remote['type']
-                                !== $current_remote['type']
-                        ) {
-                            $write_remote_change(
-                                $current_remote,
-                                $current_remote['type'] !== 'dir'
-                            );
-                        }
-                        $previous_remote =
-                            $this->read_index_line($previous_remote_handle);
-                        $current_remote =
-                            $this->read_index_line($current_remote_handle);
-                    }
-                }
-                if (!fflush($remote_changes_handle)) {
-                    throw new RuntimeException(
-                        'Failed to flush the remote files-pull changes.'
-                    );
-                }
-            } finally {
-                if (is_resource($previous_remote_handle)) {
-                    fclose($previous_remote_handle);
-                }
-                fclose($current_remote_handle);
-                fclose($remote_changes_handle);
-            }
-
-            $remote_change_sorter = new ExternalMergeSort(
-                static function (string $line): string {
-                    $entry = json_decode(
-                        $line,
-                        true,
-                        512,
-                        JSON_THROW_ON_ERROR
-                    );
-                    return path_sort_key(
-                        base64_decode($entry['path'])
-                    );
-                },
-                8 * 1024 * 1024,
-                true,
-                $this->state_dir
-            );
-            $remote_change_sorter->sort($remote_changes_path);
-
-            $local_changes_handle = fopen($local_changes_path, 'rb');
-            $remote_changes_handle = fopen($remote_changes_path, 'rb');
-            $conflicts_handle = fopen($conflicts_temporary_path, 'wb');
-            if (
-                !is_resource($local_changes_handle)
-                || !is_resource($remote_changes_handle)
-                || !is_resource($conflicts_handle)
-            ) {
-                if (is_resource($local_changes_handle)) {
-                    fclose($local_changes_handle);
-                }
-                if (is_resource($remote_changes_handle)) {
-                    fclose($remote_changes_handle);
-                }
-                if (is_resource($conflicts_handle)) {
-                    fclose($conflicts_handle);
-                }
-                throw new RuntimeException(
-                    'Failed to open the files-pull conflict inputs.'
-                );
-            }
-            $read_local_change = static function ($handle): ?string {
-                while (true) {
-                    $line = fgets($handle);
-                    if ($line === false) {
-                        if (!feof($handle)) {
-                            throw new RuntimeException(
-                                'Failed to read a local files-pull change.'
-                            );
-                        }
+                    if ($this->shutdown_requested) {
                         return null;
                     }
-                    if (trim($line) === '') {
-                        continue;
-                    }
-                    $entry = json_decode(
-                        $line,
-                        true,
-                        512,
-                        JSON_THROW_ON_ERROR
-                    );
-                    return base64_decode($entry['path']);
-                }
-            };
-            $read_remote_change = static function ($handle): ?array {
-                while (true) {
-                    $line = fgets($handle);
-                    if ($line === false) {
-                        if (!feof($handle)) {
-                            throw new RuntimeException(
-                                'Failed to read a remote files-pull change.'
-                            );
-                        }
-                        return null;
-                    }
-                    if (trim($line) === '') {
-                        continue;
-                    }
-                    $entry = json_decode(
-                        $line,
-                        true,
-                        512,
-                        JSON_THROW_ON_ERROR
-                    );
-                    return [
-                        'path' => base64_decode($entry['path']),
-                        'remote_path' =>
-                            base64_decode($entry['remote_path']),
-                        'replace_subtree' =>
-                            (bool) $entry['replace_subtree'],
-                    ];
-                }
-            };
-            $path_is_same_or_descendant = static function (
-                string $path,
-                string $possible_ancestor
-            ): bool {
-                return $path === $possible_ancestor
-                    || strpos($path, $possible_ancestor . '/') === 0;
-            };
-            try {
-                $local_change =
-                    $read_local_change($local_changes_handle);
-                $local_change_ancestors = [];
-                $conflicted_replacement_path = null;
-                $remote_change =
-                    $read_remote_change($remote_changes_handle);
-                while ($remote_change !== null) {
-                    if (
-                        $conflicted_replacement_path !== null
-                        && !$path_is_same_or_descendant(
-                            $remote_change['path'],
-                            $conflicted_replacement_path
-                        )
-                    ) {
-                        $conflicted_replacement_path = null;
-                    }
-                    while (
-                        $local_change !== null
-                        && compare_paths(
-                            $local_change,
-                            $remote_change['path']
-                        ) <= 0
-                    ) {
-                        while (
-                            $local_change_ancestors !== []
-                            && !$path_is_same_or_descendant(
-                                $local_change,
-                                $local_change_ancestors[
-                                    array_key_last(
-                                        $local_change_ancestors
-                                    )
-                                ]
+                    while ($local_path !== null) {
+                        if (
+                            self::files_pull_paths_overlap(
+                                $local_path,
+                                $remote_change['local_path']
                             )
                         ) {
-                            array_pop($local_change_ancestors);
+                            $record =
+                                $remote_change['remote_path'] . "\0";
+                            if (
+                                fwrite($conflicts_handle, $record)
+                                !== strlen($record)
+                            ) {
+                                throw new RuntimeException(
+                                    'Failed to write the files-pull conflict list.'
+                                );
+                            }
+                            ++$conflict_count;
+                            break;
                         }
-                        $local_change_ancestors[] = $local_change;
-                        $local_change =
-                            $read_local_change($local_changes_handle);
+                        if (
+                            compare_paths(
+                                $local_path,
+                                $remote_change['local_path']
+                            ) > 0
+                        ) {
+                            break;
+                        }
+                        $local_changes->next();
+                        $local_path = $local_changes->valid()
+                            ? $local_changes->current()
+                            : null;
                     }
-                    while (
-                        $local_change_ancestors !== []
-                        && !$path_is_same_or_descendant(
-                            $remote_change['path'],
-                            $local_change_ancestors[
-                                array_key_last(
-                                    $local_change_ancestors
-                                )
-                            ]
-                        )
-                    ) {
-                        array_pop($local_change_ancestors);
-                    }
-                    $has_conflict =
-                        $conflicted_replacement_path !== null
-                        || $local_change_ancestors !== [];
-                    if (
-                        !$has_conflict
-                        && $remote_change['replace_subtree']
-                        && $local_change !== null
-                    ) {
-                        $has_conflict = $path_is_same_or_descendant(
-                            $local_change,
-                            $remote_change['path']
-                        );
-                    }
-                    if (
-                        $has_conflict
-                        && $conflicted_replacement_path === null
-                        && $remote_change['replace_subtree']
-                    ) {
-                        $conflicted_replacement_path =
-                            $remote_change['path'];
-                    }
-                    if (!$has_conflict) {
-                        $remote_change =
-                            $read_remote_change($remote_changes_handle);
-                        continue;
-                    }
-                    $line = json_encode(
-                        [
-                            'path' =>
-                                base64_encode(
-                                    $remote_change['remote_path']
-                                ),
-                        ],
-                        JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-                    ) . "\n";
-                    if (
-                        fwrite($conflicts_handle, $line)
-                        !== strlen($line)
-                    ) {
-                        throw new RuntimeException(
-                            'Failed to write a files-pull conflict.'
-                        );
-                    }
-                    $remote_change =
-                        $read_remote_change($remote_changes_handle);
                 }
                 if (!fflush($conflicts_handle)) {
                     throw new RuntimeException(
-                        'Failed to flush the files-pull conflicts.'
+                        'Failed to flush the files-pull conflict list.'
                     );
                 }
             } finally {
-                fclose($local_changes_handle);
-                fclose($remote_changes_handle);
                 fclose($conflicts_handle);
             }
-
-            $conflict_sorter = new ExternalMergeSort(
-                static function (string $line): string {
-                    $entry = json_decode(
-                        $line,
-                        true,
-                        512,
-                        JSON_THROW_ON_ERROR
-                    );
-                    return base64_decode($entry['path']);
-                },
-                8 * 1024 * 1024,
-                true,
-                $this->state_dir
-            );
-            $conflict_sorter->sort($conflicts_temporary_path);
-            if (!rename($conflicts_temporary_path, $conflicts_path)) {
+            if (!rename($swap_path, $conflicts_path)) {
                 throw new RuntimeException(
                     'Failed to publish the files-pull conflict list.'
                 );
             }
-            return $conflicts_path;
+            return $conflict_count;
         } finally {
-            foreach ([
-                $conflicts_temporary_path,
-                $local_changes_path,
-                $remote_changes_path,
-                $fresh_local_index_path,
-                $planned_local_index_temporary_path,
-            ] as $temporary_path) {
-                if (is_file($temporary_path)) {
-                    @unlink($temporary_path);
-                }
+            $plan->close();
+            $this->remove_local_plan_directory($plan_directory);
+            if (is_file($swap_path)) {
+                @unlink($swap_path);
             }
         }
+    }
+
+    /**
+     * Merges the plan's two sorted local-change streams.
+     *
+     * @return \Generator<int,string,mixed,void>
+     */
+    private function files_pull_local_change_paths(
+        PushPlan $plan
+    ): \Generator {
+        $paths_to_push = $plan->read_planned_local_paths_to_push();
+        $paths_to_delete = $plan->read_planned_local_paths_to_delete();
+        $paths_to_push->rewind();
+        $paths_to_delete->rewind();
+        while ($paths_to_push->valid() || $paths_to_delete->valid()) {
+            $push_path = $paths_to_push->valid()
+                ? base64_decode($paths_to_push->current()['path'])
+                : null;
+            $delete_path = $paths_to_delete->valid()
+                ? $paths_to_delete->current()
+                : null;
+            if ($push_path === null) {
+                $path = $delete_path;
+            } elseif ($delete_path === null) {
+                $path = $push_path;
+            } else {
+                $path = compare_paths($push_path, $delete_path) <= 0
+                    ? $push_path
+                    : $delete_path;
+            }
+            yield $path;
+            if ($push_path === $path) {
+                $paths_to_push->next();
+            }
+            if ($delete_path === $path) {
+                $paths_to_delete->next();
+            }
+        }
+    }
+
+    /**
+     * Streams paths changed between the previous and current remote indexes.
+     *
+     * @param array $context Current files-pull pair context.
+     * @return \Generator<int,array{remote_path:string,local_path:string},mixed,void>
+     */
+    private function files_pull_remote_changes(array $context): \Generator
+    {
+        $previous_handle = fopen($this->index_file, 'rb');
+        $current_handle = fopen($this->remote_index_file, 'rb');
+        if (
+            !is_resource($previous_handle)
+            || !is_resource($current_handle)
+        ) {
+            throw new RuntimeException(
+                'Failed to open the remote indexes for conflict detection.'
+            );
+        }
+        try {
+            $previous = $this->read_index_line($previous_handle);
+            $current = $this->read_index_line($current_handle);
+            while ($previous !== null || $current !== null) {
+                if ($previous === null) {
+                    $comparison = 1;
+                } elseif ($current === null) {
+                    $comparison = -1;
+                } else {
+                    $comparison = compare_paths(
+                        $previous['path'],
+                        $current['path']
+                    );
+                }
+                $remote_path = null;
+                if ($comparison < 0) {
+                    if (
+                        $this->is_file_path_selected_by_pull_only_files(
+                            $previous['path']
+                        )
+                    ) {
+                        $remote_path = $previous['path'];
+                    }
+                    $previous =
+                        $this->read_index_line($previous_handle);
+                } elseif ($comparison > 0) {
+                    $remote_path = $current['path'];
+                    $current = $this->read_index_line($current_handle);
+                } else {
+                    if (
+                        $previous['ctime'] !== $current['ctime']
+                        || $previous['size'] !== $current['size']
+                        || $previous['type'] !== $current['type']
+                    ) {
+                        $remote_path = $current['path'];
+                    }
+                    $previous =
+                        $this->read_index_line($previous_handle);
+                    $current = $this->read_index_line($current_handle);
+                }
+                if ($remote_path === null) {
+                    continue;
+                }
+                $local_path =
+                    $this->remote_path_to_local_path_within_import_root(
+                        $remote_path
+                    );
+                $local_path = self::path_remainder_under(
+                    $local_path,
+                    $context['local_tree']
+                );
+                if ($local_path === null || $local_path === '') {
+                    continue;
+                }
+                yield [
+                    'remote_path' => $remote_path,
+                    'local_path' => ltrim($local_path, '/'),
+                ];
+            }
+        } finally {
+            fclose($previous_handle);
+            fclose($current_handle);
+        }
+    }
+
+    /** Whether either relative path is the other path or its ancestor. */
+    private static function files_pull_paths_overlap(
+        string $left,
+        string $right
+    ): bool {
+        return $left === $right
+            || strpos($left, $right . '/') === 0
+            || strpos($right, $left . '/') === 0;
+    }
+
+    /** Returns the durable sorted conflict list for the current files-pull. */
+    private function files_pull_conflicts_path(): string
+    {
+        return $this->state_dir . '/.import-file-conflicts';
     }
 
     /**
@@ -9759,171 +7358,6 @@ class ImportClient
      * @param string $state_key   Key in $this->state that holds fetch progress
      *                            (e.g. "fetch" or "fetch_skipped").
      */
-    private function download_files_from_list(
-        string $list_file,
-        string $state_key
-    ): bool {
-        $fetch_state = $this->get_download_list_fetch_state($state_key);
-        $this->reconcile_discarded_fetched_file_staging(
-            $fetch_state
-        );
-        if (
-            !$this->reconcile_pending_fetched_file_install(
-                $fetch_state
-            )
-        ) {
-            return false;
-        }
-        if (
-            !file_exists($list_file)
-            || filesize($list_file) === 0
-        ) {
-            return true;
-        }
-
-        // Compute download list counters once at the start of each list.
-        // These survive across batches within one invocation and are
-        // recomputed on restart from the state file's byte offset.
-        if ($this->download_list_total === null) {
-            $offset = $this->get_download_list_fetch_state($state_key)->offset;
-            $this->download_list_total = $this->count_newlines($list_file);
-            $this->download_list_done = $offset > 0
-                ? $this->count_newlines($list_file, $offset)
-                : 0;
-        }
-        $batch_file = $fetch_state->batch_file;
-        $batch_offset = $fetch_state->offset;
-        $next_offset = $fetch_state->next_offset;
-        $cursor = $fetch_state->cursor;
-
-        $batch_entries = $fetch_state->batch_entries;
-        $planned_local_state_path = $batch_file === null
-            ? null
-            : $batch_file . '.planned-local-state.jsonl';
-
-        if (
-            $batch_file === null
-            || !file_exists($batch_file)
-            || !is_file($planned_local_state_path)
-        ) {
-            $rebuilding_saved_batch = $batch_file !== null;
-            $saved_batch_file = $batch_file;
-            $batch = $this->prepare_fetch_batch($list_file, $batch_offset);
-            if ($batch === null) {
-                if ($rebuilding_saved_batch) {
-                    throw new RuntimeException(
-                        'The recreated files-pull fetch batch is empty.'
-                    );
-                }
-                return true;
-            }
-            if (
-                $rebuilding_saved_batch
-                && (
-                    $batch['offset'] !== $batch_offset
-                    || $batch['next_offset'] !== $next_offset
-                    || $batch['entries'] !== $batch_entries
-                )
-            ) {
-                @unlink($batch['file']);
-                @unlink(
-                    $batch['file']
-                        . '.planned-local-state.jsonl'
-                );
-                throw new RuntimeException(
-                    'The recreated files-pull fetch batch does not '
-                    . 'match its saved boundaries.'
-                );
-            }
-            $batch_file = $batch["file"];
-            $planned_local_state_path =
-                $batch_file . '.planned-local-state.jsonl';
-            $batch_offset = $batch["offset"];
-            $next_offset = $batch["next_offset"];
-            $batch_entries = $batch["entries"];
-            if (!$rebuilding_saved_batch) {
-                $fetch_state->cursor = null;
-                $fetch_state->planned_local_state_offset = 0;
-                $fetch_state->applying_path = null;
-                $fetch_state->applying_expected_local_state = null;
-                $fetch_state->staged_file = null;
-                $fetch_state->pending_file_install = null;
-            }
-            $fetch_state->offset = $batch_offset;
-            $fetch_state->next_offset = $next_offset;
-            $fetch_state->batch_file = $batch_file;
-            $fetch_state->batch_entries = $batch_entries;
-            $cursor = $fetch_state->cursor;
-            $this->save_state($this->state);
-            if ($saved_batch_file !== null) {
-                @unlink($saved_batch_file);
-                @unlink(
-                    $saved_batch_file
-                        . '.planned-local-state.jsonl'
-                );
-            }
-        }
-
-        $post_data = [
-            "file_list" => new CURLFile(
-                $batch_file,
-                "application/json",
-                "file-list.json",
-            ),
-        ];
-
-        $complete = $this->download_file_fetch(
-            $post_data,
-            $cursor,
-            $state_key,
-            $planned_local_state_path
-        );
-        if (!$complete) {
-            return false;
-        }
-        $fetch_state =
-            $this->get_download_list_fetch_state($state_key);
-
-        // Advance the done counter by the known batch size and reset
-        // the per-batch file counter. files_imported counted files within
-        // this batch; now that the batch is complete, those files are
-        // accounted for in download_list_done.
-        if ($this->download_list_done !== null) {
-            $this->download_list_done += $batch_entries;
-        }
-        $this->import_state()->files_pull_summary->files_pulled += $batch_entries;
-        $this->files_imported = 0;
-
-        $this->set_download_list_fetch_state($state_key, DownloadListFetchProgressState::from_array([
-            "offset" => $next_offset,
-            "next_offset" => $next_offset,
-            "batch_file" => null,
-            "cursor" => null,
-            "planned_local_state_offset" => 0,
-            "applying_path" => null,
-            "applying_expected_local_state" => null,
-            "staged_file" => null,
-            "pending_file_install" => null,
-            "retained_local_subtree_top_offset" =>
-                $fetch_state->retained_local_subtree_top_offset,
-            "retained_local_subtree_stack_offset" =>
-                $fetch_state->retained_local_subtree_stack_offset,
-        ]));
-        $this->save_state($this->state);
-
-        if (file_exists($batch_file)) {
-            @unlink($batch_file);
-            $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
-        }
-        if (is_file($planned_local_state_path)) {
-            @unlink($planned_local_state_path);
-            $this->audit_log(
-                "FILE DELETE | {$planned_local_state_path} | fetch batch complete"
-            );
-        }
-        return $next_offset >= filesize($list_file);
-    }
-
     /**
      * Count newlines in a file using buffered reads.  Much faster than
      * fgets() on large JSONL files because it never allocates per-line
@@ -9956,6 +7390,95 @@ class ImportClient
         return $count;
     }
 
+    private function download_files_from_list(
+        string $list_file,
+        string $state_key
+    ): bool {
+        if (!file_exists($list_file)) {
+            return true;
+        }
+
+        if (filesize($list_file) === 0) {
+            return true;
+        }
+
+        // Compute download list counters once at the start of each list.
+        // These survive across batches within one invocation and are
+        // recomputed on restart from the state file's byte offset.
+        if ($this->download_list_total === null) {
+            $offset = $this->get_download_list_fetch_state($state_key)->offset;
+            $this->download_list_total = $this->count_newlines($list_file);
+            $this->download_list_done = $offset > 0
+                ? $this->count_newlines($list_file, $offset)
+                : 0;
+        }
+        $fetch_state = $this->get_download_list_fetch_state($state_key);
+        $batch_file = $fetch_state->batch_file;
+        $batch_offset = $fetch_state->offset;
+        $next_offset = $fetch_state->next_offset;
+        $cursor = $fetch_state->cursor;
+
+        $batch_entries = $fetch_state->batch_entries;
+
+        if ($batch_file === null || !file_exists($batch_file)) {
+            $batch = $this->prepare_fetch_batch($list_file, $batch_offset);
+            if ($batch === null) {
+                return true;
+            }
+            $batch_file = $batch["file"];
+            $batch_offset = $batch["offset"];
+            $next_offset = $batch["next_offset"];
+            $batch_entries = $batch["entries"];
+            $cursor = null;
+            $this->set_download_list_fetch_state($state_key, DownloadListFetchProgressState::from_array([
+                "offset" => $batch_offset,
+                "next_offset" => $next_offset,
+                "batch_file" => $batch_file,
+                "batch_entries" => $batch_entries,
+                "cursor" => null,
+            ]));
+            $this->save_state($this->state);
+        }
+
+        $post_data = [
+            "file_list" => new CURLFile(
+                $batch_file,
+                "application/json",
+                "file-list.json",
+            ),
+        ];
+
+        $complete = $this->download_file_fetch($post_data, $cursor, $state_key);
+        if (!$complete) {
+            return false;
+        }
+
+        if (file_exists($batch_file)) {
+            @unlink($batch_file);
+            $this->audit_log("FILE DELETE | {$batch_file} | fetch batch complete");
+        }
+
+        // Advance the done counter by the known batch size and reset
+        // the per-batch file counter. files_imported counted files within
+        // this batch; now that the batch is complete, those files are
+        // accounted for in download_list_done.
+        if ($this->download_list_done !== null) {
+            $this->download_list_done += $batch_entries;
+        }
+        $this->import_state()->files_pull_summary->files_pulled += $batch_entries;
+        $this->files_imported = 0;
+
+        $this->set_download_list_fetch_state($state_key, DownloadListFetchProgressState::from_array([
+            "offset" => $next_offset,
+            "next_offset" => $next_offset,
+            "batch_file" => null,
+            "cursor" => null,
+        ]));
+        $this->save_state($this->state);
+
+        return $next_offset >= filesize($list_file);
+    }
+
     private function get_download_list_fetch_state(string $state_key): DownloadListFetchProgressState
     {
         if ($state_key === "fetch") {
@@ -9980,7 +7503,6 @@ class ImportClient
         throw new InvalidArgumentException("Unknown fetch state key: {$state_key}");
     }
 
-    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI batch diagnostics report byte offsets and parser messages.
     /**
      * Builds a JSON batch file listing the next set of paths to download.
      *
@@ -10036,31 +7558,13 @@ class ImportClient
             @unlink($tmp);
             throw new RuntimeException("Failed to open fetch batch file");
         }
-        $planned_local_state_path =
-            $tmp . '.planned-local-state.jsonl';
-        $planned_local_state_handle =
-            fopen($planned_local_state_path, 'wb');
-        if (!is_resource($planned_local_state_handle)) {
-            fclose($handle);
-            fclose($out);
-            @unlink($tmp);
-            throw new RuntimeException(
-                'Failed to open the fetch batch planned-local-state file.'
-            );
-        }
+
         // Read lines from the download list (one JSON entry per line) and
         // accumulate them into the JSON array until we approach the size limit.
-        // The download list supports two formats:
-        //   - A bare JSON string:   "/path/to/file"
-        //   - A JSON object:        {"path": "<base64-encoded path>"}
         $bytes = 0;
         $entries = 0;
         $first = true;
-        if (fwrite($out, '[') !== 1) {
-            throw new RuntimeException(
-                'Failed to write the fetch batch opening delimiter.'
-            );
-        }
+        fwrite($out, "[");
         $bytes = 1;
         while (true) {
             // Remember where this line started so we can rewind if the
@@ -10074,27 +7578,13 @@ class ImportClient
             if ($line === "") {
                 continue;
             }
-            $decoded = json_decode(
-                $line,
-                true,
-                512,
-                JSON_THROW_ON_ERROR
-            );
-            if (is_array($decoded)) {
-                $encoded_path = $decoded["path"];
-                $path = base64_decode($encoded_path);
-                $request_entry = ['path' => $encoded_path];
-            } else {
-                $path = $decoded;
-                $request_entry = $path;
-            }
-            $validate_local_state =
-                is_array($decoded)
-                && !empty($decoded['validate_local_state']);
             $json_path = json_encode(
-                $request_entry,
-                JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+                json_decode($line, true),
+                JSON_UNESCAPED_SLASHES,
             );
+            if ($json_path === false) {
+                continue;
+            }
             $prefix = $first ? "" : ",";
             $chunk = $prefix . $json_path;
             $needed = $bytes + strlen($chunk) + 1; // +1 for closing bracket
@@ -10108,65 +7598,32 @@ class ImportClient
             if ($first && $needed > $limit) {
                 // Still write at least one entry even if it exceeds the limit,
                 // otherwise we'd loop forever on a single long path.
-                if (fwrite($out, $chunk) !== strlen($chunk)) {
-                    throw new RuntimeException(
-                        'Failed to write a complete fetch batch entry.'
-                    );
+                if (fwrite($out, $chunk) === false) {
+                    throw new RuntimeException("Failed to write fetch batch file (disk full?)");
                 }
                 $bytes += strlen($chunk);
                 $entries++;
                 $first = false;
-                $this->append_fetch_batch_planned_local_state(
-                    $planned_local_state_handle,
-                    $path,
-                    $validate_local_state,
-                    is_array($decoded)
-                        ? ( $decoded['expected_local_state'] ?? null )
-                        : null
-                );
                 break;
             }
 
-            if (fwrite($out, $chunk) !== strlen($chunk)) {
-                throw new RuntimeException(
-                    'Failed to write a complete fetch batch entry.'
-                );
+            if (fwrite($out, $chunk) === false) {
+                throw new RuntimeException("Failed to write fetch batch file (disk full?)");
             }
             $bytes += strlen($chunk);
             $entries++;
             $first = false;
-            $this->append_fetch_batch_planned_local_state(
-                $planned_local_state_handle,
-                $path,
-                $validate_local_state,
-                is_array($decoded)
-                    ? ( $decoded['expected_local_state'] ?? null )
-                    : null
-            );
         }
-        if (fwrite($out, ']') !== 1) {
-            throw new RuntimeException(
-                'Failed to write the fetch batch closing delimiter.'
-            );
-        }
+        fwrite($out, "]");
         $bytes += 1;
 
         $next_offset = ftell($handle);
         fclose($handle);
         fclose($out);
-        if (!fflush($planned_local_state_handle)) {
-            fclose($planned_local_state_handle);
-            @unlink($tmp);
-            @unlink($planned_local_state_path);
-            throw new RuntimeException(
-                'Failed to flush the fetch batch planned-local-state file.'
-            );
-        }
-        fclose($planned_local_state_handle);
+
         // An empty batch (just "[]") means we've exhausted the download list.
         if ($bytes <= 2) {
             @unlink($tmp);
-            @unlink($planned_local_state_path);
             return null;
         }
 
@@ -10176,34 +7633,6 @@ class ImportClient
             "next_offset" => $next_offset,
             "entries" => $entries,
         ];
-    }
-    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-
-    /**
-     * Appends one request path and its planned local state to the batch sidecar.
-     *
-     * @param resource   $handle
-     * @param array|null $expected_local_state Planned local state, or null when absent.
-     */
-    private function append_fetch_batch_planned_local_state(
-        $handle,
-        string $path,
-        bool $validate_local_state,
-        ?array $expected_local_state
-    ): void {
-        $line = json_encode(
-            [
-                'path' => base64_encode($path),
-                'validate_local_state' => $validate_local_state,
-                'expected_local_state' => $expected_local_state,
-            ],
-            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-        ) . "\n";
-        if (fwrite($handle, $line) !== strlen($line)) {
-            throw new RuntimeException(
-                'Failed to write the fetch batch planned-local-state file.'
-            );
-        }
     }
 
     /**
@@ -10259,349 +7688,16 @@ class ImportClient
     }
 
     /**
-     * Applies the pending local deletion saved in the diff state.
-     *
-     * @return bool Whether the path is absent and its deletion is in the WAL.
+     * Append a path to the download list file.
      */
-    private function apply_pending_local_action(): bool
+    private function append_download_list(string $path, $handle): void
     {
-        $action = $this->import_state()->diff->pending_local_action;
-        if ($action === null) {
-            return false;
-        }
-        $path = base64_decode($action['path_b64']);
-        $accepted_local_state = $action['accepted_local_state'];
-        $local_state = $this->capture_local_path_state($path);
-        if (
-            $local_state !== null
-            && $local_state !== $accepted_local_state
-            && $this->files_pull_conflict_policy !== 'remote-wins'
-        ) {
-            if ($this->files_pull_conflict_policy === 'our-wins') {
-                $this->audit_log(
-                    'FILE CONFLICT | path_b64='
-                    . $this->files_pull_message_path_b64($path)
-                    . ' | policy=our-wins | local path changed after '
-                    . 'the deletion checkpoint and was retained'
-                );
-                $this->import_state()->diff->pending_local_action = null;
-                $this->save_state($this->state, false);
-                return false;
-            }
-            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Arbitrary path bytes are represented as base64.
-            throw new RuntimeException(
-                'The local path changed after files-pull saved its pending deletion: '
-                . 'path_b64='
-                . $this->files_pull_message_path_b64($path)
-                . '. Abort this files-pull lifecycle, then rerun with '
-                . '--on-conflict=remote-wins or '
-                . '--on-conflict=our-wins.'
-            );
-            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-        }
-
-        if ($local_state !== null) {
-            if ($action['kind'] === 'remove_empty_directory') {
-                $local_path =
-                    $this->remote_path_to_local_path_within_import_root(
-                        $path
-                    );
-                @rmdir($local_path);
-            } else {
-                $this->delete_local_file_path($path);
-            }
-            $local_state = $this->capture_local_path_state($path);
-        }
-        if ($local_state !== null) {
-            if (
-                $local_state !== $accepted_local_state
-                && $this->files_pull_conflict_policy === 'our-wins'
-            ) {
-                $this->audit_log(
-                    'FILE CONFLICT | path_b64='
-                    . $this->files_pull_message_path_b64($path)
-                    . ' | policy=our-wins | local path changed during '
-                    . 'the deletion attempt and was retained'
-                );
-                $this->import_state()->diff->pending_local_action = null;
-                $this->save_state($this->state, false);
-                return false;
-            }
-            if (
-                $local_state !== $accepted_local_state
-                && $this->files_pull_conflict_policy === 'stop'
-            ) {
-                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Arbitrary path bytes are represented as base64.
-                throw new RuntimeException(
-                    'The local path changed during a pending files-pull deletion: '
-                    . 'path_b64='
-                    . $this->files_pull_message_path_b64($path)
-                    . '. Abort this files-pull lifecycle, then rerun with '
-                    . '--on-conflict=remote-wins or '
-                    . '--on-conflict=our-wins.'
-                );
-                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-            }
-            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Arbitrary path bytes are represented as base64.
-            throw new RuntimeException(
-                'Failed to complete the pending files-pull local deletion: '
-                . 'path_b64='
-                . $this->files_pull_message_path_b64($path)
-                . '.'
-            );
-            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-        }
-
-        $this->delete_index_entry($path, true);
-        if (
-            !is_resource($this->index_update_wal_handle)
-            || !fflush($this->index_update_wal_handle)
-        ) {
-            throw new RuntimeException(
-                'Failed to flush the local deletion to the index-update WAL.'
-            );
-        }
-        $this->import_state()->diff->pending_local_action = null;
-        $this->save_state($this->state, false);
-        return true;
-    }
-
-    /**
-     * Decides whether the remote change may still mutate its local path.
-     *
-     * @param array|null $expected_local_state {
-     *     Planned local path state, or null when the path was absent.
-     *
-     *     @type string $type  Path type: file, link, dir, or other.
-     *     @type int    $ctime Local ctime for a file or symlink.
-     *     @type int    $size  Local size for a file or symlink.
-     *     @type bool   $empty Whether a directory was empty.
-     * }
-     */
-    private function should_apply_remote_change_after_planning(
-        string $path,
-        bool $validate_local_state,
-        ?array $expected_local_state
-    ): bool {
-        return $this->should_apply_remote_change_after_planning_with_local_state(
-            $path,
-            $validate_local_state,
-            $expected_local_state,
-            $this->capture_local_path_state($path)
-        );
-    }
-
-    /**
-     * Decides whether a captured local path state may still be mutated.
-     *
-     * @param array|null $expected_local_state State captured by planning.
-     * @param array|null $local_state          Exact live state to consider.
-     */
-    private function should_apply_remote_change_after_planning_with_local_state(
-        string $path,
-        bool $validate_local_state,
-        ?array $expected_local_state,
-        ?array $local_state
-    ): bool {
-        if (
-            !$validate_local_state
-            || $this->files_pull_conflict_policy === 'remote-wins'
-            || $this->local_path_state_matches_planned_state(
-                $local_state,
-                $expected_local_state
-            )
-        ) {
-            return true;
-        }
-
-        $encoded_path = $this->files_pull_message_path_b64($path);
-        if ($this->files_pull_conflict_policy === 'our-wins') {
-            $this->audit_log(
-                'FILE CONFLICT | path_b64='
-                . $encoded_path
-                . ' | policy=our-wins | local path changed after planning '
-                . 'and was retained'
-            );
-            return false;
-        }
-
-        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Arbitrary path bytes are represented as base64.
-        throw new RuntimeException(
-            'The path changed locally after files-pull planned the remote change: '
-            . 'path_b64='
-            . $encoded_path
-            . '. Abort this files-pull lifecycle, then rerun with '
-            . '--on-conflict=remote-wins or '
-            . '--on-conflict=our-wins.'
-        );
-        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-    }
-
-    /** Encodes a remote path relative to the paired local tree for messages. */
-    private function files_pull_message_path_b64(string $path): string
-    {
-        $context = $this->files_pull_pair_context();
-        $relative_path = self::path_remainder_under(
-            $path,
-            $context['remote_document_root']
-        );
-        return base64_encode(
-            $relative_path === null
-                ? $path
-                : ltrim($relative_path, '/')
-        );
-    }
-
-    /**
-     * Compares an exact live state with the state captured by planning.
-     *
-     * Directory planning compares emptiness rather than metadata because
-     * applying child changes updates directory metadata.
-     *
-     * @param array|null $local_state          Exact live path state.
-     * @param array|null $expected_local_state State captured by planning.
-     */
-    private function local_path_state_matches_planned_state(
-        ?array $local_state,
-        ?array $expected_local_state
-    ): bool {
-        if ($local_state === null) {
-            return $expected_local_state === null;
-        }
-        if (
-            $expected_local_state === null
-            || ( $expected_local_state['type'] ?? null )
-                !== $local_state['type']
-        ) {
-            return false;
-        }
-        if ($local_state['type'] === 'dir') {
-            return $local_state['empty'] === (bool) (
-                $expected_local_state['empty'] ?? false
-            );
-        }
-        return $local_state['ctime']
-                === (int) ( $expected_local_state['ctime'] ?? -1 )
-            && $local_state['size']
-                === (int) ( $expected_local_state['size'] ?? -1 );
-    }
-
-    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem diagnostics represent arbitrary paths as base64.
-    /**
-     * Captures the exact live state used to guard one local mutation.
-     *
-     * @return array {
-     *     Exact local state, or null when the path is absent.
-     *
-     *     @type string $type  Path type: file, link, dir, or other.
-     *     @type int    $ctime Local ctime.
-     *     @type int    $size  Local lstat size.
-     *     @type bool   $empty Whether a directory is empty.
-     * }
-     */
-    private function capture_local_path_state(string $path): ?array
-    {
-        $local_path =
-            $this->remote_path_to_local_path_within_import_root($path);
-        clearstatcache(true, $local_path);
-        $local_stat = @lstat($local_path);
-        if ($local_stat === false) {
-            return null;
-        }
-
-        $file_type_bits =
-            $local_stat['mode'] & FileIndexProcessor::STAT_TYPE_MASK;
-        if ($file_type_bits === FileIndexProcessor::STAT_TYPE_LINK) {
-            $type = 'link';
-        } elseif ($file_type_bits === FileIndexProcessor::STAT_TYPE_FILE) {
-            $type = 'file';
-        } elseif ($file_type_bits === FileIndexProcessor::STAT_TYPE_DIR) {
-            $type = 'dir';
-        } else {
-            $type = 'other';
-        }
-        $state = [
-            'type' => $type,
-            'ctime' => (int) $local_stat['ctime'],
-            'size' => (int) $local_stat['size'],
-        ];
-        if ($type === 'dir') {
-            $directory_handle = @opendir($local_path);
-            if (!is_resource($directory_handle)) {
-                throw new RuntimeException(
-                    'Failed to inspect the local directory before changing it: '
-                    . 'path_b64='
-                    . base64_encode($path)
-                    . '.'
-                );
-            }
-            $empty = true;
-            try {
-                while (true) {
-                    $entry = readdir($directory_handle);
-                    if ($entry === false) {
-                        break;
-                    }
-                    if ($entry !== '.' && $entry !== '..') {
-                        $empty = false;
-                        break;
-                    }
-                }
-            } finally {
-                closedir($directory_handle);
-            }
-            clearstatcache(true, $local_path);
-            $confirmed_stat = @lstat($local_path);
-            if (
-                $confirmed_stat === false
-                || (
-                    $confirmed_stat['mode']
-                    & FileIndexProcessor::STAT_TYPE_MASK
-                ) !== FileIndexProcessor::STAT_TYPE_DIR
-                || (int) $confirmed_stat['ctime'] !== $state['ctime']
-                || (int) $confirmed_stat['size'] !== $state['size']
-            ) {
-                throw new RuntimeException(
-                    'The local directory changed while files-pull inspected it: '
-                    . 'path_b64='
-                    . base64_encode($path)
-                    . '. Retry the command.'
-                );
-            }
-            $state['empty'] = $empty;
-        }
-        return $state;
-    }
-    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-
-    /**
-     * Append a path and its planned local state to the download list.
-     *
-     * @param array|null $expected_local_state Planned local state, or null when absent.
-     */
-    private function append_download_list(
-        string $path,
-        $handle,
-        bool $validate_local_state = false,
-        ?array $expected_local_state = null
-    ): void {
-        $record = ["path" => base64_encode($path)];
-        if ($validate_local_state) {
-            $record['validate_local_state'] = true;
-            $record['expected_local_state'] = $expected_local_state;
-        }
         $line = json_encode(
-            $record,
-            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+            ["path" => base64_encode($path)],
+            JSON_UNESCAPED_SLASHES,
         );
-        $serialized_record = $line . "\n";
-        if (
-            fwrite($handle, $serialized_record)
-                !== strlen($serialized_record)
-        ) {
-            throw new RuntimeException(
-                'Failed to write a complete download-list entry.'
-            );
+        if ($line !== false) {
+            fwrite($handle, $line . "\n");
         }
         $this->audit_log("Added to the download list: {$path}", false);
     }
@@ -12732,33 +9828,22 @@ class ImportClient
         if ($is_first) {
             // Reset skip flag for each new file
             $context->skip_current_file = false;
-            if (
-                !$this->should_apply_fetched_file_change(
-                    $path,
-                    $context
-                )
-            ) {
-                $context->skip_current_file = true;
-                return;
-            }
-        } elseif (
-            $this->get_download_list_fetch_state(
-                $context->fetch_state_key
-            )->applying_path === $path
-            && $context->planned_local_state_checked_path === null
-        ) {
-            if (
-                !$this->should_apply_fetched_file_change(
-                    $path,
-                    $context
-                )
-            ) {
-                $context->skip_current_file = true;
-                return;
-            }
-        }
 
-        if ($is_first) {
+            if (
+                (file_exists($local_path) || is_link($local_path)) &&
+                (!is_file($local_path) || is_link($local_path))
+            ) {
+                if (
+                    !$this->remove_local_path_without_following_symlinks(
+                        $local_path
+                    )
+                ) {
+                    throw new RuntimeException(
+                        "Failed to replace path with file: {$path}",
+                    );
+                }
+            }
+
             // Check if file exists locally
             $exists_locally = file_exists($local_path);
             $local_size = $exists_locally ? filesize($local_path) : 0;
@@ -12806,35 +9891,12 @@ class ImportClient
 
         // Open file handle on first chunk
         if ($is_first) {
-            $reuse_private_staging = false;
-            $fetch_state = $this->get_download_list_fetch_state(
-                $context->fetch_state_key
-            );
-            if ($fetch_state->staged_file !== null) {
-                if (!is_resource($context->file_handle)) {
-                    throw new RuntimeException(
-                        'The saved files-pull staging file is not open.'
-                    );
+            // Close previous file if any
+            if ($context->file_handle) {
+                fclose($context->file_handle);
+                if ($context->file_ctime && $context->file_path) {
+                    touch($context->file_path, $context->file_ctime);
                 }
-                $staging_paths =
-                    $this->fetched_file_staging_paths(
-                        $fetch_state->staged_file
-                    );
-                if ($staging_paths['remote'] !== $path) {
-                    throw new RuntimeException(
-                        'The restarted file part does not match its '
-                        . 'files-pull staging path.'
-                    );
-                }
-                $reuse_private_staging = true;
-            }
-            if (
-                is_resource($context->file_handle)
-                && !$reuse_private_staging
-            ) {
-                throw new RuntimeException(
-                    'A fetched file handle is open without staging state.'
-                );
             }
 
             // Create parent directory if needed
@@ -12851,14 +9913,23 @@ class ImportClient
                 }
             }
 
-            if (!$reuse_private_staging) {
-                $this->open_fetched_file_staging(
-                    $path,
-                    $local_path,
-                    $headers,
-                    $context
+            // Open new file
+            $context->file_handle = fopen($local_path, "wb");
+            if (!$context->file_handle) {
+                $error = error_get_last();
+                throw new RuntimeException(
+                    "Failed to open file for writing: {$local_path}\n" .
+                        "Parent directory: {$dir}\n" .
+                        "Directory exists: " .
+                        (is_dir($dir) ? "yes" : "no") .
+                        "\n" .
+                        "Error: " .
+                        ($error["message"] ?? "unknown"),
                 );
             }
+            $context->file_path = $local_path;
+            $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
+            $context->file_bytes_written = 0;  // Reset byte counter for new file
         }
 
         // Write body data if present
@@ -12882,1716 +9953,49 @@ class ImportClient
             $closed = fclose($context->file_handle);
             $context->file_handle = null;
             if (!$closed) {
-                throw new RuntimeException(
-                    "Failed to flush the completed pulled file."
-                );
+                throw new RuntimeException("Failed to flush the completed pulled file.");
             }
-            $this->install_completed_fetched_file_staging(
-                $path,
-                $headers,
-                $context
-            );
-        }
-    }
 
-    /**
-     * Opens a private sibling file for one regular-file download.
-     *
-     * @param array<string,string|int> $headers Multipart file headers.
-     */
-    private function open_fetched_file_staging(
-        string $path,
-        string $local_path,
-        array $headers,
-        StreamingContext $context
-    ): void {
-        $fetch_state = $this->get_download_list_fetch_state(
-            $context->fetch_state_key
-        );
-        if (
-            $fetch_state->staged_file !== null
-            || $fetch_state->pending_file_install !== null
-        ) {
-            throw new RuntimeException(
-                'A different fetched file download is already open.'
-            );
-        }
-        $staging_path =
-            dirname($local_path)
-            . '/.reprint-'
-            . bin2hex(random_bytes(8))
-            . '.part';
-        $staged_file = [
-            'remote_path_b64' => base64_encode($path),
-            'destination_path_b64' => base64_encode($local_path),
-            'staging_path_b64' => base64_encode($staging_path),
-            'staging_dev' => null,
-            'staging_ino' => null,
-            'staging_bytes' => 0,
-            'install_mode' => 0666 & ~umask(),
-            'remote_ctime' =>
-                (int) ( $headers['x-file-ctime'] ?? 0 ),
-            'remote_size' =>
-                (int) ( $headers['x-file-size'] ?? 0 ),
-            'remote_file_changed' =>
-                ( $headers['x-file-changed'] ?? '0' ) === '1',
-            'discard_started' => false,
-            'validate_local_state' =>
-                !empty(
-                    $context->planned_local_state_checked_result
-                        ['validate']
-                ),
-        ];
-        $fetch_state->staged_file = $staged_file;
-        $this->save_state($this->state, false);
+            // Set file modification time
+            if ($context->file_ctime && $context->file_path) {
+                touch($context->file_path, $context->file_ctime);
+            }
 
-        $handle = @fopen($staging_path, 'x+b');
-        if (!is_resource($handle)) {
-            throw new RuntimeException(
-                'Failed to create the private files-pull staging file.'
-            );
-        }
-        $stat = fstat($handle);
-        if (!is_array($stat)) {
-            fclose($handle);
-            @unlink($staging_path);
-            throw new RuntimeException(
-                'Failed to inspect the private files-pull staging file.'
-            );
-        }
-        try {
-            $this->make_fetched_file_staging_private(
-                $staging_path,
-                $handle
-            );
-        } catch (RuntimeException $error) {
-            fclose($handle);
-            @unlink($staging_path);
-            $fetch_state->staged_file = null;
-            $this->save_state($this->state, false);
-            throw $error;
-        }
-        $staged_file['staging_dev'] = (int) $stat['dev'];
-        $staged_file['staging_ino'] = (int) $stat['ino'];
-        $fetch_state->staged_file = $staged_file;
-        $context->file_handle = $handle;
-        $context->file_path = $staging_path;
-        $context->file_bytes_written = 0;
-        $this->save_state($this->state, false);
-    }
+            // Index update (JSON lines)
+            $file_size = (int) ($headers["x-file-size"] ?? 0);
+            $final_size = file_exists($context->file_path)
+                ? filesize($context->file_path)
+                : 0;
 
-    /** Reopens the exact private file saved at the last file-part boundary. */
-    private function resume_fetched_file_staging(
-        DownloadListFetchProgressState $fetch_state,
-        StreamingContext $context
-    ): void {
-        $staged_file = $fetch_state->staged_file;
-        if ($staged_file === null) {
-            return;
-        }
-        $paths = $this->fetched_file_staging_paths($staged_file);
-        $handle = null;
-        if (
-            $staged_file['staging_dev'] === null
-            || $staged_file['staging_ino'] === null
-        ) {
-            clearstatcache(true, $paths['staging']);
-            $stat = @lstat($paths['staging']);
-            if ($stat === false) {
-                $handle = @fopen($paths['staging'], 'x+b');
-            } elseif (
-                !is_link($paths['staging'])
-                && $this->stat_is_regular_file($stat)
-                && (int) $stat['size'] === 0
-            ) {
-                $handle = @fopen($paths['staging'], 'r+b');
-            }
-            if (!is_resource($handle)) {
-                throw new RuntimeException(
-                    'Failed to recover the reserved files-pull staging file.'
-                );
-            }
-            $stat = fstat($handle);
-            if (!is_array($stat)) {
-                fclose($handle);
-                throw new RuntimeException(
-                    'Failed to inspect the recovered files-pull staging file.'
-                );
-            }
-            $this->make_fetched_file_staging_private(
-                $paths['staging'],
-                $handle
-            );
-            $staged_file['staging_dev'] = (int) $stat['dev'];
-            $staged_file['staging_ino'] = (int) $stat['ino'];
-            $staged_file['staging_bytes'] = 0;
-            $fetch_state->staged_file = $staged_file;
-            $this->save_state($this->state, false);
-        } else {
-            clearstatcache(true, $paths['staging']);
-            $stat = @lstat($paths['staging']);
-            if (
-                !is_array($stat)
-                || is_link($paths['staging'])
-                || !$this->stat_is_regular_file($stat)
-                || (int) $stat['dev']
-                    !== $staged_file['staging_dev']
-                || (int) $stat['ino']
-                    !== $staged_file['staging_ino']
-                || (int) $stat['size']
-                    < $staged_file['staging_bytes']
-            ) {
-                throw new RuntimeException(
-                    'The saved files-pull staging file no longer matches '
-                    . 'its durable boundary.'
-                );
-            }
-            $handle = @fopen($paths['staging'], 'r+b');
-            if (!is_resource($handle)) {
-                throw new RuntimeException(
-                    'Failed to reopen the files-pull staging file.'
-                );
-            }
-            if (
-                (int) $stat['size'] > $staged_file['staging_bytes']
-                && !ftruncate(
-                    $handle,
-                    $staged_file['staging_bytes']
-                )
-            ) {
-                fclose($handle);
-                throw new RuntimeException(
-                    'Failed to discard unconfirmed staged file bytes.'
-                );
-            }
-            if (
-                fseek($handle, $staged_file['staging_bytes']) !== 0
-            ) {
-                fclose($handle);
-                throw new RuntimeException(
-                    'Failed to seek to the staged file boundary.'
-                );
-            }
-            $this->make_fetched_file_staging_private(
-                $paths['staging'],
-                $handle
-            );
-        }
-        $context->file_handle = $handle;
-        $context->file_path = $paths['staging'];
-        $context->file_bytes_written =
-            $staged_file['staging_bytes'];
-    }
+            $file_changed = ($headers["x-file-changed"] ?? "0") === "1";
 
-    /** Keeps unfinished fetched contents readable only by the local owner. */
-    private function make_fetched_file_staging_private(
-        string $staging_path,
-        $handle
-    ): void {
-        if (!@chmod($staging_path, 0600)) {
-            throw new RuntimeException(
-                'Failed to make the files-pull staging file private.'
-            );
-        }
-        $stat = fstat($handle);
-        if (
-            !is_array($stat)
-            || ( (int) $stat['mode'] & 07777 ) !== 0600
-        ) {
-            throw new RuntimeException(
-                'The files-pull staging file is not private.'
-            );
-        }
-    }
+            if ($context->file_ctime && !$file_changed) {
+                $this->upsert_index_entry(
+                    $path,
+                    $context->file_ctime,
+                    $file_size,
+                    "file",
+                );
+                $this->files_imported++; // Count completed files only
+                $this->clear_volatile_file($path);
+                $this->audit_log(
+                    sprintf("  Indexed (wrote %d bytes)", $final_size),
+                    false,
+                );
+            } elseif ($file_changed) {
+                $this->audit_log(
+                    "  File changed during stream; index not updated",
+                    true,
+                );
+            }
 
-    /** Saves one confirmed private staging-file byte boundary. */
-    private function record_fetched_file_staging_boundary(
-        DownloadListFetchProgressState $fetch_state,
-        StreamingContext $context
-    ): void {
-        $staged_file = $fetch_state->staged_file;
-        if (
-            $staged_file === null
-            || !is_resource($context->file_handle)
-        ) {
-            throw new RuntimeException(
-                'Cannot save a closed files-pull staging boundary.'
-            );
-        }
-        if (!fflush($context->file_handle)) {
-            throw new RuntimeException(
-                'Failed to flush the files-pull staging file.'
-            );
-        }
-        $paths = $this->fetched_file_staging_paths($staged_file);
-        $stat = fstat($context->file_handle);
-        if (
-            !is_array($stat)
-            || $context->file_path !== $paths['staging']
-            || (int) $stat['dev'] !== $staged_file['staging_dev']
-            || (int) $stat['ino'] !== $staged_file['staging_ino']
-            || (int) $stat['size']
-                !== $context->file_bytes_written
-        ) {
-            throw new RuntimeException(
-                'The open files-pull staging file does not match its '
-                . 'saved identity and byte count.'
-            );
-        }
-        $staged_file['staging_bytes'] =
-            $context->file_bytes_written;
-        $fetch_state->staged_file = $staged_file;
-    }
-
-    /**
-     * Saves the completed staging identity, then installs it atomically.
-     *
-     * @param array<string,string|int> $headers Multipart file headers.
-     */
-    private function install_completed_fetched_file_staging(
-        string $path,
-        array $headers,
-        StreamingContext $context
-    ): void {
-        $fetch_state = $this->get_download_list_fetch_state(
-            $context->fetch_state_key
-        );
-        $staged_file = $fetch_state->staged_file;
-        if ($staged_file === null) {
-            throw new RuntimeException(
-                'The completed fetched file has no saved staging state.'
-            );
-        }
-        $paths = $this->fetched_file_staging_paths($staged_file);
-        if ($paths['remote'] !== $path) {
-            throw new RuntimeException(
-                'The completed file path does not match its staging state.'
-            );
-        }
-        clearstatcache(true, $paths['staging']);
-        $stat = @lstat($paths['staging']);
-        if (
-            !is_array($stat)
-            || is_link($paths['staging'])
-            || !$this->stat_is_regular_file($stat)
-            || (int) $stat['dev'] !== $staged_file['staging_dev']
-            || (int) $stat['ino'] !== $staged_file['staging_ino']
-            || (int) $stat['size']
-                !== $context->file_bytes_written
-        ) {
-            throw new RuntimeException(
-                'The completed files-pull staging file does not match '
-                . 'its saved identity.'
-            );
-        }
-        $staged_file['staging_bytes'] =
-            $context->file_bytes_written;
-        $staged_file['remote_ctime'] =
-            (int) ( $headers['x-file-ctime'] ?? 0 );
-        $staged_file['remote_size'] =
-            (int) ( $headers['x-file-size'] ?? 0 );
-        $staged_file['remote_file_changed'] =
-            ( $headers['x-file-changed'] ?? '0' ) === '1';
-        if (
-            !$staged_file['remote_file_changed']
-            && $staged_file['remote_size']
-                !== $staged_file['staging_bytes']
-        ) {
-            throw new RuntimeException(
-                'The completed fetched file size does not match the '
-                . 'remote file size.'
-            );
-        }
-        $staged_file['cursor'] =
-            isset($headers['x-cursor'])
-                ? (string) $headers['x-cursor']
-                : null;
-        $staged_file['destination_removal'] = null;
-        $staged_file['installed_dev'] = null;
-        $staged_file['installed_ino'] = null;
-        $staged_file['installed_ctime'] = null;
-        $staged_file['planned_local_state_offset'] =
-            $context->planned_local_state_offset;
-        $fetch_state->staged_file = null;
-        $fetch_state->pending_file_install = $staged_file;
-        $this->save_state($this->state, false);
-
-        if (
-            !$this->finish_pending_fetched_file_install(
-                $fetch_state,
-                $context
-            )
-        ) {
-            throw new FilesPullLocalStepPendingException();
-        }
-    }
-
-    /**
-     * Finishes or recognizes a staged-file installation after interruption.
-     *
-     * @return bool Whether the pending installation is settled.
-     */
-    private function reconcile_pending_fetched_file_install(
-        DownloadListFetchProgressState $fetch_state
-    ): bool {
-        if ($fetch_state->pending_file_install === null) {
-            return true;
-        }
-        return $this->finish_pending_fetched_file_install(
-            $fetch_state,
-            null
-        );
-    }
-
-    /** Finishes a durable staging-file discard after interruption. */
-    private function reconcile_discarded_fetched_file_staging(
-        DownloadListFetchProgressState $fetch_state
-    ): void {
-        $record = $fetch_state->pending_file_install
-            ?? $fetch_state->staged_file;
-        if ($record === null || !$record['discard_started']) {
-            return;
-        }
-        $pending_install = $fetch_state->pending_file_install;
-        $this->discard_fetched_file_staging($fetch_state, null);
-        if ($pending_install !== null) {
-            $this->settle_fetched_path_without_install(
-                $fetch_state,
-                $pending_install,
-                null
-            );
-            return;
-        }
-        $this->save_state($this->state, false);
-    }
-
-    /**
-     * Installs a pending staged file or confirms that rename already ran.
-     */
-    private function finish_pending_fetched_file_install(
-        DownloadListFetchProgressState $fetch_state,
-        ?StreamingContext $context
-    ): bool {
-        $pending_install = $fetch_state->pending_file_install;
-        if ($pending_install === null) {
-            return true;
-        }
-        $paths = $this->fetched_file_staging_paths(
-            $pending_install
-        );
-        clearstatcache(true, $paths['staging']);
-        clearstatcache(true, $paths['destination']);
-        $staging_stat = @lstat($paths['staging']);
-        $destination_stat = @lstat($paths['destination']);
-        $staging_matches =
-            is_array($staging_stat)
-            && !is_link($paths['staging'])
-            && $this->stat_is_regular_file($staging_stat)
-            && (int) $staging_stat['dev']
-                === $pending_install['staging_dev']
-            && (int) $staging_stat['ino']
-                === $pending_install['staging_ino']
-            && (int) $staging_stat['size']
-                === $pending_install['staging_bytes'];
-        $installed_dev =
-            $pending_install['installed_dev']
-                ?? $pending_install['staging_dev'];
-        $installed_ino =
-            $pending_install['installed_ino']
-                ?? $pending_install['staging_ino'];
-        $destination_matches =
-            is_array($destination_stat)
-            && !is_link($paths['destination'])
-            && $this->stat_is_regular_file($destination_stat)
-            && (int) $destination_stat['dev']
-                === $installed_dev
-            && (int) $destination_stat['ino']
-                === $installed_ino
-            && (int) $destination_stat['size']
-                === $pending_install['staging_bytes'];
-        if (!$staging_matches && !$destination_matches) {
-            throw new RuntimeException(
-                'Neither the staged file nor its destination matches the '
-                . 'pending files-pull installation.'
-            );
-        }
-        if (
-            $destination_matches
-            && $context === null
-            && $pending_install['installed_ctime'] === null
-        ) {
-            throw new RuntimeException(
-                'Files-pull found the staged file at its destination, '
-                . 'but stopped before saving its installed ctime. Its '
-                . 'contents cannot be distinguished from a later local '
-                . 'edit. Abort this files-pull lifecycle, then rerun it.'
-            );
-        }
-        if (
-            $destination_matches
-            && $context === null
-            && (int) $destination_stat['ctime']
-                !== $pending_install['installed_ctime']
-        ) {
-            $this->audit_log(
-                'FILES PULL RECOVERY | installed file identity is '
-                . 'ambiguous; replaying path_b64='
-                . base64_encode($paths['remote']),
-                true
-            );
-            $this->remove_owned_files_pull_path(
-                $this->pending_fetched_file_destination_stack_path(
-                    $fetch_state
-                )
-            );
-            $fetch_state->pending_file_install = null;
-            $this->save_state($this->state, false);
-            return true;
-        }
-
-        if (!$destination_matches) {
-            $expected_local_state =
-                $fetch_state->applying_expected_local_state;
-            $local_state =
-                $this->capture_local_path_state($paths['remote']);
-            $is_absent_directory_intermediate =
-                $local_state === null
-                && $pending_install['destination_removal'] !== null
-                && is_array($expected_local_state)
-                && ( $expected_local_state['type'] ?? null ) === 'dir';
-            if (
-                !$is_absent_directory_intermediate
-                && !$this->should_apply_remote_change_after_planning_with_local_state(
-                    $paths['remote'],
-                    $pending_install['validate_local_state'],
-                    $expected_local_state,
-                    $local_state
-                )
-            ) {
-                if ($pending_install['destination_removal'] !== null) {
-                    $this
-                        ->clear_unstarted_fetched_file_destination_removal(
-                            $fetch_state
-                        );
-                }
-                $this->retain_fetched_local_subtree_in_state(
-                    $paths['remote'],
-                    $fetch_state
-                );
-                $this->discard_fetched_file_staging(
-                    $fetch_state,
-                    $context
-                );
-                $this->settle_fetched_path_without_install(
-                    $fetch_state,
-                    $pending_install,
-                    $context
-                );
-                return true;
-            }
-            if (
-                !$this->fetched_path_parents_allow_remote_change(
-                    $paths['remote']
-                )
-            ) {
-                if ($pending_install['destination_removal'] !== null) {
-                    $this
-                        ->clear_unstarted_fetched_file_destination_removal(
-                            $fetch_state
-                        );
-                }
-                $this->retain_fetched_local_subtree_in_state(
-                    $paths['remote'],
-                    $fetch_state
-                );
-                $this->discard_fetched_file_staging(
-                    $fetch_state,
-                    $context
-                );
-                $this->settle_fetched_path_without_install(
-                    $fetch_state,
-                    $pending_install,
-                    $context
-                );
-                return true;
-            }
-            if ($pending_install['destination_removal'] !== null) {
-                if (
-                    $pending_install['destination_removal']
-                        ['top_offset'] !== null
-                ) {
-                    $this
-                        ->remove_next_pending_fetched_file_destination_path(
-                            $fetch_state
-                        );
-                } else {
-                    $this
-                        ->continue_pending_fetched_file_destination_quarantine(
-                            $fetch_state,
-                            $paths['destination']
-                        );
-                }
-                return false;
-            }
-            if (
-                is_dir($paths['destination'])
-                && !is_link($paths['destination'])
-            ) {
-                $this
-                    ->queue_pending_fetched_file_destination_directory(
-                        $fetch_state,
-                        $paths['destination']
-                    );
-                return false;
-            }
-            if (
-                is_array($destination_stat)
-                && !is_link($paths['destination'])
-                && $this->stat_is_regular_file($destination_stat)
-            ) {
-                $this->preserve_replaced_file_metadata(
-                    $paths['staging'],
-                    $destination_stat
-                );
-            } else {
-                $this->restore_new_fetched_file_mode(
-                    $paths['staging'],
-                    $pending_install['install_mode']
-                );
-            }
-            if (!@rename($paths['staging'], $paths['destination'])) {
-                clearstatcache(true, $paths['destination']);
-                if (
-                    is_dir($paths['destination'])
-                    && !is_link($paths['destination'])
-                ) {
-                    $this
-                        ->queue_pending_fetched_file_destination_directory(
-                            $fetch_state,
-                            $paths['destination']
-                        );
-                    return false;
-                }
-                throw new RuntimeException(
-                    'Failed to atomically install the fetched file.'
-                );
-            }
-            clearstatcache(true, $paths['destination']);
-            $destination_stat = @lstat($paths['destination']);
-            $destination_is_installed_file =
-                is_array($destination_stat)
-                && !is_link($paths['destination'])
-                && $this->stat_is_regular_file($destination_stat)
-                && (int) $destination_stat['size']
-                    === $pending_install['staging_bytes'];
-            if (!$destination_is_installed_file) {
-                throw new RuntimeException(
-                    'The installed fetched path is not a regular file of '
-                    . 'the staged size.'
-                );
-            }
-            // Mounted and virtual filesystems may assign a new inode while
-            // implementing rename. Follow the file's installed identity.
-            $pending_install['installed_dev'] =
-                (int) $destination_stat['dev'];
-            $pending_install['installed_ino'] =
-                (int) $destination_stat['ino'];
-            $destination_matches = true;
-        }
-
-        if ($pending_install['installed_ctime'] === null) {
-            if ($pending_install['remote_ctime'] > 0) {
-                @touch(
-                    $paths['destination'],
-                    $pending_install['remote_ctime']
-                );
-            }
-            clearstatcache(true, $paths['destination']);
-            $installed_stat = @lstat($paths['destination']);
-            if (
-                !is_array($installed_stat)
-                || is_link($paths['destination'])
-                || !$this->stat_is_regular_file($installed_stat)
-                || (int) $installed_stat['dev']
-                    !== $pending_install['installed_dev']
-                || (int) $installed_stat['ino']
-                    !== $pending_install['installed_ino']
-                || (int) $installed_stat['size']
-                    !== $pending_install['staging_bytes']
-            ) {
-                throw new RuntimeException(
-                    'The installed fetched file changed before its '
-                    . 'installation checkpoint.'
-                );
-            }
-            $pending_install['installed_ctime'] =
-                (int) $installed_stat['ctime'];
-            $fetch_state->pending_file_install = $pending_install;
-            $this->save_state($this->state, false);
-        }
-        if (
-            $pending_install['remote_ctime'] > 0
-            && !$pending_install['remote_file_changed']
-        ) {
-            $this->upsert_index_entry(
-                $paths['remote'],
-                $pending_install['remote_ctime'],
-                $pending_install['remote_size'],
-                'file'
-            );
-            ++$this->files_imported;
-            $this->clear_volatile_file($paths['remote']);
-        } elseif ($pending_install['remote_file_changed']) {
-            $this->record_volatile_file($paths['remote']);
-        }
-        if (
-            $this->index_update_wal_handle
-            && !fflush($this->index_update_wal_handle)
-        ) {
-            throw new RuntimeException(
-                'Failed to flush the installed file to the index-update WAL.'
-            );
-        }
-        $fetch_state->cursor = $pending_install['cursor'];
-        $fetch_state->planned_local_state_offset =
-            $pending_install['planned_local_state_offset'];
-        $fetch_state->applying_path = null;
-        $fetch_state->applying_expected_local_state = null;
-        $fetch_state->staged_file = null;
-        $this->remove_owned_files_pull_path(
-            $this->pending_fetched_file_destination_stack_path(
-                $fetch_state
-            )
-        );
-        $fetch_state->pending_file_install = null;
-        if ($context !== null) {
             $context->file_path = null;
+            $context->file_ctime = null;
             $context->file_bytes_written = 0;
-            $context->path_settled_in_current_chunk = true;
+            // Clear crash recovery tracking - file is complete
+            $this->import_state()->current_file = null;
+            $this->import_state()->current_file_bytes = null;
         }
-        $this->save_state($this->state, false);
-        return true;
-    }
-
-    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI diagnostics represent arbitrary paths as base64.
-    /**
-     * Advances the durable same-parent quarantine before bounded removal.
-     */
-    private function continue_pending_fetched_file_destination_quarantine(
-        DownloadListFetchProgressState $fetch_state,
-        string $destination_path
-    ): void {
-        $pending_install = $fetch_state->pending_file_install;
-        if (
-            $pending_install === null
-            || $pending_install['destination_removal'] === null
-        ) {
-            throw new LogicException(
-                'The pending fetched-file destination quarantine is not open.'
-            );
-        }
-        $destination_removal =
-            $pending_install['destination_removal'];
-        $quarantine_path =
-            $this->pending_fetched_file_quarantine_path(
-                $destination_removal
-            );
-        clearstatcache(true, $destination_path);
-        clearstatcache(true, $quarantine_path);
-        $destination_stat = @lstat($destination_path);
-        $quarantine_stat = @lstat($quarantine_path);
-        $destination_matches_saved_source =
-            is_array($destination_stat)
-            && !is_link($destination_path)
-            && $this->stat_is_directory($destination_stat)
-            && (int) $destination_stat['dev']
-                === $destination_removal['directory_dev']
-            && (int) $destination_stat['ino']
-                === $destination_removal['directory_ino'];
-        $quarantine_matches_saved_source =
-            is_array($quarantine_stat)
-            && !is_link($quarantine_path)
-            && $this->stat_is_directory($quarantine_stat)
-            && (int) $quarantine_stat['dev']
-                === $destination_removal['directory_dev']
-            && (int) $quarantine_stat['ino']
-                === $destination_removal['directory_ino'];
-
-        if ($quarantine_stat !== false) {
-            if (!$quarantine_matches_saved_source) {
-                throw new RuntimeException(
-                    'The fetched-file quarantine path does not match the '
-                    . 'saved destination directory: path_b64='
-                    . base64_encode($quarantine_path)
-                    . '.'
-                );
-            }
-            $quarantine_parent_stat =
-                @stat(dirname($quarantine_path));
-            if (
-                !is_array($quarantine_parent_stat)
-                || !$this->stat_is_directory(
-                    $quarantine_parent_stat
-                )
-            ) {
-                throw new RuntimeException(
-                    'Failed to inspect the fetched-file quarantine parent.'
-                );
-            }
-            $pending_directory =
-                $this->append_pending_quarantined_directory(
-                    $this->pending_fetched_file_destination_stack_path(
-                        $fetch_state
-                    ),
-                    $quarantine_path,
-                    $quarantine_path,
-                    (int) $quarantine_stat['dev'],
-                    (int) $quarantine_stat['ino'],
-                    (int) $quarantine_parent_stat['dev'],
-                    (int) $quarantine_parent_stat['ino'],
-                    null,
-                    $destination_removal['stack_offset']
-                );
-            $pending_install['destination_removal']['top_offset'] =
-                $pending_directory['offset'];
-            $pending_install['destination_removal']['stack_offset'] =
-                $pending_directory['next_offset'];
-            $fetch_state->pending_file_install = $pending_install;
-            $this->save_state($this->state, false);
-            return;
-        }
-
-        if (!$destination_matches_saved_source) {
-            $pending_install['destination_removal'] = null;
-            $fetch_state->pending_file_install = $pending_install;
-            $this->save_state($this->state, false);
-            return;
-        }
-        if (!@rename($destination_path, $quarantine_path)) {
-            clearstatcache(true, $destination_path);
-            clearstatcache(true, $quarantine_path);
-            $destination_stat = @lstat($destination_path);
-            $quarantine_stat = @lstat($quarantine_path);
-            if (
-                is_array($quarantine_stat)
-                && !is_link($quarantine_path)
-                && $this->stat_is_directory($quarantine_stat)
-                && (int) $quarantine_stat['dev']
-                    === $destination_removal['directory_dev']
-                && (int) $quarantine_stat['ino']
-                    === $destination_removal['directory_ino']
-            ) {
-                return;
-            }
-            if ($quarantine_stat !== false) {
-                throw new RuntimeException(
-                    'The fetched-file quarantine path was occupied during '
-                    . 'the destination rename: path_b64='
-                    . base64_encode($quarantine_path)
-                    . '.'
-                );
-            }
-            if (
-                !is_array($destination_stat)
-                || is_link($destination_path)
-                || !$this->stat_is_directory($destination_stat)
-                || (int) $destination_stat['dev']
-                    !== $destination_removal['directory_dev']
-                || (int) $destination_stat['ino']
-                    !== $destination_removal['directory_ino']
-            ) {
-                $pending_install['destination_removal'] = null;
-                $fetch_state->pending_file_install = $pending_install;
-                $this->save_state($this->state, false);
-                return;
-            }
-            throw new RuntimeException(
-                'Failed to quarantine a directory blocking the fetched '
-                . 'file: destination_path_b64='
-                . base64_encode($destination_path)
-                . '.'
-            );
-        }
-        clearstatcache(true, $quarantine_path);
-        $quarantine_stat = @lstat($quarantine_path);
-        if (
-            !is_array($quarantine_stat)
-            || is_link($quarantine_path)
-            || !$this->stat_is_directory($quarantine_stat)
-            || (int) $quarantine_stat['dev']
-                !== $destination_removal['directory_dev']
-            || (int) $quarantine_stat['ino']
-                !== $destination_removal['directory_ino']
-        ) {
-            throw new RuntimeException(
-                'The quarantined fetched-file destination does not match '
-                . 'the saved directory identity: path_b64='
-                . base64_encode($quarantine_path)
-                . '.'
-            );
-        }
-    }
-
-    /**
-     * Removes at most one path from a quarantined destination directory.
-     */
-    private function remove_next_pending_fetched_file_destination_path(
-        DownloadListFetchProgressState $fetch_state
-    ): void {
-        $pending_install = $fetch_state->pending_file_install;
-        if (
-            $pending_install === null
-            || $pending_install['destination_removal'] === null
-            || $pending_install['destination_removal']
-                ['top_offset'] === null
-        ) {
-            throw new LogicException(
-                'The pending fetched-file destination removal is not open.'
-            );
-        }
-        $destination_removal =
-            $pending_install['destination_removal'];
-        $quarantine_path =
-            $this->pending_fetched_file_quarantine_path(
-                $destination_removal
-            );
-        $stack_path =
-            $this->pending_fetched_file_destination_stack_path(
-                $fetch_state
-            );
-        $pending_directory = $this->read_pending_quarantined_directory(
-            $stack_path,
-            $destination_removal['top_offset']
-        );
-        $source_path = $pending_directory['source_path'];
-        $work_path = $pending_directory['work_path'];
-        $is_root_directory =
-            $pending_directory['previous_offset'] === null;
-
-        clearstatcache(true, $quarantine_path);
-        $quarantine_stat = @lstat($quarantine_path);
-        if ($quarantine_stat === false) {
-            if (
-                $is_root_directory
-            ) {
-                $this->finish_pending_deleted_directory_step(
-                    $fetch_state,
-                    $pending_directory
-                );
-                return;
-            }
-            throw new RuntimeException(
-                'The quarantined fetched-file root disappeared while a '
-                . 'descendant removal remained pending: path_b64='
-                . base64_encode($quarantine_path)
-                . '.'
-            );
-        }
-        if (
-            is_link($quarantine_path)
-            || !$this->stat_is_directory($quarantine_stat)
-            || (int) $quarantine_stat['dev']
-                !== $destination_removal['directory_dev']
-            || (int) $quarantine_stat['ino']
-                !== $destination_removal['directory_ino']
-        ) {
-            throw new RuntimeException(
-                'The quarantined fetched-file root changed before its '
-                . 'bounded removal step: path_b64='
-                . base64_encode($quarantine_path)
-                . '.'
-            );
-        }
-        $prepare_result =
-            $this->run_quarantined_directory_child_process(
-                'prepare',
-                $pending_directory
-            );
-        if ($prepare_result['status'] === 'removed') {
-            $this->finish_pending_deleted_directory_step(
-                $fetch_state,
-                $pending_directory
-            );
-            return;
-        }
-        if ($prepare_result['status'] === 'prepared') {
-            return;
-        }
-
-        $remove_result =
-            $this->run_quarantined_directory_child_process(
-                'remove',
-                $pending_directory
-            );
-        if ($remove_result['status'] === 'directory') {
-            $entry = base64_decode($remove_result['entry_b64']);
-            $child_source_path = $work_path . '/' . $entry;
-            $child_work_path =
-                $work_path
-                . '/.reprint-'
-                . bin2hex(random_bytes(8))
-                . '.remove-dir';
-            $child_directory =
-                $this->append_pending_quarantined_directory(
-                    $stack_path,
-                    $child_source_path,
-                    $child_work_path,
-                    $remove_result['dev'],
-                    $remove_result['ino'],
-                    $pending_directory['dev'],
-                    $pending_directory['ino'],
-                    $destination_removal['top_offset'],
-                    $destination_removal['stack_offset']
-                );
-            $pending_install['destination_removal']
-                ['top_offset'] = $child_directory['offset'];
-            $pending_install['destination_removal']
-                ['stack_offset'] =
-                    $child_directory['next_offset'];
-            $fetch_state->pending_file_install =
-                $pending_install;
-            $this->save_state($this->state, false);
-            return;
-        }
-        if (
-            $remove_result['status'] === 'entry_removed'
-            || $remove_result['status'] === 'retry'
-        ) {
-            return;
-        }
-        $this->finish_pending_deleted_directory_step(
-            $fetch_state,
-            $pending_directory
-        );
-    }
-
-    /**
-     * Runs one directory-relative quarantine action in a pinned child cwd.
-     *
-     * @param array $pending_directory {
-     *     Saved directory identity.
-     *
-     *     @type string   $source_path     Observed directory path.
-     *     @type string   $work_path       Private removal path.
-     *     @type int      $dev             Directory device number.
-     *     @type int      $ino             Directory inode number.
-     *     @type int      $parent_dev      Parent device number.
-     *     @type int      $parent_ino      Parent inode number.
-     *     @type int|null $previous_offset Previous linked stack entry.
-     * }
-     * @return array {
-     *     Bounded child action result.
-     *
-     *     @type string $status    Action status.
-     *     @type string $entry_b64 Directory entry, for `directory`.
-     *     @type int    $dev       Entry device number, for `directory`.
-     *     @type int    $ino       Entry inode number, for `directory`.
-     * }
-     */
-    private function run_quarantined_directory_child_process(
-        string $action,
-        array $pending_directory
-    ): array {
-        if (!function_exists('proc_open')) {
-            throw new RuntimeException(
-                'Cannot safely remove the quarantined local directory '
-                . 'because proc_open() is unavailable.'
-            );
-        }
-$script = <<<'PHP'
-$action = $argv[1];
-$source_path = base64_decode($argv[2]);
-$work_path = base64_decode($argv[3]);
-$expected_dev = (int) $argv[4];
-$expected_ino = (int) $argv[5];
-$expected_parent_dev = (int) $argv[6];
-$expected_parent_ino = (int) $argv[7];
-$finish = static function (array $result, int $exit = 0): void {
-    echo json_encode($result, JSON_UNESCAPED_SLASHES);
-    exit($exit);
-};
-$fail = static function (string $message) use ($finish): void {
-    $finish(['status' => 'error', 'message' => $message], 1);
-};
-$is_directory = static function ($stat): bool {
-    return is_array($stat)
-        && (($stat['mode'] & 0170000) === 0040000);
-};
-$matches = static function (
-    $stat,
-    int $dev,
-    int $ino
-) use ($is_directory): bool {
-    return $is_directory($stat)
-        && (int) $stat['dev'] === $dev
-        && (int) $stat['ino'] === $ino;
-};
-if ($action === 'prepare') {
-    if (!@chdir(dirname($source_path))) {
-        $fail('Failed to enter the quarantined directory parent.');
-    }
-    if (
-        !$matches(
-            @lstat('.'),
-            $expected_parent_dev,
-            $expected_parent_ino
-        )
-    ) {
-        $fail('The quarantined directory parent identity changed.');
-    }
-    $source_name = basename($source_path);
-    $work_name = basename($work_path);
-    $source_stat = @lstat($source_name);
-    $work_stat = @lstat($work_name);
-    if ($source_name === $work_name) {
-        if ($source_stat === false) {
-            $finish(['status' => 'removed']);
-        }
-        if (!$matches($source_stat, $expected_dev, $expected_ino)) {
-            $fail('The quarantined directory identity changed.');
-        }
-        $finish(['status' => 'ready']);
-    }
-    if ($work_stat !== false) {
-        if (
-            $source_stat === false
-            && $matches($work_stat, $expected_dev, $expected_ino)
-        ) {
-            $finish(['status' => 'ready']);
-        }
-        $fail('The private quarantined directory path is occupied.');
-    }
-    if ($source_stat === false) {
-        $finish(['status' => 'removed']);
-    }
-    if (!$matches($source_stat, $expected_dev, $expected_ino)) {
-        $fail('A quarantined child directory identity changed.');
-    }
-    if (!@rename($source_name, $work_name)) {
-        $fail('Failed to move a quarantined child to its private path.');
-    }
-    if (
-        !$matches(
-            @lstat($work_name),
-            $expected_dev,
-            $expected_ino
-        )
-    ) {
-        $fail('The moved quarantined child identity changed.');
-    }
-    $finish(['status' => 'prepared']);
-}
-if (!@chdir($work_path)) {
-    $fail('Failed to enter the private quarantined directory.');
-}
-if (!$matches(@lstat('.'), $expected_dev, $expected_ino)) {
-    $fail('The private quarantined directory identity changed.');
-}
-$handle = @opendir('.');
-if (!is_resource($handle)) {
-    $fail('Failed to open the private quarantined directory.');
-}
-do {
-    $entry = readdir($handle);
-} while ($entry === '.' || $entry === '..');
-closedir($handle);
-if ($entry !== false) {
-    $child_stat = @lstat($entry);
-    if ($child_stat === false) {
-        $finish(['status' => 'retry']);
-    }
-    if ($is_directory($child_stat)) {
-        $finish([
-            'status' => 'directory',
-            'entry_b64' => base64_encode($entry),
-            'dev' => (int) $child_stat['dev'],
-            'ino' => (int) $child_stat['ino'],
-        ]);
-    }
-    if (!@unlink($entry)) {
-        $fail('Failed to remove a quarantined non-directory child.');
-    }
-    $finish(['status' => 'entry_removed']);
-}
-if (!@chdir('..')) {
-    $fail('Failed to enter the quarantined directory parent.');
-}
-if (
-    !$matches(
-        @lstat('.'),
-        $expected_parent_dev,
-        $expected_parent_ino
-    )
-) {
-    $fail('The private quarantined directory parent identity changed.');
-}
-$work_name = basename($work_path);
-if (
-    !$matches(
-        @lstat($work_name),
-        $expected_dev,
-        $expected_ino
-    )
-) {
-    $fail('The empty quarantined directory identity changed.');
-}
-if (@rmdir($work_name)) {
-    $finish(['status' => 'removed']);
-}
-$retry_stat = @lstat($work_name);
-if ($retry_stat === false) {
-    $finish(['status' => 'removed']);
-}
-if (!$matches($retry_stat, $expected_dev, $expected_ino)) {
-    $fail('The quarantined directory changed while it was removed.');
-}
-$retry_handle = @opendir($work_name);
-if (!is_resource($retry_handle)) {
-    $fail('Failed to reopen the quarantined directory.');
-}
-do {
-    $retry_entry = readdir($retry_handle);
-} while ($retry_entry === '.' || $retry_entry === '..');
-closedir($retry_handle);
-if ($retry_entry === false) {
-    $fail('Failed to remove an empty quarantined directory.');
-}
-$finish(['status' => 'retry']);
-PHP;
-        $descriptor_specification = [
-            0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ];
-        $process = @proc_open(
-            [
-                PHP_BINARY,
-                '-n',
-                '-r',
-                $script,
-                $action,
-                base64_encode($pending_directory['source_path']),
-                base64_encode($pending_directory['work_path']),
-                (string) $pending_directory['dev'],
-                (string) $pending_directory['ino'],
-                (string) $pending_directory['parent_dev'],
-                (string) $pending_directory['parent_ino'],
-            ],
-            $descriptor_specification,
-            $pipes
-        );
-        if (!is_resource($process)) {
-            throw new RuntimeException(
-                'Failed to start the safe quarantine removal process.'
-            );
-        }
-        fclose($pipes[0]);
-        $stdout = stream_get_contents($pipes[1], 8193);
-        $stdout_overflow = fread($pipes[1], 1);
-        fclose($pipes[1]);
-        $stderr = stream_get_contents($pipes[2], 8193);
-        $stderr_overflow = fread($pipes[2], 1);
-        fclose($pipes[2]);
-        $exit_code = proc_close($process);
-        if (
-            !is_string($stdout)
-            || strlen($stdout) > 8192
-            || $stdout_overflow !== ''
-            || !is_string($stderr)
-            || strlen($stderr) > 8192
-            || $stderr_overflow !== ''
-        ) {
-            throw new RuntimeException(
-                'The quarantine removal process output exceeded 8192 bytes.'
-            );
-        }
-        try {
-            $result = json_decode(
-                $stdout,
-                true,
-                32,
-                JSON_THROW_ON_ERROR
-            );
-        } catch (JsonException $error) {
-            throw new RuntimeException(
-                'The quarantine removal process returned invalid output: '
-                . trim($stderr)
-            );
-        }
-        if ($exit_code !== 0 || $result['status'] === 'error') {
-            $message = $result['message'] ?? trim($stderr);
-            throw new RuntimeException(
-                'The quarantine removal process failed: action='
-                . $action
-                . ', source_path_b64='
-                . base64_encode($pending_directory['source_path'])
-                . ', work_path_b64='
-                . base64_encode($pending_directory['work_path'])
-                . ', detail='
-                . $message
-            );
-        }
-        return $result;
-    }
-
-    /**
-     * Saves the next directory-stack boundary after one directory vanished.
-     *
-     * @param array $pending_directory {
-     *     Saved directory identity.
-     *
-     *     @type string   $source_path     Observed directory path.
-     *     @type string   $work_path       Private removal path.
-     *     @type int      $dev             Directory device number.
-     *     @type int      $ino             Directory inode number.
-     *     @type int      $parent_dev      Parent device number.
-     *     @type int      $parent_ino      Parent inode number.
-     *     @type int|null $previous_offset Previous linked stack entry.
-     * }
-     */
-    private function finish_pending_deleted_directory_step(
-        DownloadListFetchProgressState $fetch_state,
-        array $pending_directory
-    ): void {
-        $pending_install = $fetch_state->pending_file_install;
-        if (
-            $pending_install === null
-            || $pending_install['destination_removal'] === null
-        ) {
-            throw new LogicException(
-                'Cannot finish a closed fetched-file directory removal.'
-            );
-        }
-        if ($pending_directory['previous_offset'] === null) {
-            $pending_install['destination_removal'] = null;
-            $fetch_state->applying_expected_local_state = null;
-        } else {
-            $pending_install['destination_removal']['top_offset'] =
-                $pending_directory['previous_offset'];
-        }
-        $fetch_state->pending_file_install = $pending_install;
-        $this->save_state($this->state, false);
-        if ($pending_directory['previous_offset'] === null) {
-            $this->remove_owned_files_pull_path(
-                $this->pending_fetched_file_destination_stack_path(
-                    $fetch_state
-                )
-            );
-        }
-    }
-
-    /**
-     * Saves an exact same-parent quarantine intent for a blocking directory.
-     */
-    private function queue_pending_fetched_file_destination_directory(
-        DownloadListFetchProgressState $fetch_state,
-        string $directory_path
-    ): void {
-        $pending_install = $fetch_state->pending_file_install;
-        if ($pending_install === null) {
-            throw new LogicException(
-                'Cannot queue a directory without a pending fetched file.'
-            );
-        }
-        clearstatcache(true, $directory_path);
-        $directory_stat = @lstat($directory_path);
-        if (
-            !is_array($directory_stat)
-            || is_link($directory_path)
-            || !$this->stat_is_directory($directory_stat)
-        ) {
-            return;
-        }
-        $quarantine_path =
-            dirname($directory_path)
-            . '/.reprint-'
-            . bin2hex(random_bytes(8))
-            . '.remove';
-        clearstatcache(true, $quarantine_path);
-        if (@lstat($quarantine_path) !== false) {
-            throw new RuntimeException(
-                'The generated fetched-file quarantine path is occupied.'
-            );
-        }
-        $pending_install['destination_removal'] = [
-            'quarantine_path_b64' =>
-                base64_encode($quarantine_path),
-            'directory_dev' => (int) $directory_stat['dev'],
-            'directory_ino' => (int) $directory_stat['ino'],
-            'top_offset' => null,
-            'stack_offset' => 0,
-        ];
-        $fetch_state->pending_file_install = $pending_install;
-        $this->save_state($this->state, false);
-    }
-    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-
-    /** Returns the same-parent quarantine path from durable state. */
-    private function pending_fetched_file_quarantine_path(
-        array $destination_removal
-    ): string {
-        return base64_decode(
-            $destination_removal['quarantine_path_b64']
-        );
-    }
-
-    /**
-     * Appends one exact quarantined directory to the durable removal stack.
-     *
-     * @return array {
-     *     @type string   $source_path     Observed directory path.
-     *     @type string   $work_path       Private removal path.
-     *     @type int      $dev             Directory device number.
-     *     @type int      $ino             Directory inode number.
-     *     @type int      $parent_dev      Parent device number.
-     *     @type int      $parent_ino      Parent inode number.
-     *     @type int|null $previous_offset Previous linked stack entry.
-     *     @type int      $offset          Offset of this linked entry.
-     *     @type int      $next_offset     Durable end after this entry.
-     * }
-     */
-    private function append_pending_quarantined_directory(
-        string $stack_path,
-        string $source_path,
-        string $work_path,
-        int $dev,
-        int $ino,
-        int $parent_dev,
-        int $parent_ino,
-        ?int $previous_offset,
-        int $durable_offset
-    ): array {
-        $handle = fopen($stack_path, 'c+b');
-        if (!is_resource($handle)) {
-            throw new RuntimeException(
-                'Failed to open the quarantined-directory removal stack.'
-            );
-        }
-        try {
-            if (
-                !ftruncate($handle, $durable_offset)
-                || fseek($handle, $durable_offset) !== 0
-            ) {
-                throw new RuntimeException(
-                    'Failed to restore the quarantined-directory removal stack.'
-                );
-            }
-            $line = json_encode(
-                [
-                    'source_path_b64' =>
-                        base64_encode($source_path),
-                    'work_path_b64' =>
-                        base64_encode($work_path),
-                    'dev' => $dev,
-                    'ino' => $ino,
-                    'parent_dev' => $parent_dev,
-                    'parent_ino' => $parent_ino,
-                    'previous_offset' => $previous_offset,
-                ],
-                JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-            ) . "\n";
-            if (
-                fwrite($handle, $line) !== strlen($line)
-                || !fflush($handle)
-            ) {
-                throw new RuntimeException(
-                    'Failed to append the quarantined-directory removal stack.'
-                );
-            }
-            $next_offset = ftell($handle);
-            if (!is_int($next_offset)) {
-                throw new RuntimeException(
-                    'Failed to determine the quarantined-directory stack boundary.'
-                );
-            }
-            return [
-                'source_path' => $source_path,
-                'work_path' => $work_path,
-                'dev' => $dev,
-                'ino' => $ino,
-                'parent_dev' => $parent_dev,
-                'parent_ino' => $parent_ino,
-                'previous_offset' => $previous_offset,
-                'offset' => $durable_offset,
-                'next_offset' => $next_offset,
-            ];
-        } finally {
-            fclose($handle);
-        }
-    }
-
-    /**
-     * Reads one exact directory from the durable quarantine-removal stack.
-     *
-     * @return array {
-     *     @type string   $source_path     Observed directory path.
-     *     @type string   $work_path       Private removal path.
-     *     @type int      $dev             Directory device number.
-     *     @type int      $ino             Directory inode number.
-     *     @type int      $parent_dev      Parent device number.
-     *     @type int      $parent_ino      Parent inode number.
-     *     @type int|null $previous_offset Previous linked stack entry.
-     * }
-     */
-    private function read_pending_quarantined_directory(
-        string $stack_path,
-        int $offset
-    ): array {
-        $handle = fopen($stack_path, 'rb');
-        if (!is_resource($handle)) {
-            throw new RuntimeException(
-                'Failed to open the quarantined-directory removal stack.'
-            );
-        }
-        try {
-            if (fseek($handle, $offset) !== 0) {
-                throw new RuntimeException(
-                    'Failed to seek in the quarantined-directory removal stack.'
-                );
-            }
-            $line = fgets($handle);
-            if ($line === false) {
-                throw new RuntimeException(
-                    'Failed to read a quarantined-directory stack entry.'
-                );
-            }
-            $record = json_decode(
-                $line,
-                true,
-                512,
-                JSON_THROW_ON_ERROR
-            );
-            return [
-                'source_path' =>
-                    base64_decode($record['source_path_b64']),
-                'work_path' =>
-                    base64_decode($record['work_path_b64']),
-                'dev' => $record['dev'],
-                'ino' => $record['ino'],
-                'parent_dev' => $record['parent_dev'],
-                'parent_ino' => $record['parent_ino'],
-                'previous_offset' => $record['previous_offset'],
-            ];
-        } finally {
-            fclose($handle);
-        }
-    }
-
-    /** Returns the owned stack for one pending fetched-file installation. */
-    private function pending_fetched_file_destination_stack_path(
-        DownloadListFetchProgressState $fetch_state
-    ): string {
-        $state_key =
-            $fetch_state === $this->import_state()->fetch
-                ? 'fetch'
-                : 'fetch-skipped';
-        return $this->state_dir
-            . '/.files-pull-'
-            . $state_key
-            . '-pending-file-install-directory-stack.jsonl';
-    }
-
-    /** Copies portable inode metadata before replacing an existing file. */
-    private function preserve_replaced_file_metadata(
-        string $staging_path,
-        array $destination_stat
-    ): void {
-        clearstatcache(true, $staging_path);
-        $staging_stat = @lstat($staging_path);
-        if (!is_array($staging_stat)) {
-            throw new RuntimeException(
-                'Failed to inspect the staged file before preserving '
-                . 'destination metadata.'
-            );
-        }
-        if (
-            (int) $staging_stat['uid']
-                !== (int) $destination_stat['uid']
-            && !@chown(
-                $staging_path,
-                (int) $destination_stat['uid']
-            )
-        ) {
-            throw new RuntimeException(
-                'Failed to preserve the owner of the replaced local file.'
-            );
-        }
-        if (
-            (int) $staging_stat['gid']
-                !== (int) $destination_stat['gid']
-            && !@chgrp(
-                $staging_path,
-                (int) $destination_stat['gid']
-            )
-        ) {
-            throw new RuntimeException(
-                'Failed to preserve the group of the replaced local file.'
-            );
-        }
-        $destination_mode =
-            (int) $destination_stat['mode'] & 07777;
-        if (!@chmod($staging_path, $destination_mode)) {
-            throw new RuntimeException(
-                'Failed to preserve the permissions of the replaced local file.'
-            );
-        }
-        clearstatcache(true, $staging_path);
-        $staging_stat = @lstat($staging_path);
-        if (
-            !is_array($staging_stat)
-            || (int) $staging_stat['uid']
-                !== (int) $destination_stat['uid']
-            || (int) $staging_stat['gid']
-                !== (int) $destination_stat['gid']
-            || (
-                (int) $staging_stat['mode'] & 07777
-            ) !== $destination_mode
-        ) {
-            throw new RuntimeException(
-                'The staged file does not retain the replaced local file metadata.'
-            );
-        }
-    }
-
-    /** Restores normal creation permissions before installing a new file. */
-    private function restore_new_fetched_file_mode(
-        string $staging_path,
-        int $install_mode
-    ): void {
-        if (!@chmod($staging_path, $install_mode)) {
-            throw new RuntimeException(
-                'Failed to set permissions on the fetched local file.'
-            );
-        }
-        clearstatcache(true, $staging_path);
-        $stat = @lstat($staging_path);
-        if (
-            !is_array($stat)
-            || ( (int) $stat['mode'] & 07777 ) !== $install_mode
-        ) {
-            throw new RuntimeException(
-                'The fetched local file has unexpected permissions.'
-            );
-        }
-    }
-
-    /** Advances a completed remote part whose local change was retained. */
-    private function settle_fetched_path_without_install(
-        DownloadListFetchProgressState $fetch_state,
-        array $pending_install,
-        ?StreamingContext $context
-    ): void {
-        $fetch_state->cursor = $pending_install['cursor'];
-        $fetch_state->planned_local_state_offset =
-            $pending_install['planned_local_state_offset'];
-        $fetch_state->applying_path = null;
-        $fetch_state->applying_expected_local_state = null;
-        $fetch_state->staged_file = null;
-        $this->remove_owned_files_pull_path(
-            $this->pending_fetched_file_destination_stack_path(
-                $fetch_state
-            )
-        );
-        $fetch_state->pending_file_install = null;
-        if ($context !== null) {
-            $context->file_path = null;
-            $context->file_bytes_written = 0;
-            $context->path_settled_in_current_chunk = true;
-        }
-        $this->save_state($this->state, false);
-    }
-
-    /** Closes and removes only the exact private staging file in state. */
-    private function discard_fetched_file_staging(
-        DownloadListFetchProgressState $fetch_state,
-        ?StreamingContext $context
-    ): void {
-        if (
-            $context !== null
-            && is_resource($context->file_handle)
-        ) {
-            fclose($context->file_handle);
-            $context->file_handle = null;
-        }
-        $record = $fetch_state->pending_file_install
-            ?? $fetch_state->staged_file;
-        if ($record !== null) {
-            if (!$record['discard_started']) {
-                $record['discard_started'] = true;
-                if ($fetch_state->pending_file_install !== null) {
-                    $fetch_state->pending_file_install = $record;
-                } else {
-                    $fetch_state->staged_file = $record;
-                }
-                $this->save_state($this->state, false);
-            }
-            $paths = $this->fetched_file_staging_paths($record);
-            clearstatcache(true, $paths['staging']);
-            $stat = @lstat($paths['staging']);
-            if (is_array($stat)) {
-                $identity_matches =
-                    !is_link($paths['staging'])
-                    && $this->stat_is_regular_file($stat)
-                    && (
-                        $record['staging_dev'] === null
-                        || (
-                            (int) $stat['dev']
-                                === $record['staging_dev']
-                            && (int) $stat['ino']
-                                === $record['staging_ino']
-                        )
-                    );
-                if (!$identity_matches || !@unlink($paths['staging'])) {
-                    throw new RuntimeException(
-                        'Failed to discard the exact files-pull staging file.'
-                    );
-                }
-            }
-        }
-        $fetch_state->staged_file = null;
-        $this->remove_owned_files_pull_path(
-            $this->pending_fetched_file_destination_stack_path(
-                $fetch_state
-            )
-        );
-        $fetch_state->pending_file_install = null;
-        if ($context !== null) {
-            $context->file_path = null;
-            $context->file_bytes_written = 0;
-        }
-    }
-
-    /**
-     * Decodes the three paths saved for one private staged file.
-     *
-     * @return array{remote:string,destination:string,staging:string}
-     */
-    private function fetched_file_staging_paths(
-        array $record
-    ): array {
-        return [
-            'remote' => base64_decode($record['remote_path_b64']),
-            'destination' =>
-                base64_decode($record['destination_path_b64']),
-            'staging' =>
-                base64_decode($record['staging_path_b64']),
-        ];
-    }
-
-    /** Reports whether an lstat record describes a regular file. */
-    private function stat_is_regular_file(array $stat): bool
-    {
-        return (
-            $stat['mode'] & FileIndexProcessor::STAT_TYPE_MASK
-        ) === FileIndexProcessor::STAT_TYPE_FILE;
-    }
-
-    /** Reports whether an lstat record describes a directory. */
-    private function stat_is_directory(array $stat): bool
-    {
-        return (
-            $stat['mode'] & FileIndexProcessor::STAT_TYPE_MASK
-        ) === FileIndexProcessor::STAT_TYPE_DIR;
     }
 
     /**
@@ -14809,10 +10213,7 @@ PHP;
     /**
      * Handle a directory chunk (create empty directory).
      */
-    private function handle_directory_chunk(
-        array $chunk,
-        StreamingContext $context
-    ): void
+    private function handle_directory_chunk(array $chunk): void
     {
         $headers = $chunk["headers"];
         $raw_header = $headers["x-directory-path"] ?? "";
@@ -14827,15 +10228,6 @@ PHP;
                     true,
                 );
             }
-            return;
-        }
-        if (
-            !$this->should_apply_fetched_remote_change(
-                $path,
-                $context,
-                'dir'
-            )
-        ) {
             return;
         }
 
@@ -14893,23 +10285,19 @@ PHP;
         }
     }
 
-    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI symlink diagnostics contain validated filesystem paths.
     /**
      * Recreates a symlink from the export stream in the local filesystem.
      *
      * Decodes the base64-encoded path and target from the chunk headers,
      * validates that the target stays within the filesystem root (preventing
-     * directory traversal), then creates the symlink. Invalid targets are
-     * reported without changing the local tree. A failure after replacement
-     * starts stops the request so its applying path remains resumable.
+     * directory traversal), then creates the symlink.  Failures are logged
+     * to the audit log and reported as symlink_error progress events — they
+     * do not halt the import.
      *
      * @param array $chunk Multipart chunk with x-symlink-path, x-symlink-target,
      *                     and x-symlink-ctime headers (all base64-encoded).
      */
-    private function handle_symlink_chunk(
-        array $chunk,
-        StreamingContext $context
-    ): void
+    private function handle_symlink_chunk(array $chunk): void
     {
         $headers = $chunk["headers"];
         $raw_path = $headers["x-symlink-path"] ?? "";
@@ -14928,22 +10316,13 @@ PHP;
             }
             return;
         }
+
         $local_path = $this->remote_path_to_local_path_within_import_root($path);
         $target_for_local = $this->map_symlink_target_for_local_mirror(
             $path,
             $local_path,
             $target,
         );
-        if (
-            !$this->should_apply_fetched_remote_change(
-                $path,
-                $context,
-                'link',
-                $target_for_local
-            )
-        ) {
-            return;
-        }
 
         // In preserve-local mode, if something already exists at the symlink
         // path, keep it — whether it's a file, directory, or another symlink.
@@ -14983,19 +10362,22 @@ PHP;
         }
 
         // Remove existing file/symlink if present
-        $symlink_already_matches =
-            is_link($local_path)
-            && readlink($local_path) === $target_for_local;
-        if (
-            !$symlink_already_matches
-            && ( file_exists($local_path) || is_link($local_path) )
-        ) {
+        if (file_exists($local_path) || is_link($local_path)) {
             if (
                 !$this->remove_local_path_without_following_symlinks($local_path)
             ) {
-                throw new RuntimeException(
-                    "Failed to replace existing path with symlink: {$path}",
+                $this->audit_log(
+                    "Failed to remove existing path for symlink: {$local_path}",
+                    true,
                 );
+                $this->output_progress([
+                    "type" => "symlink_error",
+                    "path" => $path,
+                    "target" => $target_for_local,
+                    "error" => "Failed to replace existing path",
+                    "message" => "Symlink error: {$path} -> {$target}",
+                ]);
+                return;
             }
         }
 
@@ -15009,22 +10391,43 @@ PHP;
                 $this->emit_skip_progress($path);
                 return;
             } catch (RuntimeException $e) {
-                throw new RuntimeException(
-                    "Failed to create a parent directory for symlink: {$path}",
-                    0,
-                    $e
+                // Log error and skip this symlink
+                $this->audit_log(
+                    "Failed to create directory for symlink: {$dir}",
+                    true,
                 );
+                $this->output_progress([
+                    "type" => "symlink_error",
+                    "path" => $path,
+                    "target" => $target_for_local,
+                    "error" => "Failed to create parent directory",
+                    "message" => "Symlink error: {$path} -> {$target}",
+                ]);
+                return;
             }
         }
 
         // Create symlink
-        $symlink_result = $symlink_already_matches
-            ? true
-            : @symlink($target_for_local, $local_path);
+        $symlink_result = symlink($target_for_local, $local_path);
         if (true !== $symlink_result || !is_link($local_path)) {
-            throw new RuntimeException(
-                "Failed to create symlink: {$path} -> {$target_for_local}",
+            // Log error and skip this symlink
+            $this->audit_log(
+                "Failed to create symlink: {$local_path} -> {$target_for_local}",
+                true,
             );
+            $this->output_progress([
+                "type" => "symlink_error",
+                "path" => $path,
+                "target" => $target_for_local,
+                "error" => "Failed to create symlink",
+                "message" => "Symlink error: {$path} -> {$target}",
+            ]);
+            return;
+        }
+
+        // Try to set the ctime (may not work on all systems)
+        if ($ctime > 0) {
+            @touch($local_path, $ctime);
         }
 
         $this->audit_log("Symlink: {$path} -> {$target_for_local}", false);
@@ -15039,570 +10442,6 @@ PHP;
             "target" => $target_for_local,
             "message" => "Symlink: {$path} -> {$target}",
         ]);
-    }
-    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-
-    /** Prepares a regular-file download without changing its destination. */
-    private function should_apply_fetched_file_change(
-        string $path,
-        StreamingContext $context
-    ): bool {
-        if ($this->fetched_path_is_in_retained_local_subtree(
-            $path,
-            $context
-        )) {
-            $planned_local_state =
-                $this->consume_fetched_path_planned_local_state(
-                    $path,
-                    $context
-                );
-            $fetch_state = $this->get_download_list_fetch_state(
-                $context->fetch_state_key
-            );
-            $fetch_state->planned_local_state_offset =
-                $context->planned_local_state_offset;
-            $fetch_state->applying_path = $path;
-            $fetch_state->applying_expected_local_state =
-                $planned_local_state['expected'];
-            if ($fetch_state->staged_file !== null) {
-                $this->discard_fetched_file_staging(
-                    $fetch_state,
-                    $context
-                );
-            }
-            return false;
-        }
-        $planned_local_state =
-            $this->consume_fetched_path_planned_local_state(
-                $path,
-                $context
-        );
-        if (!$planned_local_state['validate']) {
-            $fetch_state = $this->get_download_list_fetch_state(
-                $context->fetch_state_key
-            );
-            $fetch_state->planned_local_state_offset =
-                $context->planned_local_state_offset;
-            $fetch_state->applying_path = $path;
-            $fetch_state->applying_expected_local_state =
-                $planned_local_state['expected'];
-            return true;
-        }
-        $fetch_state = $this->get_download_list_fetch_state(
-            $context->fetch_state_key
-        );
-        if (
-            $fetch_state->applying_path !== null
-            && $fetch_state->applying_path !== $path
-        ) {
-            throw new RuntimeException(
-                'The fetch state applies a different remote path than the '
-                . 'current file part.'
-            );
-        }
-        $should_apply =
-            $this->should_apply_remote_change_after_planning(
-                $path,
-                true,
-                $planned_local_state['expected']
-            );
-        if (!$should_apply) {
-            $this->retain_fetched_local_subtree($path, $context);
-            $fetch_state->planned_local_state_offset =
-                $context->planned_local_state_offset;
-            $fetch_state->applying_path = $path;
-            $fetch_state->applying_expected_local_state =
-                $planned_local_state['expected'];
-            if ($fetch_state->staged_file !== null) {
-                $this->discard_fetched_file_staging(
-                    $fetch_state,
-                    $context
-                );
-            }
-            return false;
-        }
-        if (!$this->fetched_path_parents_allow_remote_change($path)) {
-            $this->retain_fetched_local_subtree($path, $context);
-            $fetch_state->planned_local_state_offset =
-                $context->planned_local_state_offset;
-            $fetch_state->applying_path = $path;
-            $fetch_state->applying_expected_local_state =
-                $planned_local_state['expected'];
-            if ($fetch_state->staged_file !== null) {
-                $this->discard_fetched_file_staging(
-                    $fetch_state,
-                    $context
-                );
-            }
-            return false;
-        }
-
-        $fetch_state->planned_local_state_offset =
-            $context->planned_local_state_offset;
-        $fetch_state->applying_path = $path;
-        $fetch_state->applying_expected_local_state =
-            $planned_local_state['expected'];
-        $this->save_state($this->state, false);
-        return true;
-    }
-
-    /**
-     * Checks the planned local state immediately before a fetched non-file path
-     * mutates it.
-     */
-    private function should_apply_fetched_remote_change(
-        string $path,
-        StreamingContext $context,
-        ?string $desired_type = null,
-        ?string $desired_link_target = null
-    ): bool {
-        if ($this->fetched_path_is_in_retained_local_subtree(
-            $path,
-            $context
-        )) {
-            $planned_local_state =
-                $this->consume_fetched_path_planned_local_state(
-                    $path,
-                    $context
-                );
-            $fetch_state = $this->get_download_list_fetch_state(
-                $context->fetch_state_key
-            );
-            $fetch_state->planned_local_state_offset =
-                $context->planned_local_state_offset;
-            $fetch_state->applying_path = $path;
-            $fetch_state->applying_expected_local_state =
-                $planned_local_state['expected'];
-            return false;
-        }
-        $planned_local_state =
-            $this->consume_fetched_path_planned_local_state(
-                $path,
-                $context
-            );
-        if (!$planned_local_state['validate']) {
-            return true;
-        }
-        $fetch_state = $this->get_download_list_fetch_state(
-            $context->fetch_state_key
-        );
-        if ($fetch_state->applying_path === $path) {
-            $local_path =
-                $this->remote_path_to_local_path_within_import_root(
-                    $path
-                );
-            clearstatcache(true, $local_path);
-            $local_stat = @lstat($local_path);
-            $matches_completed_replay =
-                $local_stat === false
-                || (
-                    $desired_type === 'dir'
-                    && !is_link($local_path)
-                    && is_dir($local_path)
-                )
-                || (
-                    $desired_type === 'link'
-                    && is_link($local_path)
-                    && readlink($local_path)
-                        === $desired_link_target
-                );
-            if ($matches_completed_replay) {
-                return $this->fetched_path_parents_allow_remote_change(
-                    $path
-                );
-            }
-        }
-        $should_apply =
-            $this->should_apply_remote_change_after_planning(
-                $path,
-                true,
-                $planned_local_state['expected']
-            );
-        if (!$should_apply) {
-            $this->retain_fetched_local_subtree($path, $context);
-            $fetch_state->planned_local_state_offset =
-                $context->planned_local_state_offset;
-            $fetch_state->applying_path = $path;
-            $fetch_state->applying_expected_local_state =
-                $planned_local_state['expected'];
-            return false;
-        }
-        if (!$this->fetched_path_parents_allow_remote_change($path)) {
-            $this->retain_fetched_local_subtree($path, $context);
-            $fetch_state->planned_local_state_offset =
-                $context->planned_local_state_offset;
-            $fetch_state->applying_path = $path;
-            $fetch_state->applying_expected_local_state =
-                $planned_local_state['expected'];
-            return false;
-        }
-
-        $fetch_state->planned_local_state_offset =
-            $context->planned_local_state_offset;
-        $fetch_state->applying_path = $path;
-        $fetch_state->applying_expected_local_state =
-            $planned_local_state['expected'];
-        $this->save_state($this->state, false);
-        return true;
-    }
-
-    /** Keeps all ordered response paths under one our-wins rejection. */
-    private function retain_fetched_local_subtree(
-        string $path,
-        StreamingContext $context
-    ): void {
-        if ($this->files_pull_conflict_policy !== 'our-wins') {
-            return;
-        }
-        $fetch_state = $this->get_download_list_fetch_state(
-            $context->fetch_state_key
-        );
-        $this->retain_fetched_local_subtree_in_state(
-            $path,
-            $fetch_state
-        );
-    }
-
-    /** Persists one our-wins subtree in a fetch checkpoint. */
-    private function retain_fetched_local_subtree_in_state(
-        string $path,
-        DownloadListFetchProgressState $fetch_state
-    ): void {
-        if ($this->files_pull_conflict_policy !== 'our-wins') {
-            return;
-        }
-        $state_key =
-            $this->download_list_fetch_state_key($fetch_state);
-        if (
-            $this->fetched_path_is_in_retained_local_subtree_state(
-                $path,
-                $fetch_state,
-                $state_key
-            )
-        ) {
-            return;
-        }
-        $retained_local_subtree =
-            $this->append_retained_local_subtree(
-                $this->retained_local_subtree_stack_path($state_key),
-                $path,
-                $fetch_state->retained_local_subtree_top_offset,
-                $fetch_state->retained_local_subtree_stack_offset
-            );
-        $fetch_state->retained_local_subtree_top_offset =
-            $retained_local_subtree['offset'];
-        $fetch_state->retained_local_subtree_stack_offset =
-            $retained_local_subtree['next_offset'];
-    }
-
-    /** Reports whether the ordered fetch path is under a retained subtree. */
-    private function fetched_path_is_in_retained_local_subtree(
-        string $path,
-        StreamingContext $context
-    ): bool {
-        $fetch_state = $this->get_download_list_fetch_state(
-            $context->fetch_state_key
-        );
-        return $this->fetched_path_is_in_retained_local_subtree_state(
-            $path,
-            $fetch_state,
-            $context->fetch_state_key
-        );
-    }
-
-    /** Returns the state key for one active download-list checkpoint. */
-    private function download_list_fetch_state_key(
-        DownloadListFetchProgressState $fetch_state
-    ): string {
-        return $fetch_state === $this->import_state()->fetch
-            ? 'fetch'
-            : 'fetch_skipped';
-    }
-
-    /** Reports membership while popping retained roots already passed. */
-    private function fetched_path_is_in_retained_local_subtree_state(
-        string $path,
-        DownloadListFetchProgressState $fetch_state,
-        string $state_key
-    ): bool {
-        $stack_path =
-            $this->retained_local_subtree_stack_path($state_key);
-        while (
-            $fetch_state->retained_local_subtree_top_offset !== null
-        ) {
-            $retained_local_subtree =
-                $this->read_retained_local_subtree(
-                    $stack_path,
-                    $fetch_state->retained_local_subtree_top_offset
-                );
-            if (
-                $path === $retained_local_subtree['path']
-                || str_starts_with(
-                    $path,
-                    $retained_local_subtree['path'] . '/'
-                )
-            ) {
-                return true;
-            }
-            if (
-                strcmp(
-                    $path,
-                    $retained_local_subtree['path'] . '/'
-                ) <= 0
-            ) {
-                return false;
-            }
-            $fetch_state->retained_local_subtree_top_offset =
-                $retained_local_subtree['previous_offset'];
-        }
-        return false;
-    }
-
-    /**
-     * Refuses to remove a late file or symlink which blocks a fetched parent.
-     */
-    private function fetched_path_parents_allow_remote_change(
-        string $path
-    ): bool {
-        if (
-            !$this->maintain_previous_local_index
-            || $this->files_pull_conflict_policy === 'remote-wins'
-        ) {
-            return true;
-        }
-        $context = $this->files_pull_pair_context();
-        $relative_path = self::path_remainder_under(
-            $path,
-            $context['remote_document_root']
-        );
-        if ($relative_path === null) {
-            return true;
-        }
-        $parts = explode('/', trim($relative_path, '/'));
-        array_pop($parts);
-        $local_parent = $context['local_tree'];
-        $remote_parent = $context['remote_document_root'];
-        foreach ($parts as $part) {
-            if ($part === '') {
-                continue;
-            }
-            $local_parent .= '/' . $part;
-            $remote_parent .= '/' . $part;
-            clearstatcache(true, $local_parent);
-            if (
-                is_link($local_parent)
-                || (
-                    file_exists($local_parent)
-                    && !is_dir($local_parent)
-                )
-            ) {
-                return $this->should_apply_remote_change_after_planning(
-                    $remote_parent,
-                    true,
-                    null
-                );
-            }
-        }
-        return true;
-    }
-
-    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI fetch diagnostics represent arbitrary paths as base64.
-    /**
-     * Consumes the next planned-local-state record for one fetched path.
-     *
-     * @return array {
-     *     @type bool       $validate Whether the path state must be checked.
-     *     @type array|null $expected Planned local path state, or null when absent.
-     * }
-     * @phpstan-return array{validate:bool,expected:array<string,mixed>|null}
-     */
-    private function consume_fetched_path_planned_local_state(
-        string $path,
-        StreamingContext $context
-    ): array {
-        if (
-            $context->planned_local_state_checked_path === $path
-            && is_array($context->planned_local_state_checked_result)
-        ) {
-            return $context->planned_local_state_checked_result;
-        }
-        $fetch_state = $this->get_download_list_fetch_state(
-            $context->fetch_state_key
-        );
-        if ($fetch_state->applying_path === $path) {
-            $staged_file = $fetch_state->pending_file_install
-                ?? $fetch_state->staged_file;
-            $validate_local_state =
-                is_array($staged_file)
-                && ( $staged_file['remote_path_b64'] ?? null )
-                    === base64_encode($path)
-                    ? $staged_file['validate_local_state']
-                    : true;
-            $context->planned_local_state_checked_path = $path;
-            $context->planned_local_state_checked_result = [
-                'validate' => $validate_local_state,
-                'expected' =>
-                    $fetch_state->applying_expected_local_state,
-            ];
-            return $context->planned_local_state_checked_result;
-        }
-        if (!is_resource($context->planned_local_state_handle)) {
-            throw new RuntimeException(
-                'The fetch batch planned-local-state file is not open.'
-            );
-        }
-        $line = fgets($context->planned_local_state_handle);
-        if ($line === false) {
-            throw new RuntimeException(
-                'The fetch response contains a path missing from its '
-                . 'planned-local-state file.'
-            );
-        }
-        $record = json_decode(
-            $line,
-            true,
-            512,
-            JSON_THROW_ON_ERROR
-        );
-        $planned_path = base64_decode($record['path']);
-        $planned_local_state_offset =
-            ftell($context->planned_local_state_handle);
-        if (!is_int($planned_local_state_offset)) {
-            throw new RuntimeException(
-                'Failed to determine the fetch batch '
-                . 'planned-local-state offset.'
-            );
-        }
-        $context->planned_local_state_offset =
-            $planned_local_state_offset;
-        if ($planned_path !== $path) {
-            throw new RuntimeException(
-                'The fetch response path does not match its '
-                . 'planned-local-state record: response_path_b64='
-                . base64_encode($path)
-                . ', planned_path_b64='
-                . base64_encode($planned_path)
-                . '.'
-            );
-        }
-        $context->planned_local_state_checked_path = $path;
-        $context->planned_local_state_checked_result = [
-            'validate' =>
-                !empty($record['validate_local_state']),
-            'expected' => $record['expected_local_state'] ?? null,
-        ];
-        return $context->planned_local_state_checked_result;
-    }
-
-    /** Rejects a completed response which omitted requested path records. */
-    private function assert_fetch_planned_local_state_settled(
-        StreamingContext $context
-    ): void {
-        if ($context->planned_local_state_checked_path !== null) {
-            throw new RuntimeException(
-                'The file-fetch response completed before its current path '
-                . 'was settled.'
-            );
-        }
-        if (!is_resource($context->planned_local_state_handle)) {
-            throw new RuntimeException(
-                'The fetch batch planned-local-state file is not open.'
-            );
-        }
-        $offset = ftell($context->planned_local_state_handle);
-        $stat = fstat($context->planned_local_state_handle);
-        if (
-            !is_int($offset)
-            || !is_array($stat)
-            || $offset !== (int) $stat['size']
-        ) {
-            $next_path_b64 = null;
-            if (is_int($offset)) {
-                $line = fgets(
-                    $context->planned_local_state_handle
-                );
-                if (is_string($line)) {
-                    $record = json_decode($line, true);
-                    if (
-                        is_array($record)
-                        && is_string($record['path'] ?? null)
-                    ) {
-                        $next_path_b64 = $record['path'];
-                    }
-                }
-            }
-            throw new RuntimeException(
-                'The file-fetch response completed before every requested '
-                . 'path was settled'
-                . (
-                    $next_path_b64 === null
-                        ? '.'
-                        : ': next_path_b64='
-                            . $next_path_b64
-                            . '.'
-                )
-            );
-        }
-    }
-    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-
-    /** Settles a requested path reported missing before or during its stream. */
-    private function handle_missing_file_chunk(
-        array $chunk,
-        StreamingContext $context
-    ): void {
-        $encoded_path =
-            $chunk['headers']['x-file-path'] ?? '';
-        $path = is_string($encoded_path)
-            ? base64_decode($encoded_path, true)
-            : false;
-        if (
-            $path === false
-            || $path === ''
-            || base64_encode($path) !== $encoded_path
-        ) {
-            throw new RuntimeException(
-                'A missing file part has an invalid base64 path.'
-            );
-        }
-        $this->consume_fetched_path_planned_local_state(
-            $path,
-            $context
-        );
-        $this->discard_failed_fetched_file($path, $context);
-        $context->path_settled_in_current_chunk = true;
-        $this->audit_log(
-            'Missing on server: path_b64=' . base64_encode($path),
-            true
-        );
-    }
-
-    /** Closes only importer-owned staging after a terminal file response. */
-    private function discard_failed_fetched_file(
-        string $path,
-        StreamingContext $context
-    ): void {
-        $fetch_state = $this->get_download_list_fetch_state(
-            $context->fetch_state_key
-        );
-        $staged_file = $fetch_state->pending_file_install
-            ?? $fetch_state->staged_file;
-        if ($staged_file !== null) {
-            $paths =
-                $this->fetched_file_staging_paths(
-                    $staged_file
-                );
-            if ($paths['remote'] !== $path) {
-                throw new RuntimeException(
-                    'A terminal file response does not match the open '
-                    . 'files-pull staging path.'
-                );
-            }
-            $this->discard_fetched_file_staging(
-                $fetch_state,
-                $context
-            );
-        }
     }
 
     /**
@@ -15625,75 +10464,49 @@ PHP;
         }
 
         $error_type = $data["error_type"] ?? "unknown";
-        $reported_path = $data["path"] ?? "";
+        $path = $data["path"] ?? "";
         $message = $data["message"] ?? "Error";
+
+        $this->audit_log(
+            "REMOTE ERROR | phase={$phase} | type={$error_type} | path={$path} | message={$message}",
+            true,
+        );
 
         $is_file_error = in_array(
             $error_type,
-            [
-                "file_changed",
-                "file_missing",
-                "file_open",
-                "file_read",
-                "file_seek",
-            ],
+            ["file_changed", "file_missing", "file_open", "file_read"],
             true,
         );
-        $path = $reported_path;
-        if ($phase === 'files' && $is_file_error) {
-            $path = is_string($reported_path)
-                ? base64_decode($reported_path, true)
-                : false;
-            if (
-                $path === false
-                || $path === ''
-                || base64_encode($path) !== $reported_path
-            ) {
-                throw new RuntimeException(
-                    'A file-fetch error has an invalid base64 path.'
-                );
+        if ($path !== "" && $is_file_error) {
+            $local_path = $this->fs_root . $path;
+            if ($context->file_handle && $context->file_path === $local_path) {
+                fclose($context->file_handle);
+                $context->file_handle = null;
+                $context->file_path = null;
+                $context->file_ctime = null;
+                $context->file_bytes_written = 0;
             }
-            $this->consume_fetched_path_planned_local_state(
-                $path,
-                $context
-            );
-            $this->discard_failed_fetched_file($path, $context);
-            $context->path_settled_in_current_chunk = true;
+
+            if (
+                ( !file_exists($local_path) && !is_link($local_path) )
+                || $this->remove_local_path_without_following_symlinks($local_path)
+            ) {
+                $this->delete_index_entry($path);
+            }
+
             if ($error_type === "file_changed") {
                 $this->record_volatile_file($path);
             }
         }
-        $display_path = is_string($path) ? $path : '';
-        $audit_path = $phase === 'files' && $is_file_error
-            ? 'path_b64=' . base64_encode($display_path)
-            : 'path=' . $display_path;
-        $this->audit_log(
-            "REMOTE ERROR | phase={$phase} | type={$error_type} | "
-                . "{$audit_path} | message={$message}",
-            true,
-        );
 
-        $error_progress_path =
-            $phase === 'files' && $is_file_error
-                ? 'path_b64=' . base64_encode($display_path)
-                : $display_path;
-        $error_progress_message =
-            "Remote error: {$error_type} "
-            . $error_progress_path;
+        $error_progress_message = "Remote error: {$error_type} " . ($path !== "" ? $path : "");
         $this->progress->show_progress_line($error_progress_message);
         $this->output_progress(
             [
                 "type" => "error",
                 "phase" => $phase,
                 "error_type" => $error_type,
-                "path" =>
-                    $phase === 'files' && $is_file_error
-                        ? null
-                        : $display_path,
-                "path_b64" =>
-                    $phase === 'files' && $is_file_error
-                        ? base64_encode($display_path)
-                        : null,
+                "path" => $path,
                 "error_message" => $message,
                 "message" => $error_progress_message,
             ],
@@ -16837,13 +11650,14 @@ PHP;
 
         $this->audit_log("Executing curl request...", false);
         $this->output_progress(["debug" => "Waiting for server response..."]);
+        $result = curl_exec($ch);
+        $this->audit_log(
+            "curl_exec completed, result=" .
+                ($result === false ? "false" : "true"),
+            false,
+        );
+
         try {
-            $result = curl_exec($ch);
-            $this->audit_log(
-                "curl_exec completed, result=" .
-                    ($result === false ? "false" : "true"),
-                false,
-            );
             try {
                 $this->check_curl_error($ch);
             } catch (RuntimeException $curl_error) {
@@ -16926,33 +11740,21 @@ PHP;
     private function reset_state(): void
     {
         $preflight = $this->import_state()->preflight ?? null;
-        $remote_protocol_version =
-            $this->import_state()->remote_protocol_version ?? null;
-        $remote_protocol_min_version =
-            $this->import_state()->remote_protocol_min_version ?? null;
         $version = $this->import_state()->version ?? null;
         $webhost = $this->import_state()->webhost ?? null;
         $follow = $this->import_state()->follow_symlinks ?? false;
         $nonempty = $this->import_state()->fs_root_nonempty_behavior ?? "error";
         $max_packet = $this->import_state()->max_allowed_packet ?? null;
         $files_remap_fingerprint = $this->import_state()->files_remap_fingerprint ?? null;
-        $files_pull_staging_version =
-            $this->import_state()->files_pull_staging_version;
         $pull = $this->import_state()->pull_pipeline ?? null;
         $this->state = ImportState::from_array($this->default_state());
         $this->import_state()->preflight = $preflight;
-        $this->import_state()->remote_protocol_version =
-            $remote_protocol_version;
-        $this->import_state()->remote_protocol_min_version =
-            $remote_protocol_min_version;
         $this->import_state()->version = $version;
         $this->import_state()->webhost = $webhost;
         $this->import_state()->follow_symlinks = $follow;
         $this->import_state()->fs_root_nonempty_behavior = $nonempty;
         $this->import_state()->max_allowed_packet = $max_packet;
         $this->import_state()->files_remap_fingerprint = $files_remap_fingerprint;
-        $this->import_state()->files_pull_staging_version =
-            $files_pull_staging_version;
         if ($pull !== null) {
             $this->import_state()->pull_pipeline = $pull;
         }
@@ -16970,8 +11772,6 @@ PHP;
                 "remote_cursor" => null,
             ],
             "preflight" => null,
-            "remote_protocol_version" => null,
-            "remote_protocol_min_version" => null,
             "version" => null,
             "webhost" => null,
             "follow_symlinks" => true,
@@ -16982,8 +11782,6 @@ PHP;
             "max_allowed_packet" => null,
             "files_remap_fingerprint" => null,
             "files_pull_only_fingerprint" => null,
-            "files_pull_staging_version" =>
-                self::FILES_PULL_STAGING_VERSION,
             "files_pull_summary" => [
                 "files_pulled" => 0,
             ],
@@ -16996,21 +11794,8 @@ PHP;
             ],
             "diff" => [
                 "remote_offset" => 0,
-                "local_offset" => null,
                 "local_after" => null,
-                "conflict_policy" => null,
-                "conflict_policy_locked" => false,
-                "maintain_previous_local_index" => null,
-                "planned_local_offset" => 0,
                 "conflict_offset" => 0,
-                "retained_local_subtree_top_offset" => null,
-                "retained_local_subtree_stack_offset" => 0,
-                "download_list_offset" => null,
-                "skipped_download_list_offset" => null,
-                "pending_deleted_directory_top_offset" => null,
-                "pending_deleted_directory_stack_offset" => 0,
-                "pending_local_action" => null,
-                "conflict_processor_cursor" => null,
             ],
             "index" => [
                 "cursor" => null,
@@ -17021,13 +11806,6 @@ PHP;
                 "batch_file" => null,
                 "cursor" => null,
                 "batch_entries" => 0,
-                "planned_local_state_offset" => 0,
-                "applying_path" => null,
-                "applying_expected_local_state" => null,
-                "staged_file" => null,
-                "pending_file_install" => null,
-                "retained_local_subtree_top_offset" => null,
-                "retained_local_subtree_stack_offset" => 0,
             ],
             "fetch_skipped" => [
                 "offset" => 0,
@@ -17035,14 +11813,11 @@ PHP;
                 "batch_file" => null,
                 "cursor" => null,
                 "batch_entries" => 0,
-                "planned_local_state_offset" => 0,
-                "applying_path" => null,
-                "applying_expected_local_state" => null,
-                "staged_file" => null,
-                "pending_file_install" => null,
-                "retained_local_subtree_top_offset" => null,
-                "retained_local_subtree_stack_offset" => 0,
             ],
+            // Crash recovery: track in-progress file downloads
+            // If we crash mid-write, we can truncate to the expected size on resume
+            "current_file" => null,        // Path to file being written
+            "current_file_bytes" => null,  // Expected bytes written so far
             // Crash recovery: track SQL file size
             "sql_bytes" => null,           // Expected SQL file size
             // SQL streaming progress for user-facing statement counts.
@@ -17211,17 +11986,9 @@ PHP;
         $state["fetch"]["batch_file"] = $this->encode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );
-        $state["fetch"]["applying_path"] = $this->encode_state_path_value(
-            $state["fetch"]["applying_path"] ?? null,
+        $state["current_file"] = $this->encode_state_path_value(
+            $state["current_file"] ?? null,
         );
-        $state["fetch_skipped"]["batch_file"] =
-            $this->encode_state_path_value(
-                $state["fetch_skipped"]["batch_file"] ?? null,
-            );
-        $state["fetch_skipped"]["applying_path"] =
-            $this->encode_state_path_value(
-                $state["fetch_skipped"]["applying_path"] ?? null,
-            );
         $state["db_index"]["file"] = $this->encode_state_path_value(
             $state["db_index"]["file"] ?? null,
         );
@@ -17253,17 +12020,9 @@ PHP;
         $state["fetch"]["batch_file"] = $this->decode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );
-        $state["fetch"]["applying_path"] = $this->decode_state_path_value(
-            $state["fetch"]["applying_path"] ?? null,
+        $state["current_file"] = $this->decode_state_path_value(
+            $state["current_file"] ?? null,
         );
-        $state["fetch_skipped"]["batch_file"] =
-            $this->decode_state_path_value(
-                $state["fetch_skipped"]["batch_file"] ?? null,
-            );
-        $state["fetch_skipped"]["applying_path"] =
-            $this->decode_state_path_value(
-                $state["fetch_skipped"]["applying_path"] ?? null,
-            );
         $state["db_index"]["file"] = $this->decode_state_path_value(
             $state["db_index"]["file"] ?? null,
         );
@@ -17475,36 +12234,6 @@ PHP;
             return $this->default_state();
         }
 
-        $active_command =
-            $state['active_resumable_command'] ?? [];
-        $incomplete_legacy_fetch =
-            ( $active_command['command_name'] ?? null )
-                === 'files-pull'
-            && in_array(
-                $active_command['completion_state'] ?? null,
-                ['in_progress', 'partial'],
-                true
-            )
-            && in_array(
-                $active_command['current_stage'] ?? null,
-                ['fetch', 'fetch-skipped'],
-                true
-            )
-            && ( $state['files_pull_staging_version'] ?? null )
-                !== self::FILES_PULL_STAGING_VERSION;
-        if (
-            ( $state['current_file'] ?? null ) !== null
-            || ( $state['current_file_bytes'] ?? null ) !== null
-            || $incomplete_legacy_fetch
-        ) {
-            $state['files_pull_staging_version'] = 0;
-        } elseif (
-            !isset($state['files_pull_staging_version'])
-        ) {
-            $state['files_pull_staging_version'] =
-                self::FILES_PULL_STAGING_VERSION;
-        }
-
         $state = $this->normalize_state($state);
         $state = $this->decode_state_paths($state);
 
@@ -17517,10 +12246,7 @@ PHP;
      * Uses atomic write (temp file + rename) to prevent corruption if
      * the process is killed mid-write.
      */
-    private function save_state(
-        $state,
-        bool $update_runtime_status = true
-    ): void
+    private function save_state($state): void
     {
         // Keep the spinner alive between curl requests. save_state is
         // called frequently during streaming operations, so this fills
@@ -17551,9 +12277,6 @@ PHP;
             throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->state_file}");
         }
 
-        if (!$update_runtime_status) {
-            return;
-        }
         $indexed = $this->index_count();
         $files_imported = $this->files_imported; // Completed in this run
         $has_cursor =
@@ -17750,11 +12473,12 @@ class StreamingContext
     public $on_chunk = null;
     public $file_handle = null;
     public $file_path = null;
+    public $file_ctime = null;
     public $filesystem_root = null;
     public $chunk_fingerprints = [];
     public $need_client_slice = false;
     public $next_client_offset = 0;
-    // Bytes written to the current private staging file.
+    // Crash recovery: track bytes written for current file
     public $file_bytes_written = 0;
     // Last response stats from completion chunk
     public $response_stats = [];
@@ -17762,13 +12486,6 @@ class StreamingContext
     public $saw_completion = false;
     // When true, skip writing the current file (preserve-local mode)
     public $skip_current_file = false;
-    // Sequential planned-local-state sidecar retained for the current fetch request.
-    public $planned_local_state_handle = null;
-    public $planned_local_state_offset = 0;
-    public $planned_local_state_checked_path = null;
-    public $planned_local_state_checked_result = null;
-    public $fetch_state_key = "fetch";
-    public $path_settled_in_current_chunk = false;
 }
 
 /**
@@ -17777,12 +12494,6 @@ class StreamingContext
  * Callers catch this to skip the current file/directory/symlink gracefully.
  */
 class PreserveLocalSkipException extends RuntimeException {}
-
-/**
- * Yields an open file-fetch request to keep local destination removal bounded.
- */
-// phpcs:ignore Generic.Files.OneObjectStructurePerFile.MultipleFound,WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer exceptions share this CLI module.
-class FilesPullLocalStepPendingException extends RuntimeException {}
 
 /**
  * Thrown when a cURL request times out (CURLE_OPERATION_TIMEDOUT).
@@ -17957,6 +12668,15 @@ if (
             'aliases' => ['on-docroot-nonempty'],
         ],
         [
+            'name' => 'on-conflict',
+            'type' => 'value',
+            'target' => 'on_conflict',
+            'placeholder' => 'POLICY',
+            'valid_values' => ['stop', 'remote-wins', 'our-wins'],
+            'help' => 'Handle overlapping local and remote changes (stop|remote-wins|our-wins)',
+            'commands' => ['pull-files', 'files-pull'],
+        ],
+        [
             'name' => 'include-caches',
             'type' => 'flag',
             'target' => 'include_caches',
@@ -18020,15 +12740,6 @@ if (
             'placeholder' => 'DIR',
             'help' => 'Additional remote directory to include in the export',
             'commands' => ['pull-files', 'files-pull', 'files-index'],
-        ],
-        [
-            'name' => 'on-conflict',
-            'type' => 'value',
-            'target' => 'on_conflict',
-            'placeholder' => 'POLICY',
-            'valid_values' => ['stop', 'remote-wins', 'our-wins'],
-            'help' => 'Handle paths changed both locally and remotely (stop|remote-wins|our-wins; default: stop)',
-            'commands' => ['pull-files', 'files-pull'],
         ],
 
         // ── db-pull options ──────────────────────────────────────
@@ -18869,7 +13580,7 @@ if (
                 "site-export-api query which pull-files added.\n" .
                 "The output is a local minimized push operation plan before target\n" .
                 "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
-                "built-in exclusions include generated wp-content caches, version-\n" .
+                "default-skipped paths include generated wp-content caches, version-\n" .
                 "control data, node_modules, package-manager caches, OS metadata, and\n" .
                 "editor scratch files.\n" .
                 "Paths remain base64 text in JSONL output so\n" .

@@ -75,8 +75,6 @@ class FilesSyncStateTest extends TestCase
                 "remote_cursor" => null,
             ],
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
-            "remote_protocol_version" => 2,
-            "remote_protocol_min_version" => 1,
             "version" => null,
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
@@ -285,54 +283,6 @@ class FilesSyncStateTest extends TestCase
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
     }
 
-    public function testChangingAnUnlockedConflictPolicyKeepsTheLocalIndexSnapshot(): void
-    {
-        $snapshot =
-            $this->stateDir . '/.files-pull-diff-local-index.jsonl';
-        file_put_contents($snapshot, $this->indexLine('/wp-login.php', 1000, 100));
-        file_put_contents(
-            $this->stateDir . '/.files-pull-conflicts.jsonl',
-            ''
-        );
-        $planDirectory =
-            $this->stateDir . '/.files-pull-conflict-plan';
-        mkdir($planDirectory);
-        file_put_contents($planDirectory . '/cursor', 'open');
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "partial",
-                "current_stage" => "diff",
-            ],
-            'diff' => [
-                'local_offset' => 0,
-                'conflict_policy' => 'stop',
-                'conflict_policy_locked' => false,
-            ],
-        ]);
-
-        [$client, $reflection] = $this->prepareClient();
-        $reflection->getProperty(
-            'files_pull_conflict_policy'
-        )->setValue($client, 'remote-wins');
-        $reflection->getProperty(
-            'files_pull_conflict_policy_was_explicit'
-        )->setValue($client, true);
-        $reflection->getMethod(
-            'restore_files_pull_conflict_policy'
-        )->invoke($client);
-
-        $this->assertFileExists($snapshot);
-        $this->assertFileDoesNotExist(
-            $this->stateDir . '/.files-pull-conflicts.jsonl'
-        );
-        $this->assertDirectoryDoesNotExist($planDirectory);
-        $this->assertSame(
-            'remote-wins',
-            $this->readState()['diff']['conflict_policy'] ?? null
-        );
-    }
-
     /**
      * After a full `pull`, active_resumable_command points at the last stage
      * (db-apply), not files-pull, but pull_pipeline records a deferred tail. A
@@ -384,63 +334,6 @@ class FilesSyncStateTest extends TestCase
     // Preserve-local diff tests
     // ---------------------------------------------------------------
 
-    public function testDiffResumesFromSnapshotAfterWalShrinksMutableIndex(): void
-    {
-        $first = $this->indexLine('/a.txt', 1000, 1);
-        $second = $this->indexLine('/b.txt', 1000, 1);
-        $third = $this->indexLine('/c.txt', 1000, 1);
-        $snapshot =
-            $this->stateDir . '/.files-pull-diff-local-index.jsonl';
-        file_put_contents($snapshot, $first . $second . $third);
-
-        // The first local-only path was already deleted and its WAL replay
-        // removed it from the mutable index before this process resumed.
-        file_put_contents(
-            $this->stateDir . '/.import-index.jsonl',
-            $second . $third
-        );
-        file_put_contents(
-            $this->stateDir . '/.import-remote-index.jsonl',
-            $this->indexLine('/b.txt', 2000, 2)
-                . $this->indexLine('/c.txt', 2000, 2)
-        );
-        file_put_contents($this->fs_root . '/b.txt', 'b');
-        file_put_contents($this->fs_root . '/c.txt', 'c');
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "partial",
-                "current_stage" => "diff",
-            ],
-            'diff' => [
-                'remote_offset' => 0,
-                'local_offset' => strlen($first),
-                'download_list_offset' => 0,
-                'skipped_download_list_offset' => 0,
-            ],
-        ]);
-
-        [$client, $reflection] = $this->prepareClient();
-        $completed = $reflection->getMethod(
-            'diff_indexes_and_build_fetch_list'
-        )->invoke($client);
-
-        $this->assertTrue($completed);
-        $this->assertSame(
-            ['/b.txt', '/c.txt'],
-            $this->readDownloadList()
-        );
-        $state = $this->readState();
-        $this->assertSame(
-            filesize($snapshot),
-            $state['diff']['local_offset'] ?? null
-        );
-        $this->assertSame(
-            filesize($this->stateDir . '/.import-download-list.jsonl'),
-            $state['diff']['download_list_offset'] ?? null
-        );
-    }
-
     /**
      * In preserve-local mode, a file that is in the local index and changed
      * remotely (different ctime) must be added to the download list.
@@ -481,15 +374,6 @@ class FilesSyncStateTest extends TestCase
             '/wp-content/themes/flavor/style.css',
             $downloads,
             "A changed file in the local index must be re-downloaded, not skipped by preserve-local",
-        );
-        $snapshot =
-            $this->stateDir . '/.files-pull-diff-local-index.jsonl';
-        $this->assertFileExists($snapshot);
-        $state = $this->readState();
-        $this->assertSame(
-            filesize($snapshot),
-            $state['diff']['local_offset'] ?? null,
-            'The completed diff must save its immutable local-index boundary.',
         );
     }
 
@@ -556,15 +440,6 @@ class FilesSyncStateTest extends TestCase
                 "completion_state" => "in_progress",
                 "current_stage" => "fetch",
             ],
-            "preflight" => [
-                "data" => [
-                    "ok" => true,
-                    "runtime" => [
-                        "document_root" => "/",
-                    ],
-                ],
-                "http_code" => 200,
-            ],
         ]);
 
         [$client, $reflection] = $this->prepareClient();
@@ -572,12 +447,6 @@ class FilesSyncStateTest extends TestCase
         // Send a file chunk with new content
         $method = $reflection->getMethod('handle_file_chunk');
         $context = new \StreamingContext();
-        $context->planned_local_state_checked_path =
-            '/wp-content/themes/flavor/style.css';
-        $context->planned_local_state_checked_result = [
-            'validate' => false,
-            'expected' => null,
-        ];
         $chunk = [
             'headers' => [
                 'x-file-path' => base64_encode('/wp-content/themes/flavor/style.css'),
@@ -615,34 +484,12 @@ class CompletedFileFetchClient extends \ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
-        $file_list = $post_data['file_list'] ?? null;
-        if ($file_list instanceof \CURLFile) {
-            $entries = json_decode(
-                (string) file_get_contents($file_list->getFilename()),
-                true,
-                512,
-                JSON_THROW_ON_ERROR
-            );
-            foreach ($entries as $entry) {
-                $path_header = is_array($entry)
-                    ? $entry['path']
-                    : base64_encode($entry);
-                ( $context->on_chunk )( [
-                    "headers" => [
-                        "x-chunk-type" => "missing",
-                        "x-file-path" => $path_header,
-                        "x-cursor" => base64_encode($path_header),
-                    ],
-                    "body" => "",
-                ] );
-            }
-        }
-        ( $context->on_chunk )( [
+        ($context->on_chunk)([
             "headers" => [
                 "x-chunk-type" => "completion",
                 "x-status" => "complete",
             ],
             "body" => "",
-        ] );
+        ]);
     }
 }

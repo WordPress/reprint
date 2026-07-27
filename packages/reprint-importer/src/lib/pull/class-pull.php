@@ -289,6 +289,8 @@ class Pull
                 $state->active_resumable_command->remote_cursor = null;
                 $state->active_resumable_command->current_stage = null;
                 $state->consecutive_timeouts = 0;
+                $state->current_file = null;
+                $state->current_file_bytes = null;
                 $state->diff = new FileDiffProgressState();
                 $state->index = new RemoteFileIndexCursorState();
                 $state->fetch = new DownloadListFetchProgressState();
@@ -414,7 +416,6 @@ class Pull
                     $this->client->exit_code = 1;
                     throw new RuntimeException($preflight["error"] ?? "Preflight check failed");
                 }
-                $this->client->assert_remote_protocol_compatible();
                 $summary = null;
                 $data = $preflight["data"] ?? null;
                 if (is_array($data)) {
@@ -808,6 +809,8 @@ class Pull
         $state->active_resumable_command->current_stage = null;
         $state->consecutive_timeouts = 0;
         if ($reset_file_transfer_state) {
+            $state->current_file = null;
+            $state->current_file_bytes = null;
             $state->diff = new FileDiffProgressState();
             $state->fetch = new DownloadListFetchProgressState();
             $state->fetch_skipped = new DownloadListFetchProgressState();

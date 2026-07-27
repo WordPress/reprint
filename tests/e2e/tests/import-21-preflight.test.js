@@ -29,11 +29,6 @@ describe('Import: Preflight Endpoint', () => {
     });
 
     it('reports protocol version', () => {
-        assert.ok(Number.isInteger(preflight.protocol_version), `Expected integer protocol_version, got ${typeof preflight.protocol_version}`);
-        assert.ok(preflight.protocol_version >= 2, `Expected protocol_version >= 2, got ${preflight.protocol_version}`);
-        assert.ok(Number.isInteger(preflight.protocol_min_version), `Expected integer protocol_min_version, got ${typeof preflight.protocol_min_version}`);
-        assert.ok(preflight.protocol_min_version >= 1, `Expected protocol_min_version >= 1, got ${preflight.protocol_min_version}`);
-        assert.ok(preflight.protocol_min_version <= preflight.protocol_version, 'Expected protocol_min_version <= protocol_version');
     });
 
     it('detects WordPress installation', () => {

@@ -224,16 +224,17 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
         const statePath = join(tempDir, '.import-state.json');
         const state = JSON.parse(readFileSync(statePath, 'utf-8'));
 
-        assert.equal(
-            typeof state.diff.local_offset,
-            'number',
-            'Expected diff.local_offset to be persisted',
+        assert.equal(typeof state.diff.local_after, 'string', 'Expected diff.local_after to be persisted');
+        assert.ok(
+            state.diff.local_after.startsWith('base64:'),
+            `Expected base64-encoded diff.local_after, got: ${state.diff.local_after}`,
         );
-        assert.ok(state.diff.local_offset >= 0, 'Expected a non-negative diff.local_offset');
-        assert.equal(state.diff.local_after, null, 'Expected the legacy diff.local_after cursor to be cleared');
 
         if (typeof state.fetch.batch_file === 'string') {
             assert.ok(state.fetch.batch_file.startsWith('base64:'), 'Expected fetch.batch_file to use base64');
+        }
+        if (typeof state.current_file === 'string') {
+            assert.ok(state.current_file.startsWith('base64:'), 'Expected current_file to use base64');
         }
         if (state.db_index && typeof state.db_index.file === 'string') {
             assert.ok(state.db_index.file.startsWith('base64:'), 'Expected db_index.file to use base64');

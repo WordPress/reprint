@@ -109,8 +109,6 @@ class OnlyFilesPathPrefixTest extends TestCase
             'follow_symlinks' => false,
             'fs_root_nonempty_behavior' => 'preserve-local',
             'filter' => 'none',
-            'remote_protocol_version' => 2,
-            'remote_protocol_min_version' => 1,
         );
 
         file_put_contents(

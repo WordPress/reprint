@@ -21,14 +21,6 @@ final class FileFetchCompressionTest extends TestCase
         parent::tearDown();
     }
 
-    public function testObjectPathRequestsAdvanceTheExporterProtocol(): void
-    {
-        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
-
-        $this->assertSame(2, EXPORT_PROTOCOL_VERSION);
-        $this->assertSame(1, EXPORT_MIN_IMPORT_VERSION);
-    }
-
     public function testFileFetchUsesIdentityForBinaryPaths(): void
     {
         $siteDir = $this->tempDir . '/site';
@@ -41,34 +33,6 @@ final class FileFetchCompressionTest extends TestCase
         $this->assertStringStartsWith('--boundary-', $stdout);
         $this->assertFalse(@gzdecode($stdout), 'binary file_fetch should not be gzip framed');
         $this->assertStringContainsString('pretend-jpeg-bytes', $stdout);
-    }
-
-    public function testFileFetchAcceptsBase64PathObjectForNonUtf8Filename(): void
-    {
-        $siteDir = $this->tempDir . '/site';
-        mkdir($siteDir, 0755, true);
-        $filePath = $siteDir . "/photo-\xff.jpg";
-        // Darwin rejects non-UTF-8 path components at the filesystem boundary.
-        // The missing part still confirms that the endpoint preserved the bytes.
-        $fileWasCreated = @file_put_contents(
-            $filePath,
-            'non-utf8-path-bytes',
-        ) !== false;
-
-        $stdout = $this->runFileFetch($siteDir, [
-            ['path' => base64_encode($filePath)],
-        ]);
-
-        $this->assertStringStartsWith('--boundary-', $stdout);
-        $this->assertStringContainsString(
-            'X-File-Path: ' . base64_encode($filePath),
-            $stdout,
-        );
-        if ($fileWasCreated) {
-            $this->assertStringContainsString('non-utf8-path-bytes', $stdout);
-        } else {
-            $this->assertStringContainsString('X-Chunk-Type: missing', $stdout);
-        }
     }
 
     public function testFileFetchUsesGzipForTextOnlyPaths(): void
@@ -376,7 +340,16 @@ final class FileFetchCompressionTest extends TestCase
     private function runFileFetch(string $siteDir, array $paths): string
     {
         $listPath = $this->tempDir . '/file-list.json';
-        file_put_contents($listPath, json_encode($paths, JSON_THROW_ON_ERROR));
+        $fileList = array_map(
+            static function (string $path): array {
+                return ['path' => base64_encode($path)];
+            },
+            $paths
+        );
+        file_put_contents(
+            $listPath,
+            json_encode($fileList, JSON_THROW_ON_ERROR)
+        );
 
         $configPath = $this->tempDir . '/config.json';
         file_put_contents($configPath, json_encode([

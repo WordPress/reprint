@@ -72,8 +72,6 @@ class CurlTimeoutRecoveryTest extends TestCase
                 "remote_cursor" => null,
             ],
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
-            "remote_protocol_version" => 2,
-            "remote_protocol_min_version" => 1,
             "version" => null,
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
@@ -89,68 +87,6 @@ class CurlTimeoutRecoveryTest extends TestCase
     {
         $contents = file_get_contents($this->stateDir . '/.import-state.json');
         return json_decode($contents, true);
-    }
-
-    private function writePlannedLocalStateFile(string ...$paths): string
-    {
-        $file = $this->stateDir . '/planned-local-state.jsonl';
-        $lines = array_map(
-            static function (string $path): string {
-                return json_encode([
-                    'path' => base64_encode($path),
-                ]);
-            },
-            $paths
-        );
-        file_put_contents($file, implode("\n", $lines) . "\n");
-        return $file;
-    }
-
-    private function seedStagedFile(int $bytes): string
-    {
-        $remotePath = '/uploads/large.bin';
-        $filesystemRoot = realpath($this->fs_root);
-        $this->assertIsString($filesystemRoot);
-        $destinationPath = $filesystemRoot . $remotePath;
-        mkdir(dirname($destinationPath), 0755, true);
-        $stagingPath =
-            dirname($destinationPath)
-            . '/.reprint-1234567890abcdef.part';
-        file_put_contents($stagingPath, str_repeat('a', $bytes));
-        $stat = lstat($stagingPath);
-        $this->assertIsArray($stat);
-        $this->writeState([
-            "files_pull_staging_version" => 1,
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "in_progress",
-                "current_stage" => "fetch",
-            ],
-            "fetch" => [
-                "offset" => 0,
-                "next_offset" => 100,
-                "batch_file" => null,
-                "cursor" => self::fileCursorForBytes($bytes),
-                "applying_path" => $remotePath,
-                "staged_file" => [
-                    "remote_path_b64" => base64_encode($remotePath),
-                    "destination_path_b64" =>
-                        base64_encode($destinationPath),
-                    "staging_path_b64" =>
-                        base64_encode($stagingPath),
-                    "staging_dev" => (int) $stat["dev"],
-                    "staging_ino" => (int) $stat["ino"],
-                    "staging_bytes" => $bytes,
-                    "install_mode" => 0644,
-                    "remote_ctime" => 1234567890,
-                    "remote_size" => 1024,
-                    "remote_file_changed" => false,
-                    "discard_started" => false,
-                    "validate_local_state" => false,
-                ],
-            ],
-        ]);
-        return $stagingPath;
     }
 
     public static function fileCursorForBytes(int $bytes): string
@@ -254,7 +190,6 @@ class CurlTimeoutRecoveryTest extends TestCase
     public function testFileFetchTimeoutSavesPartialState()
     {
         $this->writeState([
-            "files_pull_staging_version" => 1,
             "active_resumable_command" => [
                 "command_name" => "files-pull",
                 "completion_state" => "in_progress",
@@ -276,7 +211,6 @@ class CurlTimeoutRecoveryTest extends TestCase
             null,
             base64_encode('{"path":"/photo.jpg","offset":4096}'),
             "fetch",
-            $this->writePlannedLocalStateFile('/photo.jpg'),
         );
 
         $this->assertFalse(
@@ -292,119 +226,27 @@ class CurlTimeoutRecoveryTest extends TestCase
         );
     }
 
-    public function testLegacyDirectFileCheckpointFailsClosedUntilAbort(): void
+    public function testFileFetchHardCrashCheckpointDoesNotPutCursorBehindBytes()
     {
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "partial",
-                "current_stage" => "fetch",
-            ],
-            "current_file" =>
-                $this->fs_root . '/uploads/large.bin',
-            "current_file_bytes" => 256,
-        ]);
+        $trackedPath = $this->fs_root . '/uploads/large.bin';
+        mkdir(dirname($trackedPath), 0755, true);
+        file_put_contents($trackedPath, str_repeat('a', 256));
 
-        [$client] = $this->prepareClient();
-        $this->assertSame(
-            0,
-            $client->get_import_state()
-                ->files_pull_staging_version
-        );
-        $client->save_import_state();
-        $saved = $this->readState();
-        $this->assertSame(
-            0,
-            $saved["files_pull_staging_version"]
-                ?? null
-        );
-        $this->assertArrayNotHasKey("current_file", $saved);
-
-        $reflection = new \ReflectionClass($client);
-        $reflection->getMethod('handle_abort')->invoke(
-            $client,
-            'db-apply'
-        );
-        $saved = $this->readState();
-        $this->assertSame(
-            0,
-            $saved["files_pull_staging_version"]
-                ?? null
-        );
-
-        $client->clear_files_pull_progress();
-        $saved = $this->readState();
-        $this->assertSame(
-            1,
-            $saved["files_pull_staging_version"]
-                ?? null
-        );
-
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "partial",
-                "current_stage" => "fetch",
-            ],
-            "current_file" =>
-                $this->fs_root . '/uploads/large.bin',
-            "current_file_bytes" => 256,
-        ]);
-        [$resumedClient] = $this->prepareClient();
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage(
-            'private regular-file staging schema'
-        );
-        $resumedClient->run_files_sync();
-    }
-
-    /**
-     * @dataProvider legacyFetchStageProvider
-     */
-    public function testLegacyFetchWithoutAFileCheckpointFailsClosed(
-        string $stage
-    ): void
-    {
         $this->writeState([
             "active_resumable_command" => [
                 "command_name" => "files-pull",
                 "completion_state" => "in_progress",
-                "current_stage" => $stage,
+                "current_stage" => "fetch",
             ],
-            "current_file" => null,
-            "current_file_bytes" => null,
+            "fetch" => [
+                "offset" => 0,
+                "next_offset" => 100,
+                "batch_file" => null,
+                "cursor" => self::fileCursorForBytes(256),
+            ],
+            "current_file" => $trackedPath,
+            "current_file_bytes" => 256,
         ]);
-
-        [$client] = $this->prepareClient();
-        $this->assertSame(
-            0,
-            $client->get_import_state()
-                ->files_pull_staging_version
-        );
-        $client->save_import_state();
-        [$client] = $this->prepareClient();
-        $this->assertSame(
-            0,
-            $client->get_import_state()
-                ->files_pull_staging_version
-        );
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage(
-            'private regular-file staging schema'
-        );
-        $client->run_files_sync();
-    }
-
-    /** @return iterable<string,array{string}> */
-    public static function legacyFetchStageProvider(): iterable
-    {
-        yield 'main fetch' => ['fetch'];
-        yield 'skipped-path fetch' => ['fetch-skipped'];
-    }
-
-    public function testFileFetchHardCrashCheckpointDoesNotPutCursorBehindBytes()
-    {
-        $stagingPath = $this->seedStagedFile(256);
 
         [$client, $reflection] = $this->prepareClient(
             InterruptedStreamedPartClient::class,
@@ -418,7 +260,6 @@ class CurlTimeoutRecoveryTest extends TestCase
                 null,
                 self::fileCursorForBytes(256),
                 "fetch",
-                $this->writePlannedLocalStateFile('/uploads/large.bin'),
             );
             $this->fail('Expected simulated hard crash during file fetch');
         } catch (\ReflectionException $e) {
@@ -431,9 +272,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         }
 
         $state = $this->readState();
-        $savedBytes =
-            $state["fetch"]["staged_file"]["staging_bytes"]
-                ?? null;
+        $savedBytes = $state["current_file_bytes"] ?? null;
         $savedCursorBytes = self::fileCursorBytes(
             $state["fetch"]["cursor"] ?? null,
         );
@@ -447,15 +286,29 @@ class CurlTimeoutRecoveryTest extends TestCase
             $savedCursorBytes,
             'A hard-crash checkpoint must not put the saved cursor behind the bytes retained on disk',
         );
-        $this->assertSame($savedBytes, filesize($stagingPath));
-        $this->assertFileDoesNotExist(
-            $this->fs_root . '/uploads/large.bin'
-        );
     }
 
     public function testFileFetchTimeoutKeepsThePreviousPartBoundary()
     {
-        $stagingPath = $this->seedStagedFile(256);
+        $trackedPath = $this->fs_root . '/uploads/large.bin';
+        mkdir(dirname($trackedPath), 0755, true);
+        file_put_contents($trackedPath, str_repeat('a', 256));
+
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
+            "fetch" => [
+                "offset" => 0,
+                "next_offset" => 100,
+                "batch_file" => null,
+                "cursor" => self::fileCursorForBytes(256),
+            ],
+            "current_file" => $trackedPath,
+            "current_file_bytes" => 256,
+        ]);
 
         [$client, $reflection] = $this->prepareClient(
             InterruptedStreamedPartClient::class,
@@ -467,7 +320,6 @@ class CurlTimeoutRecoveryTest extends TestCase
             ["timeout_during_part" => true],
             self::fileCursorForBytes(256),
             "fetch",
-            $this->writePlannedLocalStateFile('/uploads/large.bin'),
         ));
 
         // The timeout leaves half of the next 256-byte part on disk after its
@@ -479,70 +331,13 @@ class CurlTimeoutRecoveryTest extends TestCase
             256,
             self::fileCursorBytes($state["fetch"]["cursor"] ?? null),
         );
-        $this->assertSame(
-            256,
-            $state["fetch"]["staged_file"]["staging_bytes"] ?? null
-        );
-        $this->assertSame(384, filesize($stagingPath));
-        $this->assertFileDoesNotExist(
-            $this->fs_root . '/uploads/large.bin'
-        );
-
-        [$resumedClient, $resumedReflection] =
-            $this->prepareClient();
-        $resumedReflection->getMethod('download_file_fetch')->invoke(
-            $resumedClient,
-            null,
-            self::fileCursorForBytes(256),
-            "fetch",
-            $this->writePlannedLocalStateFile('/uploads/large.bin'),
-        );
-        $this->assertSame(256, filesize($stagingPath));
+        $this->assertSame(256, $state["current_file_bytes"] ?? null);
+        $this->assertSame(384, filesize($trackedPath));
     }
 
     // ---------------------------------------------------------------
     // download_remote_index: timeout saves state and returns false
     // ---------------------------------------------------------------
-
-    public function testRemoteIndexCompletionPublishesItsNextStage(): void
-    {
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "in_progress",
-                "current_stage" => "index",
-            ],
-            "index" => [
-                "cursor" => base64_encode('{"dir":"/wp-content","offset":500}'),
-            ],
-            "preflight" => [
-                "data" => [
-                    "ok" => true,
-                    "wp_detect" => [
-                        "roots" => [
-                            ["path" => "/srv/htdocs"],
-                        ],
-                    ],
-                ],
-                "http_code" => 200,
-            ],
-        ]);
-
-        [$client, $reflection] = $this->prepareClient(
-            SuccessTestClient::class,
-        );
-        $completed = $reflection->getMethod(
-            'download_remote_index'
-        )->invoke($client, null, 'prepare-diff');
-
-        $this->assertTrue($completed);
-        $state = $this->readState();
-        $this->assertNull($state['index']['cursor'] ?? null);
-        $this->assertSame(
-            'prepare-diff',
-            $state['active_resumable_command']['current_stage'] ?? null
-        );
-    }
 
     public function testRemoteIndexTimeoutSavesPartialState()
     {
@@ -900,7 +695,7 @@ class InterruptedStreamedPartClient extends \ImportClient
         ];
 
         $timeout_during_part = !empty($post_data["timeout_during_part"]);
-        ( $context->on_chunk )([
+        ($context->on_chunk)([
             "headers" => $headers,
             "body" => str_repeat('b', $timeout_during_part ? 128 : 256),
             "is_streaming_body" => true,
@@ -910,7 +705,7 @@ class InterruptedStreamedPartClient extends \ImportClient
                 "cURL error: Operation timed out while receiving a streamed file part"
             );
         }
-        ( $context->on_chunk )([
+        ($context->on_chunk)([
             "headers" => $headers,
             "body" => "",
             "is_streaming_close" => true,
@@ -935,11 +730,7 @@ class SuccessTestClient extends \ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
-        ( $context->on_chunk )([
-            'headers' => [
-                'x-chunk-type' => 'completion',
-                'x-status' => 'complete',
-            ],
-        ]);
+        // Signal completion
+        $context->saw_completion = true;
     }
 }

@@ -14,7 +14,6 @@ class PullFilterFakeClient extends \ImportClient
     public int $files_sync_runs = 0;
     public int $db_sync_runs = 0;
     public int $db_apply_runs = 0;
-    public int $remote_protocol_version = 2;
     public array $progress_events = [];
     public array $status_errors = [];
 
@@ -87,8 +86,6 @@ class PullFilterFakeClient extends \ImportClient
                 ],
             ],
         ];
-        $state->remote_protocol_version = $this->remote_protocol_version;
-        $state->remote_protocol_min_version = 1;
         $state->active_resumable_command->completion_state = "complete";
         $this->save_import_state();
     }
@@ -674,115 +671,6 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
         $this->assertSame('db-apply', $state["active_resumable_command"]["command_name"]);
         $this->assertSame(42, $state["apply"]["statements_executed"]);
-    }
-
-    public function testPullDbRepeatsAnIncompatiblePreflightAfterTheExporterIsUpdated(): void
-    {
-        $old_exporter_client = $this->makeClient(false);
-        $old_exporter_client->remote_protocol_version = 1;
-
-        try {
-            ob_start();
-            $old_exporter_client->run([
-                "command" => "pull-db",
-                "target_engine" => "sqlite",
-            ]);
-            $this->fail('Expected pull-db to stop on an incompatible exporter.');
-        } catch (\RuntimeException $error) {
-            $this->assertStringContainsString(
-                'requires exporter protocol v2 or newer',
-                $error->getMessage()
-            );
-        } finally {
-            ob_end_clean();
-        }
-
-        $state = $this->readState();
-        $this->assertSame(1, $old_exporter_client->preflight_runs);
-        $this->assertNull($state["pull_pipeline"]["last_completed_stage"]);
-
-        $updated_exporter_client = $this->makeClient(false);
-        ob_start();
-        $updated_exporter_client->run([
-            "command" => "pull-db",
-            "target_engine" => "sqlite",
-        ]);
-        ob_end_clean();
-
-        $state = $this->readState();
-        $this->assertSame(1, $updated_exporter_client->preflight_runs);
-        $this->assertSame(1, $updated_exporter_client->db_sync_runs);
-        $this->assertSame(1, $updated_exporter_client->db_apply_runs);
-        $this->assertSame(
-            'db-apply',
-            $state["pull_pipeline"]["last_completed_stage"]
-        );
-    }
-
-    /** @dataProvider resumedRemoteStageProvider */
-    public function testResumedRemoteStageRejectsACachedOldExporter(
-        string $command,
-        array $stages,
-        array $options
-    ): void {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "pull_pipeline" => [
-                    "started_by_command" => $command,
-                    "stage_sequence" => $stages,
-                    "last_completed_stage" => "preflight",
-                ],
-                "preflight" => [
-                    "http_code" => 200,
-                    "data" => ["ok" => true],
-                ],
-                "remote_protocol_version" => 1,
-                "remote_protocol_min_version" => 1,
-            ])
-        );
-        $client = new \ImportClient(
-            'http://127.0.0.1:1',
-            $this->stateDir,
-            $this->fs_root
-        );
-
-        try {
-            ob_start();
-            $client->run(["command" => $command] + $options);
-            $this->fail(
-                'Expected the resumed pipeline to reject the old exporter.'
-            );
-        } catch (\RuntimeException $error) {
-            $this->assertStringContainsString(
-                'requires exporter protocol v2 or newer',
-                $error->getMessage()
-            );
-        } finally {
-            ob_end_clean();
-        }
-
-        $state = $this->readState();
-        $this->assertSame(
-            'preflight',
-            $state["pull_pipeline"]["last_completed_stage"]
-        );
-    }
-
-    public static function resumedRemoteStageProvider(): array
-    {
-        return [
-            'files pull' => [
-                'pull-files',
-                ['preflight', 'files-pull'],
-                [],
-            ],
-            'database pull' => [
-                'pull-db',
-                ['preflight', 'db-pull', 'db-apply'],
-                ['target_engine' => 'sqlite'],
-            ],
-        ];
     }
 
     public function testPullDbRejectsConflictingInProgressPullFiles(): void

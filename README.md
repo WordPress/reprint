@@ -240,27 +240,14 @@ the `--on-fs-root-nonempty` flag controls this behavior. It takes the following 
 - `--on-fs-root-nonempty=error` (default): throw an error and abort.
 - `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
 
-**Local and remote changes**
+**Conflicting file changes**
 
-On a delta `files-pull` or `pull-files`, conflict detection requires compatible
-previous local and import baselines. Remote changes are measured from the last
-completed pull's import baseline, while local changes are measured from the
-previous local index advanced by a compatible pull or committed push.
-`--on-conflict` controls a path changed both in the local tree and on the source:
-Compatible pulls use `--filter=none`, omit `--include-caches` and `--remap`,
-and do not use `--on-fs-root-nonempty=preserve-local`.
+On a delta pull, `--on-conflict` controls a path changed both locally and
+remotely:
 
 - `--on-conflict=stop` (default): stop before changing the local tree.
-- `--on-conflict=remote-wins`: apply the source change.
-- `--on-conflict=our-wins`: retain the local path. The source change remains
-  pending for a later pull, and the local change remains pending for
-  `files-diff` and `files-push`.
-
-After a push, a later local edit may conservatively conflict with the pushed
-target change until a conflict policy resolves it.
-
-An initial pull has no earlier local path state to compare and therefore
-applies the source tree.
+- `--on-conflict=remote-wins`: apply the remote change.
+- `--on-conflict=our-wins`: keep the local path and leave both changes pending.
 
 **Filtering files**
 
@@ -623,8 +610,7 @@ If the JSON is invalid on load, the importer renames it to
   },
   "diff": {
     "remote_offset": 1024,        // byte offset into remote index
-    "local_offset": 1024,         // byte offset into immutable local-index snapshot
-    "local_after": null           // legacy path cursor, cleared after migration
+    "local_after": "base64..."    // last compared local path
   },
   "index": {
     "cursor": "..."               // file_index cursor
@@ -634,11 +620,7 @@ If the JSON is invalid on load, the importer renames it to
     "offset": 512,                // byte offset into download list
     "next_offset": 1024,
     "batch_file": null,
-    "cursor": "...",              // file_fetch cursor
-    "staged_file": {
-      "staging_path_b64": "...",
-      "staging_bytes": 1048576    // durable byte boundary in the private staging file
-    }
+    "cursor": "..."               // file_fetch cursor
   },
   "fetch_skipped": {              // used when --filter=skipped-earlier
     "offset": 0,
@@ -647,6 +629,10 @@ If the JSON is invalid on load, the importer renames it to
     "cursor": null
   },
 
+  // Crash recovery: if the importer dies mid-write, these let it
+  // truncate the partially-written file back to its last good state.
+  "current_file": "wp-content/uploads/photo.jpg",
+  "current_file_bytes": 1048576,  // expected size after last complete write
   "sql_bytes": 524288,            // expected db.sql size
   "sql_output": "file",           // "file" | "stdout" | "mysql"
 
@@ -730,4 +716,4 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. If `files-pull` has already quarantined a local directory which blocks a fetched file, resume until that fetched file settles before aborting. For `db-pull` and `db-index`, abort clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.

@@ -39,8 +39,6 @@ class FileTreeProducer
 
     /** State for the file currently being streamed in chunks. */
     private $streaming_file_handle = null;
-    /** @var array|null */
-    private $pending_resume_error = null;
 
     public function __destruct()
     {
@@ -101,7 +99,6 @@ class FileTreeProducer
 
         $this->current_chunk = null;
         $this->streaming_file_handle = null;
-        $this->pending_resume_error = null;
         $this->streaming_file_offset = 0;
         $this->current_file_meta = null;
         $this->last_emitted_path = null;
@@ -138,7 +135,6 @@ class FileTreeProducer
             : ($this->directories[0] ?? "/");
         $this->current_chunk = null;
         $this->streaming_file_handle = null;
-        $this->pending_resume_error = null;
         $this->paths_sorted = false;
         $this->paths_positioned = false;
         $this->paths_position = 0;
@@ -160,18 +156,10 @@ class FileTreeProducer
             clearstatcache(true, $path);
             $size = @filesize($path);
             if ($size === false) {
+                // File disappeared; treat as completed.
                 $this->current_file_meta = null;
                 $this->streaming_file_offset = 0;
-                $this->pending_resume_error = [
-                    "chunk" => [
-                        "type" => "error",
-                        "error_type" => "file_missing",
-                        "path" => $path,
-                        "message" => "File disappeared before resume",
-                    ],
-                    "ctime" => $ctime,
-                    "bytes" => $byte_offset,
-                ];
+                $this->last_emitted_path = $path;
             } else {
                 $this->current_file_meta = [
                     "path" => $path,
@@ -219,15 +207,6 @@ class FileTreeProducer
      */
     private function stream_step(): void
     {
-        if ($this->pending_resume_error !== null) {
-            $pending_resume_error = $this->pending_resume_error;
-            $this->pending_resume_error = null;
-            $this->last_emitted_path = $pending_resume_error["chunk"]["path"];
-            $this->last_emitted_ctime = $pending_resume_error["ctime"];
-            $this->current_chunk = $pending_resume_error["chunk"];
-            return;
-        }
-
         if ($this->current_file_meta !== null) {
             $this->stream_file_chunk($this->current_file_meta);
             return;
@@ -591,13 +570,7 @@ class FileTreeProducer
             "root" => base64_encode($this->filesystem_root),
         ];
 
-        if ($this->pending_resume_error !== null) {
-            $cursor["path"] = base64_encode(
-                $this->pending_resume_error["chunk"]["path"]
-            );
-            $cursor["ctime"] = $this->pending_resume_error["ctime"];
-            $cursor["bytes"] = $this->pending_resume_error["bytes"];
-        } elseif ($this->current_file_meta !== null) {
+        if ($this->current_file_meta !== null) {
             $cursor["path"] = base64_encode($this->current_file_meta["path"]);
             $cursor["ctime"] = $this->current_file_meta["ctime"];
             $cursor["bytes"] = $this->streaming_file_offset;

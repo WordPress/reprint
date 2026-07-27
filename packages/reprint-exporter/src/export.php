@@ -18,32 +18,6 @@ if (!ob_get_level()) {
 }
 
 
-/**
- * The wire-protocol version this export plugin speaks.
- *
- * Both the export plugin (server) and the importer (client) are deployed
- * independently.  These two constants let them detect incompatibility at
- * preflight time instead of producing silent corruption.
- *
- * EXPORT_PROTOCOL_VERSION is sent to the importer in the preflight JSON
- * response as `protocol_version`.  Bump it whenever a change to the wire
- * protocol (cursor encoding, multipart structure, header names, endpoint
- * parameters, response format) would break an older importer.
- */
-define('EXPORT_PROTOCOL_VERSION', 2);
-
-/**
- * The oldest *importer* protocol version this export plugin can talk to.
- *
- * Sent to the importer in the preflight response as `protocol_min_version`.
- * The importer checks that its own IMPORT_PROTOCOL_VERSION is >= this value;
- * if not, it tells the user to update the importer.
- *
- * Raise this when you drop backward-compatibility with old importers.
- * Keep it equal to EXPORT_PROTOCOL_VERSION if no backward compat is needed.
- */
-define('EXPORT_MIN_IMPORT_VERSION', 1);
-
 // File type mask + file type values (top bits of st_mode)
 define('STAT_TYPE_MASK',   0170000);
 define('STAT_TYPE_SOCKET', 0140000);
@@ -2079,8 +2053,6 @@ function endpoint_preflight(array $config): array
         "ok" => $ok,
         "error" => $preflight_error,
         "timestamp" => time(),
-        "protocol_version" => EXPORT_PROTOCOL_VERSION,
-        "protocol_min_version" => EXPORT_MIN_IMPORT_VERSION,
         "wp_detect" => [
             "found" => !empty($wp_detect["roots"]),
             "searched" => $wp_detect["searched"],
@@ -2821,9 +2793,6 @@ function emit_file_index_error(
 
 /**
  * Streams files from a client-provided path list (uploaded as JSON).
- *
- * Entries may be legacy path strings or objects whose `path` value is base64
- * text for raw filesystem path bytes.
  */
 function endpoint_file_fetch(
     array $config,
@@ -2864,14 +2833,7 @@ function endpoint_file_fetch(
     }
     $paths = [];
     foreach ($decoded as $entry) {
-        if (is_array($entry)) {
-            $paths[] = base64_decode($entry["path"]);
-            continue;
-        }
-        if (!is_string($entry) || $entry === "") {
-            continue;
-        }
-        $paths[] = $entry;
+        $paths[] = base64_decode($entry["path"]);
     }
 
     $chunk_size = $config["chunk_size"] ?? FileTreeProducer::DEFAULT_CHUNK_SIZE;
@@ -3089,14 +3051,14 @@ function path_head_looks_like_text(string $path): bool
 }
 
 /**
- * Reports whether a path matches a built-in file-index exclusion.
+ * Reports whether a path belongs to the established default file-index skip set.
  *
  * @param string $path Filesystem path to classify.
  * @return bool Whether the path is omitted unless caches are included.
  */
-function path_matches_built_in_exclusion(string $path): bool
+function path_is_default_skipped(string $path): bool
 {
-    return FileIndexProcessor::path_matches_built_in_exclusion($path);
+    return FileIndexProcessor::path_is_default_skipped($path);
 }
 
 /**

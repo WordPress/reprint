@@ -91,13 +91,6 @@ class TypeSwapTest extends TestCase
     public function testFileChunkReplacesSymlinkToDirectory()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
-        $client->get_import_state()->preflight = [
-            'data' => [
-                'runtime' => [
-                    'document_root' => '/',
-                ],
-            ],
-        ];
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -112,7 +105,7 @@ class TypeSwapTest extends TestCase
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('handle_file_chunk');
 
-        $context = $this->streamingContextForPath('/swapped-path');
+        $context = new \StreamingContext();
         $chunk = [
             'headers' => [
                 'x-file-path' => base64_encode('/swapped-path'),
@@ -163,11 +156,7 @@ class TypeSwapTest extends TestCase
             ],
         ];
 
-        $method->invoke(
-            $client,
-            $chunk,
-            $this->streamingContextForPath('/swapped-dir')
-        );
+        $method->invoke($client, $chunk);
 
         $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');
         $this->assertTrue(is_dir($symlinkPath), 'Should be a real directory now');
@@ -182,13 +171,6 @@ class TypeSwapTest extends TestCase
     public function testFileChunkUnderFormerSymlink()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
-        $client->get_import_state()->preflight = [
-            'data' => [
-                'runtime' => [
-                    'document_root' => '/',
-                ],
-            ],
-        ];
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -203,24 +185,18 @@ class TypeSwapTest extends TestCase
 
         // Step 1: directory chunk replaces the symlink
         $dirMethod = $reflection->getMethod('handle_directory_chunk');
-        $dirMethod->invoke(
-            $client,
-            [
-                'headers' => [
-                    'x-directory-path' => base64_encode('/parent'),
-                    'x-directory-ctime' => '1234567890',
-                ],
+        $dirMethod->invoke($client, [
+            'headers' => [
+                'x-directory-path' => base64_encode('/parent'),
+                'x-directory-ctime' => '1234567890',
             ],
-            $this->streamingContextForPath('/parent')
-        );
+        ]);
 
         $this->assertTrue(is_dir($symlinkPath), 'Should be a real directory after dir chunk');
 
         // Step 2: file chunk writes a nested file
         $fileMethod = $reflection->getMethod('handle_file_chunk');
-        $context = $this->streamingContextForPath(
-            '/parent/sub/file.txt'
-        );
+        $context = new \StreamingContext();
         $fileMethod->invoke($client, [
             'headers' => [
                 'x-file-path' => base64_encode('/parent/sub/file.txt'),
@@ -269,16 +245,5 @@ class TypeSwapTest extends TestCase
         $this->assertTrue(is_dir($symlinkPath), 'top should be a real directory');
         $this->assertTrue(is_dir($fsRoot . '/top/sub'), 'sub should exist');
         $this->assertTrue(is_dir($fsRoot . '/top/sub/deep'), 'deep should exist');
-    }
-
-    private function streamingContextForPath(string $path): \StreamingContext
-    {
-        $context = new \StreamingContext();
-        $context->planned_local_state_checked_path = $path;
-        $context->planned_local_state_checked_result = [
-            'validate' => false,
-            'expected' => null,
-        ];
-        return $context;
     }
 }

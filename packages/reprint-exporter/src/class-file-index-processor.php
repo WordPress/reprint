@@ -77,9 +77,6 @@ final class FileIndexProcessor {
     /** @var array|null Directory failure produced by the most recent step. */
     private $directory_error = null;
 
-    /** @var string|null Built-in exclusion root settled by the most recent step. */
-    private $built_in_exclusion_root = null;
-
     /** @var bool Whether close() has been called. */
     private $closed = false;
 
@@ -275,7 +272,6 @@ final class FileIndexProcessor {
         $this->step_status = null;
         $this->index_entries = [];
         $this->directory_error = null;
-        $this->built_in_exclusion_root = null;
 
         // Emit the parent links discovered during start() before descendants.
         // They share one cursor boundary because traversal has not begun yet.
@@ -317,12 +313,8 @@ final class FileIndexProcessor {
 
         // Apply omissions before lstat() and before a directory can enter the
         // stack. Omitted subtrees therefore cost no extra filesystem calls.
-        if (
-            !$this->include_caches
-            && self::path_matches_built_in_exclusion($path)
-        ) {
+        if (!$this->include_caches && self::path_is_default_skipped($path)) {
             $this->step_status = self::STATUS_SKIPPED;
-            $this->built_in_exclusion_root = $path;
             return true;
         }
         if (
@@ -447,16 +439,6 @@ final class FileIndexProcessor {
     }
 
     /**
-     * Returns the built-in exclusion root settled by the most recent step.
-     *
-     * Storage-path omissions and non-skipped steps return null.
-     */
-    public function get_built_in_exclusion_root(): ?string
-    {
-        return $this->built_in_exclusion_root;
-    }
-
-    /**
      * Returns the directory failure produced by the most recent step.
      *
      * @return array|null {
@@ -527,12 +509,12 @@ final class FileIndexProcessor {
     }
 
     /**
-     * Reports whether a path matches a built-in file-index exclusion.
+     * Reports whether a path belongs to the established default skip set.
      *
      * @param string $path Filesystem path to classify.
      * @return bool Whether the path should be omitted unless caches are included.
      */
-    public static function path_matches_built_in_exclusion(string $path): bool
+    public static function path_is_default_skipped(string $path): bool
     {
         // Sentinel slashes make component matches independent of whether the
         // component appears at the beginning, middle, or end of the path.
