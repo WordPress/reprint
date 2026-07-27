@@ -309,7 +309,7 @@ function create_db_connection(array $creds, array $options = [])
     $merged_options = $options + $default_options;
 
     return new PDO(
-        "mysql:host={$creds['db_host']};dbname={$creds['db_name']};charset=utf8mb4",
+        build_pdo_dsn($creds['db_host'], $creds['db_name']),
         $creds["db_user"],
         $creds["db_password"],
         $merged_options
