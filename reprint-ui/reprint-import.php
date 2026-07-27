@@ -658,7 +658,7 @@ function run_local_activation(): array {
     } elseif ($sqlite_size === 0) {
         $error = 'SQLite was not produced by the importer';
     } elseif (!$has_real_data) {
-        $error = 'db-apply did not land any data (wp_options=' . json_encode($row_counts['wp_options'])
+        $error = 'Database apply did not land any data (wp_options=' . json_encode($row_counts['wp_options'])
               . ', wp_users=' . json_encode($row_counts['wp_users']) . ')';
     }
 

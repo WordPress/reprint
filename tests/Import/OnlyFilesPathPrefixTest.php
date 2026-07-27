@@ -238,7 +238,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --only while resuming files-pull');
+        $this->expectExceptionMessage('Cannot change --only while resuming files pull');
         $this->call($c, 'assert_files_pull_only_unchanged_while_resuming', array(true));
     }
 
@@ -261,7 +261,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         ));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --only while resuming files-pull');
+        $this->expectExceptionMessage('Cannot change --only while resuming files pull');
         $this->runFilesPullWithOnly(array(':wp-uploads:'));
     }
 

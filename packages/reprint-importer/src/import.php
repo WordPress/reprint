@@ -651,6 +651,7 @@ class ImportClient
      */
     public function audit_log(string $message, bool $to_console = true): void
     {
+        $message = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $message) ?? $message;
         $timestamp = date("Y-m-d H:i:s");
         $log_line = "[{$timestamp}] {$message}\n";
 
@@ -745,16 +746,17 @@ class ImportClient
      */
     public function audit_log_argv(string $command, array $argv, ?string $pair = null): void
     {
-        // Mask the remote URL (argv[2]) to avoid logging secrets embedded in query strings.
+        // Grouped commands shift the URL position, so mask secrets in every argument.
         $masked = $argv;
-        if (isset($masked[2]) && $command !== 'apply-runtime') {
-            $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
-            if ($command === 'files-push') {
-                $masked[2] = self::mask_files_push_url_user_info($masked[2]);
-            }
-        }
         foreach ($masked as $argument_index => $argument) {
-            if (is_string($argument) && strpos($argument, '--secret=') === 0) {
+            if (!is_string($argument)) {
+                continue;
+            }
+            $masked[$argument_index] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $argument);
+            if ($command === 'files-push' && strpos($argument, '://') !== false) {
+                $masked[$argument_index] = self::mask_files_push_url_user_info($masked[$argument_index]);
+            }
+            if (strpos($argument, '--secret=') === 0) {
                 $masked[$argument_index] = '--secret=***';
             }
         }
@@ -842,7 +844,7 @@ class ImportClient
             true,
         );
 
-        $this->progress->show_lifecycle_line("{$count} file(s) changed during sync and need re-syncing (run files-pull again):\n");
+        $this->progress->show_lifecycle_line("{$count} file(s) changed during sync and need re-syncing (run files pull again):\n");
 
         foreach ($files as $path => $changes) {
             $suffix = $changes >= 3
@@ -857,7 +859,7 @@ class ImportClient
                 "type" => "volatile_files",
                 "files" => $files,
                 "count" => $count,
-                "message" => "{$count} file(s) changed during sync and need re-syncing (run files-pull again)",
+                "message" => "{$count} file(s) changed during sync and need re-syncing (run files pull again)",
             ],
             true,
         );
@@ -1216,7 +1218,7 @@ class ImportClient
             try {
                 $this->run_db_apply($options);
                 $final_status = $this->import_state()->active_resumable_command->completion_state ?? "complete";
-                $this->output_progress(["status" => $final_status, "message" => "db-apply {$final_status}"]);
+                $this->output_progress(["status" => $final_status, "message" => "database apply {$final_status}"]);
                 if ($final_status === "partial") {
                     $this->exit_code = 2;
                 }
@@ -1497,7 +1499,7 @@ class ImportClient
         }
         if (!flock($lock_handle, LOCK_EX | LOCK_NB)) {
             fclose($lock_handle);
-            throw new RuntimeException('Another files-diff or files-pull process is using this target and local tree.');
+            throw new RuntimeException('Another files-diff or files pull process is using this target and local tree.');
         }
         return $lock_handle;
     }
@@ -2416,7 +2418,7 @@ class ImportClient
         $entry = $this->import_state()->preflight ?? null;
         if (!is_array($entry) || empty($entry["data"])) {
             throw new RuntimeException(
-                "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
+                "No source inspection found. Run 'source inspect' first.",
             );
         }
     }
@@ -2757,7 +2759,7 @@ class ImportClient
                 if (!$has_skipped) {
                     throw new RuntimeException(
                         "--filter=skipped-earlier was requested but there is no skipped file list. " .
-                            "Run files-pull with --filter=essential-files first.",
+                            "Run files pull with --filter=essential-files first.",
                     );
                 }
                 $this->audit_log(
@@ -2800,7 +2802,7 @@ class ImportClient
                 true,
             );
 
-            $this->progress->show_lifecycle_line("files-pull already complete: {$index_size} files indexed\n");
+            $this->progress->show_lifecycle_line("files pull already complete: {$index_size} files indexed\n");
             if ($has_skipped) {
                 $this->progress->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
             } else {
@@ -2812,7 +2814,7 @@ class ImportClient
                 "command" => "files-pull",
                 "files_indexed" => $index_size,
                 "has_skipped" => $has_skipped,
-                "message" => "files-pull already complete: {$index_size} files indexed",
+                "message" => "files pull already complete: {$index_size} files indexed",
             ], true);
             return;
         }
@@ -2829,7 +2831,7 @@ class ImportClient
         ) {
             throw new RuntimeException(
                 "--filter=skipped-earlier was requested but there is no completed sync with skipped files. " .
-                    "Run files-pull with --filter=essential-files first.",
+                    "Run files pull with --filter=essential-files first.",
             );
         }
 
@@ -2866,7 +2868,7 @@ class ImportClient
                 true,
             );
 
-            $this->progress->show_lifecycle_line("Resuming files-pull\n");
+            $this->progress->show_lifecycle_line("Resuming files pull\n");
             $this->progress->show_lifecycle_line("  Stage: {$stage}\n");
             $this->progress->show_lifecycle_line("  Already indexed: {$index_size} files\n");
             $this->output_progress([
@@ -2875,7 +2877,7 @@ class ImportClient
                 "command" => "files-pull",
                 "stage" => $stage,
                 "index_size" => $index_size,
-                "message" => "Resuming files-pull (stage: {$stage}, indexed: {$index_size} files)",
+                "message" => "Resuming files pull (stage: {$stage}, indexed: {$index_size} files)",
             ], true);
         } else {
             // Starting fresh — validate that target directory is empty.
@@ -2908,7 +2910,7 @@ class ImportClient
                     true,
                 );
 
-                $this->progress->show_lifecycle_line("Starting files-pull (delta)\n");
+                $this->progress->show_lifecycle_line("Starting files pull (delta)\n");
                 $this->progress->show_lifecycle_line("  Index contains: {$index_size} files\n");
                 $this->progress->show_lifecycle_line("  Stage: index\n");
                 $this->output_progress([
@@ -2917,7 +2919,7 @@ class ImportClient
                     "command" => "files-pull",
                     "delta" => true,
                     "index_size" => $index_size,
-                    "message" => "Starting files-pull (delta, {$index_size} files indexed)",
+                    "message" => "Starting files pull (delta, {$index_size} files indexed)",
                 ], true);
             } else {
                 $this->audit_log(
@@ -2925,12 +2927,12 @@ class ImportClient
                     true,
                 );
 
-                $this->progress->show_lifecycle_line("Starting files-pull\n");
+                $this->progress->show_lifecycle_line("Starting files pull\n");
                 $this->output_progress([
                     "type" => "lifecycle",
                     "event" => "starting",
                     "command" => "files-pull",
-                    "message" => "Starting files-pull",
+                    "message" => "Starting files pull",
                 ], true);
             }
         }
@@ -2952,13 +2954,14 @@ class ImportClient
         $this->progress->clear_progress_line();
         $index_size = $this->index_count();
         $label = $is_delta ? "files-pull (delta)" : "files-pull";
+        $display_label = $is_delta ? "files pull (delta)" : "files pull";
 
         $this->audit_log(
             sprintf("%s complete: %d files indexed", $label, $index_size),
             true,
         );
 
-        $this->progress->show_lifecycle_line("{$label} complete: {$index_size} files indexed\n");
+        $this->progress->show_lifecycle_line("{$display_label} complete: {$index_size} files indexed\n");
         $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $this->output_progress([
             "type" => "lifecycle",
@@ -2967,7 +2970,7 @@ class ImportClient
             "delta" => $is_delta,
             "files_indexed" => $index_size,
             "audit_log" => $this->audit_log,
-            "message" => "{$label} complete: {$index_size} files indexed",
+            "message" => "{$display_label} complete: {$index_size} files indexed",
         ], true);
 
         $this->report_volatile_files();
@@ -3662,22 +3665,23 @@ class ImportClient
                 $sql_exists = file_exists($sql_file);
                 if ($sql_exists) {
                     throw new RuntimeException(
-                        "db-pull already completed and db.sql exists. Use --abort flag to start over.",
+                        "database dump already completed and db.sql exists. Use --abort to start over.",
                     );
                 } else {
                     throw new RuntimeException(
-                        "db-pull marked complete but db.sql is missing. Use --abort flag to re-sync.",
+                        "database dump is complete but db.sql is missing. Use --abort to run it again.",
                     );
                 }
             } else {
                 throw new RuntimeException(
-                    "db-pull already completed. Use --abort flag to start over.",
+                    "database dump already completed. Use --abort to start over.",
                 );
             }
         }
 
         if ($has_progress) {
             $stage = $this->import_state()->active_resumable_command->current_stage ?? "db-index";
+            $display_stage = $stage === "db-index" ? "database index" : $stage;
             $this->audit_log(
                 sprintf(
                     "RESUME db-pull | stage=%s | cursor=%s",
@@ -3689,13 +3693,13 @@ class ImportClient
                 true,
             );
 
-            $this->progress->show_lifecycle_line("Resuming db-pull (stage: {$stage})\n");
+            $this->progress->show_lifecycle_line("Resuming database dump (stage: {$display_stage})\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
                 "command" => "db-pull",
                 "stage" => $stage,
-                "message" => "Resuming db-pull (stage: {$stage})",
+                "message" => "Resuming database dump (stage: {$display_stage})",
             ], true);
         } else {
             // Starting fresh
@@ -3709,12 +3713,12 @@ class ImportClient
 
             $this->audit_log("START db-pull", true);
 
-            $this->progress->show_lifecycle_line("Starting db-pull\n");
+            $this->progress->show_lifecycle_line("Starting database dump\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
                 "command" => "db-pull",
-                "message" => "Starting db-pull",
+                "message" => "Starting database dump",
             ], true);
         }
 
@@ -3768,7 +3772,7 @@ class ImportClient
 
         $this->audit_log("db-pull complete", true);
 
-        $this->progress->show_lifecycle_line("db-pull complete\n");
+        $this->progress->show_lifecycle_line("database dump complete\n");
         if ($this->sql_output_mode === "file") {
             $this->progress->show_lifecycle_line("SQL file: {$sql_file}\n");
         } elseif ($this->sql_output_mode === "stdout") {
@@ -3783,7 +3787,7 @@ class ImportClient
             "command" => "db-pull",
             "sql_output_mode" => $this->sql_output_mode,
             "audit_log" => $this->audit_log,
-            "message" => "db-pull complete",
+            "message" => "database dump complete",
         ];
         if ($this->sql_output_mode === "file") {
             $db_sync_complete["sql_file"] = $sql_file;
@@ -3857,7 +3861,7 @@ class ImportClient
             );
         } else {
             throw new RuntimeException(
-                "No domain data found. Run db-pull first, or place a db.sql file in {$this->state_dir}.",
+                "No domain data found. Run database dump first, or place a db.sql file in {$this->state_dir}.",
             );
         }
 
@@ -4058,7 +4062,7 @@ class ImportClient
      * The effective fs root is --fs-root + the remote site's document_root
      * prefix (from preflight). For example, if the remote document_root is
      * /srv/htdocs and --fs-root is ./files, the effective fs root is
-     * ./files/srv/htdocs. If the site was flattened with flat-docroot,
+     * ./files/srv/htdocs. If the site was flattened with layout flatten,
      * pass the flattened directory as --fs-root directly and the prefix
      * is not applied.
      */
@@ -4067,14 +4071,14 @@ class ImportClient
         $runtime = $options["runtime"] ?? null;
         if (empty($runtime)) {
             throw new InvalidArgumentException(
-                "apply-runtime requires --runtime=RUNTIME."
+                "runtime prepare requires --runtime=RUNTIME."
             );
         }
 
         $output_dir = $options["output_dir"] ?? null;
         if (empty($output_dir)) {
             throw new InvalidArgumentException(
-                "apply-runtime requires --output-dir=DIR to write runtime configuration files"
+                "runtime prepare requires --output-dir=DIR to write runtime configuration files"
             );
         }
 
@@ -4082,8 +4086,8 @@ class ImportClient
         $entry = $this->import_state()->preflight ?? null;
         if (!is_array($entry) || empty($entry["data"])) {
             throw new RuntimeException(
-                "apply-runtime requires a prior preflight run. " .
-                "Run 'preflight' first to capture the source site's environment."
+                "runtime prepare requires a prior source inspection. " .
+                "Run 'source inspect' first to capture the source site's environment."
             );
         }
 
@@ -4121,7 +4125,7 @@ class ImportClient
                 throw new RuntimeException(
                     "Effective fs root does not exist: {$effective_fs_root}\n" .
                     "The remote document_root was: {$remote_doc_root}\n" .
-                    "If you used flat-docroot, pass the flattened directory " .
+                    "If you used layout flatten, pass the flattened directory " .
                     "with --flat-document-root instead of --fs-root."
                 );
             }
@@ -4309,7 +4313,7 @@ class ImportClient
             "paths_removed" => $manifest->paths_to_remove,
             "extra_directories" => $manifest->extra_directories,
             "start_config" => $start_config,
-            "message" => "apply-runtime complete (runtime: {$runtime})",
+            "message" => "runtime prepare complete (runtime: {$runtime})",
         ]);
 
         if (!$this->progress->is_mode('pipeline')) {
@@ -4359,7 +4363,7 @@ class ImportClient
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
             "condition" => "file_not_found",
-            "description" => "Proxy missing uploads from the source site until files-pull completes",
+            "description" => "Proxy missing uploads from the source site until files pull completes",
         ];
         $this->audit_log(
             "APPLY-RUNTIME | enabled remote upload proxy ({$base_url})",
@@ -4439,7 +4443,7 @@ class ImportClient
         $flatten_to = $options["flatten_to"] ?? null;
         if (empty($flatten_to)) {
             throw new InvalidArgumentException(
-                "flat-docroot requires --flatten-to=PATH",
+                "layout flatten requires --flatten-to=PATH",
             );
         }
 
@@ -4490,7 +4494,7 @@ class ImportClient
         if ($abspath === null) {
             throw new RuntimeException(
                 "Cannot determine WordPress ABSPATH from preflight data. " .
-                    "Run preflight first to detect the WordPress installation.",
+                    "Run source inspect first to detect the WordPress installation.",
             );
         }
 
@@ -5016,8 +5020,9 @@ class ImportClient
 
     /**
      * If --new-site-url is set, derive the source origin from the export URL
-     * and append implicit --rewrite-url mappings for both HTTP and HTTPS
-     * variants of the old URL to $options. The new URL is used verbatim.
+     * or cached source inspection and append implicit --rewrite-url mappings
+     * for both HTTP and HTTPS variants of the old URL to $options. The new URL
+     * is used verbatim.
      */
     private function resolve_new_site_url_option(array &$options): void
     {
@@ -5025,10 +5030,29 @@ class ImportClient
             return;
         }
 
-        $parsed_url = parse_url($this->remote_url);
-        if (!$parsed_url || !isset($parsed_url['scheme'], $parsed_url['host'])) {
+        $preflight_data = $this->import_state()->preflight["data"] ?? [];
+        $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
+        $source_urls = [
+            $this->remote_url,
+            $paths_urls["home_url"] ?? null,
+            $paths_urls["site_url"] ?? null,
+            $preflight_data["database"]["wp"]["home"] ?? null,
+            $preflight_data["database"]["wp"]["siteurl"] ?? null,
+        ];
+        $parsed_url = null;
+        foreach ($source_urls as $source_url) {
+            if (!is_string($source_url)) {
+                continue;
+            }
+            $candidate = parse_url($source_url);
+            if ($candidate && isset($candidate['scheme'], $candidate['host'])) {
+                $parsed_url = $candidate;
+                break;
+            }
+        }
+        if ($parsed_url === null) {
             throw new InvalidArgumentException(
-                "--new-site-url requires a valid export URL to derive the source site origin.",
+                "--new-site-url requires a valid export URL or source inspection to derive the source site origin.",
             );
         }
 
@@ -5180,7 +5204,7 @@ class ImportClient
 
         if (!$target_user || !$target_db) {
             throw new InvalidArgumentException(
-                "db-apply with --target-engine=mysql requires --target-user and --target-db.",
+                "database apply with --target-engine=mysql requires --target-user and --target-db.",
             );
         }
 
@@ -5224,7 +5248,7 @@ class ImportClient
         $sql_file = $this->state_dir . "/db.sql";
         if (!file_exists($sql_file)) {
             throw new RuntimeException(
-                "db.sql not found in {$this->state_dir}. Run db-pull first.",
+                "db.sql not found in {$this->state_dir}. Run database dump first.",
             );
         }
 
@@ -5273,7 +5297,7 @@ class ImportClient
 
         if ($current_status === "complete") {
             throw new RuntimeException(
-                "db-apply already completed. Use --abort flag to re-run.",
+                "database apply already completed. Use --abort to run it again.",
             );
         }
 
@@ -5291,14 +5315,14 @@ class ImportClient
                 ),
                 true,
             );
-            $this->progress->show_lifecycle_line("Resuming db-apply (executed: {$statements_executed} statements)\n");
+            $this->progress->show_lifecycle_line("Resuming database apply (executed: {$statements_executed} statements)\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
                 "command" => "db-apply",
                 "statements_executed" => $statements_executed,
                 "bytes_read" => $bytes_read,
-                "message" => "Resuming db-apply (executed: {$statements_executed} statements)",
+                "message" => "Resuming database apply (executed: {$statements_executed} statements)",
             ], true);
         } else {
             $this->import_state()->active_resumable_command->command_name = "db-apply";
@@ -5312,12 +5336,12 @@ class ImportClient
             $bytes_read = 0;
 
             $this->audit_log("START db-apply", true);
-            $this->progress->show_lifecycle_line("Starting db-apply\n");
+            $this->progress->show_lifecycle_line("Starting database apply\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
                 "command" => "db-apply",
-                "message" => "Starting db-apply",
+                "message" => "Starting database apply",
             ], true);
         }
 
@@ -5599,7 +5623,7 @@ class ImportClient
                     "phase" => "db-apply",
                     "statements_executed" => $statements_executed,
                     "statements_total" => $statements_total,
-                    "message" => "db-apply partial: {$statements_executed} statements executed",
+                    "message" => "database apply partial: {$statements_executed} statements executed",
                 ], true);
             } else {
                 // Deactivate host-specific plugins before marking complete.
@@ -5646,14 +5670,14 @@ class ImportClient
                     "phase" => "db-apply",
                     "statements_executed" => $statements_executed,
                     "statements_total" => $statements_total,
-                    "message" => "db-apply complete ({$statements_executed} statements executed)",
+                    "message" => "database apply complete ({$statements_executed} statements executed)",
                 ]);
 
                 if (!$this->progress->is_mode('pipeline')) {
                     // Clear the progress line before printing the final message
                     $this->progress->clear_progress_line();
                 }
-                $this->progress->show_lifecycle_line("db-apply complete ({$statements_executed} statements executed)\n");
+                $this->progress->show_lifecycle_line("database apply complete ({$statements_executed} statements executed)\n");
             }
         } finally {
             fclose($sql_handle);
@@ -5887,11 +5911,11 @@ class ImportClient
         if ($current_status === "complete") {
             if ($tables_exists) {
                 throw new RuntimeException(
-                    "db-index already completed and db-tables.jsonl exists. Use --abort flag to start over.",
+                    "database index already completed and db-tables.jsonl exists. Use --abort to start over.",
                 );
             } else {
                 throw new RuntimeException(
-                    "db-index marked complete but db-tables.jsonl is missing. Use --abort flag to re-run.",
+                    "database index is complete but db-tables.jsonl is missing. Use --abort to run it again.",
                 );
             }
         }
@@ -5906,12 +5930,12 @@ class ImportClient
             $this->save_state($this->state);
 
             $this->audit_log("START db-index", true);
-            $this->progress->show_lifecycle_line("Starting db-index\n");
+            $this->progress->show_lifecycle_line("Starting database index\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "starting",
                 "command" => "db-index",
-                "message" => "Starting db-index",
+                "message" => "Starting database index",
             ], true);
         } else {
             $this->audit_log(
@@ -5921,12 +5945,12 @@ class ImportClient
                 ),
                 true,
             );
-            $this->progress->show_lifecycle_line("Resuming db-index\n");
+            $this->progress->show_lifecycle_line("Resuming database index\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "resuming",
                 "command" => "db-index",
-                "message" => "Resuming db-index",
+                "message" => "Resuming database index",
             ], true);
         }
 
@@ -5950,7 +5974,7 @@ class ImportClient
             true,
         );
 
-        $this->progress->show_lifecycle_line("db-index complete: {$tables} tables\n");
+        $this->progress->show_lifecycle_line("database index complete: {$tables} tables\n");
         $this->progress->show_lifecycle_line("Table stats: {$tables_file}\n");
         $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $this->output_progress([
@@ -5960,7 +5984,7 @@ class ImportClient
             "tables" => $tables,
             "tables_file" => $tables_file,
             "audit_log" => $this->audit_log,
-            "message" => "db-index complete: {$tables} tables",
+            "message" => "database index complete: {$tables} tables",
         ], true);
     }
 
@@ -6211,7 +6235,7 @@ class ImportClient
         if (empty($roots)) {
             throw new RuntimeException(
                 "No root directories found. Either add directory[]=... to the " .
-                    "export URL, or run preflight first so directories can be auto-detected.",
+                    "export URL, or run source inspect first so directories can be auto-detected.",
             );
         }
 
@@ -8568,7 +8592,7 @@ class ImportClient
         if ($previous !== null && $previous !== $fingerprint) {
             throw new RuntimeException(
                 "Cannot change --remap rules while reusing the same files index. " .
-                    "Use the original --remap rules, or use a new --state-dir for a fresh files-pull.",
+                    "Use the original --remap rules, or use a new --state-dir for a fresh files pull.",
             );
         }
 
@@ -8611,8 +8635,8 @@ class ImportClient
 
         if ($previous !== null && $previous !== $fingerprint) {
             throw new RuntimeException(
-                "Cannot change --only while resuming files-pull. " .
-                    "Use the original --only values, or use --abort to start a new files-pull.",
+                "Cannot change --only while resuming files pull. " .
+                    "Use the original --only values, or use --abort to start a new files pull.",
             );
         }
 
@@ -8651,8 +8675,8 @@ class ImportClient
 
         if ($previous !== null && $previous !== $fingerprint) {
             throw new RuntimeException(
-                "Cannot change the --follow-symlinks bundle directory for an existing files-pull. " .
-                    "Use the original value, or use --abort to start a new files-pull.",
+                "Cannot change the --follow-symlinks bundle directory for an existing files pull. " .
+                    "Use the original value, or use --abort to start a new files pull.",
             );
         }
 
@@ -8933,7 +8957,7 @@ class ImportClient
 
             if ($value === null) {
                 throw new InvalidArgumentException(
-                    "Cannot resolve token \"{$token}\": not available in preflight data. Run preflight first."
+                    "Cannot resolve token \"{$token}\": not available in preflight data. Run source inspect first."
                 );
             }
 
@@ -11974,6 +11998,22 @@ if (
             'help_section' => 'global',
             'commands' => [],
         ],
+        [
+            'name' => 'cached',
+            'type' => 'flag',
+            'target' => 'cached',
+            'help' => 'Check the source inspection already stored in --state-dir',
+            'commands' => ['preflight-assert'],
+        ],
+        [
+            'name' => 'porcelain',
+            'type' => 'value',
+            'target' => 'porcelain',
+            'placeholder' => 'VERSION',
+            'valid_values' => ['v1'],
+            'help' => 'Print the stable v1 status format',
+            'commands' => ['import-metadata'],
+        ],
 
         // ── files-pull options ───────────────────────────────────
         [
@@ -11982,7 +12022,7 @@ if (
             'target' => 'filter',
             'placeholder' => 'MODE',
             'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
-            'help' => 'Filter which files to download (pull/pull-files: none|essential-files; files-pull also supports skipped-earlier)',
+            'help' => 'Filter which files to download (pull/pull-files: none|essential-files; files pull also supports skipped-earlier)',
             'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
@@ -12411,7 +12451,7 @@ if (
         echo "Mirror any WordPress site over HTTP.\n";
         echo "Version " . get_importer_version() . "\n";
         echo "\n";
-        echo "Usage: reprint <command> <remote-url> [options]\n";
+        echo "Usage: reprint <command> [arguments] [options]\n";
         echo "\n";
 
         $high = array_filter($command_info, fn($i) => ($i['level'] ?? 'low') === 'high');
@@ -12454,6 +12494,36 @@ if (
     }
 
     /**
+     * Render the actions available below one command group.
+     */
+    function reprint_cli_render_group_help(string $group, array $command_info): void
+    {
+        $prefix = "{$group} ";
+        $commands = array_filter(
+            $command_info,
+            fn($_, $name) => strpos($name, $prefix) === 0,
+            ARRAY_FILTER_USE_BOTH
+        );
+
+        // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- CLI help is plain text.
+        echo "Usage: reprint {$group} <command> [arguments] [options]\n";
+        echo "\n";
+        echo "Commands:\n";
+        $max_len = max(array_map(
+            fn($name) => strlen(substr($name, strlen($prefix))),
+            array_keys($commands)
+        ));
+        foreach ($commands as $name => $info) {
+            $action = substr($name, strlen($prefix));
+            // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- CLI help is plain text.
+            echo "  " . str_pad($action, $max_len + 2) . $info["short"] . "\n";
+        }
+        echo "\n";
+        // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- CLI help is plain text.
+        echo "Run 'reprint {$group} <command> --help' for command-specific help.\n";
+    }
+
+    /**
      * Render per-command --help output.
      *
      * The "Options:" section is auto-generated from $option_defs so that
@@ -12478,11 +12548,12 @@ if (
         // shown when the command usage names them, so command-specific help
         // matches what the CLI requires without duplicating every command name
         // in the option definition.
-        $cmd_options = array_filter($option_defs, function ($d) use ($command, $usage) {
+        $internal_command = $info["command"] ?? $command;
+        $cmd_options = array_filter($option_defs, function ($d) use ($internal_command, $usage) {
             if (($d['help'] ?? null) === null) {
                 return false;
             }
-            if (isset($d['commands']) && in_array($command, $d['commands'], true)) {
+            if (isset($d['commands']) && in_array($internal_command, $d['commands'], true)) {
                 return true;
             }
             return
@@ -12562,7 +12633,7 @@ if (
         echo "  2. Enter a shared secret and save\n";
         echo "  3. Use the same secret with reprint:\n";
         echo "\n";
-        echo "     {$dim}php reprint.phar preflight https://your-site.com \\\n";
+        echo "     {$dim}php reprint.phar source inspect https://your-site.com \\\n";
         echo "       --secret=YOUR_SECRET \\\n";
         echo "       --state-dir=./state --fs-root=./files{$reset}\n";
         echo "\n";
@@ -12639,12 +12710,12 @@ if (
     $command_info = [
         "pull" => [
             "level" => "high",
-            "short" => "Clone a remote site (preflight + files + database + import)",
+            "short" => "Clone a remote site (source inspection + files + database + import)",
             "description" =>
                 "Full site clone in a single command. Composes lower-level commands into\n" .
                 "a resumable pipeline:\n" .
                 "\n" .
-                "  1. Preflight — probe the remote site environment\n" .
+                "  1. Source inspection — probe the remote site environment\n" .
                 "  2. Files     — download all remote files into --fs-root\n" .
                 "  3. Database  — download the SQL dump\n" .
                 "  4. Import    — apply SQL to a local database (if --target-db)\n" .
@@ -12696,8 +12767,8 @@ if (
             "description" =>
                 "Runs the file side of the pull pipeline:\n" .
                 "\n" .
-                "  1. Preflight — probe the remote site environment\n" .
-                "  2. files-pull — download all files, or a selected subset\n" .
+                "  1. Source inspection — probe the remote site environment\n" .
+                "  2. files pull — download all files, or a selected subset\n" .
                 "\n" .
                 "This gives files the same retry and resume behavior as pull,\n" .
                 "without running the database stages.\n",
@@ -12716,9 +12787,9 @@ if (
             "description" =>
                 "Runs the database side of the pull pipeline:\n" .
                 "\n" .
-                "  1. Preflight — probe the remote site environment\n" .
-                "  2. db-pull — download the SQL dump into --state-dir/db.sql\n" .
-                "  3. db-apply — import the dump into a local database\n" .
+                "  1. Source inspection — probe the remote site environment\n" .
+                "  2. database dump — download the SQL dump into --state-dir/db.sql\n" .
+                "  3. database apply — import the dump into a local database\n" .
                 "\n" .
                 "This gives the database the same retry and resume behavior as pull,\n" .
                 "without running the file or runtime stages. With no MySQL target\n" .
@@ -12746,9 +12817,11 @@ if (
                 "any other reprint command can connect to it.\n",
             "extra" => null,
         ],
-        "preflight" => [
+        "source inspect" => [
+            "command" => "preflight",
             "level" => "low",
             "short" => "Probe the remote site and cache its environment",
+            "usage" => "reprint source inspect <remote-url> --state-dir=DIR --fs-root=DIR [options]",
             "description" =>
                 "Contacts the remote site and collects environment details:\n" .
                 "PHP/MySQL versions, memory limits, filesystem access, database\n" .
@@ -12760,24 +12833,28 @@ if (
                 "Exits 0 if the site reported OK, 1 otherwise.\n",
             "extra" => null,
         ],
-        "preflight-assert" => [
+        "source check" => [
+            "command" => "preflight-assert",
             "level" => "low",
-            "short" => "Verify the remote site can be mirrored (exits 0 or 1)",
+            "short" => "Check whether the cached source inspection passed",
+            "usage" => "reprint source check --cached --state-dir=DIR",
             "description" =>
-                "Runs the same check as the preflight command, then evaluates\n" .
+                "Reads the source inspection already stored in --state-dir and evaluates\n" .
                 "key assertions:\n" .
                 "\n" .
                 "  - Remote site responded with HTTP 200\n" .
-                "  - Preflight OK flag is set\n" .
+                "  - Source inspection OK flag is set\n" .
                 "  - Filesystem directories are accessible\n" .
                 "  - Database connection works\n" .
                 "\n" .
                 "Prints a PASS/FAIL summary and exits 0 if all checks pass, 1 if not.\n",
             "extra" => null,
         ],
-        "files-pull" => [
+        "files pull" => [
+            "command" => "files-pull",
             "level" => "low",
             "short" => "Pull all files (initial) or only changes (delta)",
+            "usage" => "reprint files pull <remote-url> --state-dir=DIR --fs-root=DIR [options]",
             "description" =>
                 "Downloads files from the remote site into --fs-root.\n" .
                 "\n" .
@@ -12832,7 +12909,7 @@ if (
                 "Sends the existing local tree at --fs-root to the target exporter API.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
-                "It does not require pull preflight.\n" .
+                "It does not require a prior source inspection.\n" .
                 "\n" .
                 "Each process runs one sender until it completes, reaches a caller time or\n" .
                 "memory boundary, or receives a signal handled by this PHP runtime.\n" .
@@ -12862,9 +12939,11 @@ if (
                 "Does not download any file contents.\n",
             "extra" => null,
         ],
-        "files-stats" => [
+        "files stats" => [
+            "command" => "files-stats",
             "level" => "low",
             "short" => "Show file counts and sizes from the local index",
+            "usage" => "reprint files stats --state-dir=DIR --fs-root=DIR",
             "description" =>
                 "Reads local index files to report (no network calls):\n" .
                 "\n" .
@@ -12872,85 +12951,96 @@ if (
                 "  - Files not yet downloaded and their combined size\n" .
                 "\n" .
                 "Output is JSON with 'indexed' and 'pending' sections.\n" .
-                "Requires a prior files-index or files-pull run.\n",
+                "Requires a prior files-index or files pull run.\n",
             "extra" => null,
         ],
-        "db-pull" => [
+        "database dump" => [
+            "command" => "db-pull",
             "level" => "low",
             "short" => "Pull the database as a SQL dump (index + download)",
+            "usage" => "reprint database dump <remote-url> --state-dir=DIR --fs-root=DIR [options]",
             "description" =>
                 "Indexes remote tables, then streams the full SQL dump into\n" .
                 "--state-dir/db.sql (default), to stdout, or directly into a\n" .
                 "MySQL connection. Resumes from the last cursor if interrupted.\n" .
-                "Discovered domains are cached for later use by db-apply.\n",
+                "Discovered domains are cached for later use by database apply.\n",
             "extra" =>
                 "Output modes:\n" .
                 "  file    Write to --state-dir/db.sql (default)\n" .
                 "  stdout  Write raw SQL to stdout; progress goes to stderr\n" .
                 "  mysql   Stream directly into a MySQL connection\n",
         ],
-        "db-index" => [
+        "database index" => [
+            "command" => "db-index",
             "level" => "low",
             "short" => "Pull table metadata from the remote database",
+            "usage" => "reprint database index <remote-url> --state-dir=DIR --fs-root=DIR [options]",
             "description" =>
                 "Fetches table metadata (name, estimated rows, data size) from\n" .
                 "the remote server and writes it to --state-dir/db-tables.jsonl.\n" .
-                "Useful for planning before a full db-pull.\n",
+                "Useful for planning before a full database dump.\n",
             "extra" =>
                 "Output files:\n" .
                 "  db-tables.jsonl  One JSON object per table\n",
         ],
-        "db-domains" => [
+        "database domains" => [
+            "command" => "db-domains",
             "level" => "low",
             "short" => "Extract domains from the pulled SQL dump",
+            "usage" => "reprint database domains --state-dir=DIR",
             "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
                 "\n" .
-                "If .import-domains.json exists (cached by db-pull), it is read\n" .
+                "If .import-domains.json exists (cached by database dump), it is read\n" .
                 "directly. Otherwise, db.sql is scanned and the result is cached\n" .
                 "for future calls. No network calls.\n" .
                 "\n" .
                 "Example:\n" .
-                "  reprint db-domains - --state-dir=/path/to/state\n",
+                "  reprint database domains --state-dir=/path/to/state\n",
             "extra" => null,
         ],
-        "import-metadata" => [
+        "status" => [
+            "command" => "import-metadata",
             "level" => "low",
             "short" => "Print local import lifecycle metadata as JSON",
-            "usage" => "reprint import-metadata --state-dir=DIR",
+            "usage" => "reprint status --porcelain=v1 --state-dir=DIR",
             "description" =>
                 "Reads --state-dir/.import-state.json and prints metadata for\n" .
                 "host integrations. No network calls are made.\n",
             "extra" =>
                 "Example:\n" .
-                "  reprint import-metadata --state-dir=./state | jq '.hasCompletedOnce'\n",
+                "  reprint status --porcelain=v1 --state-dir=./state | jq '.hasCompletedOnce'\n",
         ],
-        "db-apply" => [
+        "database apply" => [
+            "command" => "db-apply",
             "level" => "low",
             "short" => "Import the SQL dump into a local MySQL or SQLite database",
+            "usage" => "reprint database apply --state-dir=DIR --fs-root=DIR [options]",
             "description" =>
                 "Reads db.sql from --state-dir, optionally rewrites URLs, and executes\n" .
                 "all statements against a target database. Resumable. Saves target\n" .
-                "database credentials to state for use by apply-runtime.\n",
+                "database credentials to state for use by runtime prepare.\n",
             "extra" =>
                 "MySQL example:\n" .
-                "  reprint db-apply - --state-dir=./state --fs-root=./files \\\n" .
+                "  reprint database apply --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-user=root --target-db=wp_new \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n" .
                 "\n" .
                 "SQLite example:\n" .
-                "  reprint db-apply - --state-dir=./state --fs-root=./files \\\n" .
+                "  reprint database apply --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-engine=sqlite --target-sqlite-path=/path/to/db.sqlite \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n",
         ],
-        "flat-docroot" => [
+        "layout flatten" => [
+            "command" => "flat-docroot",
             "level" => "low",
             "short" => "Reassemble pulled files into a standard WordPress layout",
+            "usage" => "reprint layout flatten --state-dir=DIR --fs-root=DIR --flatten-to=PATH [options]",
             "description" =>
                 "Creates a directory at --flatten-to with symlinks that map the\n" .
                 "pulled files back into a vanilla WordPress directory structure.\n" .
                 "\n" .
-                "Uses preflight paths (ABSPATH, WP_CONTENT_DIR, WP_PLUGIN_DIR,\n" .
+                "Uses source inspection paths (ABSPATH, WP_CONTENT_DIR, WP_PLUGIN_DIR,\n" .
                 "WPMU_PLUGIN_DIR, uploads basedir) to locate each component\n" .
                 "within --fs-root, even when they reside in different parent\n" .
                 "directories on the source server (e.g. WP Cloud with ABSPATH at\n" .
@@ -12961,22 +13051,24 @@ if (
                 "the command stops with an error unless --force is specified.\n",
             "extra" => null,
         ],
-        "apply-runtime" => [
+        "runtime prepare" => [
+            "command" => "apply-runtime",
             "level" => "low",
             "short" => "Generate server config and prepare the site to run locally",
+            "usage" => "reprint runtime prepare --state-dir=DIR (--fs-root=DIR|--flat-document-root=DIR) [options]",
             "description" =>
                 "Generates server configuration (runtime.php, nginx.conf or start.sh)\n" .
-                "from preflight data and removes production-only drop-ins and mu-plugins\n" .
+                "from source inspection data and removes production-only drop-ins and mu-plugins\n" .
                 "that would crash outside the original host.\n" .
                 "\n" .
-                "If db-apply was run first, embeds the target database credentials\n" .
+                "If database apply was run first, embeds the target database credentials\n" .
                 "into runtime.php automatically.\n" .
                 "\n" .
                 "Does not require a remote URL — reads only from local state.\n" .
                 "\n" .
                 "Pass --fs-root for the raw download directory (the remote document_root\n" .
                 "path is appended automatically), or --flat-document-root for a directory\n" .
-                "created by flat-docroot (used as-is). These are mutually exclusive.\n",
+                "created by layout flatten (used as-is). These are mutually exclusive.\n",
             "extra" =>
                 "Runtime modes:\n" .
                 "  nginx-fpm      — writes runtime.php + nginx.conf\n" .
@@ -12984,7 +13076,7 @@ if (
                 "  playground-cli — writes runtime.php + blueprint.json\n" .
                 "\n" .
                 "Database configuration:\n" .
-                "  When db-apply has been run before apply-runtime, the target database\n" .
+                "  When database apply has been run before runtime prepare, the target database\n" .
                 "  engine and credentials are read from state and included in runtime.php\n" .
                 "  as DB_* constants. For MySQL targets this means DB_HOST, DB_NAME,\n" .
                 "  DB_USER, and DB_PASSWORD. For SQLite targets, the sqlite-database-\n" .
@@ -13009,11 +13101,11 @@ if (
                 "\n" .
                 "Examples:\n" .
                 "  # From raw download directory:\n" .
-                "  reprint apply-runtime --state-dir=./state \\\n" .
+                "  reprint runtime prepare --state-dir=./state \\\n" .
                 "    --fs-root=./files --output-dir=./runtime --runtime=php-builtin\n" .
                 "\n" .
                 "  # From flattened layout:\n" .
-                "  reprint apply-runtime --state-dir=./state \\\n" .
+                "  reprint runtime prepare --state-dir=./state \\\n" .
                 "    --flat-document-root=./flat --output-dir=./runtime --runtime=php-builtin\n" .
                 "\n" .
                 "  bash ./runtime/start.sh\n",
@@ -13026,18 +13118,62 @@ if (
         exit(1);
     }
 
-    $command = $argv[1];
-
-    // Legacy command names that still work on the CLI.
-    $command_aliases = [
-        "files-sync" => "files-pull",
-        "db-sync" => "db-pull",
-        "flat-document-root" => "flat-docroot",
-        "flatten-docroot" => "flat-docroot",
-    ];
-    if (isset($command_aliases[$command])) {
-        $command = $command_aliases[$command];
+    $reprint_requested_command = $argv[1];
+    $reprint_command_groups = ["source", "files", "database", "layout", "runtime"];
+    $reprint_group_help_requested =
+        $argc === 2 || in_array($argv[2] ?? null, ["--help", "-h", "help"], true);
+    if (
+        in_array($reprint_requested_command, $reprint_command_groups, true) &&
+        $reprint_group_help_requested
+    ) {
+        reprint_cli_render_group_help($reprint_requested_command, $command_info);
+        exit($argc === 2 ? 1 : 0);
     }
+
+    $reprint_public_command = $reprint_requested_command;
+    $reprint_command_word_count = 1;
+    $reprint_grouped_command = isset($argv[2]) ? "{$argv[1]} {$argv[2]}" : null;
+    $reprint_uses_public_spelling = false;
+
+    if ($reprint_grouped_command !== null && isset($command_info[$reprint_grouped_command])) {
+        $reprint_public_command = $reprint_grouped_command;
+        $reprint_command_word_count = 2;
+        $reprint_uses_public_spelling = true;
+    } elseif (isset($command_info[$reprint_requested_command])) {
+        $reprint_uses_public_spelling = true;
+    }
+
+    // Older public spellings remain accepted, but help always uses the
+    // current spelling.
+    $command_aliases = [
+        "preflight" => "source inspect",
+        "preflight-assert" => "source check",
+        "files-pull" => "files pull",
+        "files-sync" => "files pull",
+        "files-stats" => "files stats",
+        "db-pull" => "database dump",
+        "db-sync" => "database dump",
+        "db-index" => "database index",
+        "db-domains" => "database domains",
+        "db-apply" => "database apply",
+        "import-metadata" => "status",
+        "flat-docroot" => "layout flatten",
+        "flat-document-root" => "layout flatten",
+        "flatten-docroot" => "layout flatten",
+        "apply-runtime" => "runtime prepare",
+    ];
+    if (isset($command_aliases[$reprint_requested_command])) {
+        $reprint_public_command = $command_aliases[$reprint_requested_command];
+    }
+
+    if (!$reprint_uses_public_spelling && !isset($command_aliases[$reprint_requested_command])) {
+        $reprint_unknown_command = $reprint_grouped_command ?? $reprint_requested_command;
+        fwrite(STDERR, "Unknown command: {$reprint_unknown_command}\n");
+        fwrite(STDERR, "Run 'reprint --help' to list commands.\n");
+        exit(1);
+    }
+
+    $command = $command_info[$reprint_public_command]["command"] ?? $reprint_public_command;
 
     // install-exporter is a standalone guide — no URL, state-dir, or fs-root needed.
     // Handle it before per-command --help so it always shows the full guide.
@@ -13047,8 +13183,10 @@ if (
     }
 
     // Per-command --help (can be requested before providing url/path)
-    if (in_array("--help", array_slice($argv, 2)) || in_array("-h", array_slice($argv, 2))) {
-        _cli_render_command_help($command, $option_defs, $command_info);
+    $reprint_arguments_start_index = 1 + $reprint_command_word_count;
+    $reprint_command_arguments = array_slice($argv, $reprint_arguments_start_index);
+    if (in_array("--help", $reprint_command_arguments) || in_array("-h", $reprint_command_arguments)) {
+        _cli_render_command_help($reprint_public_command, $option_defs, $command_info);
         exit(0);
     }
 
@@ -13056,24 +13194,45 @@ if (
     // local-only commands (db-domains, db-apply, etc.) still accept it for
     // CLI consistency and backward compatibility with existing callers.
     $local_only_commands = ["apply-runtime", "import-metadata"];
-    $is_local_only = in_array($command, $local_only_commands, true);
+    $reprint_public_local_commands = ["preflight-assert", "files-stats", "db-domains", "db-apply", "flat-docroot"];
+    $reprint_is_public_local_command =
+        $reprint_uses_public_spelling && in_array($command, $reprint_public_local_commands, true);
+    $is_local_only =
+        in_array($command, $local_only_commands, true) || $reprint_is_public_local_command;
 
     if ($is_local_only) {
         $remote_url = "-";
-        $option_start_index = 2; // options start right after the command
+        $option_start_index = $reprint_arguments_start_index;
     } else {
-        $remote_url = $argv[2] ?? null;
+        $remote_url = $argv[$reprint_arguments_start_index] ?? null;
         if (!$remote_url) {
             fwrite(STDERR, "Error: <remote-url> is required\n");
-            fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+            fwrite(STDERR, "Usage: reprint {$reprint_public_command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
             exit(1);
         }
-        $option_start_index = 3;
+        $option_start_index = $reprint_arguments_start_index + 1;
     }
 
     [$state_dir, $fs_root, $options] = _cli_parse_options(
         $argv, $argc, $option_start_index, $option_defs
     );
+    if ($reprint_uses_public_spelling && $command === "preflight-assert" && empty($options["cached"])) {
+        fwrite(STDERR, "Error: source check requires --cached\n");
+        exit(1);
+    }
+    $reprint_porcelain = $options["porcelain"] ?? null;
+    if ($reprint_uses_public_spelling && $command === "import-metadata" && $reprint_porcelain !== "v1") {
+        fwrite(STDERR, "Error: status requires --porcelain=v1\n");
+        exit(1);
+    }
+    if ($command !== "preflight-assert" && array_key_exists("cached", $options)) {
+        fwrite(STDERR, "Error: --cached is accepted only by source check.\n");
+        exit(1);
+    }
+    if ($command !== "import-metadata" && array_key_exists("porcelain", $options)) {
+        fwrite(STDERR, "Error: --porcelain is accepted only by status.\n");
+        exit(1);
+    }
     $options["command"] = $command;
 
     $reprint_files_command_arguments = array_slice($argv, $option_start_index);
@@ -13111,7 +13270,7 @@ if (
 
     if (!$state_dir) {
         fwrite(STDERR, "Error: --state-dir=DIR is required\n");
-        fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        fwrite(STDERR, "Usage: reprint {$reprint_public_command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
 
@@ -13122,9 +13281,14 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$fs_root && !$flat_document_root && $command !== "import-metadata") {
+    $reprint_public_commands_without_fs_root = ["preflight-assert", "db-domains"];
+    $reprint_is_public_command_without_fs_root =
+        $reprint_uses_public_spelling && in_array($command, $reprint_public_commands_without_fs_root, true);
+    $reprint_requires_fs_root =
+        $command !== "import-metadata" && !$reprint_is_public_command_without_fs_root;
+    if (!$fs_root && !$flat_document_root && $reprint_requires_fs_root) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
-        fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        fwrite(STDERR, "Usage: reprint {$reprint_public_command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
     if (!$fs_root) {

@@ -68,11 +68,11 @@
                     <th>Date</th>
                     <th>Message</th>
                     <th class="num">Total</th>
-                    <th class="num">preflight</th>
-                    <th class="num">files-pull</th>
-                    <th class="num">db-pull</th>
-                    <th class="num">db-apply</th>
-                    <th class="num">apply-runtime</th>
+                    <th class="num">source inspect</th>
+                    <th class="num">files pull</th>
+                    <th class="num">database dump</th>
+                    <th class="num">database apply</th>
+                    <th class="num">runtime prepare</th>
                 </tr>
             </thead>
             <tbody></tbody>
@@ -84,6 +84,13 @@
 
 <script>
 const STAGES = ['preflight', 'files-pull', 'db-pull', 'db-apply', 'apply-runtime'];
+const STAGE_LABELS = {
+    'preflight': 'source inspect',
+    'files-pull': 'files pull',
+    'db-pull': 'database dump',
+    'db-apply': 'database apply',
+    'apply-runtime': 'runtime prepare',
+};
 const COLORS = {
     'preflight': '#1f77b4',
     'files-pull': '#2ca02c',
@@ -160,7 +167,7 @@ async function load() {
         data: {
             labels,
             datasets: STAGES.map((s) => ({
-                label: s,
+                label: STAGE_LABELS[s],
                 data: stageData[s],
                 borderColor: COLORS[s],
                 backgroundColor: COLORS[s] + '22',

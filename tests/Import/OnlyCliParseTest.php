@@ -235,7 +235,7 @@ PHP, var_export($requestsLog, true)));
             }
         }
         $this->assertSame(
-            'Cannot resolve token ":abspath:": not available in preflight data. Run preflight first.',
+            'Cannot resolve token ":abspath:": not available in preflight data. Run source inspect first.',
             $result['error'] ?? null
         );
         $this->assertStringNotContainsString('"status":"aborted"', $output);
