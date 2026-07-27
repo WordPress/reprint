@@ -2822,8 +2822,8 @@ function emit_file_index_error(
 /**
  * Streams files from a client-provided path list (uploaded as JSON).
  *
- * Entries may be legacy path strings or objects whose `path` value is strict
- * base64 text for raw filesystem path bytes.
+ * Entries may be legacy path strings or objects whose `path` value is base64
+ * text for raw filesystem path bytes.
  */
 function endpoint_file_fetch(
     array $config,
@@ -2863,29 +2863,9 @@ function endpoint_file_fetch(
         );
     }
     $paths = [];
-    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- File-list validation failures become protocol errors, not HTML output.
-    foreach ($decoded as $index => $entry) {
+    foreach ($decoded as $entry) {
         if (is_array($entry)) {
-            if (
-                !array_key_exists("path", $entry)
-                || !is_string($entry["path"])
-            ) {
-                throw new InvalidArgumentException(
-                    "file_list[{$index}].path must be base64 text"
-                );
-            }
-            $path = base64_decode($entry["path"], true);
-            if ($path === false) {
-                throw new InvalidArgumentException(
-                    "file_list[{$index}].path must be valid base64 text"
-                );
-            }
-            if ($path === "") {
-                throw new InvalidArgumentException(
-                    "file_list[{$index}].path must decode to a non-empty path"
-                );
-            }
-            $paths[] = $path;
+            $paths[] = base64_decode($entry["path"]);
             continue;
         }
         if (!is_string($entry) || $entry === "") {
@@ -2893,7 +2873,6 @@ function endpoint_file_fetch(
         }
         $paths[] = $entry;
     }
-    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     $chunk_size = $config["chunk_size"] ?? FileTreeProducer::DEFAULT_CHUNK_SIZE;
     $chunk_size = require_int_range(
@@ -3110,14 +3089,14 @@ function path_head_looks_like_text(string $path): bool
 }
 
 /**
- * Reports whether a path belongs to the established default file-index skip set.
+ * Reports whether a path matches a built-in file-index exclusion.
  *
  * @param string $path Filesystem path to classify.
  * @return bool Whether the path is omitted unless caches are included.
  */
-function path_is_default_skipped(string $path): bool
+function path_matches_built_in_exclusion(string $path): bool
 {
-    return FileIndexProcessor::path_is_default_skipped($path);
+    return FileIndexProcessor::path_matches_built_in_exclusion($path);
 }
 
 /**

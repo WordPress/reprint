@@ -172,9 +172,8 @@ class FileDiffProgressState
                 : null;
         $state->pending_deleted_directory_stack_offset =
             (int) ( $data['pending_deleted_directory_stack_offset'] ?? 0 );
-        $state->pending_local_action = self::normalize_pending_local_action(
-            $data['pending_local_action'] ?? null
-        );
+        $state->pending_local_action =
+            $data['pending_local_action'] ?? null;
         $state->conflict_processor_cursor = self::decode_conflict_processor_cursor(
             $data['conflict_processor_cursor'] ?? null
         );
@@ -203,10 +202,7 @@ class FileDiffProgressState
                 $this->pending_deleted_directory_top_offset,
             'pending_deleted_directory_stack_offset' =>
                 $this->pending_deleted_directory_stack_offset,
-            'pending_local_action' =>
-                self::normalize_pending_local_action(
-                    $this->pending_local_action
-                ),
+            'pending_local_action' => $this->pending_local_action,
             'conflict_processor_cursor' =>
                 self::encode_conflict_processor_cursor(
                     $this->conflict_processor_cursor
@@ -226,166 +222,18 @@ class FileDiffProgressState
         ];
     }
 
-    /**
-     * Validates one pending local deletion before exposing or persisting it.
-     *
-     * @return array<string,mixed>|null
-     */
-    private static function normalize_pending_local_action(
-        $value
-    ): ?array {
-        if ($value === null) {
-            return null;
-        }
-        if (!is_array($value)) {
-            throw new UnexpectedValueException(
-                'The pending files-pull local action must be an object.'
-            );
-        }
-        $keys = array_keys($value);
-        sort($keys);
-        if (
-            $keys
-            !== ['accepted_local_state', 'kind', 'path_b64']
-        ) {
-            throw new UnexpectedValueException(
-                'The pending files-pull local action has invalid fields.'
-            );
-        }
-        $kind = $value['kind'];
-        if (
-            !is_string($kind)
-            || !in_array(
-                $kind,
-                ['delete_path', 'remove_empty_directory'],
-                true
-            )
-        ) {
-            throw new UnexpectedValueException(
-                'The pending files-pull local action kind is invalid.'
-            );
-        }
-        $path_b64 = $value['path_b64'];
-        $path =
-            is_string($path_b64)
-                ? base64_decode($path_b64, true)
-                : false;
-        if (
-            $path === false
-            || $path === ''
-            || base64_encode($path) !== $path_b64
-        ) {
-            throw new UnexpectedValueException(
-                'The pending files-pull local action path is not canonical base64.'
-            );
-        }
-        $accepted_local_state = self::normalize_pending_local_state(
-            $value['accepted_local_state']
-        );
-        if (
-            $kind === 'remove_empty_directory'
-            && $accepted_local_state !== null
-            && (
-                $accepted_local_state['type'] !== 'dir'
-                || !$accepted_local_state['empty']
-            )
-        ) {
-            throw new UnexpectedValueException(
-                'A pending empty-directory removal must accept an empty directory.'
-            );
-        }
-        return [
-            'kind' => $kind,
-            'path_b64' => $path_b64,
-            'accepted_local_state' => $accepted_local_state,
-        ];
-    }
-
-    /**
-     * Validates the exact live path state accepted by a pending deletion.
-     *
-     * @return array<string,mixed>|null
-     */
-    private static function normalize_pending_local_state(
-        $value
-    ): ?array {
-        if ($value === null) {
-            return null;
-        }
-        if (!is_array($value)) {
-            throw new UnexpectedValueException(
-                'The pending files-pull local path state must be an object or null.'
-            );
-        }
-        $type = $value['type'] ?? null;
-        if (
-            !is_string($type)
-            || !in_array($type, ['file', 'link', 'dir', 'other'], true)
-        ) {
-            throw new UnexpectedValueException(
-                'The pending files-pull local path type is invalid.'
-            );
-        }
-        $expected_keys =
-            $type === 'dir'
-                ? ['ctime', 'empty', 'size', 'type']
-                : ['ctime', 'size', 'type'];
-        $keys = array_keys($value);
-        sort($keys);
-        if ($keys !== $expected_keys) {
-            throw new UnexpectedValueException(
-                'The pending files-pull local path state has invalid fields.'
-            );
-        }
-        if (
-            !is_int($value['ctime'])
-            || !is_int($value['size'])
-            || $value['size'] < 0
-            || ( $type === 'dir' && !is_bool($value['empty']) )
-        ) {
-            throw new UnexpectedValueException(
-                'The pending files-pull local path metadata is invalid.'
-            );
-        }
-        $state = [
-            'type' => $type,
-            'ctime' => $value['ctime'],
-            'size' => $value['size'],
-        ];
-        if ($type === 'dir') {
-            $state['empty'] = $value['empty'];
-        }
-        return $state;
-    }
-
     /** Decodes a cursor persisted by encode_conflict_processor_cursor(). */
     private static function decode_conflict_processor_cursor(
         $value
     ): ?array {
-        if (!is_array($value)) {
+        if ($value === null) {
             return null;
         }
-        if (!isset($value['serialized_b64'])) {
-            return $value;
-        }
-        $serialized = base64_decode(
-            (string) $value['serialized_b64'],
-            true
-        );
-        if ($serialized === false) {
-            throw new UnexpectedValueException(
-                'The files-pull conflict cursor is not valid base64.'
-            );
-        }
-        $cursor = @unserialize(
-            $serialized,
+        /** @var array<string,mixed> $cursor */
+        $cursor = unserialize(
+            base64_decode($value['serialized_b64']),
             ['allowed_classes' => false]
         );
-        if (!is_array($cursor)) {
-            throw new UnexpectedValueException(
-                'The files-pull conflict cursor is not a serialized array.'
-            );
-        }
         return $cursor;
     }
 }
@@ -457,18 +305,10 @@ class DownloadListFetchProgressState
         $state->planned_local_state_offset = (int) ( $data['planned_local_state_offset'] ?? 0 );
         $state->applying_path = isset($data['applying_path']) ? (string) $data['applying_path'] : null;
         $state->applying_expected_local_state =
-            isset($data['applying_expected_local_state'])
-            && is_array($data['applying_expected_local_state'])
-                ? $data['applying_expected_local_state']
-                : null;
-        $state->staged_file = self::normalize_staged_file(
-            $data['staged_file'] ?? null,
-            false
-        );
-        $state->pending_file_install = self::normalize_staged_file(
-            $data['pending_file_install'] ?? null,
-            true
-        );
+            $data['applying_expected_local_state'] ?? null;
+        $state->staged_file = $data['staged_file'] ?? null;
+        $state->pending_file_install =
+            $data['pending_file_install'] ?? null;
         $state->retained_local_subtree_top_offset =
             isset($data['retained_local_subtree_top_offset'])
                 ? (int) $data['retained_local_subtree_top_offset']
@@ -490,260 +330,13 @@ class DownloadListFetchProgressState
             'applying_path' => $this->applying_path,
             'applying_expected_local_state' =>
                 $this->applying_expected_local_state,
-            'staged_file' =>
-                self::normalize_staged_file($this->staged_file, false),
-            'pending_file_install' =>
-                self::normalize_staged_file(
-                    $this->pending_file_install,
-                    true
-                ),
+            'staged_file' => $this->staged_file,
+            'pending_file_install' => $this->pending_file_install,
             'retained_local_subtree_top_offset' =>
                 $this->retained_local_subtree_top_offset,
             'retained_local_subtree_stack_offset' =>
                 $this->retained_local_subtree_stack_offset,
         ];
-    }
-
-    /**
-     * Validates a private staged file before exposing or persisting it.
-     *
-     * @return array<string,mixed>|null
-     */
-    private static function normalize_staged_file(
-        $value,
-        bool $pending_install
-    ): ?array {
-        if ($value === null) {
-            return null;
-        }
-        if (!is_array($value)) {
-            throw new UnexpectedValueException(
-                'The files-pull staged file must be an object.'
-            );
-        }
-        $expected_keys = [
-            'destination_path_b64',
-            'discard_started',
-            'install_mode',
-            'remote_ctime',
-            'remote_file_changed',
-            'remote_path_b64',
-            'remote_size',
-            'staging_bytes',
-            'staging_dev',
-            'staging_ino',
-            'staging_path_b64',
-            'validate_local_state',
-        ];
-        if ($pending_install) {
-            $expected_keys[] = 'cursor';
-            $expected_keys[] = 'destination_removal';
-            $expected_keys[] = 'installed_ctime';
-            $expected_keys[] = 'planned_local_state_offset';
-        }
-        sort($expected_keys);
-        $keys = array_keys($value);
-        sort($keys);
-        if ($keys !== $expected_keys) {
-            throw new UnexpectedValueException(
-                'The files-pull staged file has invalid fields.'
-            );
-        }
-        foreach (
-            [
-                'remote_path_b64',
-                'destination_path_b64',
-                'staging_path_b64',
-            ] as $path_key
-        ) {
-            $encoded_path = $value[$path_key];
-            $path = is_string($encoded_path)
-                ? base64_decode($encoded_path, true)
-                : false;
-            if (
-                $path === false
-                || $path === ''
-                || base64_encode($path) !== $encoded_path
-            ) {
-                throw new UnexpectedValueException(
-                    'A files-pull staged-file path is not canonical base64.'
-                );
-            }
-        }
-        foreach (
-            [
-                'remote_ctime',
-                'remote_size',
-                'staging_bytes',
-                'install_mode',
-            ] as $integer_key
-        ) {
-            if (
-                !is_int($value[$integer_key])
-                || $value[$integer_key] < 0
-                || (
-                    $integer_key === 'install_mode'
-                    && $value[$integer_key] > 07777
-                )
-            ) {
-                throw new UnexpectedValueException(
-                    'The files-pull staged-file byte metadata is invalid.'
-                );
-            }
-        }
-        foreach (['staging_dev', 'staging_ino'] as $identity_key) {
-            if (
-                $value[$identity_key] !== null
-                && (
-                    !is_int($value[$identity_key])
-                    || $value[$identity_key] < 0
-                )
-            ) {
-                throw new UnexpectedValueException(
-                    'The files-pull staged-file identity is invalid.'
-                );
-            }
-        }
-        $staging_dev_is_missing = $value['staging_dev'] === null;
-        $staging_ino_is_missing = $value['staging_ino'] === null;
-        if ($staging_dev_is_missing !== $staging_ino_is_missing) {
-            throw new UnexpectedValueException(
-                'The files-pull staged-file identity is incomplete.'
-            );
-        }
-        if (!is_bool($value['remote_file_changed'])) {
-            throw new UnexpectedValueException(
-                'The files-pull staged-file change marker is invalid.'
-            );
-        }
-        if (!is_bool($value['discard_started'])) {
-            throw new UnexpectedValueException(
-                'The files-pull staged-file discard marker is invalid.'
-            );
-        }
-        if (!is_bool($value['validate_local_state'])) {
-            throw new UnexpectedValueException(
-                'The files-pull staged-file validation marker is invalid.'
-            );
-        }
-        $normalized = [
-            'remote_path_b64' => $value['remote_path_b64'],
-            'destination_path_b64' =>
-                $value['destination_path_b64'],
-            'staging_path_b64' => $value['staging_path_b64'],
-            'staging_dev' => $value['staging_dev'],
-            'staging_ino' => $value['staging_ino'],
-            'staging_bytes' => $value['staging_bytes'],
-            'install_mode' => $value['install_mode'],
-            'remote_ctime' => $value['remote_ctime'],
-            'remote_size' => $value['remote_size'],
-            'remote_file_changed' =>
-                $value['remote_file_changed'],
-            'discard_started' => $value['discard_started'],
-            'validate_local_state' =>
-                $value['validate_local_state'],
-        ];
-        if ($pending_install) {
-            if (
-                $value['staging_dev'] === null
-                || $value['staging_ino'] === null
-            ) {
-                throw new UnexpectedValueException(
-                    'A pending files-pull install needs a staging identity.'
-                );
-            }
-            if (
-                $value['cursor'] !== null
-                && !is_string($value['cursor'])
-            ) {
-                throw new UnexpectedValueException(
-                    'The pending files-pull file cursor is invalid.'
-                );
-            }
-            if (
-                !is_int($value['planned_local_state_offset'])
-                || $value['planned_local_state_offset'] < 0
-            ) {
-                throw new UnexpectedValueException(
-                    'The pending files-pull planned-state offset is invalid.'
-                );
-            }
-            $normalized['cursor'] = $value['cursor'];
-            $destination_removal = $value['destination_removal'];
-            $destination_removal_keys =
-                is_array($destination_removal)
-                    ? array_keys($destination_removal)
-                    : [];
-            sort($destination_removal_keys);
-            $quarantine_path_b64 =
-                is_array($destination_removal)
-                && is_string(
-                    $destination_removal['quarantine_path_b64'] ?? null
-                )
-                    ? $destination_removal['quarantine_path_b64']
-                    : null;
-            $quarantine_path =
-                $quarantine_path_b64 === null
-                    ? false
-                    : base64_decode($quarantine_path_b64, true);
-            if (
-                $destination_removal !== null
-                && (
-                    !is_array($destination_removal)
-                    || $destination_removal_keys
-                        !== [
-                            'directory_dev',
-                            'directory_ino',
-                            'quarantine_path_b64',
-                            'stack_offset',
-                            'top_offset',
-                        ]
-                    || $quarantine_path === false
-                    || $quarantine_path === ''
-                    || base64_encode($quarantine_path)
-                        !== $quarantine_path_b64
-                    || !is_int($destination_removal['directory_dev'])
-                    || $destination_removal['directory_dev'] < 0
-                    || !is_int($destination_removal['directory_ino'])
-                    || $destination_removal['directory_ino'] < 0
-                    || (
-                        $destination_removal['top_offset'] !== null
-                        && (
-                            !is_int(
-                                $destination_removal['top_offset']
-                            )
-                            || $destination_removal['top_offset'] < 0
-                        )
-                    )
-                    || !is_int(
-                        $destination_removal['stack_offset']
-                    )
-                    || $destination_removal['stack_offset'] < 0
-                )
-            ) {
-                throw new UnexpectedValueException(
-                    'The pending files-pull destination-removal state is invalid.'
-                );
-            }
-            $normalized['destination_removal'] =
-                $destination_removal;
-            if (
-                $value['installed_ctime'] !== null
-                && (
-                    !is_int($value['installed_ctime'])
-                    || $value['installed_ctime'] < 0
-                )
-            ) {
-                throw new UnexpectedValueException(
-                    'The pending files-pull installed ctime is invalid.'
-                );
-            }
-            $normalized['installed_ctime'] =
-                $value['installed_ctime'];
-            $normalized['planned_local_state_offset'] =
-                $value['planned_local_state_offset'];
-        }
-        return $normalized;
     }
 }
 

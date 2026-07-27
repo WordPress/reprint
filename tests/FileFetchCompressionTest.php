@@ -71,32 +71,6 @@ final class FileFetchCompressionTest extends TestCase
         }
     }
 
-    public function testFileFetchRejectsInvalidBase64PathObject(): void
-    {
-        $listPath = $this->tempDir . '/file-list.json';
-        file_put_contents(
-            $listPath,
-            json_encode([['path' => 'not base64!']], JSON_THROW_ON_ERROR),
-        );
-
-        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
-        $budget = new ResourceBudget(
-            microtime(true),
-            10,
-            128 * 1024 * 1024,
-            0.9,
-        );
-
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage(
-            'file_list[0].path must be valid base64 text',
-        );
-        endpoint_file_fetch([
-            'directory' => $this->tempDir,
-            'file_list_path' => $listPath,
-        ], $budget);
-    }
-
     public function testFileFetchUsesGzipForTextOnlyPaths(): void
     {
         $siteDir = $this->tempDir . '/site';

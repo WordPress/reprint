@@ -225,6 +225,40 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($diff['stdout']));
     }
 
+    public function testInitialPullCreatesCircularSymlinks(): void
+    {
+        unlink($this->stateDirectory . '/.import-index.jsonl');
+        foreach (scandir($this->rawFileRoot) ?: [] as $entry) {
+            if ($entry !== '.' && $entry !== '..') {
+                $this->removeTree($this->rawFileRoot . '/' . $entry);
+            }
+        }
+        $this->writeRemoteOverrides([
+            'removed_paths' => array_merge(
+                array_keys($this->initialFiles),
+                [self::PULLED_PATH]
+            ),
+            'added_symlinks' => [
+                'link-a' => '/var/www/html/link-b',
+                'link-b' => '/var/www/html/link-a',
+            ],
+        ]);
+
+        $result = $this->runFilesPull();
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertTrue(is_link($this->localTree . '/link-a'));
+        $this->assertTrue(is_link($this->localTree . '/link-b'));
+        $this->assertSame(
+            'link-b',
+            readlink($this->localTree . '/link-a')
+        );
+        $this->assertSame(
+            'link-a',
+            readlink($this->localTree . '/link-b')
+        );
+    }
+
     public function testInitialIndexOrdersAnAncestorBeforeAnEarlyByteChildName(): void
     {
         $this->writeRemoteOverrides([
@@ -1987,6 +2021,8 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
 
     public function testRemappedFilesPullDoesNotPublishAPreviousLocalIndex(): void
     {
+        $previousLocalIndex =
+            $this->pushStateDirectory() . '/previous_local_index.jsonl';
         $this->removeTree($this->rawFileRoot);
         mkdir($this->rawFileRoot, 0700, true);
         unlink($this->stateDirectory . '/.import-index.jsonl');
@@ -1994,11 +2030,17 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
         $result = $this->runFilesPull([
             '--remap',
             '/var/www/html',
-            ':fs-root:/var/www/html',
+            ':fs-root:/site',
         ]);
 
         $this->assertSame(0, $result['exit'], $result['output']);
-        $this->assertFileDoesNotExist($this->pushStateDirectory() . '/previous_local_index.jsonl');
+        $this->assertSame(
+            self::PULLED_CONTENTS,
+            file_get_contents(
+                $this->rawFileRoot . '/site/' . self::PULLED_PATH
+            )
+        );
+        $this->assertFileDoesNotExist($previousLocalIndex);
     }
 
     public function testFilesDiffIsLocalAndReportsAnEmptyDiffImmediatelyAfterPull(): void
@@ -3405,7 +3447,7 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($result['stdout']));
     }
 
-    public function testDeltaPullKeepsDefaultSkippedRemotePathsOutOfTheIndex(): void
+    public function testDeltaPullKeepsBuiltInExclusionsOutOfTheIndex(): void
     {
         $this->completeEligiblePull();
 
@@ -3808,6 +3850,15 @@ if (is_array($overrides)) {
             'empty' => false,
         );
     }
+    foreach (($overrides['added_symlinks'] ?? array()) as $added_path => $target) {
+        $updated_index[] = array(
+            'path' => base64_encode('/var/www/html/' . $added_path),
+            'ctime' => 43,
+            'size' => strlen($target),
+            'type' => 'link',
+            'target' => base64_encode($target),
+        );
+    }
     $remote_index = $updated_index;
     if (!empty($overrides['empty_index'])) {
         $remote_index = array();
@@ -4063,6 +4114,20 @@ if ($endpoint === 'file_index') {
                 echo "--{$boundary}--\r\n";
                 exit;
             }
+            continue;
+        }
+        if (($remote_entry['type'] ?? null) === 'link') {
+            $write_part(array(
+                'X-Chunk-Type' => 'symlink',
+                'X-Symlink-Path' =>
+                    base64_encode($requested_file_path),
+                'X-Symlink-Target' =>
+                    $remote_entry['target'],
+                'X-Symlink-Ctime' =>
+                    (int) ($remote_entry['ctime'] ?? 0),
+                'X-Cursor' => 'requested-file-complete',
+            ));
+            ++$files_completed;
             continue;
         }
         $is_pulled_file =

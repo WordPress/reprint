@@ -72,7 +72,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('overwrite behavior', $output);
         $this->assertStringContainsString('same files-pull with --abort', $output);
         $this->assertStringContainsString('push operation plan', $output);
-        $this->assertStringContainsString('default-skipped paths', $output);
+        $this->assertStringContainsString('built-in exclusions', $output);
         $this->assertStringContainsString('No network calls', $output);
         $this->assertStringContainsString('complete diff from the beginning', $output);
         $this->assertStringNotContainsString('--runtime', $output);

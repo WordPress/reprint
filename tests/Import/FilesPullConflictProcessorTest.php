@@ -126,9 +126,9 @@ final class FilesPullConflictProcessorTest extends TestCase {
         );
     }
 
-    public function testNewDirectoryWithOnlyDefaultSkippedChildConflictsWithRemoteScalar(): void
+    public function testNewDirectoryWithOnlyBuiltInExclusionConflictsWithRemoteScalar(): void
     {
-        $localTree = $this->tempDir . '/default-skipped-local';
+        $localTree = $this->tempDir . '/built-in-exclusion-local';
         mkdir($localTree . '/collision/.git', 0755, true);
         file_put_contents(
             $localTree . '/collision/.git/config',
@@ -136,7 +136,7 @@ final class FilesPullConflictProcessorTest extends TestCase {
         );
 
         $this->assertNewDirectoryRootConflictsWithRemoteScalar(
-            'default-skipped',
+            'built-in exclusion',
             $localTree
         );
     }
@@ -271,7 +271,7 @@ final class FilesPullConflictProcessorTest extends TestCase {
         );
     }
 
-    public function testDefaultSkippedRootDoesNotConflictWithChangedRemoteSibling(): void
+    public function testBuiltInExclusionDoesNotConflictWithChangedRemoteSibling(): void
     {
         $localTree = $this->tempDir . '/skipped-sibling-local';
         mkdir($localTree . '/tree', 0755, true);

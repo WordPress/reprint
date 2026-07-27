@@ -5,11 +5,11 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 
 /**
- * Coverage for the default deny-list applied by endpoint_file_index().
+ * Coverage for the built-in exclusions applied by endpoint_file_index().
  *
  * Two layers of testing:
  *
- *   1. path_is_default_skipped() unit tests — exhaustive per-input
+ *   1. path_matches_built_in_exclusion() unit tests — exhaustive per-input
  *      classification of cache dirs, VCS metadata, OS junk, editor
  *      scratch, AND a long list of *negative* cases where a name
  *      looks superficially similar but should be preserved
@@ -28,7 +28,7 @@ use PHPUnit\Framework\TestCase;
  * traversal (and into traversal *resume*, since the cursor-after
  * pointer must advance past filtered entries).
  */
-final class FileIndexSkipDefaultsTest extends TestCase
+final class FileIndexBuiltInExclusionsTest extends TestCase
 {
     private string $tempDir;
 
@@ -46,21 +46,25 @@ final class FileIndexSkipDefaultsTest extends TestCase
     }
 
     // ------------------------------------------------------------------
-    // Unit tests — path_is_default_skipped()
+    // Unit tests — path_matches_built_in_exclusion()
     // ------------------------------------------------------------------
 
     /**
      * @dataProvider skipCases
      */
-    public function testPathIsDefaultSkippedClassifier(string $path, bool $expected): void
+    public function testPathMatchesBuiltInExclusion(string $path, bool $expected): void
     {
         require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
-        $this->assertSame($expected, path_is_default_skipped($path), "classifier for '$path'");
+        $this->assertSame(
+            $expected,
+            path_matches_built_in_exclusion($path),
+            "classifier for '$path'"
+        );
     }
 
     /**
      * @return array[] {
-     *     Default skip classifier cases.
+     *     Built-in exclusion classifier cases.
      *
      *     @type string $0 Path to classify.
      *     @type bool   $1 Expected skip result.
@@ -164,7 +168,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
     // Integration tests — endpoint_file_index() over the fixture
     // ------------------------------------------------------------------
 
-    public function testFileIndexFiltersDefaultJunk(): void
+    public function testFileIndexAppliesBuiltInExclusions(): void
     {
         $siteDir = $this->buildFixtureSite();
         $entries = $this->runFileIndexEntries($siteDir, /* include_caches */ false);

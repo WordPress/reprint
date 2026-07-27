@@ -155,6 +155,8 @@ class ImportStateTest extends TestCase
                 'top_offset' => 7,
                 'stack_offset' => 19,
             ],
+            'installed_dev' => null,
+            'installed_ino' => null,
             'installed_ctime' => null,
             'planned_local_state_offset' => 47,
         ]);
@@ -213,42 +215,6 @@ class ImportStateTest extends TestCase
             $action,
             $state->to_array()['diff']['pending_local_action'] ?? null
         );
-    }
-
-    public function testFileDiffStateRejectsANoncanonicalPendingActionPath(): void
-    {
-        $this->expectException(\UnexpectedValueException::class);
-        $this->expectExceptionMessage('not canonical base64');
-
-        \ImportState::from_array([
-            'diff' => [
-                'pending_local_action' => [
-                    'kind' => 'delete_path',
-                    'path_b64' => 'YQ',
-                    'accepted_local_state' => null,
-                ],
-            ],
-        ]);
-    }
-
-    public function testFileDiffStateRejectsAnIncompletePendingActionState(): void
-    {
-        $this->expectException(\UnexpectedValueException::class);
-        $this->expectExceptionMessage('invalid fields');
-
-        \ImportState::from_array([
-            'diff' => [
-                'pending_local_action' => [
-                    'kind' => 'remove_empty_directory',
-                    'path_b64' => base64_encode('/var/www/html/empty'),
-                    'accepted_local_state' => [
-                        'type' => 'dir',
-                        'ctime' => 41,
-                        'size' => 0,
-                    ],
-                ],
-            ],
-        ]);
     }
 
     public function testStateRoundTripMatchesDefaultStateSchema(): void

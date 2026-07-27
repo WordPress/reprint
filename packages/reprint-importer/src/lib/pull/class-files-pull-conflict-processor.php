@@ -123,14 +123,6 @@ final class FilesPullConflictProcessor {
      */
     public static function resume(array $cursor): self
     {
-        if (
-            !isset($cursor['position']['phase'])
-            || !is_string($cursor['position']['phase'])
-        ) {
-            throw new InvalidArgumentException(
-                'The files-pull conflict cursor is missing its phase.'
-            );
-        }
         $processor = new self();
         $processor->cursor = $cursor;
         return $processor;
@@ -270,14 +262,14 @@ final class FilesPullConflictProcessor {
                 break;
 
             case FileIndexProcessor::STATUS_SKIPPED:
-                $skipped_path =
+                $built_in_exclusion_root =
                     $this->local_index_processor
-                        ->get_default_skipped_path();
-                if ($skipped_path === null) {
+                        ->get_built_in_exclusion_root();
+                if ($built_in_exclusion_root === null) {
                     break;
                 }
-                clearstatcache(true, $skipped_path);
-                $skipped_stat = @lstat($skipped_path);
+                clearstatcache(true, $built_in_exclusion_root);
+                $skipped_stat = @lstat($built_in_exclusion_root);
                 if (!is_array($skipped_stat)) {
                     break;
                 }
@@ -294,7 +286,7 @@ final class FilesPullConflictProcessor {
                     $skipped_type = 'other';
                 }
                 $skipped_entry = [
-                    'path' => $skipped_path,
+                    'path' => $built_in_exclusion_root,
                     'ctime' => (int) $skipped_stat['ctime'],
                     'size' =>
                         $skipped_type === 'file'
@@ -304,12 +296,13 @@ final class FilesPullConflictProcessor {
                     'type' => $skipped_type,
                 ];
                 if ($skipped_type === 'dir') {
-                    $directory_handle = @opendir($skipped_path);
+                    $directory_handle =
+                        @opendir($built_in_exclusion_root);
                     if (!is_resource($directory_handle)) {
                         throw new RuntimeException(
-                            'Could not inspect a default-skipped local '
+                            'Could not inspect a built-in exclusion '
                             . 'directory while preparing files-pull conflicts: '
-                            . base64_encode($skipped_path)
+                            . base64_encode($built_in_exclusion_root)
                             . '.'
                         );
                     }
@@ -554,13 +547,7 @@ final class FilesPullConflictProcessor {
                     512,
                     JSON_THROW_ON_ERROR
                 );
-                $path = base64_decode($entry['path'] ?? '', true);
-                if ($path === false) {
-                    throw new RuntimeException(
-                        'A planned local path is not valid base64.'
-                    );
-                }
-                return $path;
+                return base64_decode($entry['path']);
             },
             self::SORT_CHUNK_BYTES,
             true
@@ -587,13 +574,7 @@ final class FilesPullConflictProcessor {
                         512,
                         JSON_THROW_ON_ERROR
                     );
-                    $path = base64_decode($entry['path'] ?? '', true);
-                    if ($path === false) {
-                        throw new RuntimeException(
-                            'A planned local path is not valid base64.'
-                        );
-                    }
-                    return $path;
+                    return base64_decode($entry['path']);
                 }
             );
         }
@@ -711,13 +692,7 @@ final class FilesPullConflictProcessor {
                 512,
                 JSON_THROW_ON_ERROR
             );
-            $path = base64_decode($entry['path'] ?? '', true);
-            if ($path === false) {
-                throw new RuntimeException(
-                    'A remote index path is not valid base64.'
-                );
-            }
-            return $path;
+            return base64_decode($entry['path']);
         };
     }
 
@@ -845,13 +820,9 @@ final class FilesPullConflictProcessor {
                     512,
                     JSON_THROW_ON_ERROR
                 );
-                $path = base64_decode($entry['path'] ?? '', true);
-                if ($path === false) {
-                    throw new RuntimeException(
-                        'A remote files-pull change path is not valid base64.'
-                    );
-                }
-                return path_sort_key($path);
+                return path_sort_key(
+                    base64_decode($entry['path'])
+                );
             },
             self::SORT_CHUNK_BYTES,
             true
@@ -878,13 +849,9 @@ final class FilesPullConflictProcessor {
                         512,
                         JSON_THROW_ON_ERROR
                     );
-                    $path = base64_decode($entry['path'] ?? '', true);
-                    if ($path === false) {
-                        throw new RuntimeException(
-                            'A remote files-pull change path is not valid base64.'
-                        );
-                    }
-                    return path_sort_key($path);
+                    return path_sort_key(
+                        base64_decode($entry['path'])
+                    );
                 }
             );
         }
@@ -949,15 +916,9 @@ final class FilesPullConflictProcessor {
             $position['conflicted_replacement_path_b64']
         )
             ? base64_decode(
-                $position['conflicted_replacement_path_b64'],
-                true
+                $position['conflicted_replacement_path_b64']
             )
             : null;
-        if ($active_replacement === false) {
-            throw new RuntimeException(
-                'The conflicted replacement path is not valid base64.'
-            );
-        }
         if (
             $active_replacement !== null
             && !$this->path_is_same_or_descendant(
@@ -1109,13 +1070,7 @@ final class FilesPullConflictProcessor {
                     512,
                     JSON_THROW_ON_ERROR
                 );
-                $path = base64_decode($entry['path'] ?? '', true);
-                if ($path === false) {
-                    throw new RuntimeException(
-                        'A files-pull conflict path is not valid base64.'
-                    );
-                }
-                return $path;
+                return base64_decode($entry['path']);
             },
             self::SORT_CHUNK_BYTES,
             true
@@ -1142,13 +1097,7 @@ final class FilesPullConflictProcessor {
                         512,
                         JSON_THROW_ON_ERROR
                     );
-                    $path = base64_decode($entry['path'] ?? '', true);
-                    if ($path === false) {
-                        throw new RuntimeException(
-                            'A files-pull conflict path is not valid base64.'
-                        );
-                    }
-                    return $path;
+                    return base64_decode($entry['path']);
                 }
             );
         }
@@ -1217,14 +1166,7 @@ final class FilesPullConflictProcessor {
                 512,
                 JSON_THROW_ON_ERROR
             );
-            $decoded_path =
-                base64_decode($entry['path'] ?? '', true);
-            if ($decoded_path === false) {
-                throw new RuntimeException(
-                    'A files-pull conflict index path is not valid base64.'
-                );
-            }
-            $entry['path'] = $decoded_path;
+            $entry['path'] = base64_decode($entry['path']);
             $entry['ctime'] = (int) ( $entry['ctime'] ?? 0 );
             $entry['size'] = (int) ( $entry['size'] ?? 0 );
             $entry['type'] = (string) ( $entry['type'] ?? '' );
@@ -1289,7 +1231,11 @@ final class FilesPullConflictProcessor {
             return null;
         }
         $relative_path = ltrim($relative_path, '/');
-        if (FileIndexProcessor::path_is_default_skipped($relative_path)) {
+        if (
+            FileIndexProcessor::path_matches_built_in_exclusion(
+                $relative_path
+            )
+        ) {
             return null;
         }
         return [
@@ -1356,12 +1302,6 @@ final class FilesPullConflictProcessor {
                 512,
                 JSON_THROW_ON_ERROR
             );
-            $local_path = base64_decode($entry['path'] ?? '', true);
-            if ($local_path === false) {
-                throw new RuntimeException(
-                    'A depth-first local change path is not valid base64.'
-                );
-            }
             $next_offset = ftell($handle);
             if (!is_int($next_offset)) {
                 throw new RuntimeException(
@@ -1369,7 +1309,7 @@ final class FilesPullConflictProcessor {
                 );
             }
             $result = [
-                'path' => $local_path,
+                'path' => base64_decode($entry['path']),
                 'next_offset' => $next_offset,
             ];
         }
@@ -1417,15 +1357,6 @@ final class FilesPullConflictProcessor {
                 512,
                 JSON_THROW_ON_ERROR
             );
-            $local_path =
-                base64_decode($record['path'] ?? '', true);
-            $remote_path =
-                base64_decode($record['remote_path'] ?? '', true);
-            if ($local_path === false || $remote_path === false) {
-                throw new RuntimeException(
-                    'A depth-first remote change path is not valid base64.'
-                );
-            }
             $next_offset = ftell($handle);
             if (!is_int($next_offset)) {
                 throw new RuntimeException(
@@ -1434,8 +1365,9 @@ final class FilesPullConflictProcessor {
             }
             $result = [
                 'entry' => [
-                    'path' => $local_path,
-                    'remote_path' => $remote_path,
+                    'path' => base64_decode($record['path']),
+                    'remote_path' =>
+                        base64_decode($record['remote_path']),
                     'replace_subtree' =>
                         (bool) ( $record['replace_subtree'] ?? false ),
                 ],
@@ -1531,14 +1463,8 @@ final class FilesPullConflictProcessor {
             512,
             JSON_THROW_ON_ERROR
         );
-        $path = base64_decode($record['path_b64'] ?? '', true);
-        if ($path === false) {
-            throw new RuntimeException(
-                'A local change-stack path is not valid base64.'
-            );
-        }
         return [
-            'path' => $path,
+            'path' => base64_decode($record['path_b64']),
             'previous_offset' =>
                 isset($record['previous_offset'])
                     ? (int) $record['previous_offset']
@@ -1664,16 +1590,9 @@ final class FilesPullConflictProcessor {
     /** Decodes the remote document root from the durable cursor. */
     private function remote_document_root(): string
     {
-        $path = base64_decode(
-            $this->cursor['remote_document_root_b64'],
-            true
+        return base64_decode(
+            $this->cursor['remote_document_root_b64']
         );
-        if ($path === false) {
-            throw new RuntimeException(
-                'The files-pull conflict remote document root is invalid.'
-            );
-        }
-        return $path;
     }
 
     /** @return list<string> Decoded selected absolute remote paths. */
@@ -1684,13 +1603,7 @@ final class FilesPullConflictProcessor {
             $this->cursor['selected_remote_paths_b64']
             as $encoded_path
         ) {
-            $path = base64_decode($encoded_path, true);
-            if ($path === false) {
-                throw new RuntimeException(
-                    'A selected files-pull path is not valid base64.'
-                );
-            }
-            $paths[] = $path;
+            $paths[] = base64_decode($encoded_path);
         }
         return $paths;
     }

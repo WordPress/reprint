@@ -8,7 +8,8 @@
  *
  * Setup: a 2 MiB random binary file. With --file-chunk-max=262144, the
  * file is sliced into eight chunks. A test_hook_before_file_chunk hook
- * exits PHP on the second chunk, which forces the failure mid-file.
+ * exits PHP on the third chunk, which forces the failure mid-file after one
+ * earlier multipart part reached the importer.
  *
  * After removing the hook, files-sync resumes and completes. Final
  * assertion: SHA-256 of the imported file equals the source.
@@ -86,14 +87,16 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('first run crashes mid-file on the second body chunk', () => {
-        // Hook exits when we hit a non-first chunk of the specific file
-        // we care about. Two non-obvious bits:
+    it('first run crashes mid-file on the third body chunk', () => {
+        // Hook exits when we hit the third chunk of the specific file
+        // we care about. Three non-obvious bits:
         //
-        //   1. Path filter. WordPress core ships files larger than the
+        //   1. The third chunk leaves at least one earlier multipart part
+        //      confirmed, so the saved staging boundary must be nonzero.
+        //   2. Path filter. WordPress core ships files larger than the
         //      chunk size; without the filter the hook would crash on
         //      whichever WP file the producer happens to reach first.
-        //   2. Self-disabling via a marker file. removeTestHooks() deletes
+        //   3. Self-disabling via a marker file. removeTestHooks() deletes
         //      the hook PHP source, but PHP-FPM workers keep the function
         //      in memory across requests — so a worker that already loaded
         //      the hook would still call it on the resume run and crash
@@ -103,7 +106,7 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
         writeTestHooks(site, [
             "function test_hook_before_file_chunk($path, $offset, &$data) {",
             `    if (file_exists('${marker}')) { return; }`,
-            "    if ($offset > 0 && substr($path, -strlen('big-binary.jpg')) === 'big-binary.jpg') {",
+            "    if ($offset >= 524288 && substr($path, -strlen('big-binary.jpg')) === 'big-binary.jpg') {",
             `        @file_put_contents('${marker}', '1');`,
             "        exit(1);",
             "    }",

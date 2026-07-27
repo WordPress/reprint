@@ -403,7 +403,7 @@ class ImportClient
     private $export_directories_cache = null;
 
     /**
-     * @var bool When true, ask the server to ship the default-skipped
+     * @var bool When true, ask the server to ship content which matches built-in
      * generated content (wp-content/cache, .git, node_modules, etc.).
      *
      * The server's file-index endpoint filters these by default so a
@@ -2170,7 +2170,7 @@ class ImportClient
             $this->discard_fetched_file_staging($fetch_state, null);
             return $destination_removal_may_have_changed_tree;
         }
-        $paths = $this->validated_fetched_file_staging_paths($record);
+        $paths = $this->fetched_file_staging_paths($record);
         clearstatcache(true, $paths['staging']);
         if (@lstat($paths['staging']) !== false) {
             $this->discard_fetched_file_staging($fetch_state, null);
@@ -2192,9 +2192,15 @@ class ImportClient
             && !is_link($paths['destination'])
             && $this->stat_is_regular_file($destination_stat)
             && (int) $destination_stat['dev']
-                === $record['staging_dev']
+                === (
+                    $record['installed_dev']
+                        ?? $record['staging_dev']
+                )
             && (int) $destination_stat['ino']
-                === $record['staging_ino']
+                === (
+                    $record['installed_ino']
+                        ?? $record['staging_ino']
+                )
             && (int) $destination_stat['size']
                 === $record['staging_bytes'];
         $fetch_state->staged_file = null;
@@ -2225,15 +2231,14 @@ class ImportClient
             ) {
                 continue;
             }
-            $paths = $this->validated_fetched_file_staging_paths(
+            $paths = $this->fetched_file_staging_paths(
                 $pending_install
             );
             $destination_removal =
                 $pending_install['destination_removal'];
             $quarantine_path =
-                $this->validated_pending_fetched_file_quarantine_path(
-                    $destination_removal,
-                    $paths['destination']
+                $this->pending_fetched_file_quarantine_path(
+                    $destination_removal
                 );
             clearstatcache(true, $quarantine_path);
             $quarantine_stat = @lstat($quarantine_path);
@@ -2276,15 +2281,14 @@ class ImportClient
                 'Cannot clear a closed fetched-file quarantine intent.'
             );
         }
-        $paths = $this->validated_fetched_file_staging_paths(
+        $paths = $this->fetched_file_staging_paths(
             $pending_install
         );
         $destination_removal =
             $pending_install['destination_removal'];
         $quarantine_path =
-            $this->validated_pending_fetched_file_quarantine_path(
-                $destination_removal,
-                $paths['destination']
+            $this->pending_fetched_file_quarantine_path(
+                $destination_removal
             );
         clearstatcache(true, $quarantine_path);
         if (@lstat($quarantine_path) !== false) {
@@ -2315,10 +2319,7 @@ class ImportClient
         if ($action === null) {
             return false;
         }
-        $path = base64_decode($action['path_b64'], true);
-        if ($path === false || $path === '') {
-            return true;
-        }
+        $path = base64_decode($action['path_b64']);
         try {
             $local_state = $this->capture_local_path_state($path);
         } catch (RuntimeException $error) {
@@ -3388,20 +3389,6 @@ class ImportClient
     private function restore_files_pull_conflict_policy(): void
     {
         $saved_policy = $this->import_state()->diff->conflict_policy;
-        if (
-            $saved_policy !== null
-            && !in_array(
-                $saved_policy,
-                ['stop', 'remote-wins', 'our-wins'],
-                true
-            )
-        ) {
-            throw new RuntimeException(
-                'The saved files-pull conflict policy is invalid: '
-                . $saved_policy
-                . '. Abort this files-pull lifecycle before starting again.'
-            );
-        }
         if ($saved_policy === null) {
             $stage = $this->import_state()
                 ->active_resumable_command->current_stage;
@@ -3641,7 +3628,7 @@ class ImportClient
             return;
         }
         $path = ltrim($path, '/');
-        if (FileIndexProcessor::path_is_default_skipped($path)) {
+        if (FileIndexProcessor::path_matches_built_in_exclusion($path)) {
             return;
         }
         $current_path = $path;
@@ -7481,13 +7468,7 @@ class ImportClient
         $diff = $this->import_state()->diff;
         $local_index_snapshot_path =
             $this->state_dir . '/.files-pull-diff-local-index.jsonl';
-        if (!is_file($local_index_snapshot_path)) {
-            if ($diff->local_offset !== null) {
-                throw new RuntimeException(
-                    'The local index for the current files-pull diff is '
-                    . 'missing. Abort this files-pull lifecycle and rerun it.'
-                );
-            }
+        if ($diff->local_offset === null) {
             $local_index_snapshot_path =
                 $this->copy_local_index_for_files_pull_diff();
         }
@@ -7546,14 +7527,8 @@ class ImportClient
                     512,
                     JSON_THROW_ON_ERROR
                 );
-                $path = base64_decode($record['path'], true);
-                if ($path === false) {
-                    throw new RuntimeException(
-                        'A files-pull conflict path is not valid base64.'
-                    );
-                }
                 $path_offset = $line_offset;
-                return $path;
+                return base64_decode($record['path']);
             }
         };
         $next_conflict_offset = $conflict_offset;
@@ -7733,7 +7708,8 @@ class ImportClient
         $planned_local_entry = null;
         $planned_local_offset = $diff->planned_local_offset;
         $validate_planned_local_state =
-            $this->files_pull_conflict_policy !== 'remote-wins'
+            $this->maintain_previous_local_index
+            && $this->files_pull_conflict_policy !== 'remote-wins'
             && is_file($planned_local_index_path);
         if ($validate_planned_local_state) {
             $planned_local_handle =
@@ -8516,17 +8492,6 @@ class ImportClient
     private function retained_local_subtree_stack_path(
         string $state_key
     ): string {
-        if (
-            !in_array(
-                $state_key,
-                ['diff', 'fetch', 'fetch_skipped'],
-                true
-            )
-        ) {
-            throw new InvalidArgumentException(
-                'Unknown retained-subtree state key: ' . $state_key
-            );
-        }
         return $this->state_dir
             . '/.files-pull-'
             . str_replace('_', '-', $state_key)
@@ -8632,21 +8597,8 @@ class ImportClient
                 512,
                 JSON_THROW_ON_ERROR
             );
-            $path_b64 = $record['path_b64'] ?? null;
-            $path = is_string($path_b64)
-                ? base64_decode($path_b64, true)
-                : false;
-            if (
-                $path === false
-                || $path === ''
-                || base64_encode($path) !== $path_b64
-            ) {
-                throw new RuntimeException(
-                    'A retained-subtree path is not canonical base64.'
-                );
-            }
             return [
-                'path' => $path,
+                'path' => base64_decode($record['path_b64']),
                 'previous_offset' =>
                     isset($record['previous_offset'])
                         ? (int) $record['previous_offset']
@@ -8756,14 +8708,8 @@ class ImportClient
                 512,
                 JSON_THROW_ON_ERROR
             );
-            $path = base64_decode($record['path_b64'] ?? '', true);
-            if ($path === false) {
-                throw new RuntimeException(
-                    'A pending deleted-directory path is not valid base64.'
-                );
-            }
             return [
-                'path' => $path,
+                'path' => base64_decode($record['path_b64']),
                 'previous_offset' =>
                     isset($record['previous_offset'])
                         ? (int) $record['previous_offset']
@@ -9279,13 +9225,7 @@ class ImportClient
                         512,
                         JSON_THROW_ON_ERROR
                     );
-                    $path = base64_decode($entry['path'], true);
-                    if ($path === false) {
-                        throw new RuntimeException(
-                            'A planned local path is not valid base64.'
-                        );
-                    }
-                    return $path;
+                    return base64_decode($entry['path']);
                 },
                 8 * 1024 * 1024,
                 true,
@@ -9479,7 +9419,7 @@ class ImportClient
                 }
                 $relative_path = ltrim($relative_path, '/');
                 if (
-                    FileIndexProcessor::path_is_default_skipped(
+                    FileIndexProcessor::path_matches_built_in_exclusion(
                         $relative_path
                     )
                 ) {
@@ -9575,13 +9515,9 @@ class ImportClient
                         512,
                         JSON_THROW_ON_ERROR
                     );
-                    $path = base64_decode($entry['path'], true);
-                    if ($path === false) {
-                        throw new RuntimeException(
-                            'A remote files-pull change path is not valid base64.'
-                        );
-                    }
-                    return path_sort_key($path);
+                    return path_sort_key(
+                        base64_decode($entry['path'])
+                    );
                 },
                 8 * 1024 * 1024,
                 true,
@@ -9630,13 +9566,7 @@ class ImportClient
                         512,
                         JSON_THROW_ON_ERROR
                     );
-                    $path = base64_decode($entry['path'], true);
-                    if ($path === false) {
-                        throw new RuntimeException(
-                            'A local files-pull change path is not valid base64.'
-                        );
-                    }
-                    return $path;
+                    return base64_decode($entry['path']);
                 }
             };
             $read_remote_change = static function ($handle): ?array {
@@ -9659,17 +9589,10 @@ class ImportClient
                         512,
                         JSON_THROW_ON_ERROR
                     );
-                    $path = base64_decode($entry['path'], true);
-                    $remote_path =
-                        base64_decode($entry['remote_path'], true);
-                    if ($path === false || $remote_path === false) {
-                        throw new RuntimeException(
-                            'A remote files-pull change path is not valid base64.'
-                        );
-                    }
                     return [
-                        'path' => $path,
-                        'remote_path' => $remote_path,
+                        'path' => base64_decode($entry['path']),
+                        'remote_path' =>
+                            base64_decode($entry['remote_path']),
                         'replace_subtree' =>
                             (bool) $entry['replace_subtree'],
                     ];
@@ -9801,13 +9724,7 @@ class ImportClient
                         512,
                         JSON_THROW_ON_ERROR
                     );
-                    $path = base64_decode($entry['path'], true);
-                    if ($path === false) {
-                        throw new RuntimeException(
-                            'A files-pull conflict path is not valid base64.'
-                        );
-                    }
-                    return $path;
+                    return base64_decode($entry['path']);
                 },
                 8 * 1024 * 1024,
                 true,
@@ -9861,19 +9778,6 @@ class ImportClient
             !file_exists($list_file)
             || filesize($list_file) === 0
         ) {
-            if (
-                $fetch_state->batch_file !== null
-                || $fetch_state->cursor !== null
-                || $fetch_state->applying_path !== null
-                || $fetch_state->staged_file !== null
-                || $fetch_state->pending_file_install !== null
-            ) {
-                throw new RuntimeException(
-                    'The files-pull download list is missing while its '
-                    . 'fetch state is unfinished. Abort this files-pull '
-                    . 'lifecycle, then rerun it.'
-                );
-            }
             return true;
         }
 
@@ -10170,57 +10074,19 @@ class ImportClient
             if ($line === "") {
                 continue;
             }
-            try {
-                $decoded = json_decode(
-                    $line,
-                    true,
-                    512,
-                    JSON_THROW_ON_ERROR
-                );
-            } catch (JsonException $error) {
-                throw new RuntimeException(
-                    'A download-list entry is not valid JSON at byte '
-                    . $line_start
-                    . ': '
-                    . $error->getMessage()
-                );
-            }
-            if (is_string($decoded)) {
-                $path = $decoded;
-                $request_entry = $path;
-            } elseif (
-                is_array($decoded)
-                && is_string($decoded["path"] ?? null)
-            ) {
+            $decoded = json_decode(
+                $line,
+                true,
+                512,
+                JSON_THROW_ON_ERROR
+            );
+            if (is_array($decoded)) {
                 $encoded_path = $decoded["path"];
-                $path = base64_decode($encoded_path, true);
-                if (
-                    $path === false
-                    || $path === ''
-                    || base64_encode($path) !== $encoded_path
-                ) {
-                    throw new RuntimeException(
-                        'A download-list object path is not canonical '
-                        . 'base64 at byte '
-                        . $line_start
-                        . '.'
-                    );
-                }
+                $path = base64_decode($encoded_path);
                 $request_entry = ['path' => $encoded_path];
             } else {
-                throw new RuntimeException(
-                    'A download-list entry must be a path string or an '
-                    . 'object with a base64 path at byte '
-                    . $line_start
-                    . '.'
-                );
-            }
-            if (!is_string($path) || $path === "") {
-                throw new RuntimeException(
-                    'A download-list path must not be empty at byte '
-                    . $line_start
-                    . '.'
-                );
+                $path = $decoded;
+                $request_entry = $path;
             }
             $validate_local_state =
                 is_array($decoded)
@@ -10403,12 +10269,7 @@ class ImportClient
         if ($action === null) {
             return false;
         }
-        $path = base64_decode($action['path_b64'], true);
-        if ($path === false || $path === '') {
-            throw new RuntimeException(
-                'The pending files-pull local action path is invalid.'
-            );
-        }
+        $path = base64_decode($action['path_b64']);
         $accepted_local_state = $action['accepted_local_state'];
         $local_state = $this->capture_local_path_state($path);
         if (
@@ -12956,7 +12817,7 @@ class ImportClient
                     );
                 }
                 $staging_paths =
-                    $this->validated_fetched_file_staging_paths(
+                    $this->fetched_file_staging_paths(
                         $fetch_state->staged_file
                     );
                 if ($staging_paths['remote'] !== $path) {
@@ -13128,7 +12989,7 @@ class ImportClient
         if ($staged_file === null) {
             return;
         }
-        $paths = $this->validated_fetched_file_staging_paths($staged_file);
+        $paths = $this->fetched_file_staging_paths($staged_file);
         $handle = null;
         if (
             $staged_file['staging_dev'] === null
@@ -13262,7 +13123,7 @@ class ImportClient
                 'Failed to flush the files-pull staging file.'
             );
         }
-        $paths = $this->validated_fetched_file_staging_paths($staged_file);
+        $paths = $this->fetched_file_staging_paths($staged_file);
         $stat = fstat($context->file_handle);
         if (
             !is_array($stat)
@@ -13301,7 +13162,7 @@ class ImportClient
                 'The completed fetched file has no saved staging state.'
             );
         }
-        $paths = $this->validated_fetched_file_staging_paths($staged_file);
+        $paths = $this->fetched_file_staging_paths($staged_file);
         if ($paths['remote'] !== $path) {
             throw new RuntimeException(
                 'The completed file path does not match its staging state.'
@@ -13346,6 +13207,8 @@ class ImportClient
                 ? (string) $headers['x-cursor']
                 : null;
         $staged_file['destination_removal'] = null;
+        $staged_file['installed_dev'] = null;
+        $staged_file['installed_ino'] = null;
         $staged_file['installed_ctime'] = null;
         $staged_file['planned_local_state_offset'] =
             $context->planned_local_state_offset;
@@ -13413,7 +13276,7 @@ class ImportClient
         if ($pending_install === null) {
             return true;
         }
-        $paths = $this->validated_fetched_file_staging_paths(
+        $paths = $this->fetched_file_staging_paths(
             $pending_install
         );
         clearstatcache(true, $paths['staging']);
@@ -13430,14 +13293,20 @@ class ImportClient
                 === $pending_install['staging_ino']
             && (int) $staging_stat['size']
                 === $pending_install['staging_bytes'];
+        $installed_dev =
+            $pending_install['installed_dev']
+                ?? $pending_install['staging_dev'];
+        $installed_ino =
+            $pending_install['installed_ino']
+                ?? $pending_install['staging_ino'];
         $destination_matches =
             is_array($destination_stat)
             && !is_link($paths['destination'])
             && $this->stat_is_regular_file($destination_stat)
             && (int) $destination_stat['dev']
-                === $pending_install['staging_dev']
+                === $installed_dev
             && (int) $destination_stat['ino']
-                === $pending_install['staging_ino']
+                === $installed_ino
             && (int) $destination_stat['size']
                 === $pending_install['staging_bytes'];
         if (!$staging_matches && !$destination_matches) {
@@ -13553,8 +13422,7 @@ class ImportClient
                 ) {
                     $this
                         ->remove_next_pending_fetched_file_destination_path(
-                            $fetch_state,
-                            $paths['destination']
+                            $fetch_state
                         );
                 } else {
                     $this
@@ -13610,22 +13478,25 @@ class ImportClient
             }
             clearstatcache(true, $paths['destination']);
             $destination_stat = @lstat($paths['destination']);
-            $destination_matches =
+            $destination_is_installed_file =
                 is_array($destination_stat)
                 && !is_link($paths['destination'])
                 && $this->stat_is_regular_file($destination_stat)
-                && (int) $destination_stat['dev']
-                    === $pending_install['staging_dev']
-                && (int) $destination_stat['ino']
-                    === $pending_install['staging_ino']
                 && (int) $destination_stat['size']
                     === $pending_install['staging_bytes'];
-            if (!$destination_matches) {
+            if (!$destination_is_installed_file) {
                 throw new RuntimeException(
-                    'The installed fetched file does not match its staged '
-                    . 'identity.'
+                    'The installed fetched path is not a regular file of '
+                    . 'the staged size.'
                 );
             }
+            // Mounted and virtual filesystems may assign a new inode while
+            // implementing rename. Follow the file's installed identity.
+            $pending_install['installed_dev'] =
+                (int) $destination_stat['dev'];
+            $pending_install['installed_ino'] =
+                (int) $destination_stat['ino'];
+            $destination_matches = true;
         }
 
         if ($pending_install['installed_ctime'] === null) {
@@ -13642,9 +13513,9 @@ class ImportClient
                 || is_link($paths['destination'])
                 || !$this->stat_is_regular_file($installed_stat)
                 || (int) $installed_stat['dev']
-                    !== $pending_install['staging_dev']
+                    !== $pending_install['installed_dev']
                 || (int) $installed_stat['ino']
-                    !== $pending_install['staging_ino']
+                    !== $pending_install['installed_ino']
                 || (int) $installed_stat['size']
                     !== $pending_install['staging_bytes']
             ) {
@@ -13722,9 +13593,8 @@ class ImportClient
         $destination_removal =
             $pending_install['destination_removal'];
         $quarantine_path =
-            $this->validated_pending_fetched_file_quarantine_path(
-                $destination_removal,
-                $destination_path
+            $this->pending_fetched_file_quarantine_path(
+                $destination_removal
             );
         clearstatcache(true, $destination_path);
         clearstatcache(true, $quarantine_path);
@@ -13866,8 +13736,7 @@ class ImportClient
      * Removes at most one path from a quarantined destination directory.
      */
     private function remove_next_pending_fetched_file_destination_path(
-        DownloadListFetchProgressState $fetch_state,
-        string $destination_path
+        DownloadListFetchProgressState $fetch_state
     ): void {
         $pending_install = $fetch_state->pending_file_install;
         if (
@@ -13883,9 +13752,8 @@ class ImportClient
         $destination_removal =
             $pending_install['destination_removal'];
         $quarantine_path =
-            $this->validated_pending_fetched_file_quarantine_path(
-                $destination_removal,
-                $destination_path
+            $this->pending_fetched_file_quarantine_path(
+                $destination_removal
             );
         $stack_path =
             $this->pending_fetched_file_destination_stack_path(
@@ -13899,45 +13767,6 @@ class ImportClient
         $work_path = $pending_directory['work_path'];
         $is_root_directory =
             $pending_directory['previous_offset'] === null;
-        if (
-            (
-                $is_root_directory
-                && (
-                    $source_path !== $quarantine_path
-                    || $work_path !== $quarantine_path
-                )
-            )
-            || (
-                !$is_root_directory
-                && (
-                    strpos(
-                        $source_path,
-                        $quarantine_path . '/'
-                    ) !== 0
-                    || strpos(
-                        $work_path,
-                        $quarantine_path . '/'
-                    ) !== 0
-                    || dirname($source_path) !== dirname($work_path)
-                    || $source_path === $work_path
-                    || preg_match(
-                        '/^\\.reprint-[0-9a-f]{16}\\.remove-dir$/D',
-                        basename($work_path)
-                    ) !== 1
-                )
-            )
-        ) {
-            throw new RuntimeException(
-                'The pending fetched-file directory paths are invalid for '
-                . 'their quarantine: source_path_b64='
-                . base64_encode($source_path)
-                . ', work_path_b64='
-                . base64_encode($work_path)
-                . ', quarantine_path_b64='
-                . base64_encode($quarantine_path)
-                . '.'
-            );
-        }
 
         clearstatcache(true, $quarantine_path);
         $quarantine_stat = @lstat($quarantine_path);
@@ -13988,11 +13817,6 @@ class ImportClient
         if ($prepare_result['status'] === 'prepared') {
             return;
         }
-        if ($prepare_result['status'] !== 'ready') {
-            throw new RuntimeException(
-                'The quarantine preparation process returned an invalid status.'
-            );
-        }
 
         $remove_result =
             $this->run_quarantined_directory_child_process(
@@ -14000,28 +13824,7 @@ class ImportClient
                 $pending_directory
             );
         if ($remove_result['status'] === 'directory') {
-            $entry_b64 = $remove_result['entry_b64'] ?? null;
-            $entry = is_string($entry_b64)
-                ? base64_decode($entry_b64, true)
-                : false;
-            $child_dev = $remove_result['dev'] ?? null;
-            $child_ino = $remove_result['ino'] ?? null;
-            if (
-                $entry === false
-                || $entry === ''
-                || $entry === '.'
-                || $entry === '..'
-                || strpos($entry, '/') !== false
-                || base64_encode($entry) !== $entry_b64
-                || !is_int($child_dev)
-                || $child_dev < 0
-                || !is_int($child_ino)
-                || $child_ino < 0
-            ) {
-                throw new RuntimeException(
-                    'The quarantine removal process returned an invalid directory.'
-                );
-            }
+            $entry = base64_decode($remove_result['entry_b64']);
             $child_source_path = $work_path . '/' . $entry;
             $child_work_path =
                 $work_path
@@ -14033,8 +13836,8 @@ class ImportClient
                     $stack_path,
                     $child_source_path,
                     $child_work_path,
-                    $child_dev,
-                    $child_ino,
+                    $remove_result['dev'],
+                    $remove_result['ino'],
                     $pending_directory['dev'],
                     $pending_directory['ino'],
                     $destination_removal['top_offset'],
@@ -14056,15 +13859,9 @@ class ImportClient
         ) {
             return;
         }
-        if ($remove_result['status'] === 'removed') {
-            $this->finish_pending_deleted_directory_step(
-                $fetch_state,
-                $pending_directory
-            );
-            return;
-        }
-        throw new RuntimeException(
-            'The quarantine removal process returned an invalid status.'
+        $this->finish_pending_deleted_directory_step(
+            $fetch_state,
+            $pending_directory
         );
     }
 
@@ -14101,14 +13898,14 @@ class ImportClient
                 . 'because proc_open() is unavailable.'
             );
         }
-        $script = <<<'PHP'
-$action = $argv[1] ?? '';
-$source_path = base64_decode($argv[2] ?? '', true);
-$work_path = base64_decode($argv[3] ?? '', true);
-$expected_dev = filter_var($argv[4] ?? null, FILTER_VALIDATE_INT);
-$expected_ino = filter_var($argv[5] ?? null, FILTER_VALIDATE_INT);
-$expected_parent_dev = filter_var($argv[6] ?? null, FILTER_VALIDATE_INT);
-$expected_parent_ino = filter_var($argv[7] ?? null, FILTER_VALIDATE_INT);
+$script = <<<'PHP'
+$action = $argv[1];
+$source_path = base64_decode($argv[2]);
+$work_path = base64_decode($argv[3]);
+$expected_dev = (int) $argv[4];
+$expected_ino = (int) $argv[5];
+$expected_parent_dev = (int) $argv[6];
+$expected_parent_ino = (int) $argv[7];
 $finish = static function (array $result, int $exit = 0): void {
     echo json_encode($result, JSON_UNESCAPED_SLASHES);
     exit($exit);
@@ -14129,26 +13926,7 @@ $matches = static function (
         && (int) $stat['dev'] === $dev
         && (int) $stat['ino'] === $ino;
 };
-if (
-    !is_string($source_path)
-    || $source_path === ''
-    || !is_string($work_path)
-    || $work_path === ''
-    || !is_int($expected_dev)
-    || $expected_dev < 0
-    || !is_int($expected_ino)
-    || $expected_ino < 0
-    || !is_int($expected_parent_dev)
-    || $expected_parent_dev < 0
-    || !is_int($expected_parent_ino)
-    || $expected_parent_ino < 0
-) {
-    $fail('The saved quarantine process arguments are invalid.');
-}
 if ($action === 'prepare') {
-    if (dirname($source_path) !== dirname($work_path)) {
-        $fail('The quarantine source and work path have different parents.');
-    }
     if (!@chdir(dirname($source_path))) {
         $fail('Failed to enter the quarantined directory parent.');
     }
@@ -14202,9 +13980,6 @@ if ($action === 'prepare') {
         $fail('The moved quarantined child identity changed.');
     }
     $finish(['status' => 'prepared']);
-}
-if ($action !== 'remove') {
-    $fail('The quarantine child action is invalid.');
 }
 if (!@chdir($work_path)) {
     $fail('Failed to enter the private quarantined directory.');
@@ -14343,15 +14118,8 @@ PHP;
                 . trim($stderr)
             );
         }
-        if (!is_array($result) || !is_string($result['status'] ?? null)) {
-            throw new RuntimeException(
-                'The quarantine removal process returned an invalid result.'
-            );
-        }
         if ($exit_code !== 0 || $result['status'] === 'error') {
-            $message = is_string($result['message'] ?? null)
-                ? $result['message']
-                : trim($stderr);
+            $message = $result['message'] ?? trim($stderr);
             throw new RuntimeException(
                 'The quarantine removal process failed: action='
                 . $action
@@ -14458,28 +14226,13 @@ PHP;
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
-    /** Returns the validated same-parent quarantine path from durable state. */
-    private function validated_pending_fetched_file_quarantine_path(
-        array $destination_removal,
-        string $destination_path
+    /** Returns the same-parent quarantine path from durable state. */
+    private function pending_fetched_file_quarantine_path(
+        array $destination_removal
     ): string {
-        $quarantine_path = base64_decode(
-            $destination_removal['quarantine_path_b64'],
-            true
+        return base64_decode(
+            $destination_removal['quarantine_path_b64']
         );
-        if (
-            $quarantine_path === false
-            || dirname($quarantine_path) !== dirname($destination_path)
-            || preg_match(
-                '/^\\.reprint-[0-9a-f]{16}\\.remove$/D',
-                basename($quarantine_path)
-            ) !== 1
-        ) {
-            throw new RuntimeException(
-                'The pending fetched-file quarantine path is invalid.'
-            );
-        }
-        return $quarantine_path;
     }
 
     /**
@@ -14608,71 +14361,16 @@ PHP;
                 512,
                 JSON_THROW_ON_ERROR
             );
-            if (!is_array($record)) {
-                throw new RuntimeException(
-                    'A quarantined-directory stack entry is not an object.'
-                );
-            }
-            $record_keys = array_keys($record);
-            sort($record_keys);
-            $source_path_b64 =
-                $record['source_path_b64'] ?? null;
-            $source_path = is_string($source_path_b64)
-                ? base64_decode($source_path_b64, true)
-                : false;
-            $work_path_b64 =
-                $record['work_path_b64'] ?? null;
-            $work_path = is_string($work_path_b64)
-                ? base64_decode($work_path_b64, true)
-                : false;
-            $previous_offset = $record['previous_offset'] ?? null;
-            if (
-                $record_keys
-                    !== [
-                        'dev',
-                        'ino',
-                        'parent_dev',
-                        'parent_ino',
-                        'previous_offset',
-                        'source_path_b64',
-                        'work_path_b64',
-                    ]
-                || $source_path === false
-                || $source_path === ''
-                || base64_encode($source_path)
-                    !== $source_path_b64
-                || $work_path === false
-                || $work_path === ''
-                || base64_encode($work_path)
-                    !== $work_path_b64
-                || !is_int($record['dev'])
-                || $record['dev'] < 0
-                || !is_int($record['ino'])
-                || $record['ino'] < 0
-                || !is_int($record['parent_dev'])
-                || $record['parent_dev'] < 0
-                || !is_int($record['parent_ino'])
-                || $record['parent_ino'] < 0
-                || (
-                    $previous_offset !== null
-                    && (
-                        !is_int($previous_offset)
-                        || $previous_offset < 0
-                    )
-                )
-            ) {
-                throw new RuntimeException(
-                    'A quarantined-directory removal stack entry is invalid.'
-                );
-            }
             return [
-                'source_path' => $source_path,
-                'work_path' => $work_path,
+                'source_path' =>
+                    base64_decode($record['source_path_b64']),
+                'work_path' =>
+                    base64_decode($record['work_path_b64']),
                 'dev' => $record['dev'],
                 'ino' => $record['ino'],
                 'parent_dev' => $record['parent_dev'],
                 'parent_ino' => $record['parent_ino'],
-                'previous_offset' => $previous_offset,
+                'previous_offset' => $record['previous_offset'],
             ];
         } finally {
             fclose($handle);
@@ -14683,17 +14381,10 @@ PHP;
     private function pending_fetched_file_destination_stack_path(
         DownloadListFetchProgressState $fetch_state
     ): string {
-        if ($fetch_state === $this->import_state()->fetch) {
-            $state_key = 'fetch';
-        } elseif (
-            $fetch_state === $this->import_state()->fetch_skipped
-        ) {
-            $state_key = 'fetch-skipped';
-        } else {
-            throw new InvalidArgumentException(
-                'The pending fetched-file state is not owned by this import.'
-            );
-        }
+        $state_key =
+            $fetch_state === $this->import_state()->fetch
+                ? 'fetch'
+                : 'fetch-skipped';
         return $this->state_dir
             . '/.files-pull-'
             . $state_key
@@ -14834,7 +14525,7 @@ PHP;
                 }
                 $this->save_state($this->state, false);
             }
-            $paths = $this->validated_fetched_file_staging_paths($record);
+            $paths = $this->fetched_file_staging_paths($record);
             clearstatcache(true, $paths['staging']);
             $stat = @lstat($paths['staging']);
             if (is_array($stat)) {
@@ -14871,47 +14562,19 @@ PHP;
     }
 
     /**
-     * Decodes and checks the three paths saved for one private staged file.
+     * Decodes the three paths saved for one private staged file.
      *
      * @return array{remote:string,destination:string,staging:string}
      */
-    private function validated_fetched_file_staging_paths(
+    private function fetched_file_staging_paths(
         array $record
     ): array {
-        $remote_path = base64_decode(
-            $record['remote_path_b64'],
-            true
-        );
-        $destination_path = base64_decode(
-            $record['destination_path_b64'],
-            true
-        );
-        $staging_path = base64_decode(
-            $record['staging_path_b64'],
-            true
-        );
-        if (
-            $remote_path === false
-            || $destination_path === false
-            || $staging_path === false
-            || $destination_path
-                !== $this->remote_path_to_local_path_within_import_root(
-                    $remote_path
-                )
-            || dirname($staging_path) !== dirname($destination_path)
-            || preg_match(
-                '/^\\.reprint-[0-9a-f]{16}\\.part$/D',
-                basename($staging_path)
-            ) !== 1
-        ) {
-            throw new RuntimeException(
-                'The saved files-pull staging paths are inconsistent.'
-            );
-        }
         return [
-            'remote' => $remote_path,
-            'destination' => $destination_path,
-            'staging' => $staging_path,
+            'remote' => base64_decode($record['remote_path_b64']),
+            'destination' =>
+                base64_decode($record['destination_path_b64']),
+            'staging' =>
+                base64_decode($record['staging_path_b64']),
         ];
     }
 
@@ -15364,11 +15027,6 @@ PHP;
             );
         }
 
-        // Try to set the ctime (may not work on all systems)
-        if ($ctime > 0) {
-            @touch($local_path, $ctime);
-        }
-
         $this->audit_log("Symlink: {$path} -> {$target_for_local}", false);
 
         if ($ctime > 0) {
@@ -15656,15 +15314,9 @@ PHP;
     private function download_list_fetch_state_key(
         DownloadListFetchProgressState $fetch_state
     ): string {
-        if ($fetch_state === $this->import_state()->fetch) {
-            return 'fetch';
-        }
-        if ($fetch_state === $this->import_state()->fetch_skipped) {
-            return 'fetch_skipped';
-        }
-        throw new InvalidArgumentException(
-            'The download-list fetch state is not active.'
-        );
+        return $fetch_state === $this->import_state()->fetch
+            ? 'fetch'
+            : 'fetch_skipped';
     }
 
     /** Reports membership while popping retained roots already passed. */
@@ -15712,7 +15364,10 @@ PHP;
     private function fetched_path_parents_allow_remote_change(
         string $path
     ): bool {
-        if ($this->files_pull_conflict_policy === 'remote-wins') {
+        if (
+            !$this->maintain_previous_local_index
+            || $this->files_pull_conflict_policy === 'remote-wins'
+        ) {
             return true;
         }
         $context = $this->files_pull_pair_context();
@@ -15809,14 +15464,7 @@ PHP;
             512,
             JSON_THROW_ON_ERROR
         );
-        $planned_path =
-            base64_decode($record['path'] ?? '', true);
-        if ($planned_path === false) {
-            throw new RuntimeException(
-                'A fetch batch planned-local-state path is not valid '
-                . 'base64.'
-            );
-        }
+        $planned_path = base64_decode($record['path']);
         $planned_local_state_offset =
             ftell($context->planned_local_state_handle);
         if (!is_int($planned_local_state_offset)) {
@@ -15841,11 +15489,7 @@ PHP;
         $context->planned_local_state_checked_result = [
             'validate' =>
                 !empty($record['validate_local_state']),
-            'expected' => is_array(
-                $record['expected_local_state'] ?? null
-            )
-                ? $record['expected_local_state']
-                : null,
+            'expected' => $record['expected_local_state'] ?? null,
         ];
         return $context->planned_local_state_checked_result;
     }
@@ -15945,7 +15589,7 @@ PHP;
             ?? $fetch_state->staged_file;
         if ($staged_file !== null) {
             $paths =
-                $this->validated_fetched_file_staging_paths(
+                $this->fetched_file_staging_paths(
                     $staged_file
                 );
             if ($paths['remote'] !== $path) {
@@ -17834,8 +17478,7 @@ PHP;
         $active_command =
             $state['active_resumable_command'] ?? [];
         $incomplete_legacy_fetch =
-            is_array($active_command)
-            && ( $active_command['command_name'] ?? null )
+            ( $active_command['command_name'] ?? null )
                 === 'files-pull'
             && in_array(
                 $active_command['completion_state'] ?? null,
@@ -19226,7 +18869,7 @@ if (
                 "site-export-api query which pull-files added.\n" .
                 "The output is a local minimized push operation plan before target\n" .
                 "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
-                "default-skipped paths include generated wp-content caches, version-\n" .
+                "built-in exclusions include generated wp-content caches, version-\n" .
                 "control data, node_modules, package-manager caches, OS metadata, and\n" .
                 "editor scratch files.\n" .
                 "Paths remain base64 text in JSONL output so\n" .

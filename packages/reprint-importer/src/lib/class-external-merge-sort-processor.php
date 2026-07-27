@@ -176,7 +176,6 @@ final class ExternalMergeSortProcessor {
      */
     public static function resume(array $cursor, callable $key_extractor): self
     {
-        self::validate_cursor($cursor);
         $processor = new self($cursor, $key_extractor);
         $position = $cursor["position"];
         if ($position["phase"] === "splitting") {
@@ -810,17 +809,11 @@ final class ExternalMergeSortProcessor {
         ];
     }
 
-    /**
-     * Extracts and validates one line's key.
-     */
+    /** Extracts one line's key. */
     private function extract_key(string $line): ?string
     {
         $extract_key = $this->key_extractor;
-        $key = $extract_key($line);
-        if ($key !== null && !is_string($key)) {
-            throw new UnexpectedValueException("The merge-sort key extractor returned a non-string key.");
-        }
-        return $key;
+        return $extract_key($line);
     }
 
     /**
@@ -831,11 +824,7 @@ final class ExternalMergeSortProcessor {
         if ($last_output_key_b64 === null) {
             return null;
         }
-        $last_output_key = base64_decode($last_output_key_b64, true);
-        if ($last_output_key === false) {
-            throw new RuntimeException("The merge-sort cursor contains an invalid output key.");
-        }
-        return $last_output_key;
+        return base64_decode($last_output_key_b64);
     }
 
     /**
@@ -950,153 +939,5 @@ final class ExternalMergeSortProcessor {
     private static function merge_pair_count(int $input_run_count): int
     {
         return intdiv($input_run_count + 1, 2);
-    }
-
-    /**
-     * Rejects a malformed retained cursor before any run is changed.
-     *
-     * @param array<string,mixed> $cursor Caller-held continuation state.
-     */
-    private static function validate_cursor(array $cursor): void
-    {
-        foreach (["input_path", "output_path", "work_directory"] as $path_field) {
-            if (
-                !array_key_exists($path_field, $cursor)
-                || !is_string($cursor[$path_field])
-                || $cursor[$path_field] === ""
-            ) {
-                throw new InvalidArgumentException(
-                    "The merge-sort cursor has an invalid {$path_field}."
-                );
-            }
-        }
-        if (!is_file($cursor["input_path"])) {
-            throw new InvalidArgumentException(
-                "The retained merge-sort input is not a file: {$cursor["input_path"]}"
-            );
-        }
-        if (!is_dir($cursor["work_directory"])) {
-            throw new InvalidArgumentException(
-                "The retained merge-sort work directory is missing: {$cursor["work_directory"]}"
-            );
-        }
-        if (
-            !array_key_exists("chunk_bytes", $cursor)
-            || !is_int($cursor["chunk_bytes"])
-            || $cursor["chunk_bytes"] < 1
-        ) {
-            throw new InvalidArgumentException("The merge-sort cursor has invalid chunk_bytes.");
-        }
-        if (!array_key_exists("deduplicate", $cursor) || !is_bool($cursor["deduplicate"])) {
-            throw new InvalidArgumentException("The merge-sort cursor has invalid deduplicate state.");
-        }
-        if (
-            !array_key_exists("position", $cursor)
-            || !is_array($cursor["position"])
-            || !array_key_exists("phase", $cursor["position"])
-            || !is_string($cursor["position"]["phase"])
-        ) {
-            throw new InvalidArgumentException("The merge-sort cursor has no valid position.");
-        }
-
-        $position = $cursor["position"];
-        switch ($position["phase"]) {
-            case "splitting":
-                self::require_nonnegative_integer($position, "input_byte_offset", "splitting cursor");
-                self::require_nonnegative_integer($position, "run_count", "splitting cursor");
-                return;
-
-            case "merging":
-                self::require_nonnegative_integer($position, "round", "merging cursor");
-                self::require_positive_integer($position, "input_run_count", "merging cursor");
-                self::require_nonnegative_integer($position, "pair_index", "merging cursor");
-                self::require_nonnegative_integer($position, "left_byte_offset", "merging cursor");
-                self::require_nonnegative_integer($position, "right_byte_offset", "merging cursor");
-                self::require_nonnegative_integer($position, "output_byte_offset", "merging cursor");
-                if (
-                    !array_key_exists("last_output_key_b64", $position)
-                    || (
-                        $position["last_output_key_b64"] !== null
-                        && (
-                            !is_string($position["last_output_key_b64"])
-                            || base64_decode($position["last_output_key_b64"], true) === false
-                        )
-                    )
-                ) {
-                    throw new InvalidArgumentException(
-                        "The merging cursor has an invalid last_output_key_b64."
-                    );
-                }
-                return;
-
-            case "removing_input_round":
-                self::require_nonnegative_integer($position, "round", "removal cursor");
-                self::require_nonnegative_integer($position, "run_index", "removal cursor");
-                self::require_positive_integer($position, "next_run_count", "removal cursor");
-                return;
-
-            case "publishing":
-                if (
-                    !array_key_exists("final_run", $position)
-                    || !is_string($position["final_run"])
-                    || $position["final_run"] === ""
-                ) {
-                    throw new InvalidArgumentException(
-                        "The publishing cursor has an invalid final_run."
-                    );
-                }
-                return;
-
-            case "publishing_empty":
-            case "complete":
-                return;
-        }
-
-        throw new InvalidArgumentException(
-            "The merge-sort cursor has an unknown phase: {$position["phase"]}"
-        );
-    }
-
-    /**
-     * Requires one nonnegative integer cursor field.
-     *
-     * @param array<string,mixed> $position   Phase cursor.
-     * @param string              $field      Field to validate.
-     * @param string              $description Human-readable cursor name.
-     */
-    private static function require_nonnegative_integer(
-        array $position,
-        string $field,
-        string $description
-    ): void {
-        if (
-            !array_key_exists($field, $position)
-            || !is_int($position[$field])
-            || $position[$field] < 0
-        ) {
-            throw new InvalidArgumentException(
-                "The {$description} has an invalid {$field}."
-            );
-        }
-    }
-
-    /**
-     * Requires one positive integer cursor field.
-     *
-     * @param array<string,mixed> $position   Phase cursor.
-     * @param string              $field      Field to validate.
-     * @param string              $description Human-readable cursor name.
-     */
-    private static function require_positive_integer(
-        array $position,
-        string $field,
-        string $description
-    ): void {
-        self::require_nonnegative_integer($position, $field, $description);
-        if ($position[$field] === 0) {
-            throw new InvalidArgumentException(
-                "The {$description} requires {$field} greater than zero."
-            );
-        }
     }
 }

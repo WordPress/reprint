@@ -57,11 +57,11 @@ final class FileIndexProcessorTest extends TestCase {
         $this->assertTrue($resumed['empty_directory_was_empty']);
         $this->assertSame(
             [realpath($docroot) . '/wp-content/cache'],
-            $resumed['default_skipped_paths']
+            $resumed['built_in_exclusion_roots']
         );
     }
 
-    public function testStorageSkipIsNotReportedAsADefaultSkippedPath(): void
+    public function testStorageSkipIsNotReportedAsABuiltInExclusion(): void
     {
         $docroot = $this->tempDir . '/storage-site';
         $storage = $docroot . '/storage';
@@ -83,7 +83,7 @@ final class FileIndexProcessorTest extends TestCase {
             ) {
                 $sawStorageSkip = true;
                 $this->assertNull(
-                    $processor->get_default_skipped_path()
+                    $processor->get_built_in_exclusion_root()
                 );
             }
         }
@@ -220,7 +220,7 @@ final class FileIndexProcessorTest extends TestCase {
      *
      *     @type array[]  $entries                    File-index entries.
      *     @type string[] $statuses                   Status returned by every step.
-     *     @type string[] $default_skipped_paths      Default-skipped roots settled by traversal.
+     *     @type string[] $built_in_exclusion_roots  Roots omitted by built-in rules.
      *     @type bool     $empty_directory_was_empty Whether the empty directory was classified correctly.
      * }
      */
@@ -236,13 +236,13 @@ final class FileIndexProcessorTest extends TestCase {
         );
         $entries = [];
         $statuses = [];
-        $defaultSkippedPaths = [];
+        $builtInExclusionRoots = [];
         while ($processor->next_index_step()) {
             $statuses[] = $processor->get_step_status();
-            $defaultSkippedPath =
-                $processor->get_default_skipped_path();
-            if ($defaultSkippedPath !== null) {
-                $defaultSkippedPaths[] = $defaultSkippedPath;
+            $builtInExclusionRoot =
+                $processor->get_built_in_exclusion_root();
+            if ($builtInExclusionRoot !== null) {
+                $builtInExclusionRoots[] = $builtInExclusionRoot;
             }
             foreach ($processor->get_index_entries() as $entry) {
                 $entries[] = $entry;
@@ -272,7 +272,7 @@ final class FileIndexProcessorTest extends TestCase {
         return [
             'entries' => $entries,
             'statuses' => $statuses,
-            'default_skipped_paths' => $defaultSkippedPaths,
+            'built_in_exclusion_roots' => $builtInExclusionRoots,
             'empty_directory_was_empty' => $emptyDirectoryWasEmpty,
         ];
     }

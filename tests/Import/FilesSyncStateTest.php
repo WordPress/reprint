@@ -333,34 +333,6 @@ class FilesSyncStateTest extends TestCase
         );
     }
 
-    public function testDiffRejectsCorruptStateWithAMissingLocalIndexSnapshot(): void
-    {
-        file_put_contents(
-            $this->stateDir . '/.import-remote-index.jsonl',
-            ''
-        );
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "partial",
-                "current_stage" => "diff",
-            ],
-            'diff' => [
-                'local_offset' => 0,
-            ],
-        ]);
-
-        [$client, $reflection] = $this->prepareClient();
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage(
-            'local index for the current files-pull diff is missing'
-        );
-        $reflection->getMethod(
-            'diff_indexes_and_build_fetch_list'
-        )->invoke($client);
-    }
-
     /**
      * After a full `pull`, active_resumable_command points at the last stage
      * (db-apply), not files-pull, but pull_pipeline records a deferred tail. A
