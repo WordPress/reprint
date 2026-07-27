@@ -6153,7 +6153,7 @@ class ImportClient
                 $post_data,
                 "file_fetch",
             );
-        } catch (InterruptedResponseException $e) {
+        } catch (TransientInterruptionException $e) {
             // A streaming body may have written bytes for a multipart part
             // whose cursor is not durable yet. Keep the checkpoint saved by
             // the last complete part; the next invocation truncates any later
@@ -6416,7 +6416,7 @@ class ImportClient
         $request_start = microtime(true);
         try {
             $this->fetch_streaming($url, $cursor, $context, null, "file_index");
-        } catch (InterruptedResponseException $e) {
+        } catch (TransientInterruptionException $e) {
             $this->assert_can_resume_after_interrupted_response(
                 "file_index",
                 $cursor_before,
@@ -7818,7 +7818,7 @@ class ImportClient
                     $sql_buffer = "";
                     $curl_timed_out = true;
                     break;
-                } catch (InterruptedResponseException $e) {
+                } catch (TransientInterruptionException $e) {
                     // The server may crash mid-response (max_execution_time,
                     // OOM, fatal error). Keep $sql_buffer intact so the next
                     // invocation reloads it and continues from the last
@@ -8331,7 +8331,7 @@ class ImportClient
                         null,
                         "db_index",
                     );
-                } catch (InterruptedResponseException $e) {
+                } catch (TransientInterruptionException $e) {
                     $this->assert_can_resume_after_interrupted_response(
                         "db_index",
                         $cursor_before,
@@ -10264,9 +10264,9 @@ class ImportClient
     /**
      * Check for cURL errors after curl_exec and record timeout state.
      *
-     * @throws CurlTimeoutException        When the request times out.
-     * @throws InterruptedResponseException When the response ends early.
-     * @throws RuntimeException            For every other cURL error.
+     * @throws CurlTimeoutException          When the request times out.
+     * @throws TransientInterruptionException When the response ends early.
+     * @throws RuntimeException              For every other cURL error.
      */
     private function check_curl_error($ch): void
     {
@@ -10291,7 +10291,7 @@ class ImportClient
         //   52 = CURLE_GOT_NOTHING (empty response)
         //   56 = CURLE_RECV_ERROR (connection reset / receive failure)
         if (in_array($errno, [18, 52, 56], true)) {
-            throw new InterruptedResponseException(
+            throw new TransientInterruptionException(
                 "cURL error ({$errno}): {$error}",
             );
         }
@@ -10306,16 +10306,16 @@ class ImportClient
      * cursor did not move, the counter increments. After
      * MAX_CONSECUTIVE_INTERRUPTED_RESPONSES with no progress, the runner stops.
      *
-     * @param string                       $phase         Human-readable phase name.
-     * @param ?string                      $cursor_before Cursor at request start.
-     * @param ?string                      $cursor_after  Last durable cursor.
-     * @param InterruptedResponseException $exception     Response failure.
+     * @param string                           $phase         Human-readable phase name.
+     * @param ?string                          $cursor_before Cursor at request start.
+     * @param ?string                          $cursor_after  Last durable cursor.
+     * @param TransientInterruptionException   $exception     Response failure.
      */
     protected function assert_can_resume_after_interrupted_response(
         string $phase,
         ?string $cursor_before,
         ?string $cursor_after,
-        InterruptedResponseException $exception
+        TransientInterruptionException $exception
     ): void {
         if ($cursor_after !== null && $cursor_after !== $cursor_before) {
             $this->import_state()->consecutive_interrupted_responses = 0;
@@ -10974,14 +10974,14 @@ class ImportClient
 
         if (!$parser) {
             $snippet = $error_body ? substr($error_body, 0, 500) : "";
-            throw new InterruptedResponseException(
+            throw new TransientInterruptionException(
                 "Invalid response: missing multipart boundary. " .
                     ($snippet !== "" ? "Body: {$snippet}" : ""),
             );
         }
 
         if (!$context->saw_completion) {
-            throw new InterruptedResponseException(
+            throw new TransientInterruptionException(
                 "Invalid response: missing completion chunk from server.",
             );
         }
@@ -11757,12 +11757,19 @@ class PreserveLocalSkipException extends RuntimeException {}
 class InterruptedResponseException extends RuntimeException {}
 
 /**
+ * Thrown when an interrupted response can be requested again from its last
+ * durable cursor.
+ */
+// phpcs:ignore Generic.Files.OneObjectStructurePerFile.MultipleFound, WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
+class TransientInterruptionException extends InterruptedResponseException {}
+
+/**
  * Thrown when a cURL request times out (CURLE_OPERATION_TIMEDOUT).
  * Callers catch this to save state and exit with "partial" status instead
  * of crashing with a fatal error — the next invocation resumes from the
  * last saved cursor.
  */
-class CurlTimeoutException extends InterruptedResponseException {}
+class CurlTimeoutException extends TransientInterruptionException {}
 
 // ============================================================================
 // CLI Entry Point
