@@ -7585,7 +7585,6 @@ class ImportClient
             false,
         );
 
-        $curl_timed_out = false;
         $caught_exception = null;
         $buffer_not_flushed = "";
         $chunks_since_save = 0;
@@ -7794,56 +7793,23 @@ class ImportClient
                 $request_start = microtime(true);
                 try {
                     $this->fetch_streaming($url, $cursor, $context, null, "sql_chunk");
-                } catch (CurlTimeoutException $e) {
-                    $this->assert_can_resume_after_interrupted_response(
-                        "sql_chunk",
-                        $cursor_before,
-                        $cursor,
-                        $e,
-                    );
-                    // Save state so the next invocation resumes from the
-                    // last cursor instead of crashing with exit code 1.
-                    if ($sql_handle) {
-                        fflush($sql_handle);
-                    }
-                    $this->import_state()->active_resumable_command->remote_cursor = $cursor;
-                    $this->import_state()->sql_bytes = $sql_bytes_written;
-                    $this->import_state()->sql_statements_counted = $sql_statements_counted;
-                    $this->import_state()->active_resumable_command->completion_state = "partial";
-                    $this->save_state($this->state);
-                    // Discard any pending SQL buffer — it's incomplete and
-                    // will be re-fetched on the next invocation. Setting
-                    // this to "" also prevents the finally block from
-                    // throwing about un-executed buffered SQL.
-                    $sql_buffer = "";
-                    $curl_timed_out = true;
-                    break;
                 } catch (TransientInterruptionException $e) {
-                    // The server may crash mid-response (max_execution_time,
-                    // OOM, fatal error). Keep $sql_buffer intact so the next
-                    // invocation reloads it and continues from the last
-                    // complete response part.
-                    $this->audit_log(
-                        "SQL BUFFER | buffered_sql=" . strlen($sql_buffer) .
-                        " bytes | saving state after interrupted response",
-                        true,
-                    );
+                    // The source may time out or crash after complete SQL parts
+                    // but before its completion part. SQL multipart bodies are
+                    // delivered only at a complete part boundary, so resume from
+                    // that part's cursor without closing the selected output.
                     $this->assert_can_resume_after_interrupted_response(
                         "sql_chunk",
                         $cursor_before,
                         $cursor,
                         $e,
                     );
-                    if ($sql_handle) {
-                        fflush($sql_handle);
+                    $retry_log = "SQL RETRY | resuming source request | mode={$mode}";
+                    if ($sql_buffer !== "") {
+                        $retry_log .= " | buffered_sql=" . strlen($sql_buffer) . " bytes";
                     }
-                    $this->import_state()->active_resumable_command->remote_cursor = $cursor;
-                    $this->import_state()->sql_bytes = $sql_bytes_written;
-                    $this->import_state()->sql_statements_counted = $sql_statements_counted;
-                    $this->import_state()->active_resumable_command->completion_state = "partial";
-                    $this->save_state($this->state);
-                    $curl_timed_out = true;
-                    break;
+                    $this->audit_log($retry_log, true);
+                    continue;
                 }
                 $this->import_state()->consecutive_interrupted_responses = 0;
                 $wall_time = microtime(true) - $request_start;
@@ -7937,15 +7903,6 @@ class ImportClient
                             " (original error: " . $caught_exception->getMessage() . ")",
                             true,
                         );
-                    } elseif ($curl_timed_out) {
-                        // Crash recovery — the buffer file is preserved on
-                        // disk so the next invocation reloads it and continues
-                        // accumulating from where the server left off.
-                        $this->audit_log(
-                            "BUFFER PRESERVED | " . strlen($pending) .
-                            " bytes in SQL buffer saved for crash recovery",
-                            true,
-                        );
                     } else {
                         $buffer_not_flushed = $pending;
                     }
@@ -7958,10 +7915,6 @@ class ImportClient
                 "Buffered SQL was never executed (" . strlen($buffer_not_flushed) .
                 " bytes) — incomplete export?"
             );
-        }
-
-        if ($curl_timed_out) {
-            return;
         }
     }
 

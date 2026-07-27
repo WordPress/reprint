@@ -7,13 +7,11 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Verify that cURL timeouts during download save state and set the
- * resumable command completion state to "partial" instead of crashing with
- * a fatal RuntimeException.
+ * Verify recovery from cURL timeouts during streaming downloads.
  *
  * Each download method (download_sql, download_file_fetch, download_remote_index,
- * download_db_index) is tested by injecting a CurlTimeoutException via a
- * subclass that overrides fetch_streaming.
+ * download_db_index) is tested by injecting a CurlTimeoutException. SQL retries
+ * in the same invocation; the other phases save partial state for a later run.
  *
  * Also verifies the no-progress safety net: after repeated interrupted
  * responses with no cursor progress, the importer gives up.
@@ -142,10 +140,10 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // download_sql: timeout saves state as "partial"
+    // download_sql: timeout retries in the same invocation
     // ---------------------------------------------------------------
 
-    public function testSqlDownloadTimeoutSavesPartialState()
+    public function testSqlDownloadRetriesTimeoutUntilNoProgressLimit()
     {
         $this->writeState([
             "active_resumable_command" => [
@@ -166,21 +164,20 @@ class CurlTimeoutRecoveryTest extends TestCase
         $modeProp->setValue($client, 'file');
 
         $downloadSql = $reflection->getMethod('download_sql');
-        $downloadSql->invoke($client);
+        try {
+            $downloadSql->invoke($client);
+            $this->fail("Expected the no-progress limit to stop SQL retries");
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString(
+                "3 consecutive times without cursor progress",
+                $e->getMessage(),
+            );
+        }
 
-        $state = $this->readState();
-        $this->assertEquals(
-            "partial",
-            $state["active_resumable_command"]["completion_state"],
-            "After cURL timeout, resumable command completion state should be 'partial' not an exception"
-        );
-        $this->assertNotNull(
-            $state["active_resumable_command"]["remote_cursor"],
-            "Cursor should be preserved for resumption"
-        );
-        $this->assertNotNull(
-            $state["sql_bytes"],
-            "sql_bytes should be saved for crash recovery"
+        $this->assertSame(
+            3,
+            $client->streaming_requests,
+            "download_sql should retry timeouts until the no-progress limit",
         );
     }
 
@@ -375,46 +372,6 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // run_db_sync: timeout propagates as "partial", not exception
-    // ---------------------------------------------------------------
-
-    public function testRunDbSyncExitsPartialOnSqlTimeout()
-    {
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "db-pull",
-                "completion_state" => "in_progress",
-                "current_stage" => "sql",
-                "remote_cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
-            ],
-            "sql_bytes" => 0,
-            "db_index" => [
-                "file" => $this->stateDir . "/db-tables.jsonl",
-                "tables" => 5,
-                "rows_estimated" => 10000,
-                "bytes" => 100,
-                "updated_at" => time(),
-            ],
-        ]);
-
-        [$client, $reflection] = $this->prepareClient();
-
-        $modeProp = $reflection->getProperty('sql_output_mode');
-        $modeProp->setValue($client, 'file');
-
-        // run_db_sync should NOT throw — it should return with partial status
-        $runDbSync = $reflection->getMethod('run_db_sync');
-        $runDbSync->invoke($client);
-
-        $state = $this->readState();
-        $this->assertEquals(
-            "partial",
-            $state["active_resumable_command"]["completion_state"],
-            "run_db_sync should set resumable command completion state to 'partial' on timeout, not throw"
-        );
-    }
-
-    // ---------------------------------------------------------------
     // Exception hierarchy
     // ---------------------------------------------------------------
 
@@ -572,39 +529,6 @@ class CurlTimeoutRecoveryTest extends TestCase
         $downloadSql->invoke($client);
     }
 
-    public function testFirstTimeoutIncrementsCounterInState()
-    {
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "db-pull",
-                "completion_state" => "in_progress",
-                "current_stage" => "sql",
-                "remote_cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
-            ],
-            "sql_bytes" => 1024,
-            "consecutive_interrupted_responses" => 0,
-        ]);
-
-        $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
-        file_put_contents($this->stateDir . '/db.sql', $sql_content);
-
-        [$client, $reflection] = $this->prepareClient();
-
-        $modeProp = $reflection->getProperty('sql_output_mode');
-        $modeProp->setValue($client, 'file');
-
-        $downloadSql = $reflection->getMethod('download_sql');
-        $downloadSql->invoke($client);
-
-        $state = $this->readState();
-        $this->assertEquals("partial", $state["active_resumable_command"]["completion_state"]);
-        $this->assertEquals(
-            1,
-            $state["consecutive_interrupted_responses"],
-            "First no-progress timeout should increment counter to 1"
-        );
-    }
-
     public function testSuccessfulRequestResetsCounter()
     {
         $this->writeState([
@@ -654,6 +578,8 @@ class CurlTimeoutRecoveryTest extends TestCase
  */
 class TimeoutTestClient extends \ImportClient
 {
+    public $streaming_requests = 0;
+
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
@@ -661,6 +587,7 @@ class TimeoutTestClient extends \ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
+        ++$this->streaming_requests;
         throw new \CurlTimeoutException(
             "cURL error: Operation timed out after 300001 milliseconds with 0 bytes received"
         );
