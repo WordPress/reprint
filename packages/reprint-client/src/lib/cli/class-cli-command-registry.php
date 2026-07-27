@@ -22,8 +22,6 @@ use Reprint\Importer\Cli\Commands\PullCommand;
 use Reprint\Importer\Cli\Commands\PullDatabaseCommand;
 use Reprint\Importer\Cli\Commands\PullFilesCommand;
 
-// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions describe CLI registration errors, not HTML output.
-
 /**
  * Resolves registered command names and aliases.
  */
@@ -42,11 +40,13 @@ class CliCommandRegistry {
 		foreach ( $commands as $command ) {
 			$name = $command->get_name();
 			if ( isset( $this->commands[ $name ] ) || isset( $this->aliases[ $name ] ) ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions describe CLI registration errors, not HTML output.
 				throw new InvalidArgumentException( "The CLI command name \"{$name}\" is registered more than once." );
 			}
 			$this->commands[ $name ] = $command;
 			foreach ( $command->get_aliases() as $alias ) {
 				if ( isset( $this->commands[ $alias ] ) || isset( $this->aliases[ $alias ] ) ) {
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions describe CLI registration errors, not HTML output.
 					throw new InvalidArgumentException( "The CLI command alias \"{$alias}\" is registered more than once." );
 				}
 				$this->aliases[ $alias ] = $name;

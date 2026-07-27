@@ -31,11 +31,11 @@ class ImporterCliApplication {
 		ImporterVersionProvider $version_provider,
 		CliOutput $output
 	) {
-		$this->command_registry     = $command_registry;
-		$this->argument_parser      = $argument_parser;
-		$this->help_renderer        = $help_renderer;
-		$this->version_provider     = $version_provider;
-		$this->output               = $output;
+		$this->command_registry = $command_registry;
+		$this->argument_parser  = $argument_parser;
+		$this->help_renderer    = $help_renderer;
+		$this->version_provider = $version_provider;
+		$this->output           = $output;
 	}
 
 	/**

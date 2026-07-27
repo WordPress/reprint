@@ -2,8 +2,6 @@
 
 namespace Reprint\Importer\Cli;
 
-// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions report command-line input, not HTML output.
-
 /**
  * Produces CLI help from registered command synopses.
  */

@@ -4,8 +4,6 @@ namespace Reprint\Importer\Cli;
 
 use RuntimeException;
 
-// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions describe CLI stream failures, not HTML output.
-
 /**
  * Owns command-line output streams and terminal capability checks.
  */
@@ -39,6 +37,7 @@ class CliOutput {
 	private function write_to( $stream, string $message, string $stream_name ): void {
 		$bytes_written = fwrite( $stream, $message );
 		if ( $bytes_written === false || $bytes_written !== strlen( $message ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- This exception describes a CLI stream failure, not HTML output.
 			throw new RuntimeException( "Failed to write complete CLI output to {$stream_name}." );
 		}
 	}

@@ -4,8 +4,6 @@ namespace Reprint\Importer\Cli;
 
 use function WordPress\Reprint\Exporter\parse_size;
 
-// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions report command-line input, not HTML output.
-
 /**
  * Parses one command's positional and associative synopsis.
  */
@@ -29,7 +27,9 @@ class CliArgumentParser {
 			) {
 				if ( $argument->required ) {
 					throw new CliInputException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
 						"Error: <{$argument->placeholder}> is required\n"
+						// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
 						. 'Usage: ' . $command->get_usage()
 					);
 				}
@@ -54,6 +54,7 @@ class CliArgumentParser {
 			$match        = $this->match_option( $raw_argument, $command->get_options() );
 			if ( $match === null ) {
 				throw new CliInputException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
 					$this->invalid_argument_message( $command, $raw_argument )
 				);
 			}
@@ -64,6 +65,7 @@ class CliArgumentParser {
 				if ( ! isset( $arguments[ $argument_index + 1 ] ) ) {
 					$placeholder = $option->placeholder ?? 'VALUE';
 					throw new CliInputException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
 						"--{$option->name} requires one argument: {$placeholder}"
 					);
 				}
@@ -72,6 +74,7 @@ class CliArgumentParser {
 				if ( ! isset( $arguments[ $argument_index + 1 ], $arguments[ $argument_index + 2 ] ) ) {
 					$argument_labels = $option->argument_labels ?? 'ARG1 ARG2';
 					throw new CliInputException(
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
 						"--{$option->name} requires two arguments: {$argument_labels}"
 					);
 				}
@@ -93,7 +96,9 @@ class CliArgumentParser {
 				&& ! in_array( $value, $option->valid_values, true )
 			) {
 				throw new CliInputException(
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
 					"Invalid --{$option->name} value: {$raw_value}. Valid values: "
+					// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
 					. implode( ', ', $option->valid_values )
 				);
 			}

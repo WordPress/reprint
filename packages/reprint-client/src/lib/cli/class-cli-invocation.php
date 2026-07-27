@@ -2,8 +2,6 @@
 
 namespace Reprint\Importer\Cli;
 
-// phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Exceptions report command-line input, not HTML output.
-
 /**
  * Validated input supplied to the business-operation runner.
  */
@@ -69,6 +67,7 @@ class CliInvocation {
 		if ( $command->requires_state_directory() && ! $state_directory ) {
 			throw new CliInputException(
 				"Error: --state-dir=DIR is required\n"
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
 				. 'Usage: ' . $command->get_usage()
 			);
 		}
@@ -87,6 +86,7 @@ class CliInvocation {
 		) {
 			throw new CliInputException(
 				"Error: --fs-root=DIR is required\n"
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
 				. 'Usage: ' . $command->get_usage()
 			);
 		}
@@ -97,6 +97,7 @@ class CliInvocation {
 		) {
 			throw new CliInputException(
 				"Error: --fs-root=DIR is required\n"
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI input errors are plain-text terminal messages, not HTML output.
 				. 'Usage: ' . $command->get_usage()
 			);
 		}
