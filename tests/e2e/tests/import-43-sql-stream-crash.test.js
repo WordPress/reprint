@@ -1,22 +1,14 @@
 /**
- * Test 43: SQL Stream Crash Recovery (mysql mode)
+ * Test 43: SQL Stream Crash Recovery
  *
- * Simulates a PHP crash (exit(1)) mid-SQL-stream using a test hook on
- * test_hook_before_sql_batch. When PHP dies mid-stream, the multipart
- * response is truncated and no completion chunk is sent. Before this
- * fix, the importer would throw "Buffered SQL was never executed" and
- * fail fatally. Now it treats the missing completion chunk as an
- * interrupted response, saves partial state, and resumes on the next run.
- *
- * Note: The .sql-buffer file only contains data when the crash
- * interrupts a partial SQL statement (mid-chunk). With exit(1), PHP
- * dies before writing the next batch, so all previously received SQL
- * was already executed and the buffer is typically empty. The key
- * assertion is that the importer exits partial (code 2) and resumes
- * successfully — not that the buffer file has data.
+ * Simulates a PHP crash (exit(1)) after emitting a complete multipart
+ * part which ends midway through an INSERT, but before emitting the next
+ * part. Every SQL output mode must resume the REST stream from that part's
+ * cursor without repeating or skipping its SQL.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -29,164 +21,189 @@ import {
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
+describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
     const site = 'sql-crash';
+    const payloadTable = 'wp_reprint_crash_payload';
+    let sourcePayloads;
 
     beforeAll(async () => {
         await ensureSite(site);
+        const conn = await createMysqlConnection();
+        await conn.query(
+            `DROP TABLE IF EXISTS \`${getDbName(site)}\`.\`${payloadTable}\``
+        );
+        // An incompressible row forces the incomplete multipart part
+        // through HTTP buffering before the exporter exits.
+        await conn.query(
+            `CREATE TABLE \`${getDbName(site)}\`.\`${payloadTable}\` (` +
+            '`id` bigint unsigned NOT NULL, ' +
+            '`payload` longblob NOT NULL, ' +
+            'PRIMARY KEY (`id`))'
+        );
+        sourcePayloads = [randomBytes(512 * 1024), randomBytes(512 * 1024)];
+        await conn.query(
+            `INSERT INTO \`${getDbName(site)}\`.\`${payloadTable}\` ` +
+            '(`id`, `payload`) VALUES (?, ?), (?, ?)',
+            [1, sourcePayloads[0], 2, sourcePayloads[1]]
+        );
+        await conn.end();
+
+        // Let one incomplete INSERT part reach the client, then kill PHP
+        // before the following part is emitted.
+        writeTestHooks(site, [
+            'function test_hook_before_sql_batch(&$sql, $cursor) {',
+            `    $state_file = '/srv/e2e-sites/.e2e-hook-state-${site}';`,
+            '    $state = file_exists($state_file)',
+            '        ? json_decode(file_get_contents($state_file), true)',
+            '        : [];',
+            '',
+            '    if (!empty($state[\'crash_before_batch\'])) {',
+            '        $state[\'crash_before_batch\'] = false;',
+            '        $state[\'crashed\'] = true;',
+            '        file_put_contents($state_file, json_encode($state));',
+            '        exit(1);',
+            '    }',
+            '',
+            '    $trimmed = rtrim($sql);',
+            '    $large_incomplete_part = strlen($sql) > 512 * 1024',
+            '        && $trimmed !== \'\'',
+            '        && substr($trimmed, -1) === \',\';',
+            '    if (empty($state[\'crashed\']) && $large_incomplete_part) {',
+            '        $state[\'incomplete_batch_emitted\'] = true;',
+            '        $state[\'crash_before_batch\'] = true;',
+            '    }',
+            '    file_put_contents($state_file, json_encode($state));',
+            '}',
+        ].join('\n'));
+    });
+
+    afterAll(async () => {
+        removeTestHooks(site);
+        clearHookState(site);
+        const conn = await createMysqlConnection();
+        await conn.query(
+            `DROP TABLE IF EXISTS \`${getDbName(site)}\`.\`${payloadTable}\``
+        );
+        await conn.end();
     });
 
     function importUrl() {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    const mysqlArgs = (db) => [
-        '--sql-output=mysql',
-        `--mysql-database=${db}`,
-        '--mysql-host=127.0.0.1',
-        '--mysql-user=e2e_admin',
-        '--mysql-password=e2e_password',
-        // Force small batches so the standard WP install produces 3+
-        // SQL batches. The default (1000 fragments/batch) fits everything
-        // in one batch, so the crash hook on batch 3 would never fire.
-        '--sql-fragments-start=5',
-        '--sql-fragments-max=5',
-        '--sql-fragments-min=5',
-    ];
+    function sqlOutputArgs(mode, db) {
+        const args = [
+            `--sql-output=${mode}`,
+            // Emit one producer fragment per multipart part so the hook can
+            // stop immediately after a partial INSERT statement.
+            '--sql-fragments-start=1',
+            '--sql-fragments-max=1',
+            '--sql-fragments-min=1',
+        ];
+        if (mode === 'mysql') {
+            args.push(
+                `--mysql-database=${db}`,
+                '--mysql-host=127.0.0.1',
+                '--mysql-user=e2e_admin',
+                '--mysql-password=e2e_password',
+            );
+        }
+        return args;
+    }
 
-    describe('PHP crash mid-SQL-stream recovers via resume', () => {
-        let tempDir;
-        const importDb = 'e2e_sql_crash_import_43';
-
-        beforeAll(async () => {
-            tempDir = createTempDir('e2e-sql-stream-crash');
-            const conn = await createMysqlConnection();
-            await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
-            await conn.query(`CREATE DATABASE \`${importDb}\``);
-            await conn.end();
+    for (const mode of ['file', 'stdout', 'mysql']) {
+        it(`resumes the REST stream in ${mode} mode without skipping an INSERT row`, async () => {
+            const tempDir = createTempDir(`e2e-sql-stream-crash-${mode}`);
+            const importDb = `e2e_sql_crash_import_43_${mode}`;
 
             clearHookState(site);
+            writeHookState(site, {});
 
-            // Deploy a hook that kills PHP after 3 SQL batches. This
-            // simulates a real PHP crash (max_execution_time, OOM, fatal
-            // error) — the response is truncated mid-gzip and no completion
-            // chunk is sent.
-            writeTestHooks(site, [
-                'function test_hook_before_sql_batch(&$sql, $cursor) {',
-                `    $state_file = '/srv/e2e-sites/.e2e-hook-state-${site}';`,
-                '    $state = file_exists($state_file)',
-                '        ? json_decode(file_get_contents($state_file), true)',
-                '        : [];',
-                '    $count = ($state[\'batch_count\'] ?? 0) + 1;',
-                '    $state[\'batch_count\'] = $count;',
-                '    file_put_contents($state_file, json_encode($state));',
-                '',
-                '    // Kill PHP on the 3rd SQL batch to simulate a crash.',
-                '    // Some data has already been flushed to the client,',
-                '    // so the importer will have partial SQL in its buffer.',
-                '    if ($count === 3) {',
-                '        exit(1);',
-                '    }',
-                '}',
-            ].join('\n'));
-            writeHookState(site, { batch_count: 0 });
+            if (mode === 'mysql') {
+                const conn = await createMysqlConnection();
+                await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
+                await conn.query(`CREATE DATABASE \`${importDb}\``);
+                await conn.end();
+            }
+
+            try {
+                // autoResume=false requires this one importer invocation to
+                // recover instead of starting another process.
+                const result = runImporter(importUrl(), tempDir, 'db-sync', {
+                    secret: getSiteSecret(site),
+                    extraArgs: sqlOutputArgs(mode, importDb),
+                    autoResume: false,
+                    timeout: 270000,
+                });
+
+                assert.equal(result.exitCode, 0,
+                    `Expected ${mode} mode to complete in one invocation, got ${result.exitCode}\n` +
+                    `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+
+                const hookState = readHookState(site);
+                assert.ok(hookState, 'Hook state file should exist');
+                assert.equal(hookState.incomplete_batch_emitted, true,
+                    'Expected an incomplete SQL part to be emitted before the crash');
+                assert.equal(hookState.crashed, true,
+                    'Expected the exporter to crash before the following SQL part');
+
+                if (mode === 'mysql') {
+                    const comparison = await compareDatabases(getDbName(site), importDb);
+                    assert.ok(comparison.match,
+                        `Database mismatch after crash recovery: ` +
+                        `missing=${JSON.stringify(comparison.missingTables)}, ` +
+                        `counts=${JSON.stringify(comparison.rowCounts)}`);
+
+                    const sourceConn = await createMysqlConnection(getDbName(site));
+                    const importConn = await createMysqlConnection(importDb);
+                    const rowQuery =
+                        `SELECT id, OCTET_LENGTH(payload) AS payload_bytes, ` +
+                        `SHA2(payload, 256) AS payload_sha256 ` +
+                        `FROM \`${payloadTable}\` ORDER BY id`;
+                    const [sourceRows] = await sourceConn.query(rowQuery);
+                    const [importRows] = await importConn.query(rowQuery);
+                    await sourceConn.end();
+                    await importConn.end();
+                    assert.deepEqual(importRows, sourceRows,
+                        'Expected every split INSERT row and payload to reach MySQL');
+                } else {
+                    const sql = mode === 'file'
+                        ? readFileSync(join(tempDir, 'db.sql'), 'utf8')
+                        : result.stdout;
+                    for (const [index, payload] of sourcePayloads.entries()) {
+                        const encodedPayload = payload.toString('base64');
+                        const occurrences = sql.split(encodedPayload).length - 1;
+                        assert.equal(
+                            occurrences,
+                            1,
+                            `Expected payload ${index + 1} exactly once in ${mode} output`,
+                        );
+                    }
+                }
+
+                const stateFile = join(tempDir, '.import-state.json');
+                assert.ok(existsSync(stateFile), 'Expected state file to exist');
+                const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+                assert.equal(state.active_resumable_command.completion_state, 'complete',
+                    `Expected status=complete, got ${state.active_resumable_command.completion_state}`);
+
+                const audit = readAuditLog(tempDir);
+                assert.match(
+                    audit,
+                    /SQL RETRY \| resuming source request/,
+                    `Expected ${mode} mode to retry the interrupted REST request`,
+                );
+
+                assert.ok(!existsSync(join(tempDir, '.sql-buffer')),
+                    'Expected .sql-buffer to be absent after successful completion');
+            } finally {
+                cleanupTempDir(tempDir);
+                if (mode === 'mysql') {
+                    const conn = await createMysqlConnection();
+                    await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
+                    await conn.end();
+                }
+            }
         });
-
-        afterAll(async () => {
-            removeTestHooks(site);
-            clearHookState(site);
-            cleanupTempDir(tempDir);
-            const conn = await createMysqlConnection();
-            await conn.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
-            await conn.end();
-        });
-
-        it('first run exits partial (not fatal) after crash', () => {
-            // Disable auto-resume so we can inspect the first-run behavior.
-            // The importer should NOT throw "Buffered SQL was never executed".
-            // Instead it should save state and exit with code 2 (partial).
-            const result = runImporter(importUrl(), tempDir, 'db-sync', {
-                secret: getSiteSecret(site),
-                extraArgs: mysqlArgs(importDb),
-                autoResume: false,
-            });
-
-            // Exit code 2 = partial (retryable). Exit code 1 = fatal error.
-            // Before the fix, this would be 1 with "Buffered SQL was never executed".
-            assert.equal(result.exitCode, 2,
-                `Expected exit code 2 (partial), got ${result.exitCode}\n` +
-                `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
-
-            // Verify the hook actually fired
-            const state = readHookState(site);
-            assert.ok(state, 'Hook state file should exist');
-            assert.ok(state.batch_count >= 3,
-                `Expected batch_count >= 3, got ${state.batch_count}`);
-        });
-
-        it('state was saved for resume', () => {
-            // The importer should have persisted its state so the next
-            // run can resume. The cursor may be null if nginx buffered
-            // the entire response and no multipart chunks reached the
-            // client before the crash — in that case resume starts from
-            // scratch, which is correct.
-            const stateFile = join(tempDir, '.import-state.json');
-            assert.ok(existsSync(stateFile), 'Expected state file to exist');
-            const state = JSON.parse(readFileSync(stateFile, 'utf8'));
-            assert.equal(state.active_resumable_command.completion_state, 'partial',
-                `Expected status=partial, got ${state.active_resumable_command.completion_state}`);
-        });
-
-        it('audit log records the interrupted response', () => {
-            const audit = readAuditLog(tempDir);
-            assert.ok(
-                audit.includes('INTERRUPTED RESPONSE') ||
-                audit.includes('BUFFER PRESERVED') ||
-                audit.includes('BUFFER NOT FLUSHED') ||
-                audit.includes('missing completion chunk'),
-                'Expected audit log to record the interrupted response'
-            );
-        });
-
-        it('resume completes after removing crash hook', { timeout: 300000 }, async () => {
-            // Remove the crashing hook so subsequent requests succeed.
-            removeTestHooks(site);
-
-            const result = runImporter(importUrl(), tempDir, 'db-sync', {
-                secret: getSiteSecret(site),
-                extraArgs: mysqlArgs(importDb),
-                maxResumeAttempts: 50,
-                wallTimeout: 270000,
-            });
-            assert.equal(result.exitCode, 0,
-                `Expected exit 0 on resume, got ${result.exitCode}\n` +
-                `stderr: ${result.stderr}`);
-        });
-
-        it('database matches source after recovery', async () => {
-            const comparison = await compareDatabases(getDbName(site), importDb);
-            assert.ok(comparison.match,
-                `Database mismatch after crash recovery: ` +
-                `missing=${JSON.stringify(comparison.missingTables)}, ` +
-                `counts=${JSON.stringify(comparison.rowCounts)}`);
-        });
-
-        it('.sql-buffer is cleaned up after completion', () => {
-            assert.ok(!existsSync(join(tempDir, '.sql-buffer')),
-                'Expected .sql-buffer to be cleaned up after successful completion');
-        });
-
-        it('audit log shows successful completion after crash', () => {
-            const audit = readAuditLog(tempDir);
-            // The CRASH RECOVERY entry only appears when .sql-buffer had
-            // data to reload. With exit(1) between batches, the buffer is
-            // typically empty. Either way, the INTERRUPTED RESPONSE entry
-            // from the first run proves the crash was detected.
-            assert.ok(
-                audit.includes('INTERRUPTED RESPONSE') ||
-                audit.includes('CRASH RECOVERY'),
-                'Expected audit log to mention crash detection or recovery'
-            );
-        });
-    });
+    }
 });
