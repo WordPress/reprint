@@ -1314,10 +1314,10 @@ class EncodingTest extends MySQLDumpProducerTestBase
     }
 
     /**
-     * The resume predicate and ORDER BY must both ignore the column collation.
+     * The resume predicate and ORDER BY must both follow the primary key index.
      * latin1_german2_ci sorts ä before b, while raw bytes sort b, z, then ä.
      */
-    public function testReentrancyWithLatin1TextPrimaryKeyByteOrdering(): void
+    public function testReentrancyWithLatin1TextPrimaryKeyIndexOrdering(): void
     {
         $this->pdo->exec(
             "CREATE TABLE t (
@@ -1345,9 +1345,9 @@ class EncodingTest extends MySQLDumpProducerTestBase
         $this->assertNotFalse($letter_z_position);
         $this->assertNotFalse($umlaut_a_position);
         $this->assertTrue(
-            $letter_b_position < $letter_z_position &&
-            $letter_z_position < $umlaut_a_position,
-            "Text primary keys must be emitted in raw byte order"
+            $umlaut_a_position < $letter_b_position &&
+            $letter_b_position < $letter_z_position,
+            "Text primary keys must be emitted in primary key index order"
         );
 
         $import_pdo = $this->executeDumpInNewDatabase($sql);
@@ -1355,6 +1355,70 @@ class EncodingTest extends MySQLDumpProducerTestBase
             ["E4", "62", "7A"],
             $import_pdo
                 ->query("SELECT HEX(id) FROM t ORDER BY id")
+                ->fetchAll(PDO::FETCH_COLUMN)
+        );
+    }
+
+    /**
+     * A composite primary key may contain byte-distinct text values which its
+     * collation considers equal. The following numeric key part must determine
+     * their order across one-row batches and repeated resume boundaries.
+     */
+    public function testReentrancyWithCompositeLatin1TextPrimaryKey(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE t (
+                category VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_german2_ci NOT NULL,
+                sequence_number INT NOT NULL,
+                data VARCHAR(50),
+                PRIMARY KEY (category, sequence_number)
+            )"
+        );
+        $this->pdo->exec(
+            "INSERT INTO t (category, sequence_number, data) VALUES
+                (CONVERT(X'E4' USING latin1), 1, 'umlaut-1'),
+                ('ae', 2, 'ae-2'),
+                (CONVERT(X'E4' USING latin1), 3, 'umlaut-3'),
+                ('b', 1, 'b-1'),
+                ('z', 1, 'z-1')"
+        );
+
+        [$sql, $resume_count] = $this->exportWithResumeAfterEveryFragment([
+            "batch_size" => 1,
+        ]);
+
+        $this->assertGreaterThan(5, $resume_count);
+
+        $previous_position = -1;
+        foreach (["umlaut-1", "ae-2", "umlaut-3", "b-1", "z-1"] as $data) {
+            $position = strpos(
+                $sql,
+                "FROM_BASE64('" . base64_encode($data) . "')"
+            );
+            $this->assertNotFalse($position);
+            $this->assertGreaterThan(
+                $previous_position,
+                $position,
+                "Composite primary keys must be emitted in primary key index order"
+            );
+            $previous_position = $position;
+        }
+
+        $import_pdo = $this->executeDumpInNewDatabase($sql);
+        $this->assertSame(
+            [
+                "E4:1:umlaut-1",
+                "6165:2:ae-2",
+                "E4:3:umlaut-3",
+                "62:1:b-1",
+                "7A:1:z-1",
+            ],
+            $import_pdo
+                ->query(
+                    "SELECT CONCAT(HEX(category), ':', sequence_number, ':', data)
+                     FROM t
+                     ORDER BY category, sequence_number"
+                )
                 ->fetchAll(PDO::FETCH_COLUMN)
         );
     }

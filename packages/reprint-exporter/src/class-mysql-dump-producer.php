@@ -749,10 +749,14 @@ class MySQLDumpProducer
     /**
      * Builds the column expression shared by primary key comparison and order.
      *
-     * Nonnumeric, nonbinary columns are cast to binary so pagination follows
-     * their raw bytes instead of a connection or column collation. Applying
-     * the same expression to WHERE and ORDER BY prevents skipped rows, although
-     * MySQL may no longer use a text primary key for an efficient range scan.
+     * CHAR, VARCHAR, and TEXT columns keep their declared comparison semantics.
+     * FROM_BASE64() has a higher coercibility value than the column, so MySQL
+     * applies the column's declared character set and collation without reading
+     * the cursor through the connection character set. Keeping the indexed
+     * column bare also permits a primary-key range scan without a filesort.
+     *
+     * ENUM and SET are excluded because their indexes use numeric positions
+     * while their fetched values are strings.
      */
     private function build_primary_key_column_expression($column)
     {
@@ -760,12 +764,25 @@ class MySQLDumpProducer
             $this->quote_identifier($this->current_table) .
             "." .
             $this->quote_identifier($column);
-        $data_type = $this->get_data_type($column);
+        $data_type = strtoupper($this->get_data_type($column));
 
         if (
             $this->is_numeric_type($data_type) ||
             $this->is_binary_type($data_type)
         ) {
+            return $qualified_column;
+        }
+
+        $index_ordered_types = [
+            "CHAR",
+            "VARCHAR",
+            "TINYTEXT",
+            "TEXT",
+            "MEDIUMTEXT",
+            "LONGTEXT",
+        ];
+
+        if (in_array($data_type, $index_ordered_types, true)) {
             return $qualified_column;
         }
 
