@@ -11148,14 +11148,6 @@ class ImportClient
      */
     private function normalize_state(array $state): array
     {
-        if (
-            !array_key_exists("consecutive_interrupted_responses", $state) &&
-            array_key_exists("consecutive_timeouts", $state)
-        ) {
-            $state["consecutive_interrupted_responses"] =
-                $state["consecutive_timeouts"];
-        }
-
         $defaults = $this->default_state();
         $state = array_intersect_key($state, $defaults);
         $state = array_merge($defaults, $state);

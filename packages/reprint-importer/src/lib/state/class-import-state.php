@@ -425,7 +425,6 @@ class ImportState
         $state->mysql_database = isset($data['mysql_database']) ? (string) $data['mysql_database'] : null;
         $state->consecutive_interrupted_responses = (int) (
             $data['consecutive_interrupted_responses']
-            ?? $data['consecutive_timeouts']
             ?? 0
         );
         $state->tuning = self::adaptive_tuning_from($data['tuning'] ?? []);
