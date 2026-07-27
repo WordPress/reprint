@@ -7771,7 +7771,7 @@ class ImportClient
                             true,
                         );
                     } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "db-index", $context);
+                        $this->handle_error_chunk($chunk, "sql", $context);
                     }
                 };
 
@@ -8321,7 +8321,7 @@ class ImportClient
                             true,
                         );
                     } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "sql", $context);
+                        $this->handle_error_chunk($chunk, "db-index", $context);
                     }
                 };
 
