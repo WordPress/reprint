@@ -117,7 +117,7 @@ The file indexer (`endpoint_file_index` in `export.php`) prevents duplicate trav
 
 ### Non-Empty fs-root Handling (`--on-fs-root-nonempty`)
 
-By default, `files-pull` refuses to start if `--fs-root` is non-empty (to prevent accidental overwrites). The `--on-fs-root-nonempty` flag controls this behavior:
+By default, `files pull` refuses to start if `--fs-root` is non-empty (to prevent accidental overwrites). The `--on-fs-root-nonempty` flag controls this behavior:
 
 - `--on-fs-root-nonempty=error` (default): throw an error and abort.
 - `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
@@ -155,14 +155,14 @@ PHPUnit tests automatically create/drop test databases. The naming convention is
 
 ### Runtime Manifest and Host Analyzers
 
-The `apply-runtime` command separates source host detection from target runtime configuration. The flow is:
+The `runtime prepare` command separates source host detection from target runtime configuration. The flow is:
 
 1. **Host analyzer** (in `packages/reprint-importer/src/lib/host/analyzers/`) reads preflight data and produces a `RuntimeManifest` — a pure-data object with INI directives, constants, server vars, routes, `paths_to_remove`, and `extra_directories`.
 2. **Runtime applier** (in `packages/reprint-importer/src/lib/target-runtime/`) reads the manifest and generates server-specific configuration files.
 
 The `WpcloudHostAnalyzer` auto-detects WP Cloud production infrastructure that won't work locally: Memcached-backed `object-cache.php`, wpcomsh mu-plugins, and `auto_prepend_file`/`auto_append_file` directories. It populates `paths_to_remove` (stripped after flattening) and `extra_directories` (auto-included in the export file list). The `SitegroundHostAnalyzer` detects SiteGround hosting via `sg-*` plugin prefixes and strips `sg-cachepress` and `sg-security` from disk.
 
-Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic plugin deactivation: at the end of `db-apply`, while the target database connection is still open, the importer instantiates the host analyzer, extracts plugin directory names from `paths_to_remove`, and removes matching entries from the `active_plugins` option. This prevents "plugin file does not exist" warnings in wp-admin. The deactivation is derived from `paths_to_remove` — there is no separate manifest field for it. We skip WordPress's `deactivate_plugins()` because the plugin files will already be gone from disk by the time WordPress boots, so firing deactivation hooks into absent code is pointless.
+Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic plugin deactivation: at the end of `database apply`, while the target database connection is still open, the importer instantiates the host analyzer, extracts plugin directory names from `paths_to_remove`, and removes matching entries from the `active_plugins` option. This prevents "plugin file does not exist" warnings in wp-admin. The deactivation is derived from `paths_to_remove` — there is no separate manifest field for it. We skip WordPress's `deactivate_plugins()` because the plugin files will already be gone from disk by the time WordPress boots, so firing deactivation hooks into absent code is pointless.
 
 ### SQL Streaming Crash Recovery
 

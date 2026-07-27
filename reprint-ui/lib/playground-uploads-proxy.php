@@ -51,7 +51,7 @@ add_filter('jetpack_implode_frontend_css', '__return_false');
 add_filter('jetpack_force_disable_site_accelerator', '__return_true');
 
 // Stream missing uploads from the source so media keeps rendering
-// until reprint files-pull --filter=skipped-earlier downloads them.
+// until reprint files pull --filter=skipped-earlier downloads them.
 //
 // We PROXY here, not 302 to the source. Playground's service worker
 // post-processes Location headers to keep the iframe in scope, so a

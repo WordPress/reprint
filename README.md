@@ -45,7 +45,7 @@ Pulling example.com
   ✓ Pulling database
 
 [4/7] Importing database
-  db-apply: 1234 / 5678 statements (45.2%)
+  Database apply: 1234 / 5678 statements (45.2%)
   ✓ Importing database
 
 [5/7] Generating runtime
@@ -192,23 +192,23 @@ FS_ROOT="./local-directory-where-the-remote-site-files-will-be-recreated"
 SECRET="your-shared-secret"
 ```
 
-#### Step 1 — Preflight.
+#### Step 1 — Inspect the source.
 
 First, we'll make sure the server is reachable and the environment is in a good shape:
 
 ```bash
-php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar source inspect "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
 
-All other commands check that a preflight has been completed and refuse to start without one.
+Commands that need source environment details check that this inspection has completed and refuse to start without it.
 
 To run very basic diagnostics that confirms the remote server replied and it has a
 sound-looking filesystem and a database connection, run:
 
 ```bash
-php reprint.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar source check --cached --state-dir="$STATE_DIR"
 ```
 
 For hosting platform-specific checks, such as database version compatibility or
@@ -221,7 +221,7 @@ This first builds a full index of the remote directory tree, then streams every 
 It can be interrupted and resumed at any time — just re-run the same command:
 
 ```bash
-php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar files pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -234,7 +234,7 @@ Which is to say, you'll need to wrap it in a loop that runs until failure or ful
 
 **Non-empty local fs-root**
 
-By default, `files-pull` refuses to start if `--fs-root` is non-empty. If you need to use a non-empty local fs-root,
+By default, `files pull` refuses to start if `--fs-root` is non-empty. If you need to use a non-empty local fs-root,
 the `--on-fs-root-nonempty` flag controls this behavior. It takes the following values:
 
 - `--on-fs-root-nonempty=error` (default): throw an error and abort.
@@ -247,7 +247,7 @@ and you want to bring the site online before downloading all the uploads:
 
 ```bash
 # Step 1: download only essential files (code, config, themes, plugins)
-php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar files pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --filter=essential-files
 ```
 
@@ -257,7 +257,7 @@ files are done, the sync marks itself **complete**. The skipped file list stays 
 
 ```bash
 # Step 2: download the uploads
-php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar files pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --filter=skipped-earlier
 ```
 
@@ -274,8 +274,8 @@ The uploads directory is detected from preflight data (`uploads.basedir`), falli
 
 `pull-files` runs the file side of the high-level pull pipeline:
 
-1. `preflight`
-2. `files-pull`
+1. `source inspect`
+2. `files pull`
 
 Use it when you want a `git pull`-style file update without running any
 database stages:
@@ -286,7 +286,7 @@ php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 
 It accepts the `pull` file filters (`--filter=none` and
 `--filter=essential-files`) plus the same path selection options as
-`files-pull`, including repeated `--only` values:
+`files pull`, including repeated `--only` values:
 
 ```bash
 php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
@@ -297,9 +297,9 @@ php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 
 `pull-db` runs the database side of the high-level pull pipeline:
 
-1. `preflight`
-2. `db-pull`
-3. `db-apply`
+1. `source inspect`
+2. `database dump`
+3. `database apply`
 
 Use it when you want the local database to catch up with the remote site without
 touching files or runtime configuration:
@@ -318,7 +318,7 @@ pipeline.
 By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
 
 ```bash
-php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar database dump "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 You can also pipe the SQL directly to stdout or stream it into a MySQL server
@@ -326,11 +326,11 @@ without writing a file to disk. Use `--sql-output` to choose the mode:
 
 ```bash
 # Pipe to stdout — useful for feeding into mysql CLI or another tool
-php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar database dump "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --sql-output=stdout | mysql -u root my_database
 
 # Stream directly into MySQL — no intermediate file, no pipe
-php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar database dump "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
     --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=root --mysql-password=secret
 ```
 
@@ -364,19 +364,19 @@ The command returns one of three exit codes:
 
 While the database was being dumped, some files may have changed.
 
-First, we must abort the previous files-pull. Otherwise, it would just
+First, we must abort the previous `files pull`. Otherwise, it would just
 tell us it's completed and refuse to proceed:
 
 ```bash
-php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" --abort
+php reprint.phar files pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" --abort
 ```
 
-From here, we can run the `files-pull` command again. It will index
+From here, we can run `files pull` again. It will index
 the remote filesystem once again, compute which files have changed
 since the initial sync, and apply that delta in the local directory:
 
 ```bash
-php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar files pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
 The command returns one of three exit codes:
@@ -388,13 +388,13 @@ The command returns one of three exit codes:
 #### Step 5 — Apply the database with domain rewriting.
 
 If the site's domain is changing (e.g. migrating from `https://old-site.com`
-to `https://new-site.com`), use `db-apply` with `--rewrite-url` to import
+to `https://new-site.com`), use `database apply` with `--rewrite-url` to import
 the SQL dump into a target database while rewriting all URLs in one pass.
 
 MySQL target:
 
 ```bash
-php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar database apply --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --target-user=root --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com
 ```
@@ -402,7 +402,7 @@ php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" -
 SQLite target:
 
 ```bash
-php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar database apply --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --target-engine=sqlite --target-sqlite-path="$STATE_DIR/wordpress.sqlite" \
     --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com
@@ -418,27 +418,27 @@ are recalculated, JSON is re-encoded, and block comment attributes are updated.
 You can map multiple domains by repeating the flag:
 
 ```bash
-php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+php reprint.phar database apply --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --target-user=root --target-db=wp_new \
     --rewrite-url https://old-site.com https://new-site.com \
     --rewrite-url https://cdn.old-site.com https://cdn.new-site.com
 ```
 
-If the domain isn't changing, you can skip `db-apply` and import `db.sql`
-directly with a MySQL tool, or use `db-apply --target-engine=sqlite` to load it
+If the domain isn't changing, you can skip `database apply` and import `db.sql`
+directly with a MySQL tool, or use `database apply --target-engine=sqlite` to load it
 into SQLite through the bundled `sqlite-database-integration` driver.
 
 #### Step 6 — Generate runtime configuration.
 
 The downloaded files need server-specific configuration to actually work —
 PHP constants, INI directives, and request handlers that the source host
-relied on. `apply-runtime` reads the preflight data, detects the source
+relied on. `runtime prepare` reads the preflight data, detects the source
 hosting provider, and generates the configuration files your target server needs.
 
 For PHP's built-in development server:
 
 ```bash
-php reprint.phar apply-runtime --state-dir="$STATE_DIR" \
+php reprint.phar runtime prepare --state-dir="$STATE_DIR" \
     --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=php-builtin
 bash "$RUNTIME_DIR/start.sh"
 ```
@@ -446,16 +446,16 @@ bash "$RUNTIME_DIR/start.sh"
 For nginx + PHP-FPM:
 
 ```bash
-php reprint.phar apply-runtime --state-dir="$STATE_DIR" \
+php reprint.phar runtime prepare --state-dir="$STATE_DIR" \
     --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=nginx-fpm
 # Include $RUNTIME_DIR/nginx.conf in your nginx configuration, then reload
 ```
 
 The command accepts either `--fs-root` (the raw download directory — the remote
 `document_root` path is appended automatically) or `--flat-document-root` (a
-directory created by `flat-docroot`, used as-is). These are mutually exclusive.
+directory created by `layout flatten`, used as-is). These are mutually exclusive.
 
-Host and port default to the URL rewrite target from `db-apply` (so the server
+Host and port default to the URL rewrite target from `database apply` (so the server
 listens on the same address the database was rewritten to). Override with
 `--host` and `--port`.
 
@@ -491,13 +491,13 @@ runner instead so it can load the SQLite Integration plugin's Rust
 `wp_mysql_parser` PHP.wasm extension. CI verifies that this path does more than
 load the `.so`: `tests/e2e/ci/verify-wp-mysql-parser.php` asserts that
 `WP_MySQL_Lexer` resolves to the native lexer and that the SQLite driver creates
-a native-backed parser before benchmarking Playground `db-pull` and `db-apply`.
+a native-backed parser before benchmarking Playground database dump and apply.
 That path requires Node.js with JSPI support; CI uses Node 24.
 
 #### Shoehorning the site onto your platform
 
 You've got a copy of the remote files in the `--fs-root` directory and
-the database either already applied (via `db-apply`) or in `--state-dir/db.sql`.
+the database either already applied (via `database apply`) or in `--state-dir/db.sql`.
 From here, you need to figure out how to run that on your platform.
 
 The `db.sql` file will contain the relevant `DELETE TABLE IF EXISTS`
@@ -531,7 +531,7 @@ When an external process (e.g. a web UI) needs to poll migration progress, it ca
 
 Pass `--step=N` and `--steps=N` to your `import.php` calls to embed the pipeline position in
 the status file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
-preflight, `--step=2 --steps=4` for db-index, and so on.
+source inspection, `--step=2 --steps=4` for `database index`, and so on.
 
 The file contains a flat JSON object:
 
@@ -551,7 +551,7 @@ The file contains a flat JSON object:
 |-----------|-------------------|-------------|
 | `step`    | `int \| null`     | Current pipeline step (1-indexed). `null` when `--step` is not passed. |
 | `steps`   | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
-| `command` | `string \| null`  | Current command name (`preflight`, `files-pull`, `db-pull`, etc.). |
+| `command` | `string \| null`  | Stable internal command identifier. These values do not follow the public CLI spelling. |
 | `status`  | `string`          | One of `in_progress`, `partial`, `complete`, `error`, `aborted`. |
 | `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`, `fetch-skipped`), or `null`. Derived from the internal state's `stage` field. |
 | `error`   | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
@@ -639,17 +639,17 @@ still running, completed, or needs resuming. The `command` + `status` fields
 tell you where the pipeline is. The `stage` field gives finer granularity
 (e.g., `"scanning"`, `"sorting"`, `"streaming"` for file sync).
 
-For pull-level lifecycle checks, prefer `import-metadata` over reading
+For pull-level lifecycle checks, prefer `status --porcelain=v1` over reading
 `.import-state.json` directly. It exposes Reprint-owned pull state as a small,
 stable JSON contract for host integrations:
 
 ```bash
-php reprint.phar import-metadata --state-dir="$STATE_DIR" | jq '.hasCompletedOnce'
+php reprint.phar status --porcelain=v1 --state-dir="$STATE_DIR" | jq '.hasCompletedOnce'
 ```
 
 #### `.import-volatile-files.json` — files that changed during sync
 
-During `files-pull`, a file on the source may be modified while the importer is
+During `files pull`, a file on the source may be modified while the importer is
 streaming it. When that happens, the server returns a different content hash than
 expected and the importer records the file in `.import-volatile-files.json`
 instead of failing.
@@ -664,7 +664,7 @@ was detected as changed:
 }
 ```
 
-At the end of `files-pull`, the importer prints a summary of volatile files so
+At the end of `files pull`, the importer prints a summary of volatile files so
 the caller can decide what to do — re-run the sync, ignore them, or ask the user.
 Files that are subsequently downloaded successfully are automatically removed
 from the tracker. The file is deleted entirely once all entries are cleared.
@@ -685,26 +685,31 @@ truncated or rotated, so it provides a complete history of the migration.
 Pass `--verbose` to also print audit log entries to the console as they happen.
 This is useful for debugging but noisy for production use.
 
-### Low-level CLI commands
+### CLI commands
 
 The importer accepts the following commands:
 
 ```
-php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
+php reprint.phar <command> [arguments] [options]
 ```
 
-* `preflight` — Runs the preflight check and prints the full result as JSON. Exits with code 0 if OK, code 1 if not.
-* `preflight-assert` — Runs the preflight check and prints a human-readable pass/fail summary. Exits with code 0 if migration looks feasible, code 1 if not.
-* `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
-* `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
-* `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
-* `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
-* `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
-* `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
-* `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
-* `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
-* `import-metadata` — Prints local pull lifecycle metadata as JSON, including `hasCompletedOnce`. Requires only `--state-dir`; no network calls are made.
-* `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
-* `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
+* `pull` — Clones a complete site through one resumable pipeline.
+* `pull-files` — Runs `source inspect` and `files pull` as one resumable high-level command.
+* `pull-db` — Runs `source inspect`, `database dump`, and `database apply` as one resumable high-level command.
+* `install-exporter` — Shows how to install the matching exporter plugin.
+* `source inspect` — Inspects the source and prints the full result as JSON.
+* `source check --cached` — Checks the stored source inspection and prints a human-readable pass/fail summary.
+* `files pull` — Pulls all files initially, then only changes on later runs. Runs `files-index` when needed.
+* `files-index` — Indexes all remote files initially, then detects changes. No file contents are downloaded.
+* `files stats` — Prints counts and sizes from the local file index as JSON.
+* `files-diff` — Shows local file changes that a push would send or delete.
+* `files-push` — Pushes one local file tree without database work.
+* `database dump` — Pulls the database as SQL. Use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
+* `database index` — Writes remote table names, row estimates, and sizes to `db-tables.jsonl`.
+* `database domains` — Lists domains from `.import-domains.json` or `db.sql`.
+* `database apply` — Applies `db.sql` to MySQL or SQLite, with optional repeated `--rewrite-url FROM TO` mappings.
+* `layout flatten` — Reassembles pulled files into a standard WordPress layout with symlinks.
+* `runtime prepare` — Generates `runtime.php`, `start.sh`, `nginx.conf`, or Playground configuration from source inspection data.
+* `status --porcelain=v1` — Prints the stable local pull lifecycle status as JSON.
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+Commands that show `--abort` in their command-specific help can clear their current resumable work. For `files pull`, this keeps the local index and downloaded files so the next run performs a delta sync. For `database dump` and `database index`, it clears the output file so the next run starts from scratch. Interrupted commands resume from the last saved cursor.

@@ -512,7 +512,7 @@ class Pull
         if ($sql_output !== "file") {
             throw new InvalidArgumentException(
                 "{$command} downloads SQL to the local state directory before applying it. " .
-                "Use db-pull directly for --sql-output={$sql_output}."
+                "Use database dump directly for --sql-output={$sql_output}."
             );
         }
 
@@ -874,7 +874,7 @@ class Pull
         if (!file_exists($start_sh)) {
             throw new RuntimeException(
                 "start.sh not found at {$start_sh}. " .
-                "apply-runtime may have failed to generate it."
+                "runtime prepare may have failed to generate it."
             );
         }
 

@@ -185,6 +185,45 @@ class NewSiteUrlTest extends TestCase
         $this->callResolve($client, $options);
     }
 
+    public function testDerivesSourceOriginFromInspectionForLocalDatabaseApply(): void
+    {
+        file_put_contents(
+            $this->tempDir . '/.import-state.json',
+            json_encode([
+                'preflight' => [
+                    'data' => [
+                        'database' => [
+                            'wp' => [
+                                'paths_urls' => [
+                                    'home_url' => 'https://old-site.example.com/subdirectory',
+                                ],
+                            ],
+                        ],
+                    ],
+                    'http_code' => 200,
+                ],
+            ]),
+        );
+        $client = new \ImportClient(
+            '-',
+            $this->tempDir,
+            $this->tempDir . '/fs-root'
+        );
+        $reflection = new \ReflectionClass($client);
+        $client->state = $reflection->getMethod('load_state')->invoke($client);
+
+        $options = ['new_site_url' => 'https://new-site.example.com'];
+        $options = $this->callResolve($client, $options);
+
+        $this->assertSame(
+            [
+                ['https://old-site.example.com', 'https://new-site.example.com'],
+                ['http://old-site.example.com', 'https://new-site.example.com'],
+            ],
+            $options['rewrite_url'],
+        );
+    }
+
     public function testNewUrlUsedVerbatim(): void
     {
         $client = new \ImportClient(
