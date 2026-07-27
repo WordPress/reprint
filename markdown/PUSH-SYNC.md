@@ -99,10 +99,11 @@ compatible partial
 unselected tree is not a complete starting point. The index records the local
 path type, size, and ctime; remote values cannot stand in because ctime belongs
 to the machine where it was observed. Compatible means `--filter=none`, no
-`--remap`, and no `--on-fs-root-nonempty=preserve-local`. The high-level
-`pull` command does not maintain the baseline because later stages may change
-the local tree. Besides planning the next push, the index feeds the local
-`files-diff` command, which reports the same comparison without pushing.
+`--include-caches`, no `--remap`, and no
+`--on-fs-root-nonempty=preserve-local`. The high-level `pull` command does not
+maintain the baseline because later stages may change the local tree. Besides
+planning the next push, the index feeds the local `files-diff` command, which
+reports the same comparison without pushing.
 
 A files-pull lifecycle which cannot maintain the index — an incompatible
 option set or a pipeline that continues past the file stage — removes it before
@@ -138,14 +139,18 @@ ctime observed when that path was applied. Directory emptiness comes from
 descendants retained by the merge, not unrelated local additions on disk.
 Paths outside the files-push scope are not admitted.
 
-Before a compatible delta pull changes the local tree, it compares source
-changes with local additions, edits, and deletions since the previous local
-index was recorded. `--on-conflict=stop` stops without applying any source
-path when the same path or replaced subtree changed locally.
+Conflict detection requires compatible previous local and import baselines.
+Remote changes are measured from the last completed pull's import baseline,
+while local changes are measured from the previous local index advanced by a
+compatible pull or committed push. Before changing the local tree, a compatible
+delta pull compares those changes. `--on-conflict=stop` stops without applying
+any source path when the same path or replaced subtree changed locally.
 `--on-conflict=remote-wins` applies the source change.
 `--on-conflict=our-wins` retains the local path and does not advance either
-index for that source change, so both directions remain pending. An initial
-pull has no earlier local path state and applies the source tree.
+index for that source change, so both directions remain pending. After a push,
+a later local edit may conservatively conflict with the pushed target change
+until a conflict policy resolves it. An initial pull has no earlier local path
+state and applies the source tree.
 
 `PushPlan` first builds a path-sorted fresh local index, then derives the local
 paths to push and delete by diffing it against the previous local index its

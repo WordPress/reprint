@@ -1,17 +1,14 @@
 /**
  * Test 50: Mid-file resume after a body-stream cutoff.
  *
- * Specifically guards the contract introduced by the "stream file parts
- * directly to disk" change: now that bytes hit the local file before a
- * multipart part finishes, a request cut mid-body leaves a partially-
- * written file on disk. The importer resumes from the last completed
- * multipart part, replaying unconfirmed bytes without gaps or
- * duplication.
+ * File bytes stream into a private sibling file. A request cut mid-body
+ * leaves the destination untouched and resumes the private file from the
+ * last completed multipart part, replaying unconfirmed bytes without gaps
+ * or duplication.
  *
  * Setup: a 2 MiB random binary file. With --file-chunk-max=262144, the
  * file is sliced into eight chunks. A test_hook_before_file_chunk hook
- * exits PHP on the second chunk, which forces the failure mid-file
- * (the first chunk has been written, the file is incomplete).
+ * exits PHP on the second chunk, which forces the failure mid-file.
  *
  * After removing the hook, files-sync resumes and completes. Final
  * assertion: SHA-256 of the imported file equals the source.
@@ -124,23 +121,23 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
             `Expected first run to fail due to mid-file exit\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
     });
 
-    it('partial file is on disk and smaller than source', () => {
+    it('partial bytes remain private and the destination is absent', () => {
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         const localPath = join(importedRoot, fileRel);
-        assert.ok(existsSync(localPath),
-            'Expected the partially-downloaded file to exist on disk; the streaming change should have flushed the first chunk before the crash');
-        const partialSize = statSync(localPath).size;
-        assert.ok(partialSize > 0 && partialSize < fileSize,
-            `Expected a partial file (0 < size < ${fileSize}), got ${partialSize}`);
-    });
-
-    it('state records current_file and current_file_bytes for resume', () => {
         const stateFile = join(tempDir, '.import-state.json');
         assert.ok(existsSync(stateFile), 'Expected import state file to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.ok(state.current_file, 'Expected state.current_file to be set after a mid-file crash');
-        assert.ok(typeof state.current_file_bytes === 'number' && state.current_file_bytes > 0,
-            `Expected state.current_file_bytes > 0, got ${state.current_file_bytes}`);
+        const staged = state.fetch.staged_file;
+        assert.ok(staged, 'Expected fetch.staged_file after a mid-file crash');
+        assert.ok(typeof staged.staging_bytes === 'number' && staged.staging_bytes > 0,
+            `Expected staging_bytes > 0, got ${staged.staging_bytes}`);
+        const stagingPath = Buffer.from(staged.staging_path_b64, 'base64').toString();
+        assert.ok(existsSync(stagingPath), 'Expected the private staging file to exist');
+        const physicalSize = statSync(stagingPath).size;
+        assert.ok(physicalSize >= staged.staging_bytes && physicalSize < fileSize,
+            `Expected staged bytes <= physical size < ${fileSize}, got ${staged.staging_bytes} <= ${physicalSize}`);
+        assert.equal(existsSync(localPath), false,
+            'The destination must stay absent until the fetched file is complete');
     });
 
     it('resume completes after removing the hook', () => {

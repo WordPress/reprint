@@ -90,6 +90,72 @@ class CursorResumptionTest extends FileSyncProducerTestBase
         unlink($cursorFile);
     }
 
+    public function testResumeReportsFileMissingWhenCurrentFileDisappeared()
+    {
+        $dir = $this->createTestDirectory('cursor-file-missing', [
+            'test.txt' => str_repeat('X', 3000),
+            'z-after.txt' => 'following file',
+        ]);
+        $path = $dir . '/test.txt';
+        $followingPath = $dir . '/z-after.txt';
+        $paths = [$path, $followingPath];
+
+        $sync1 = new \FileTreeProducer($dir, [
+            'chunk_size' => 1024,
+            'paths' => $paths,
+        ]);
+        $this->assertTrue($sync1->next_chunk());
+        $cursor = $sync1->get_reentrancy_cursor();
+        unlink($path);
+
+        $sync2 = new \FileTreeProducer($dir, [
+            'chunk_size' => 1024,
+            'cursor' => $cursor,
+            'paths' => $paths,
+        ]);
+        $cursorBeforeError = $sync2->get_reentrancy_cursor();
+        $this->assertSame(
+            json_decode($cursor, true),
+            json_decode($cursorBeforeError, true),
+            'Unconfirmed missing-file errors must retain the prior byte offset'
+        );
+
+        $sync2 = new \FileTreeProducer($dir, [
+            'chunk_size' => 1024,
+            'cursor' => $cursorBeforeError,
+            'paths' => $paths,
+        ]);
+        $this->assertTrue($sync2->next_chunk());
+        $this->assertSame([
+            'type' => 'error',
+            'error_type' => 'file_missing',
+            'path' => $path,
+            'message' => 'File disappeared before resume',
+        ], $sync2->get_current_chunk());
+
+        $sync3 = new \FileTreeProducer($dir, [
+            'chunk_size' => 1024,
+            'cursor' => $sync2->get_reentrancy_cursor(),
+            'paths' => $paths,
+        ]);
+        $chunksAfterError = $this->processAllChunks($sync3);
+        $this->assertSame(
+            [$followingPath],
+            array_column(
+                array_values(array_filter(
+                    $chunksAfterError,
+                    fn($chunk) => $chunk['type'] === 'file'
+                )),
+                'path'
+            )
+        );
+        $this->assertNotContains(
+            'error',
+            array_column($chunksAfterError, 'type'),
+            'A confirmed missing-file error must not repeat after resume'
+        );
+    }
+
     public function testMultipleResumeCycles()
     {
         $dir = $this->createTestDirectory('multiple-resume', [

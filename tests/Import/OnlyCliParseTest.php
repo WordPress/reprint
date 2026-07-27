@@ -180,6 +180,8 @@ PHP, var_export($requestsLog, true)));
                 'data' => $data,
                 'http_code' => 200,
             ),
+            'remote_protocol_version' => 2,
+            'remote_protocol_min_version' => 1,
         ), JSON_PRETTY_PRINT));
     }
 

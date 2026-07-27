@@ -77,6 +77,9 @@ final class FileIndexProcessor {
     /** @var array|null Directory failure produced by the most recent step. */
     private $directory_error = null;
 
+    /** @var string|null Default-skipped path settled by the most recent step. */
+    private $default_skipped_path = null;
+
     /** @var bool Whether close() has been called. */
     private $closed = false;
 
@@ -272,6 +275,7 @@ final class FileIndexProcessor {
         $this->step_status = null;
         $this->index_entries = [];
         $this->directory_error = null;
+        $this->default_skipped_path = null;
 
         // Emit the parent links discovered during start() before descendants.
         // They share one cursor boundary because traversal has not begun yet.
@@ -315,6 +319,7 @@ final class FileIndexProcessor {
         // stack. Omitted subtrees therefore cost no extra filesystem calls.
         if (!$this->include_caches && self::path_is_default_skipped($path)) {
             $this->step_status = self::STATUS_SKIPPED;
+            $this->default_skipped_path = $path;
             return true;
         }
         if (
@@ -436,6 +441,16 @@ final class FileIndexProcessor {
     public function get_index_entries(): array
     {
         return $this->index_entries;
+    }
+
+    /**
+     * Returns the default-skipped root settled by the most recent step.
+     *
+     * Storage-path omissions and non-skipped steps return null.
+     */
+    public function get_default_skipped_path(): ?string
+    {
+        return $this->default_skipped_path;
     }
 
     /**

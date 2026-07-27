@@ -69,7 +69,11 @@ class ImportSymlinkTest extends TestCase
             ]
         ];
 
-        $method->invoke($client, $chunk);
+        $method->invoke(
+            $client,
+            $chunk,
+            $this->streamingContextForChunk($chunk)
+        );
 
         $symlinkPath = $this->tempDir . '/fs-root/test/link';
         $this->assertTrue(is_link($symlinkPath), 'Symlink should be created');
@@ -96,7 +100,11 @@ class ImportSymlinkTest extends TestCase
             ]
         ];
 
-        $method->invoke($client, $chunk);
+        $method->invoke(
+            $client,
+            $chunk,
+            $this->streamingContextForChunk($chunk)
+        );
 
         $symlinkPath = $this->tempDir . '/fs-root/a/link';
         $this->assertFalse(is_link($symlinkPath), 'Symlink escaping root should not be created');
@@ -125,7 +133,11 @@ class ImportSymlinkTest extends TestCase
                 'x-symlink-ctime' => '1234567890'
             ]
         ];
-        $method->invoke($client, $chunk1);
+        $method->invoke(
+            $client,
+            $chunk1,
+            $this->streamingContextForChunk($chunk1)
+        );
 
         $link1 = $this->tempDir . '/fs-root/site/__wp__';
         $this->assertFalse(is_link($link1), 'Symlink escaping root should not be created');
@@ -138,7 +150,11 @@ class ImportSymlinkTest extends TestCase
                 'x-symlink-ctime' => '1234567890'
             ]
         ];
-        $method->invoke($client, $chunk2);
+        $method->invoke(
+            $client,
+            $chunk2,
+            $this->streamingContextForChunk($chunk2)
+        );
 
         $link2 = $this->tempDir . '/fs-root/site/wp-load.php';
         $this->assertTrue(is_link($link2), 'Symlink staying within root should be created');
@@ -164,7 +180,11 @@ class ImportSymlinkTest extends TestCase
             ]
         ];
 
-        $method->invoke($client, $chunk);
+        $method->invoke(
+            $client,
+            $chunk,
+            $this->streamingContextForChunk($chunk)
+        );
 
         $symlinkPath = $this->tempDir . '/fs-root/bin-link';
         $this->assertFalse(is_link($symlinkPath), 'Absolute symlink outside root should not be created');
@@ -189,7 +209,11 @@ class ImportSymlinkTest extends TestCase
             ]
         ];
 
-        $method->invoke($client, $chunk);
+        $method->invoke(
+            $client,
+            $chunk,
+            $this->streamingContextForChunk($chunk)
+        );
 
         $symlinkPath = $this->tempDir . '/fs-root/wp-content/link';
         $this->assertTrue(is_link($symlinkPath), 'Symlink within root should be created');
@@ -216,7 +240,11 @@ class ImportSymlinkTest extends TestCase
             ]
         ];
 
-        $method->invoke($client, $chunk);
+        $method->invoke(
+            $client,
+            $chunk,
+            $this->streamingContextForChunk($chunk)
+        );
 
         $symlinkPath = $root . '/link';
         $this->assertTrue(is_link($symlinkPath), 'Absolute symlink within root should be created');
@@ -236,7 +264,11 @@ class ImportSymlinkTest extends TestCase
                 'x-symlink-target' => base64_encode('target'),
             ]
         ];
-        $method->invoke($client, $chunk1);
+        $method->invoke(
+            $client,
+            $chunk1,
+            $this->streamingContextForChunk($chunk1)
+        );
 
         // Missing target
         $chunk2 = [
@@ -244,7 +276,11 @@ class ImportSymlinkTest extends TestCase
                 'x-symlink-path' => base64_encode('/path'),
             ]
         ];
-        $method->invoke($client, $chunk2);
+        $method->invoke(
+            $client,
+            $chunk2,
+            $this->streamingContextForChunk($chunk2)
+        );
 
         // No symlinks should be created
         $count = 0;
@@ -283,10 +319,87 @@ class ImportSymlinkTest extends TestCase
             ]
         ];
 
-        $method->invoke($client, $chunk);
+        $method->invoke(
+            $client,
+            $chunk,
+            $this->streamingContextForChunk($chunk)
+        );
 
         // Should now be a symlink
         $this->assertTrue(is_link($filePath), 'File should be replaced with symlink');
         $this->assertEquals('target', readlink($filePath));
+    }
+
+    public function testSymlinkCreationFailureAfterReplacementStopsTheFetch(): void
+    {
+        $client = new \ImportClient(
+            'http://fake.url',
+            $this->tempDir,
+            $this->tempDir . '/fs-root'
+        );
+        $filePath = $this->tempDir . '/fs-root/test/link';
+        mkdir(dirname($filePath), 0755, true);
+        file_put_contents($filePath, 'local contents');
+        $chunk = [
+            'headers' => [
+                'x-symlink-path' => base64_encode('/test/link'),
+                'x-symlink-target' => base64_encode(str_repeat('a', 8192)),
+                'x-symlink-ctime' => '1234567890',
+            ],
+        ];
+        $reflection = new \ReflectionClass($client);
+        $method = $reflection->getMethod('handle_symlink_chunk');
+        $conflict_policy = $reflection->getProperty(
+            'files_pull_conflict_policy'
+        );
+        $conflict_policy->setValue($client, 'remote-wins');
+        $context = $this->streamingContextForChunk($chunk);
+        $local_stat = lstat($filePath);
+        $this->assertIsArray($local_stat);
+        $context->planned_local_state_checked_result = [
+            'validate' => true,
+            'expected' => [
+                'type' => 'file',
+                'size' => (int) $local_stat['size'],
+                'ctime' => (int) $local_stat['ctime'],
+            ],
+        ];
+
+        try {
+            $method->invoke(
+                $client,
+                $chunk,
+                $context
+            );
+            $this->fail('Expected symlink creation failure to stop the fetch.');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString(
+                'Failed to create symlink',
+                $error->getMessage()
+            );
+        }
+
+        $this->assertFileDoesNotExist($filePath);
+        $this->assertSame(
+            '/test/link',
+            $client->get_import_state()->fetch->applying_path
+        );
+    }
+
+    private function streamingContextForChunk(array $chunk): \StreamingContext
+    {
+        $context = new \StreamingContext();
+        $path = base64_decode(
+            $chunk['headers']['x-symlink-path'] ?? '',
+            true
+        );
+        if (is_string($path) && $path !== '') {
+            $context->planned_local_state_checked_path = $path;
+            $context->planned_local_state_checked_result = [
+                'validate' => false,
+                'expected' => null,
+            ];
+        }
+        return $context;
     }
 }

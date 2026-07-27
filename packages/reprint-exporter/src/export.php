@@ -30,7 +30,7 @@ if (!ob_get_level()) {
  * protocol (cursor encoding, multipart structure, header names, endpoint
  * parameters, response format) would break an older importer.
  */
-define('EXPORT_PROTOCOL_VERSION', 1);
+define('EXPORT_PROTOCOL_VERSION', 2);
 
 /**
  * The oldest *importer* protocol version this export plugin can talk to.
@@ -2821,6 +2821,9 @@ function emit_file_index_error(
 
 /**
  * Streams files from a client-provided path list (uploaded as JSON).
+ *
+ * Entries may be legacy path strings or objects whose `path` value is strict
+ * base64 text for raw filesystem path bytes.
  */
 function endpoint_file_fetch(
     array $config,
@@ -2860,12 +2863,37 @@ function endpoint_file_fetch(
         );
     }
     $paths = [];
-    foreach ($decoded as $path) {
-        if (!is_string($path) || $path === "") {
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- File-list validation failures become protocol errors, not HTML output.
+    foreach ($decoded as $index => $entry) {
+        if (is_array($entry)) {
+            if (
+                !array_key_exists("path", $entry)
+                || !is_string($entry["path"])
+            ) {
+                throw new InvalidArgumentException(
+                    "file_list[{$index}].path must be base64 text"
+                );
+            }
+            $path = base64_decode($entry["path"], true);
+            if ($path === false) {
+                throw new InvalidArgumentException(
+                    "file_list[{$index}].path must be valid base64 text"
+                );
+            }
+            if ($path === "") {
+                throw new InvalidArgumentException(
+                    "file_list[{$index}].path must decode to a non-empty path"
+                );
+            }
+            $paths[] = $path;
             continue;
         }
-        $paths[] = $path;
+        if (!is_string($entry) || $entry === "") {
+            continue;
+        }
+        $paths[] = $entry;
     }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     $chunk_size = $config["chunk_size"] ?? FileTreeProducer::DEFAULT_CHUNK_SIZE;
     $chunk_size = require_int_range(

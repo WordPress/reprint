@@ -21,6 +21,14 @@ final class FileFetchCompressionTest extends TestCase
         parent::tearDown();
     }
 
+    public function testObjectPathRequestsAdvanceTheExporterProtocol(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+
+        $this->assertSame(2, EXPORT_PROTOCOL_VERSION);
+        $this->assertSame(1, EXPORT_MIN_IMPORT_VERSION);
+    }
+
     public function testFileFetchUsesIdentityForBinaryPaths(): void
     {
         $siteDir = $this->tempDir . '/site';
@@ -33,6 +41,60 @@ final class FileFetchCompressionTest extends TestCase
         $this->assertStringStartsWith('--boundary-', $stdout);
         $this->assertFalse(@gzdecode($stdout), 'binary file_fetch should not be gzip framed');
         $this->assertStringContainsString('pretend-jpeg-bytes', $stdout);
+    }
+
+    public function testFileFetchAcceptsBase64PathObjectForNonUtf8Filename(): void
+    {
+        $siteDir = $this->tempDir . '/site';
+        mkdir($siteDir, 0755, true);
+        $filePath = $siteDir . "/photo-\xff.jpg";
+        // Darwin rejects non-UTF-8 path components at the filesystem boundary.
+        // The missing part still confirms that the endpoint preserved the bytes.
+        $fileWasCreated = @file_put_contents(
+            $filePath,
+            'non-utf8-path-bytes',
+        ) !== false;
+
+        $stdout = $this->runFileFetch($siteDir, [
+            ['path' => base64_encode($filePath)],
+        ]);
+
+        $this->assertStringStartsWith('--boundary-', $stdout);
+        $this->assertStringContainsString(
+            'X-File-Path: ' . base64_encode($filePath),
+            $stdout,
+        );
+        if ($fileWasCreated) {
+            $this->assertStringContainsString('non-utf8-path-bytes', $stdout);
+        } else {
+            $this->assertStringContainsString('X-Chunk-Type: missing', $stdout);
+        }
+    }
+
+    public function testFileFetchRejectsInvalidBase64PathObject(): void
+    {
+        $listPath = $this->tempDir . '/file-list.json';
+        file_put_contents(
+            $listPath,
+            json_encode([['path' => 'not base64!']], JSON_THROW_ON_ERROR),
+        );
+
+        require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+        $budget = new ResourceBudget(
+            microtime(true),
+            10,
+            128 * 1024 * 1024,
+            0.9,
+        );
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'file_list[0].path must be valid base64 text',
+        );
+        endpoint_file_fetch([
+            'directory' => $this->tempDir,
+            'file_list_path' => $listPath,
+        ], $budget);
     }
 
     public function testFileFetchUsesGzipForTextOnlyPaths(): void

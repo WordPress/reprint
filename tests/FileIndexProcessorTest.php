@@ -55,6 +55,41 @@ final class FileIndexProcessorTest extends TestCase {
         $this->assertContains(FileIndexProcessor::STATUS_SKIPPED, $resumed['statuses']);
         $this->assertContains(FileIndexProcessor::STATUS_DIRECTORY_COMPLETE, $resumed['statuses']);
         $this->assertTrue($resumed['empty_directory_was_empty']);
+        $this->assertSame(
+            [realpath($docroot) . '/wp-content/cache'],
+            $resumed['default_skipped_paths']
+        );
+    }
+
+    public function testStorageSkipIsNotReportedAsADefaultSkippedPath(): void
+    {
+        $docroot = $this->tempDir . '/storage-site';
+        $storage = $docroot . '/storage';
+        mkdir($storage, 0755, true);
+        file_put_contents($storage . '/state.json', '{}');
+
+        $processor = FileIndexProcessor::start(
+            [realpath($docroot)],
+            $docroot,
+            false,
+            false,
+            $storage
+        );
+        $sawStorageSkip = false;
+        while ($processor->next_index_step()) {
+            if (
+                $processor->get_step_status()
+                === FileIndexProcessor::STATUS_SKIPPED
+            ) {
+                $sawStorageSkip = true;
+                $this->assertNull(
+                    $processor->get_default_skipped_path()
+                );
+            }
+        }
+        $processor->close();
+
+        $this->assertTrue($sawStorageSkip);
     }
 
     public function testPathThatDisappearsAfterDirectoryScanGetsItsOwnStep(): void
@@ -185,6 +220,7 @@ final class FileIndexProcessorTest extends TestCase {
      *
      *     @type array[]  $entries                    File-index entries.
      *     @type string[] $statuses                   Status returned by every step.
+     *     @type string[] $default_skipped_paths      Default-skipped roots settled by traversal.
      *     @type bool     $empty_directory_was_empty Whether the empty directory was classified correctly.
      * }
      */
@@ -200,8 +236,14 @@ final class FileIndexProcessorTest extends TestCase {
         );
         $entries = [];
         $statuses = [];
+        $defaultSkippedPaths = [];
         while ($processor->next_index_step()) {
             $statuses[] = $processor->get_step_status();
+            $defaultSkippedPath =
+                $processor->get_default_skipped_path();
+            if ($defaultSkippedPath !== null) {
+                $defaultSkippedPaths[] = $defaultSkippedPath;
+            }
             foreach ($processor->get_index_entries() as $entry) {
                 $entries[] = $entry;
             }
@@ -230,6 +272,7 @@ final class FileIndexProcessorTest extends TestCase {
         return [
             'entries' => $entries,
             'statuses' => $statuses,
+            'default_skipped_paths' => $defaultSkippedPaths,
             'empty_directory_was_empty' => $emptyDirectoryWasEmpty,
         ];
     }
