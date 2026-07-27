@@ -270,6 +270,72 @@ class OversizedRowsTest extends MySQLDumpProducerTestBase
     }
 
     /**
+     * The oversized row checkpoint retains its primary key while UPDATE
+     * fragments are emitted. Arbitrary key bytes must survive every resume.
+     */
+    public function testReentrancyWithInvalidUtf8PrimaryKeyInOversizedRow(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE reentrant_large_binary_key (
+                id VARBINARY(16) PRIMARY KEY,
+                content LONGBLOB
+            )
+        ");
+
+        $id = "\xFF\xFE\x80";
+        $content = random_bytes(20 * 1024);
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO reentrant_large_binary_key (id, content) VALUES (?, ?)"
+        );
+        $stmt->execute([$id, $content]);
+
+        $options = [
+            "max_statement_size" => 8 * 1024,
+            "batch_size" => 1,
+        ];
+        $producer = $this->createProducer($options);
+        $fragments = [];
+        $saw_oversized_primary_key_checkpoint = false;
+
+        while ($producer->next_sql_fragment()) {
+            $fragments[] = $producer->get_sql_fragment();
+
+            try {
+                $cursor = $producer->get_reentrancy_cursor();
+            } catch (RuntimeException $e) {
+                $this->fail(
+                    "The cursor must preserve the oversized row primary key: " .
+                    $e->getMessage()
+                );
+            }
+
+            $cursor_data = json_decode($cursor, true);
+            if ($cursor_data["oversized_pk_values"] !== null) {
+                $saw_oversized_primary_key_checkpoint = true;
+                $this->assertSame(
+                    base64_encode($id),
+                    $cursor_data["oversized_pk_values"]["id"]["__binary__"]
+                );
+            }
+
+            if (!$producer->is_finished()) {
+                $options["cursor"] = $cursor;
+                $producer = $this->createProducer($options);
+            }
+        }
+
+        $this->assertTrue($saw_oversized_primary_key_checkpoint);
+
+        $sql = implode("\n", $fragments);
+        $import_pdo = $this->executeDumpInNewDatabase($sql);
+        $this->assertDatabasesEqual(
+            $this->pdo,
+            $import_pdo,
+            ["reentrant_large_binary_key"]
+        );
+    }
+
+    /**
      * Test with base64 string encoding.
      */
     public function testBase64EncodingWithLargeData(): void

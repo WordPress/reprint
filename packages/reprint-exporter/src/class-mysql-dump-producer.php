@@ -840,19 +840,21 @@ class MySQLDumpProducer
      * MySQLDumpProducer to resume exactly where this one left off. The JSON is
      * NOT base64-encoded — that's the HTTP layer's concern (export.php).
      *
-     * String and binary values in the in-flight row and oversized chunk queue
-     * are wrapped in {"__binary__": "<base64>"} markers because raw binary
+     * String values in the in-flight row and primary key checkpoints are
+     * wrapped in {"__binary__": "<base64>"} markers because raw database
      * bytes can't survive JSON encoding.
      */
     public function get_reentrancy_cursor()
     {
-        $encoded_current_row = $this->encode_row_for_cursor($this->current_row);
+        $encoded_last_pk_values = $this->encode_database_values_for_cursor($this->last_pk_values);
+        $encoded_current_row = $this->encode_database_values_for_cursor($this->current_row);
         $encoded_oversized_queue = $this->encode_oversized_queue_for_cursor($this->oversized_queue);
+        $encoded_oversized_pk_values = $this->encode_database_values_for_cursor($this->oversized_pk_values);
 
         $json = json_encode([
             "current_table" => $this->current_table,
             "current_pk_columns" => $this->current_pk_columns,
-            "last_pk_values" => $this->last_pk_values,
+            "last_pk_values" => $encoded_last_pk_values,
             "current_offset" => $this->current_offset,
             "state" => $this->state,
             "current_row" => $encoded_current_row,
@@ -863,7 +865,7 @@ class MySQLDumpProducer
              * max_statement_size.
              */
             "oversized_queue" => $encoded_oversized_queue,
-            "oversized_pk_values" => $this->oversized_pk_values,
+            "oversized_pk_values" => $encoded_oversized_pk_values,
             "state_after_oversized" => $this->state_after_oversized,
             "current_statement_size" => $this->current_statement_size,
         ]);
@@ -876,41 +878,41 @@ class MySQLDumpProducer
     }
 
     /**
-     * Wraps all string values in {"__binary__": base64} for JSON safety.
-     * JSON is UTF-8-encoded and cannot express arbitrary binary data. The
-     * "__binary__" "type brand" makes it easy to detect and decode binary data
-     * when restoring the cursor.
+     * Wraps every string in a row or primary key checkpoint in
+     * {"__binary__": base64} for JSON safety. JSON is UTF-8-encoded and cannot
+     * express arbitrary database bytes. The "__binary__" marker identifies
+     * strings to decode when restoring the cursor.
      */
-    private function encode_row_for_cursor($row)
+    private function encode_database_values_for_cursor($values)
     {
-        if ($row === null) {
+        if ($values === null) {
             return null;
         }
 
         $encoded = [];
-        foreach ($row as $col => $value) {
+        foreach ($values as $column_name => $value) {
             if ($value !== null && is_string($value)) {
-                $encoded[$col] = ['__binary__' => base64_encode($value)];
+                $encoded[$column_name] = ['__binary__' => base64_encode($value)];
             } else {
-                $encoded[$col] = $value;
+                $encoded[$column_name] = $value;
             }
         }
         return $encoded;
     }
 
-    /** Reverses encode_row_for_cursor(). */
-    private function decode_row_from_cursor($row)
+    /** Reverses encode_database_values_for_cursor(). */
+    private function decode_database_values_from_cursor($values)
     {
-        if ($row === null) {
+        if ($values === null) {
             return null;
         }
 
         $decoded = [];
-        foreach ($row as $col => $value) {
+        foreach ($values as $column_name => $value) {
             if (is_array($value) && isset($value['__binary__'])) {
-                $decoded[$col] = base64_decode($value['__binary__']);
+                $decoded[$column_name] = base64_decode($value['__binary__']);
             } else {
-                $decoded[$col] = $value;
+                $decoded[$column_name] = $value;
             }
         }
         return $decoded;
@@ -980,7 +982,9 @@ class MySQLDumpProducer
             }
             $this->current_pk_columns =
                 $cursor_data["current_pk_columns"] ?? null;
-            $this->last_pk_values = $cursor_data["last_pk_values"] ?? null;
+            $this->last_pk_values = $this->decode_database_values_from_cursor(
+                $cursor_data["last_pk_values"] ?? null
+            );
             $this->current_offset = $cursor_data["current_offset"] ?? 0;
             if (!is_int($this->current_offset) && !is_float($this->current_offset)) {
                 throw new \InvalidArgumentException(
@@ -990,7 +994,7 @@ class MySQLDumpProducer
             $this->current_offset = (int) $this->current_offset;
             $this->state = $cursor_data["state"] ?? self::STATE_INIT;
             $encoded_row = $cursor_data["current_row"] ?? null;
-            $this->current_row = $this->decode_row_from_cursor($encoded_row);
+            $this->current_row = $this->decode_database_values_from_cursor($encoded_row);
             $this->rows_in_batch = $cursor_data["rows_in_batch"] ?? 0;
             if (!is_int($this->rows_in_batch) && !is_float($this->rows_in_batch)) {
                 throw new \InvalidArgumentException(
@@ -1003,7 +1007,9 @@ class MySQLDumpProducer
 
             $encoded_queue = $cursor_data["oversized_queue"] ?? [];
             $this->oversized_queue = $this->decode_oversized_queue_from_cursor($encoded_queue);
-            $this->oversized_pk_values = $cursor_data["oversized_pk_values"] ?? null;
+            $this->oversized_pk_values = $this->decode_database_values_from_cursor(
+                $cursor_data["oversized_pk_values"] ?? null
+            );
             $this->state_after_oversized = $cursor_data["state_after_oversized"] ?? null;
 
             $this->current_statement_size = $cursor_data["current_statement_size"] ?? 0;
