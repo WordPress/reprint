@@ -7,27 +7,30 @@
 /**
  * Drives one local-files push through bounded planning and streaming requests.
  *
- * PushFilesSender owns the only caller-visible lifecycle. It holds the lock,
- * creates and removes the target push session, drives its internal PushPlan,
- * streams the selected paths, commits the push, and saves the completed fresh
- * local index as the pair's previous local index. The target owns the
+ * PushFilesSender owns the only caller-visible push lifecycle. Its caller holds
+ * the Reprint process lock while the sender creates and removes the target push
+ * session, drives its internal PushPlan, streams the selected paths, commits the
+ * push, and saves the completed fresh local index as the pair's previous local
+ * index. The target owns the
  * upload cursor for every path and for the deletion list. Durable sender state
  * retains the top-level phase, the selected path-list cursor, and learned
  * request limits and the PushPlan cursor needed after a process restart.
  *
  * ## Usage
  *
- *  1. Start a new sender with `start()`, or continue an unfinished sender with
- *     `resume()`. Both methods acquire the lifecycle lock.
+ *  1. Acquire the Reprint process lock, then start a new sender with `start()`
+ *     or continue an unfinished sender with `resume()`.
  *  2. Call `next_step()` while the current process has enough time and memory
  *     for another step.
- *  3. Call `close()` to release the lifecycle lock, even when more work remains.
+ *  3. Call `close()` and release the Reprint process lock, even when more work
+ *     remains.
  *
  * Example:
  *
+ *     $process_lock = new ReprintProcessLock($state_directory);
  *     $sender = $first_run
- *         ? PushFilesSender::start($options)
- *         : PushFilesSender::resume($options);
+ *         ? PushFilesSender::start($options, $process_lock)
+ *         : PushFilesSender::resume($options, $process_lock);
  *     try {
  *         while ($has_time_remaining() && $has_memory_available()) {
  *             if (!$sender->next_step()) {
@@ -40,12 +43,14 @@
  *             $sender->cancel();
  *         }
  *         $sender->close();
+ *         $process_lock->close();
  *     }
  *
  * The caller may cancel whenever next_step() returns true. cancel() abandons an
  * open multipart request and returns the in-memory sender to its preceding
- * durable boundary. close() only releases resources and the lock; it never
- * finishes an open request. If a process stops without closing, the next
+ * durable boundary. close() only releases sender resources; it never finishes
+ * an open request or releases the caller's process lock. If a process stops
+ * without closing, the next
  * process starts from the preceding durable boundary and reads
  * receiver-confirmed work before sending more data.
  *
@@ -136,14 +141,14 @@ final class PushFilesSender
     /** @var string Path where the serialized sender state is stored. */
     private string $state_path;
 
-    /** @var string Advisory lock file for one open lifecycle. */
-    private string $lock_path;
-
     /** @var string Target exclusions stored once for the active push. */
     private string $excluded_paths_path;
 
-    /** @var resource|null Exclusive lock held from start() or resume() through close(). */
-    private $lock_handle = null;
+    /** @var ReprintProcessLock Reprint process lock owned by the caller. */
+    private ReprintProcessLock $process_lock;
+
+    /** @var bool Whether close() released this sender's resources. */
+    private bool $closed = false;
 
     /** @var resource|null Open local_paths_to_push list retained while pushing local paths. */
     private $local_paths_to_push_handle = null;
@@ -218,11 +223,10 @@ final class PushFilesSender
     private array $push_stream_client_options;
 
     /**
-     * Starts a new sender and acquires exclusive ownership of its push state.
+     * Starts a new sender while the caller holds the Reprint process lock.
      *
      * The returned sender begins in `creating`. An existing active state is
-     * rejected so unfinished work cannot be replaced. The returned sender
-     * retains its lock until close().
+     * rejected so unfinished work cannot be replaced.
      *
      * @param array $options {
      *     Push, push stream client, and local-file options.
@@ -239,17 +243,17 @@ final class PushFilesSender
      *     @type array                   $request_sizer_options    Optional PushRequestSizer bounds.
      * }
      * @phpstan-param array<string,mixed> $options
+     * @param ReprintProcessLock $process_lock Lock for the containing state directory.
      * @return self Open sender at its initial durable state.
      */
-    public static function start(array $options): self
+    public static function start(array $options, ReprintProcessLock $process_lock): self
     {
-        $sender = new self($options);
+        $sender = new self($options, $process_lock);
         if (!is_dir($sender->push_state_directory) && !@mkdir($sender->push_state_directory, 0755, true) && !is_dir($sender->push_state_directory)) {
             throw new RuntimeException(
                 'Failed to create the local push state directory: ' . $sender->push_state_directory
             );
         }
-        $sender->lock_handle = $sender->acquire_lock();
         try {
             clearstatcache(true, $sender->state_path);
             if (is_file($sender->state_path)) {
@@ -276,25 +280,25 @@ final class PushFilesSender
     }
 
     /**
-     * Resumes an unfinished sender while holding its exclusive lifecycle lock.
+     * Resumes an unfinished sender while the caller holds the process lock.
      *
-     * The active state is read once under the acquired lock. next_step() then
+     * The active state is read once under the lock. next_step() then
      * works from that in-memory state, storing each later durable boundary
      * without reopening sender.json.
      *
      * @param array<string,mixed> $options Options documented by start().
+     * @param ReprintProcessLock  $process_lock Lock for the containing state directory.
      * @return self Open sender at its last durable state.
      */
-    public static function resume(array $options): self
+    public static function resume(array $options, ReprintProcessLock $process_lock): self
     {
-        $sender = new self($options);
+        $sender = new self($options, $process_lock);
         if (!is_dir($sender->push_state_directory)) {
             throw new LogicException(
                 'Cannot resume a push files sender without unfinished active state: '
                 . $sender->state_path
             );
         }
-        $sender->lock_handle = $sender->acquire_lock();
         try {
             $state = $sender->load_state();
             if ($state === null) {
@@ -319,10 +323,11 @@ final class PushFilesSender
      * Configures the paths and push stream client options shared by start() and resume().
      *
      * @param array<string,mixed> $options Options documented by start().
+     * @param ReprintProcessLock  $process_lock Lock for the containing state directory.
      *
      * @throws InvalidArgumentException If local path or push stream client options are invalid.
      */
-    private function __construct(array $options)
+    private function __construct(array $options, ReprintProcessLock $process_lock)
     {
         $docroot = $options['docroot'] ?? null;
         $push_state_directory = $options['push_state_directory'] ?? null;
@@ -331,6 +336,9 @@ final class PushFilesSender
         }
         if (!is_string($push_state_directory) || $push_state_directory === '') {
             throw new InvalidArgumentException('PushFilesSender requires a push_state_directory.');
+        }
+        if (!$process_lock->is_held()) {
+            throw new InvalidArgumentException('PushFilesSender requires a held Reprint process lock.');
         }
         $request_sizer_options = $options['request_sizer_options'] ?? [];
         if (!is_array($request_sizer_options)) {
@@ -353,11 +361,11 @@ final class PushFilesSender
             throw new InvalidArgumentException('PushFilesSender requires a real docroot directory.');
         }
         $this->docroot = rtrim($canonical_docroot, '/');
+        $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->plan_directory = $this->push_state_directory . '/plan';
         $this->previous_local_index = $this->push_state_directory . '/previous_local_index.jsonl';
         $this->state_path = $this->push_state_directory . '/sender.json';
-        $this->lock_path = $this->push_state_directory . '/sender.lock';
         $this->excluded_paths_path = $this->push_state_directory . '/excluded_paths.json';
         $this->request_sizer_options = $request_sizer_options;
         $this->push_stream_client_options = $push_stream_client_options;
@@ -366,7 +374,7 @@ final class PushFilesSender
     /**
      * Performs the next step for the current phase.
      *
-     * start() or resume() has already acquired the lifecycle lock and loaded the
+     * start() or resume() has received the Reprint process lock and loaded the
      * durable state, so this method only dispatches its current phase. Every
      * phase step is bounded except the deliberate completed-index copy described
      * in the class documentation. A caller stopping after this method returns
@@ -382,7 +390,7 @@ final class PushFilesSender
         if ($this->status !== 'continue') {
             return false;
         }
-        if (!is_resource($this->lock_handle)) {
+        if ($this->closed || !$this->process_lock->is_held()) {
             throw new LogicException('Cannot call next_step() after close().');
         }
 
@@ -497,7 +505,7 @@ final class PushFilesSender
     }
 
     /**
-     * Releases open resources and the lifecycle lock without finishing a request.
+     * Releases open sender resources without finishing a request.
      *
      * The caller uses cancel() first when stopping with an open multipart
      * request. Durable state remains available to resume unless next_step()
@@ -516,10 +524,7 @@ final class PushFilesSender
         }
         $this->upload_request_stage = 'closed';
         $this->state_before_upload_request = null;
-        if (is_resource($this->lock_handle)) {
-            $this->release_lock($this->lock_handle);
-        }
-        $this->lock_handle = null;
+        $this->closed = true;
     }
 
     /**
@@ -1571,38 +1576,6 @@ final class PushFilesSender
         if (is_file($this->state_path) && !unlink($this->state_path)) {
             throw new RuntimeException('Failed to remove active state: ' . $this->state_path);
         }
-    }
-
-    /**
-     * Acquires non-blocking exclusive ownership of one lifecycle.
-     *
-     * @return resource Open locked handle retained until close().
-     */
-    private function acquire_lock()
-    {
-        $lock_handle = fopen($this->lock_path, 'c+');
-        if (!is_resource($lock_handle)) {
-            throw new RuntimeException('Failed to open the lifecycle lock: ' . $this->lock_path);
-        }
-        if (!flock($lock_handle, LOCK_EX | LOCK_NB)) {
-            fclose($lock_handle);
-            throw new RuntimeException(
-                'Cannot start or resume this push files sender while another process holds its lock: '
-                . $this->lock_path
-            );
-        }
-        return $lock_handle;
-    }
-
-    /**
-     * Releases and closes a lock returned by acquire_lock().
-     *
-     * @param resource $lock_handle Open locked handle.
-     */
-    private function release_lock($lock_handle): void
-    {
-        flock($lock_handle, LOCK_UN);
-        fclose($lock_handle);
     }
 
     /**

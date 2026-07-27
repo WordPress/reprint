@@ -62,6 +62,7 @@ require_once __DIR__ . '/lib/target-runtime/load.php';
 
 // External merge sort for large index files when exec() is unavailable
 require_once __DIR__ . '/lib/external-merge-sort.php';
+require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
@@ -883,9 +884,19 @@ class ImportClient
      *   - command: Required. One of the entries in $valid_commands below.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
+     * @param ReprintProcessLock|null $process_lock Lock for this state directory already held by the caller.
      */
-    public function run(array $options = []): void
+    public function run(
+        array $options = [],
+        ?ReprintProcessLock $process_lock = null
+    ): void
     {
+        $process_lock = $process_lock ?? new ReprintProcessLock($this->state_dir);
+        if (!$process_lock->is_held()) {
+            throw new InvalidArgumentException(
+                'ImportClient requires a held Reprint process lock.'
+            );
+        }
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
@@ -956,7 +967,7 @@ class ImportClient
             return;
         }
         if ($command === "files-push") {
-            $this->run_files_push($options);
+            $this->run_files_push($options, $process_lock);
             return;
         }
 
@@ -1331,7 +1342,6 @@ class ImportClient
             throw new RuntimeException($missing_previous_local_index_message);
         }
 
-        $lock_handle = $this->acquire_files_diff_lock($push_state_directory);
         $plan_directory = $push_state_directory . '/files-diff-plan';
         try {
             if (!is_file($previous_local_index)) {
@@ -1416,8 +1426,6 @@ class ImportClient
             }
         } finally {
             $this->remove_local_plan_directory($plan_directory);
-            flock($lock_handle, LOCK_UN);
-            fclose($lock_handle);
         }
     }
 
@@ -1483,25 +1491,6 @@ class ImportClient
         }
     }
 
-    /**
-     * Acquires the pair's files-diff lifecycle lock.
-     *
-     * @return resource Open lock handle.
-     */
-    private function acquire_files_diff_lock(string $push_state_directory)
-    {
-        $lock_path = $push_state_directory . '/files-diff.lock';
-        $lock_handle = fopen($lock_path, 'c+b');
-        if (!is_resource($lock_handle)) {
-            throw new RuntimeException('Failed to open the files-diff lifecycle lock: ' . $lock_path . '.');
-        }
-        if (!flock($lock_handle, LOCK_EX | LOCK_NB)) {
-            fclose($lock_handle);
-            throw new RuntimeException('Another files-diff or files-pull process is using this target and local tree.');
-        }
-        return $lock_handle;
-    }
-
     /** Removes one completed or discarded local plan and confirms every removal. */
     private function remove_local_plan_directory(string $plan_directory): void
     {
@@ -1542,9 +1531,13 @@ class ImportClient
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
      * }
+     * @param ReprintProcessLock $process_lock Lock held for this command.
      * @phpstan-param array<string,mixed> $options
      */
-    private function run_files_push(array $options): void
+    private function run_files_push(
+        array $options,
+        ReprintProcessLock $process_lock
+    ): void
     {
         $started_at = hrtime(true) / 1000000000;
         $context = $options['files_push_context'] ?? self::prepare_files_push_context(
@@ -1582,8 +1575,8 @@ class ImportClient
 
         $resuming = is_file($context['push_state_directory'] . '/sender.json');
         $sender = $resuming
-            ? PushFilesSender::resume($sender_options)
-            : PushFilesSender::start($sender_options);
+            ? PushFilesSender::resume($sender_options, $process_lock)
+            : PushFilesSender::start($sender_options, $process_lock);
         $status = null;
         $reason = null;
         $detail = null;
@@ -13097,6 +13090,7 @@ if (
     }
 
     try {
+        $reprint_process_lock = new ReprintProcessLock($state_dir);
         $reprint_files_push_context = null;
         $reprint_files_diff_context = null;
         if ($command === 'files-push') {
@@ -13124,7 +13118,8 @@ if (
                     : ['files_push_context' => $reprint_files_push_context] )
                 + ( $reprint_files_diff_context === null
                     ? []
-                    : ['files_diff_context' => $reprint_files_diff_context] )
+                    : ['files_diff_context' => $reprint_files_diff_context] ),
+            $reprint_process_lock
         );
         // EXIT_AFTER_IMPORT controls whether we hand control back to
         // the caller after pull returns. Default true: standard CLI
@@ -13170,5 +13165,9 @@ if (
         // to see the failure — re-throw so its try/catch around
         // `include $phar` can surface a proper `{type:'error'}` event.
         throw $e;
+    } finally {
+        if (isset($reprint_process_lock)) {
+            $reprint_process_lock->close();
+        }
     }
 }

@@ -18,6 +18,9 @@ final class PushEndpointsTest extends TestCase {
     /** @var resource[] */
     private array $server_pipes = [];
 
+    /** @var array<int,ReprintProcessLock> */
+    private array $sender_process_locks = [];
+
     private string $root;
     private string $docroot;
     private string $wordpress_root;
@@ -75,6 +78,10 @@ final class PushEndpointsTest extends TestCase {
     protected function tearDown(): void
     {
         $this->stopServer($this->server_process, $this->server_pipes);
+        foreach ($this->sender_process_locks as $process_lock) {
+            $process_lock->close();
+        }
+        $this->sender_process_locks = [];
         if (isset($this->root)) {
             $this->removeTree($this->root);
         }
@@ -1397,7 +1404,7 @@ final class PushEndpointsTest extends TestCase {
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/large.bin', str_repeat('A', 6000));
         $push_state_directory = $this->root . '/retained-file-offset-state';
-        $sender = PushFilesSender::start(
+        $sender = $this->startSender(
             $this->senderOptions($local_docroot, $push_state_directory)
         );
         try {
@@ -1422,7 +1429,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame(1, $this->countEndpointRequests('push_status'));
         } finally {
             $sender->cancel();
-            $sender->close();
+            $this->closeSender($sender);
         }
     }
 
@@ -1441,7 +1448,7 @@ final class PushEndpointsTest extends TestCase {
         $this->writeIndex($previous_local_index_path, $previous_entries);
         $push_state_directory = $this->root . '/retained-deleted-paths-state';
         $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
-        $sender = PushFilesSender::start(
+        $sender = $this->startSender(
             $this->senderOptions($local_docroot, $push_state_directory)
         );
         try {
@@ -1451,7 +1458,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertGreaterThan(1, $this->countEndpointRequests('push_upload'));
             $this->assertSame(1, $this->countEndpointRequests('push_status'));
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
     }
 
@@ -1485,7 +1492,7 @@ final class PushEndpointsTest extends TestCase {
             PushFilesSender::class,
             'local_paths_to_delete_handle'
         );
-        $sender = PushFilesSender::resume(
+        $sender = $this->resumeSender(
             $this->senderOptions($local_docroot, $push_state_directory)
         );
         try {
@@ -1500,7 +1507,7 @@ final class PushEndpointsTest extends TestCase {
             if ($sender->get_status() === 'continue') {
                 $sender->cancel();
             }
-            $sender->close();
+            $this->closeSender($sender);
         }
     }
 
@@ -1520,12 +1527,12 @@ final class PushEndpointsTest extends TestCase {
         $this->seedPreviousLocalIndex($push_state_directory, $previous_local_index_path);
         $options = $this->senderOptions($local_docroot, $push_state_directory);
 
-        $sender = PushFilesSender::start($options);
+        $sender = $this->startSender($options);
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_deletes');
             file_put_contents($local_docroot . '/returned.txt', 'new');
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
         $result = $this->runSender($local_docroot, $push_state_directory);
 
@@ -1587,7 +1594,7 @@ final class PushEndpointsTest extends TestCase {
         );
         $fresh_local_index_handle = null;
 
-        $sender = PushFilesSender::start(
+        $sender = $this->startSender(
             $this->senderOptions($local_docroot, $push_state_directory)
         );
         try {
@@ -1619,7 +1626,7 @@ final class PushEndpointsTest extends TestCase {
                 $this->loadPlanPosition($push_state_directory)
             );
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
 
         $this->assertFalse(is_resource($fresh_local_index_handle));
@@ -1644,7 +1651,7 @@ final class PushEndpointsTest extends TestCase {
             'fresh_local_index_handle'
         );
 
-        $sender = PushFilesSender::start($options);
+        $sender = $this->startSender($options);
         try {
             $this->assertSame('creating', $sender->get_phase());
             $this->takeSenderStepsUntilPhase($sender, 'planning');
@@ -1676,11 +1683,11 @@ final class PushEndpointsTest extends TestCase {
             $this->assertArrayNotHasKey('file_index_cursor', $state);
             $this->assertArrayNotHasKey('fresh_local_index_byte_offset', $state);
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
         $this->assertFalse(is_resource($fresh_local_index_handle));
 
-        $sender = PushFilesSender::resume($options);
+        $sender = $this->resumeSender($options);
         try {
             $this->assertSame('planning', $sender->get_phase());
             $resumed_plan = $plan_property->getValue($sender);
@@ -1698,7 +1705,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertArrayNotHasKey('file_index_cursor', $state);
             $this->assertArrayNotHasKey('fresh_local_index_byte_offset', $state);
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
 
         $index_lines = file($fresh_local_index_path, FILE_IGNORE_NEW_LINES);
@@ -1728,7 +1735,7 @@ final class PushEndpointsTest extends TestCase {
         $child = pcntl_fork();
         $this->assertNotSame(-1, $child);
         if ($child === 0) {
-            $sender = PushFilesSender::start($options);
+            $sender = $this->startSender($options);
             $this->takeSenderStepsUntilPhase($sender, 'planning');
             if (!$sender->next_step()) {
                 exit(2);
@@ -1787,7 +1794,7 @@ final class PushEndpointsTest extends TestCase {
         $push_stream_client_property = new ReflectionProperty(PushFilesSender::class, 'push_stream_client');
         $curl_handle_property = new ReflectionProperty(MultipartPushStreamClient::class, 'curl_handle');
         $options = $this->senderOptions($local_docroot, $push_state_directory);
-        $sender = PushFilesSender::start($options);
+        $sender = $this->startSender($options);
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
             $planning_result = $this->senderResult($sender);
@@ -1827,7 +1834,7 @@ final class PushEndpointsTest extends TestCase {
             $finished_upload_requests_before_close = $this->countEndpointRequests('push_upload');
 
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
         $this->assertNull($local_paths_to_push_handle_property->getValue($sender));
         $this->assertNull($local_file_handle_property->getValue($sender));
@@ -1838,7 +1845,7 @@ final class PushEndpointsTest extends TestCase {
         clearstatcache(true, $push_state_directory . '/sender.json');
         $this->assertSame($state_inode_before_upload, fileinode($push_state_directory . '/sender.json'));
 
-        $sender = PushFilesSender::resume($options);
+        $sender = $this->resumeSender($options);
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_deletes');
             $sender->next_step();
@@ -1862,7 +1869,7 @@ final class PushEndpointsTest extends TestCase {
                 ftell($local_paths_to_delete_handle)
             );
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
         $this->assertNull($local_paths_to_delete_handle_property->getValue($sender));
         $this->assertFalse(is_resource($local_paths_to_delete_handle));
@@ -1882,7 +1889,7 @@ final class PushEndpointsTest extends TestCase {
         $push_stream_client_property = new ReflectionProperty(PushFilesSender::class, 'push_stream_client');
         $curl_handle_property = new ReflectionProperty(MultipartPushStreamClient::class, 'curl_handle');
 
-        $sender = PushFilesSender::start($options);
+        $sender = $this->startSender($options);
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
             $this->assertSame('pushing_paths', $sender->get_phase());
@@ -1910,7 +1917,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame('restart', $sender->get_status());
             $this->assertSame('local_path_changed', $sender->get_reason());
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
     }
 
@@ -1927,7 +1934,7 @@ final class PushEndpointsTest extends TestCase {
         $options = $this->senderOptions($local_docroot, $push_state_directory);
         $upload_request_stage_property = new ReflectionProperty(PushFilesSender::class, 'upload_request_stage');
 
-        $sender = PushFilesSender::start($options);
+        $sender = $this->startSender($options);
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
             $sender->next_step();
@@ -1947,7 +1954,7 @@ final class PushEndpointsTest extends TestCase {
             $sender->cancel();
             $this->assertSame('closed', $upload_request_stage_property->getValue($sender));
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
 
         $result = $this->runSender($local_docroot, $push_state_directory);
@@ -1979,7 +1986,7 @@ final class PushEndpointsTest extends TestCase {
         $child = pcntl_fork();
         $this->assertNotSame(-1, $child);
         if ($child === 0) {
-            $sender = PushFilesSender::start($options);
+            $sender = $this->startSender($options);
             for ($step = 0; $step < 300 && $sender->get_phase() !== 'pushing_paths'; ++$step) {
                 if (!$sender->next_step()) {
                     exit(2);
@@ -2113,7 +2120,7 @@ final class PushEndpointsTest extends TestCase {
         $push_state_directory = $this->root . '/changed-empty-directory-state';
         $options = $this->senderOptions($local_docroot, $push_state_directory);
 
-        $sender = PushFilesSender::start($options);
+        $sender = $this->startSender($options);
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
             $this->assertSame('pushing_paths', $sender->get_phase());
@@ -2123,7 +2130,7 @@ final class PushEndpointsTest extends TestCase {
 
             $result = $this->senderResult($sender);
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
 
         $this->assertSame('continue', $result['status']);
@@ -2193,33 +2200,33 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Holds the lifecycle lock while open and resumes the last returned boundary.
+     * Holds the Reprint process lock while open and resumes the last returned boundary.
      */
-    public function testHighLevelSenderOwnsLifecycleLockAndResumesAfterClose(): void
+    public function testHighLevelSenderUsesReprintProcessLockAndResumesAfterClose(): void
     {
         $local_docroot = $this->root . '/locked-local-docroot';
         $push_state_directory = $this->root . '/locked-state';
         mkdir($local_docroot, 0700, true);
         mkdir($push_state_directory, 0700, true);
-        $lock = fopen($push_state_directory . '/sender.lock', 'c+');
-        $this->assertIsResource($lock);
-        $this->assertTrue(flock($lock, LOCK_EX | LOCK_NB));
+        $process_lock = new ReprintProcessLock($this->root);
         try {
             try {
-                PushFilesSender::start(
+                $this->startSender(
                     $this->senderOptions($local_docroot, $push_state_directory)
                 );
-                $this->fail('Starting a sender must fail while another process owns its lock.');
+                $this->fail('Starting a sender must fail while another Reprint process owns the state directory.');
             } catch (RuntimeException $exception) {
-                $this->assertStringContainsString('another process holds its lock', $exception->getMessage());
+                $this->assertStringContainsString(
+                    'Another Reprint process is using the state directory',
+                    $exception->getMessage()
+                );
             }
         } finally {
-            flock($lock, LOCK_UN);
-            fclose($lock);
+            $process_lock->close();
         }
 
         $options = $this->senderOptions($local_docroot, $push_state_directory);
-        $sender = PushFilesSender::start($options);
+        $sender = $this->startSender($options);
         try {
             $sender->next_step();
             $first = $this->senderResult($sender);
@@ -2228,13 +2235,16 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame('continue', $first['status']);
             $this->assertSame('continue', $second['status']);
             try {
-                PushFilesSender::resume($options);
+                $this->resumeSender($options);
                 $this->fail('Resuming a sender must fail until the open sender is closed.');
             } catch (RuntimeException $exception) {
-                $this->assertStringContainsString('another process holds its lock', $exception->getMessage());
+                $this->assertStringContainsString(
+                    'Another Reprint process is using the state directory',
+                    $exception->getMessage()
+                );
             }
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
         $state_at_caller_stop = $this->loadActiveState($push_state_directory);
         $this->assertIsArray($state_at_caller_stop);
@@ -2247,18 +2257,18 @@ final class PushEndpointsTest extends TestCase {
             $this->assertStringContainsString('after close()', $exception->getMessage());
         }
 
-        $resumed_sender = PushFilesSender::resume($options);
+        $resumed_sender = $this->resumeSender($options);
         try {
             $resumed_sender->next_step();
             $result_after_resume = $this->senderResult($resumed_sender);
             $this->assertSame('continue', $result_after_resume['status']);
             $this->assertSame('pushing_deletes', $result_after_resume['phase']);
         } finally {
-            $resumed_sender->close();
+            $this->closeSender($resumed_sender);
         }
 
         try {
-            PushFilesSender::start($options);
+            $this->startSender($options);
             $this->fail('Starting a sender must not replace unfinished active state.');
         } catch (LogicException $exception) {
             $this->assertStringContainsString('unfinished active state exists', $exception->getMessage());
@@ -2280,7 +2290,7 @@ final class PushEndpointsTest extends TestCase {
         mkdir($local_docroot, 0700, true);
 
         try {
-            PushFilesSender::resume(
+            $this->resumeSender(
                 $this->senderOptions($local_docroot, $push_state_directory)
             );
             $this->fail('Resuming without active state must fail.');
@@ -2342,7 +2352,7 @@ final class PushEndpointsTest extends TestCase {
         file_put_contents($local_docroot . '/first.txt', 'first');
         file_put_contents($local_docroot . '/second.txt', 'second');
         $push_state_directory = $this->root . '/failed-upload-state';
-        $sender = PushFilesSender::start(
+        $sender = $this->startSender(
             $this->senderOptions($local_docroot, $push_state_directory)
         );
         $state_property = new ReflectionProperty(PushFilesSender::class, 'state');
@@ -2373,7 +2383,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame('lock_acquisition_failure', $sender->get_reason());
             $this->assertSame($durable_state, $state_property->getValue($sender));
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
     }
 
@@ -2414,7 +2424,7 @@ final class PushEndpointsTest extends TestCase {
         $local_docroot = $this->root . '/malformed-local-docroot';
         $push_state_directory = $this->root . '/malformed-state';
         mkdir($local_docroot, 0700, true);
-        $sender = PushFilesSender::start([
+        $sender = $this->startSender([
             'docroot' => $local_docroot,
             'push_state_directory' => $push_state_directory,
             'base_url' => 'http://' . $address . '/?reprint-api=1',
@@ -2428,7 +2438,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertFalse($sender->next_step());
             $result = $this->senderResult($sender);
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
         $this->assertFalse($sender->next_step());
         pcntl_waitpid($child, $status);
@@ -2830,13 +2840,13 @@ final class PushEndpointsTest extends TestCase {
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/value.txt', 'value after failure');
         $push_state_directory = $this->filesPushStateDirectory($local_docroot, $state_directory);
-        $sender = PushFilesSender::start(
+        $sender = $this->startSender(
             $this->filesPushSenderOptions($local_docroot, $push_state_directory)
         );
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
         $active_state = $this->loadActiveState($push_state_directory);
         $this->assertIsArray($active_state);
@@ -2880,13 +2890,13 @@ final class PushEndpointsTest extends TestCase {
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/value.txt', 'before');
         $push_state_directory = $this->filesPushStateDirectory($local_docroot, $state_directory);
-        $sender = PushFilesSender::start(
+        $sender = $this->startSender(
             $this->filesPushSenderOptions($local_docroot, $push_state_directory)
         );
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
         file_put_contents($local_docroot . '/value.txt', 'after local change');
         clearstatcache(true, $local_docroot . '/value.txt');
@@ -3292,6 +3302,47 @@ final class PushEndpointsTest extends TestCase {
         ];
     }
 
+    /** @param array<string,mixed> $options */
+    private function startSender(array $options): PushFilesSender
+    {
+        $process_lock = new ReprintProcessLock($this->root);
+        try {
+            $sender = PushFilesSender::start($options, $process_lock);
+        } catch (Throwable $throwable) {
+            $process_lock->close();
+            throw $throwable;
+        }
+        $this->sender_process_locks[spl_object_id($sender)] = $process_lock;
+        return $sender;
+    }
+
+    /** @param array<string,mixed> $options */
+    private function resumeSender(array $options): PushFilesSender
+    {
+        $process_lock = new ReprintProcessLock($this->root);
+        try {
+            $sender = PushFilesSender::resume($options, $process_lock);
+        } catch (Throwable $throwable) {
+            $process_lock->close();
+            throw $throwable;
+        }
+        $this->sender_process_locks[spl_object_id($sender)] = $process_lock;
+        return $sender;
+    }
+
+    private function closeSender(PushFilesSender $sender): void
+    {
+        $object_id = spl_object_id($sender);
+        try {
+            $sender->close();
+        } finally {
+            if (isset($this->sender_process_locks[$object_id])) {
+                $this->sender_process_locks[$object_id]->close();
+                unset($this->sender_process_locks[$object_id]);
+            }
+        }
+    }
+
     /**
      * Starts or resumes one sender and stops after its next durable boundary.
      *
@@ -3309,8 +3360,8 @@ final class PushEndpointsTest extends TestCase {
             $push_state_directory
         );
         $sender = is_file($push_state_directory . '/sender.json')
-            ? PushFilesSender::resume($options)
-            : PushFilesSender::start($options);
+            ? $this->resumeSender($options)
+            : $this->startSender($options);
         $upload_request_stage_property = new ReflectionProperty(PushFilesSender::class, 'upload_request_stage');
         try {
             do {
@@ -3324,7 +3375,7 @@ final class PushEndpointsTest extends TestCase {
             if ($sender->get_status() === 'continue') {
                 $sender->cancel();
             }
-            $sender->close();
+            $this->closeSender($sender);
         }
     }
 
@@ -3435,8 +3486,8 @@ final class PushEndpointsTest extends TestCase {
             $push_state_directory
         );
         $sender = is_file($push_state_directory . '/sender.json')
-            ? PushFilesSender::resume($options)
-            : PushFilesSender::start($options);
+            ? $this->resumeSender($options)
+            : $this->startSender($options);
         try {
             for ($step = 0; $step < 200; ++$step) {
                 $has_more_steps = $sender->next_step();
@@ -3448,7 +3499,7 @@ final class PushEndpointsTest extends TestCase {
                 }
             }
         } finally {
-            $sender->close();
+            $this->closeSender($sender);
         }
         $this->fail('The high-level sender did not reach a terminal result in 200 steps.');
     }
