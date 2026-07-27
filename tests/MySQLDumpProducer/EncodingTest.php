@@ -1183,4 +1183,62 @@ class EncodingTest extends MySQLDumpProducerTestBase
             $this->assertSame($expected, $rows[$i], "Binary mismatch at row " . ($i + 1));
         }
     }
+
+    /**
+     * Primary key values are part of the resume cursor as well as the SQL.
+     * Arbitrary key bytes must survive a cursor round trip without being
+     * interpreted as JSON text.
+     */
+    public function testReentrancyWithInvalidUtf8PrimaryKey(): void
+    {
+        $this->pdo->exec("CREATE TABLE t (id VARBINARY(16) PRIMARY KEY, data VARCHAR(50))");
+
+        $rows = [
+            ["\x00\xFF", "first"],
+            ["\x80\xFE", "second"],
+            ["\xFF\xFE", "third"],
+        ];
+        $stmt = $this->pdo->prepare("INSERT INTO t (id, data) VALUES (?, ?)");
+        foreach ($rows as $row) {
+            $stmt->execute($row);
+        }
+
+        $options = ["batch_size" => 1];
+        $producer = $this->createProducer($options);
+        $fragments = [];
+        $saw_primary_key_checkpoint = false;
+
+        while ($producer->next_sql_fragment()) {
+            $fragments[] = $producer->get_sql_fragment();
+
+            try {
+                $cursor = $producer->get_reentrancy_cursor();
+            } catch (RuntimeException $e) {
+                $this->fail(
+                    "The cursor must preserve arbitrary primary key bytes: " .
+                    $e->getMessage()
+                );
+            }
+
+            $cursor_data = json_decode($cursor, true);
+            if ($cursor_data["last_pk_values"] !== null) {
+                $saw_primary_key_checkpoint = true;
+                $this->assertArrayHasKey(
+                    "__binary__",
+                    $cursor_data["last_pk_values"]["id"]
+                );
+            }
+
+            if (!$producer->is_finished()) {
+                $options["cursor"] = $cursor;
+                $producer = $this->createProducer($options);
+            }
+        }
+
+        $this->assertTrue($saw_primary_key_checkpoint);
+
+        $sql = implode("\n", $fragments);
+        $import_pdo = $this->executeDumpInNewDatabase($sql);
+        $this->assertDatabasesEqual($this->pdo, $import_pdo, ["t"]);
+    }
 }
