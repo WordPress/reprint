@@ -138,6 +138,15 @@ ctime observed when that path was applied. Directory emptiness comes from
 descendants retained by the merge, not unrelated local additions on disk.
 Paths outside the files-push scope are not admitted.
 
+Before a compatible delta pull changes the local tree, it compares source
+changes with local additions, edits, and deletions since the previous local
+index was recorded. `--on-conflict=stop` stops without applying any source
+path when the same path or replaced subtree changed locally.
+`--on-conflict=remote-wins` applies the source change.
+`--on-conflict=our-wins` retains the local path and does not advance either
+index for that source change, so both directions remain pending. An initial
+pull has no earlier local path state and applies the source tree.
+
 `PushPlan` first builds a path-sorted fresh local index, then derives the local
 paths to push and delete by diffing it against the previous local index its
 caller supplies. The indexer marks physical emptiness while

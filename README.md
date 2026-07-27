@@ -240,6 +240,21 @@ the `--on-fs-root-nonempty` flag controls this behavior. It takes the following 
 - `--on-fs-root-nonempty=error` (default): throw an error and abort.
 - `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
 
+**Local and remote changes**
+
+On a delta `files-pull` or `pull-files` which has a previous local index,
+`--on-conflict` controls a path changed both in the local tree and on the
+source:
+
+- `--on-conflict=stop` (default): stop before changing the local tree.
+- `--on-conflict=remote-wins`: apply the source change.
+- `--on-conflict=our-wins`: retain the local path. The source change remains
+  pending for a later pull, and the local change remains pending for
+  `files-diff` and `files-push`.
+
+An initial pull has no earlier local path state to compare and therefore
+applies the source tree.
+
 **Filtering files**
 
 The `--filter` flag controls which files are downloaded. This is useful when the media library is large

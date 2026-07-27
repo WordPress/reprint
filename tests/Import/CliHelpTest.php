@@ -22,6 +22,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--filter=MODE', $output);
         $this->assertStringContainsString('--remap SOURCE TARGET', $output);
         $this->assertStringContainsString('--only=SOURCE', $output);
+        $this->assertStringContainsString('--on-conflict=POLICY', $output);
     }
 
     public function testPullDbHelpShowsRequiredAndDatabaseOptions(): void
@@ -52,6 +53,7 @@ class CliHelpTest extends TestCase
         $this->assertStringNotContainsString('--filter', $output);
         $this->assertStringNotContainsString('--remap', $output);
         $this->assertStringNotContainsString('--only', $output);
+        $this->assertStringNotContainsString('--on-conflict', $output);
     }
 
     public function testFilesDiffHelpShowsOnlyItsLocalCommandOptions(): void

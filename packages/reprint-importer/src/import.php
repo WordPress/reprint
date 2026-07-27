@@ -13,9 +13,11 @@
 use function WordPress\Filesystem\wp_join_unix_paths;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 use function WordPress\Reprint\Exporter\assert_valid_path;
+use function WordPress\Reprint\Exporter\compare_paths;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\path_sort_key;
 use function Reprint\Importer\merge_import_index_updates;
 use function Reprint\Importer\merge_previous_local_index_updates;
 
@@ -457,6 +459,9 @@ class ImportClient
      * (every detected root).
      */
     private $pull_only_files_with_path_prefixes = [];
+
+    /** @var string How files-pull handles paths changed both locally and remotely. */
+    private $files_pull_conflict_policy = 'stop';
 
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
@@ -904,6 +909,20 @@ class ImportClient
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
         $this->include_caches = $options["include_caches"] ?? false;
         $this->extra_directory = $options["extra_directory"] ?? null;
+        $this->files_pull_conflict_policy = $options['on_conflict'] ?? 'stop';
+        if (!in_array(
+            $this->files_pull_conflict_policy,
+            ['stop', 'remote-wins', 'our-wins'],
+            true
+        )) {
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option validation.
+            throw new InvalidArgumentException(
+                'Invalid --on-conflict value: '
+                . $this->files_pull_conflict_policy
+                . '. Valid values: stop, remote-wins, our-wins'
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
             if (!in_array($this->fs_root_nonempty_behavior, ['error', 'preserve-local'])) {
@@ -2031,6 +2050,30 @@ class ImportClient
         if (file_exists($this->volatile_files_file)) {
             @unlink($this->volatile_files_file);
             $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
+        }
+        foreach ([
+            $this->state_dir . '/.files-pull-local-changes.tmp',
+            $this->state_dir . '/.files-pull-remote-changes.tmp',
+            $this->state_dir . '/.files-pull-fresh-local-index.tmp',
+        ] as $conflict_path) {
+            if (is_file($conflict_path)) {
+                @unlink($conflict_path);
+                $this->audit_log("FILE DELETE | {$conflict_path}");
+            }
+        }
+        foreach (['stop', 'remote-wins', 'our-wins'] as $conflict_policy) {
+            foreach (['', '.tmp'] as $suffix) {
+                $conflict_path =
+                    $this->state_dir
+                    . '/.files-pull-conflicts-'
+                    . $conflict_policy
+                    . '.jsonl'
+                    . $suffix;
+                if (is_file($conflict_path)) {
+                    @unlink($conflict_path);
+                    $this->audit_log("FILE DELETE | {$conflict_path}");
+                }
+            }
         }
         $this->import_state()->index = new RemoteFileIndexCursorState();
         $this->import_state()->fetch = new DownloadListFetchProgressState();
@@ -6858,6 +6901,84 @@ class ImportClient
             throw new RuntimeException("Remote index file not found");
         }
 
+        $conflicts_path = $this->prepare_files_pull_conflicts();
+        $conflicts_handle = fopen($conflicts_path, 'rb');
+        if (!is_resource($conflicts_handle)) {
+            throw new RuntimeException('Failed to open the files-pull conflict list.');
+        }
+        $read_conflict_path = static function ($handle): ?string {
+            while (true) {
+                $line = fgets($handle);
+                if ($line === false) {
+                    if (!feof($handle)) {
+                        throw new RuntimeException(
+                            'Failed to read a files-pull conflict.'
+                        );
+                    }
+                    return null;
+                }
+                if (trim($line) === '') {
+                    continue;
+                }
+                $record = json_decode(
+                    $line,
+                    true,
+                    512,
+                    JSON_THROW_ON_ERROR
+                );
+                $path = base64_decode($record['path'], true);
+                if ($path === false) {
+                    throw new RuntimeException(
+                        'A files-pull conflict path is not valid base64.'
+                    );
+                }
+                return $path;
+            }
+        };
+        $next_conflict_path = $read_conflict_path($conflicts_handle);
+        if (
+            $this->files_pull_conflict_policy === 'stop'
+            && $next_conflict_path !== null
+        ) {
+            fclose($conflicts_handle);
+            @unlink($conflicts_path);
+            $context = $this->files_pull_pair_context();
+            $relative_path = self::path_remainder_under(
+                $next_conflict_path,
+                $context['remote_document_root']
+            );
+            // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Arbitrary path bytes are represented as base64.
+            throw new RuntimeException(
+                'The remote and local path both changed since the previous local index: '
+                . 'path_b64='
+                . base64_encode(
+                    $relative_path === null
+                        ? $next_conflict_path
+                        : ltrim($relative_path, '/')
+                )
+                . '. Rerun with --on-conflict=remote-wins or '
+                . '--on-conflict=our-wins.'
+            );
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        }
+        $path_has_conflict = static function (string $path) use (
+            $conflicts_handle,
+            $read_conflict_path,
+            &$next_conflict_path
+        ): bool {
+            while (
+                $next_conflict_path !== null
+                && strcmp($next_conflict_path, $path) < 0
+            ) {
+                $next_conflict_path = $read_conflict_path($conflicts_handle);
+            }
+            if ($next_conflict_path !== $path) {
+                return false;
+            }
+            $next_conflict_path = $read_conflict_path($conflicts_handle);
+            return true;
+        };
+
         $diff = $this->import_state()->diff;
         $remote_offset = $diff->remote_offset;
         $local_after = $diff->local_after;
@@ -6947,7 +7068,17 @@ class ImportClient
                 // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-pull --only runs.
                 if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                    if ($this->delete_local_file_path($local["path"])) {
+                    $has_conflict = $path_has_conflict($local["path"]);
+                    if (
+                        $has_conflict
+                        && $this->files_pull_conflict_policy === 'our-wins'
+                    ) {
+                        $this->audit_log(
+                            'FILE CONFLICT | path_b64='
+                            . base64_encode($local["path"])
+                            . ' | policy=our-wins | local path retained'
+                        );
+                    } elseif ($this->delete_local_file_path($local["path"])) {
                         $this->delete_index_entry($local["path"], true);
                     }
                 }
@@ -6965,13 +7096,25 @@ class ImportClient
                     // Always re-download — this file is in our local index,
                     // meaning we synced it before; preserve-local does not
                     // protect files we own.
-                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
-                        ? $skipped_handle
-                        : $download_handle;
-                    $this->append_download_list(
-                        $remote["path"],
-                        $target_handle,
-                    );
+                    $has_conflict = $path_has_conflict($remote["path"]);
+                    if (
+                        $has_conflict
+                        && $this->files_pull_conflict_policy === 'our-wins'
+                    ) {
+                        $this->audit_log(
+                            'FILE CONFLICT | path_b64='
+                            . base64_encode($remote["path"])
+                            . ' | policy=our-wins | local path retained'
+                        );
+                    } else {
+                        $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
+                            ? $skipped_handle
+                            : $download_handle;
+                        $this->append_download_list(
+                            $remote["path"],
+                            $target_handle,
+                        );
+                    }
                 }
                 $local_after = $local["path"];
                 $local = $this->read_index_line($local_handle);
@@ -6984,10 +7127,22 @@ class ImportClient
                     $this->audit_log($skip_reason, true);
                     $this->emit_skip_progress($remote["path"]);
                 } else {
-                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
-                        ? $skipped_handle
-                        : $download_handle;
-                    $this->append_download_list($remote["path"], $target_handle);
+                    $has_conflict = $path_has_conflict($remote["path"]);
+                    if (
+                        $has_conflict
+                        && $this->files_pull_conflict_policy === 'our-wins'
+                    ) {
+                        $this->audit_log(
+                            'FILE CONFLICT | path_b64='
+                            . base64_encode($remote["path"])
+                            . ' | policy=our-wins | local path retained'
+                        );
+                    } else {
+                        $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
+                            ? $skipped_handle
+                            : $download_handle;
+                        $this->append_download_list($remote["path"], $target_handle);
+                    }
                 }
             }
 
@@ -7008,7 +7163,17 @@ class ImportClient
 
         while ($local !== null) {
             if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                if ($this->delete_local_file_path($local["path"])) {
+                $has_conflict = $path_has_conflict($local["path"]);
+                if (
+                    $has_conflict
+                    && $this->files_pull_conflict_policy === 'our-wins'
+                ) {
+                    $this->audit_log(
+                        'FILE CONFLICT | path_b64='
+                        . base64_encode($local["path"])
+                        . ' | policy=our-wins | local path retained'
+                    );
+                } elseif ($this->delete_local_file_path($local["path"])) {
                     $this->delete_index_entry($local["path"], true);
                 }
             }
@@ -7024,6 +7189,8 @@ class ImportClient
         if ($skipped_handle !== null) {
             fclose($skipped_handle);
         }
+        fclose($conflicts_handle);
+        @unlink($conflicts_path);
 
         $this->import_state()->diff->remote_offset = $remote_offset;
         $this->import_state()->diff->local_after = $local_after;
@@ -7031,6 +7198,659 @@ class ImportClient
         $this->save_state($this->state);
 
         return !$this->shutdown_requested;
+    }
+
+    /**
+     * Builds the remote-path list changed both locally and remotely.
+     *
+     * The published list is retained while the diff is resumable because the
+     * diff itself may already have applied remote deletions. Temporary inputs
+     * are streamed and sorted on disk.
+     */
+    private function prepare_files_pull_conflicts(): string
+    {
+        $conflicts_path =
+            $this->state_dir
+            . '/.files-pull-conflicts-'
+            . $this->files_pull_conflict_policy
+            . '.jsonl';
+        if (is_file($conflicts_path)) {
+            return $conflicts_path;
+        }
+
+        $conflicts_temporary_path = $conflicts_path . '.tmp';
+        $local_changes_path =
+            $this->state_dir . '/.files-pull-local-changes.tmp';
+        $remote_changes_path =
+            $this->state_dir . '/.files-pull-remote-changes.tmp';
+        $fresh_local_index_path =
+            $this->state_dir . '/.files-pull-fresh-local-index.tmp';
+        try {
+            foreach ([
+                $conflicts_temporary_path,
+                $local_changes_path,
+                $remote_changes_path,
+                $fresh_local_index_path,
+            ] as $temporary_path) {
+                if (is_file($temporary_path) && !unlink($temporary_path)) {
+                    throw new RuntimeException(
+                        'Failed to remove a files-pull conflict temporary file: '
+                        . $temporary_path . '.'
+                    );
+                }
+            }
+
+            $context = $this->files_pull_pair_context_if_local_tree_exists();
+            $previous_local_index = $context === null
+                ? null
+                : $context['push_state_directory']
+                    . '/previous_local_index.jsonl';
+            if (
+                $this->files_pull_conflict_policy === 'remote-wins'
+                || !$this->maintain_previous_local_index
+                || $previous_local_index === null
+                || !is_file($previous_local_index)
+            ) {
+                if (file_put_contents($conflicts_temporary_path, '') === false) {
+                    throw new RuntimeException(
+                        'Failed to initialize the files-pull conflict list.'
+                    );
+                }
+                if (!rename($conflicts_temporary_path, $conflicts_path)) {
+                    throw new RuntimeException(
+                        'Failed to publish the files-pull conflict list.'
+                    );
+                }
+                return $conflicts_path;
+            }
+
+            $fresh_local_index_handle =
+                fopen($fresh_local_index_path, 'wb');
+            if (!is_resource($fresh_local_index_handle)) {
+                throw new RuntimeException(
+                    'Failed to open the fresh local index for files-pull.'
+                );
+            }
+            $file_index_processor = FileIndexProcessor::start(
+                [$context['local_tree']],
+                $context['local_tree'],
+                false,
+                false,
+                $this->state_dir
+            );
+            try {
+                while ($file_index_processor->next_index_step()) {
+                    if (
+                        $file_index_processor->get_step_status()
+                        === FileIndexProcessor::STATUS_DIRECTORY_ERROR
+                    ) {
+                        $directory_error =
+                            $file_index_processor->get_directory_error();
+                        throw new RuntimeException(
+                            $directory_error['message']
+                            . ': '
+                            . base64_encode($directory_error['path'])
+                            . '.'
+                        );
+                    }
+                    if (
+                        $file_index_processor->get_step_status()
+                        !== FileIndexProcessor::STATUS_INDEXED
+                    ) {
+                        continue;
+                    }
+                    foreach (
+                        $file_index_processor->get_index_entries()
+                        as $index_entry
+                    ) {
+                        $relative_path = substr(
+                            $index_entry['path'],
+                            strlen($context['local_tree']) + 1
+                        );
+                        $fresh_entry = [
+                            'path' => base64_encode($relative_path),
+                            'ctime' => $index_entry['ctime'],
+                            'size' => $index_entry['size'],
+                            'type' => $index_entry['type'],
+                        ];
+                        if ($index_entry['type'] === 'dir') {
+                            $fresh_entry['empty'] =
+                                $index_entry['empty'];
+                        }
+                        $line = json_encode(
+                            $fresh_entry,
+                            JSON_UNESCAPED_SLASHES
+                                | JSON_THROW_ON_ERROR
+                        ) . "\n";
+                        if (
+                            fwrite($fresh_local_index_handle, $line)
+                            !== strlen($line)
+                        ) {
+                            throw new RuntimeException(
+                                'Failed to write the fresh local index '
+                                . 'for files-pull.'
+                            );
+                        }
+                    }
+                }
+                if (!fflush($fresh_local_index_handle)) {
+                    throw new RuntimeException(
+                        'Failed to flush the fresh local index for files-pull.'
+                    );
+                }
+            } finally {
+                $file_index_processor->close();
+                fclose($fresh_local_index_handle);
+            }
+
+            $previous_local_handle =
+                fopen($previous_local_index, 'rb');
+            $fresh_local_handle =
+                fopen($fresh_local_index_path, 'rb');
+            $local_changes_handle = fopen($local_changes_path, 'wb');
+            if (
+                !is_resource($previous_local_handle)
+                || !is_resource($fresh_local_handle)
+                || !is_resource($local_changes_handle)
+            ) {
+                if (is_resource($previous_local_handle)) {
+                    fclose($previous_local_handle);
+                }
+                if (is_resource($fresh_local_handle)) {
+                    fclose($fresh_local_handle);
+                }
+                if (is_resource($local_changes_handle)) {
+                    fclose($local_changes_handle);
+                }
+                throw new RuntimeException(
+                    'Failed to open the local files-pull indexes.'
+                );
+            }
+            $write_local_change = static function (
+                string $path,
+                $handle
+            ): void {
+                $line = json_encode(
+                    ['path' => base64_encode($path)],
+                    JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                ) . "\n";
+                if (fwrite($handle, $line) !== strlen($line)) {
+                    throw new RuntimeException(
+                        'Failed to write a local files-pull change.'
+                    );
+                }
+            };
+            try {
+                $previous_local =
+                    $this->read_index_line($previous_local_handle, false);
+                $fresh_local =
+                    $this->read_index_line($fresh_local_handle, false);
+                while (
+                    $previous_local !== null
+                    || $fresh_local !== null
+                ) {
+                    if ($previous_local === null) {
+                        $comparison = 1;
+                    } elseif ($fresh_local === null) {
+                        $comparison = -1;
+                    } else {
+                        $comparison = compare_paths(
+                            $previous_local['path'],
+                            $fresh_local['path']
+                        );
+                    }
+
+                    if ($comparison < 0) {
+                        $write_local_change(
+                            $previous_local['path'],
+                            $local_changes_handle
+                        );
+                        $previous_local = $this->read_index_line(
+                            $previous_local_handle,
+                            false
+                        );
+                    } elseif ($comparison > 0) {
+                        $write_local_change(
+                            $fresh_local['path'],
+                            $local_changes_handle
+                        );
+                        $fresh_local = $this->read_index_line(
+                            $fresh_local_handle,
+                            false
+                        );
+                    } else {
+                        $local_path_changed =
+                            $previous_local['type']
+                                !== $fresh_local['type'];
+                        if (
+                            !$local_path_changed
+                            && $fresh_local['type'] === 'dir'
+                        ) {
+                            $local_path_changed =
+                                (bool) (
+                                    $previous_local['empty'] ?? false
+                                )
+                                !== (bool) (
+                                    $fresh_local['empty'] ?? false
+                                );
+                        } elseif (!$local_path_changed) {
+                            $local_path_changed =
+                                $previous_local['ctime']
+                                    !== $fresh_local['ctime']
+                                || $previous_local['size']
+                                    !== $fresh_local['size'];
+                        }
+                        if ($local_path_changed) {
+                            $write_local_change(
+                                $fresh_local['path'],
+                                $local_changes_handle
+                            );
+                        }
+                        $previous_local = $this->read_index_line(
+                            $previous_local_handle,
+                            false
+                        );
+                        $fresh_local = $this->read_index_line(
+                            $fresh_local_handle,
+                            false
+                        );
+                    }
+                }
+                if (!fflush($local_changes_handle)) {
+                    throw new RuntimeException(
+                        'Failed to flush the local files-pull changes.'
+                    );
+                }
+            } finally {
+                fclose($previous_local_handle);
+                fclose($fresh_local_handle);
+                fclose($local_changes_handle);
+            }
+
+            $previous_remote_handle = is_file($this->index_file)
+                ? fopen($this->index_file, 'rb')
+                : null;
+            $current_remote_handle = fopen($this->remote_index_file, 'rb');
+            $remote_changes_handle = fopen($remote_changes_path, 'wb');
+            if (
+                ( is_file($this->index_file)
+                    && !is_resource($previous_remote_handle) )
+                || !is_resource($current_remote_handle)
+                || !is_resource($remote_changes_handle)
+            ) {
+                if (is_resource($previous_remote_handle)) {
+                    fclose($previous_remote_handle);
+                }
+                if (is_resource($current_remote_handle)) {
+                    fclose($current_remote_handle);
+                }
+                if (is_resource($remote_changes_handle)) {
+                    fclose($remote_changes_handle);
+                }
+                throw new RuntimeException(
+                    'Failed to open the remote files-pull changes.'
+                );
+            }
+            $write_remote_change = function (
+                array $remote_entry,
+                bool $replace_subtree
+            ) use (
+                $context,
+                $remote_changes_handle
+            ): void {
+                if (
+                    !$this->is_file_path_selected_by_pull_only_files(
+                        $remote_entry['path']
+                    )
+                ) {
+                    return;
+                }
+                $local_path =
+                    $this->remote_path_to_local_path_within_import_root(
+                        $remote_entry['path']
+                    );
+                $relative_path = self::path_remainder_under(
+                    $local_path,
+                    $context['local_tree']
+                );
+                if ($relative_path === null || $relative_path === '') {
+                    return;
+                }
+                $relative_path = ltrim($relative_path, '/');
+                if (
+                    FileIndexProcessor::path_is_default_skipped(
+                        $relative_path
+                    )
+                ) {
+                    return;
+                }
+                $line = json_encode(
+                    [
+                        'path' => base64_encode($relative_path),
+                        'remote_path' =>
+                            base64_encode($remote_entry['path']),
+                        'replace_subtree' => $replace_subtree,
+                    ],
+                    JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                ) . "\n";
+                if (
+                    fwrite($remote_changes_handle, $line)
+                    !== strlen($line)
+                ) {
+                    throw new RuntimeException(
+                        'Failed to write a remote files-pull change.'
+                    );
+                }
+            };
+            try {
+                $previous_remote =
+                    $this->read_index_line($previous_remote_handle);
+                $current_remote =
+                    $this->read_index_line($current_remote_handle);
+                while (
+                    $previous_remote !== null
+                    || $current_remote !== null
+                ) {
+                    if ($previous_remote === null) {
+                        $comparison = 1;
+                    } elseif ($current_remote === null) {
+                        $comparison = -1;
+                    } else {
+                        $comparison = strcmp(
+                            $previous_remote['path'],
+                            $current_remote['path']
+                        );
+                    }
+
+                    if ($comparison < 0) {
+                        $write_remote_change($previous_remote, true);
+                        $previous_remote =
+                            $this->read_index_line($previous_remote_handle);
+                    } elseif ($comparison > 0) {
+                        $write_remote_change(
+                            $current_remote,
+                            $current_remote['type'] !== 'dir'
+                        );
+                        $current_remote =
+                            $this->read_index_line($current_remote_handle);
+                    } else {
+                        if (
+                            $previous_remote['ctime']
+                                !== $current_remote['ctime']
+                            || $previous_remote['size']
+                                !== $current_remote['size']
+                            || $previous_remote['type']
+                                !== $current_remote['type']
+                        ) {
+                            $write_remote_change(
+                                $current_remote,
+                                $current_remote['type'] !== 'dir'
+                            );
+                        }
+                        $previous_remote =
+                            $this->read_index_line($previous_remote_handle);
+                        $current_remote =
+                            $this->read_index_line($current_remote_handle);
+                    }
+                }
+                if (!fflush($remote_changes_handle)) {
+                    throw new RuntimeException(
+                        'Failed to flush the remote files-pull changes.'
+                    );
+                }
+            } finally {
+                if (is_resource($previous_remote_handle)) {
+                    fclose($previous_remote_handle);
+                }
+                fclose($current_remote_handle);
+                fclose($remote_changes_handle);
+            }
+
+            $remote_change_sorter = new ExternalMergeSort(
+                static function (string $line): string {
+                    $entry = json_decode(
+                        $line,
+                        true,
+                        512,
+                        JSON_THROW_ON_ERROR
+                    );
+                    $path = base64_decode($entry['path'], true);
+                    if ($path === false) {
+                        throw new RuntimeException(
+                            'A remote files-pull change path is not valid base64.'
+                        );
+                    }
+                    return path_sort_key($path);
+                },
+                8 * 1024 * 1024,
+                true,
+                $this->state_dir
+            );
+            $remote_change_sorter->sort($remote_changes_path);
+
+            $local_changes_handle = fopen($local_changes_path, 'rb');
+            $remote_changes_handle = fopen($remote_changes_path, 'rb');
+            $conflicts_handle = fopen($conflicts_temporary_path, 'wb');
+            if (
+                !is_resource($local_changes_handle)
+                || !is_resource($remote_changes_handle)
+                || !is_resource($conflicts_handle)
+            ) {
+                if (is_resource($local_changes_handle)) {
+                    fclose($local_changes_handle);
+                }
+                if (is_resource($remote_changes_handle)) {
+                    fclose($remote_changes_handle);
+                }
+                if (is_resource($conflicts_handle)) {
+                    fclose($conflicts_handle);
+                }
+                throw new RuntimeException(
+                    'Failed to open the files-pull conflict inputs.'
+                );
+            }
+            $read_local_change = static function ($handle): ?string {
+                while (true) {
+                    $line = fgets($handle);
+                    if ($line === false) {
+                        if (!feof($handle)) {
+                            throw new RuntimeException(
+                                'Failed to read a local files-pull change.'
+                            );
+                        }
+                        return null;
+                    }
+                    if (trim($line) === '') {
+                        continue;
+                    }
+                    $entry = json_decode(
+                        $line,
+                        true,
+                        512,
+                        JSON_THROW_ON_ERROR
+                    );
+                    $path = base64_decode($entry['path'], true);
+                    if ($path === false) {
+                        throw new RuntimeException(
+                            'A local files-pull change path is not valid base64.'
+                        );
+                    }
+                    return $path;
+                }
+            };
+            $read_remote_change = static function ($handle): ?array {
+                while (true) {
+                    $line = fgets($handle);
+                    if ($line === false) {
+                        if (!feof($handle)) {
+                            throw new RuntimeException(
+                                'Failed to read a remote files-pull change.'
+                            );
+                        }
+                        return null;
+                    }
+                    if (trim($line) === '') {
+                        continue;
+                    }
+                    $entry = json_decode(
+                        $line,
+                        true,
+                        512,
+                        JSON_THROW_ON_ERROR
+                    );
+                    $path = base64_decode($entry['path'], true);
+                    $remote_path =
+                        base64_decode($entry['remote_path'], true);
+                    if ($path === false || $remote_path === false) {
+                        throw new RuntimeException(
+                            'A remote files-pull change path is not valid base64.'
+                        );
+                    }
+                    return [
+                        'path' => $path,
+                        'remote_path' => $remote_path,
+                        'replace_subtree' =>
+                            (bool) $entry['replace_subtree'],
+                    ];
+                }
+            };
+            $path_is_same_or_descendant = static function (
+                string $path,
+                string $possible_ancestor
+            ): bool {
+                return $path === $possible_ancestor
+                    || strpos($path, $possible_ancestor . '/') === 0;
+            };
+            try {
+                $local_change =
+                    $read_local_change($local_changes_handle);
+                $local_change_ancestors = [];
+                $remote_change =
+                    $read_remote_change($remote_changes_handle);
+                while ($remote_change !== null) {
+                    while (
+                        $local_change !== null
+                        && compare_paths(
+                            $local_change,
+                            $remote_change['path']
+                        ) <= 0
+                    ) {
+                        while (
+                            $local_change_ancestors !== []
+                            && !$path_is_same_or_descendant(
+                                $local_change,
+                                $local_change_ancestors[
+                                    array_key_last(
+                                        $local_change_ancestors
+                                    )
+                                ]
+                            )
+                        ) {
+                            array_pop($local_change_ancestors);
+                        }
+                        $local_change_ancestors[] = $local_change;
+                        $local_change =
+                            $read_local_change($local_changes_handle);
+                    }
+                    while (
+                        $local_change_ancestors !== []
+                        && !$path_is_same_or_descendant(
+                            $remote_change['path'],
+                            $local_change_ancestors[
+                                array_key_last(
+                                    $local_change_ancestors
+                                )
+                            ]
+                        )
+                    ) {
+                        array_pop($local_change_ancestors);
+                    }
+                    $has_conflict = $local_change_ancestors !== [];
+                    if (
+                        !$has_conflict
+                        && $remote_change['replace_subtree']
+                        && $local_change !== null
+                    ) {
+                        $has_conflict = $path_is_same_or_descendant(
+                            $local_change,
+                            $remote_change['path']
+                        );
+                    }
+                    if (!$has_conflict) {
+                        $remote_change =
+                            $read_remote_change($remote_changes_handle);
+                        continue;
+                    }
+                    $line = json_encode(
+                        [
+                            'path' =>
+                                base64_encode(
+                                    $remote_change['remote_path']
+                                ),
+                        ],
+                        JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                    ) . "\n";
+                    if (
+                        fwrite($conflicts_handle, $line)
+                        !== strlen($line)
+                    ) {
+                        throw new RuntimeException(
+                            'Failed to write a files-pull conflict.'
+                        );
+                    }
+                    $remote_change =
+                        $read_remote_change($remote_changes_handle);
+                }
+                if (!fflush($conflicts_handle)) {
+                    throw new RuntimeException(
+                        'Failed to flush the files-pull conflicts.'
+                    );
+                }
+            } finally {
+                fclose($local_changes_handle);
+                fclose($remote_changes_handle);
+                fclose($conflicts_handle);
+            }
+
+            $conflict_sorter = new ExternalMergeSort(
+                static function (string $line): string {
+                    $entry = json_decode(
+                        $line,
+                        true,
+                        512,
+                        JSON_THROW_ON_ERROR
+                    );
+                    $path = base64_decode($entry['path'], true);
+                    if ($path === false) {
+                        throw new RuntimeException(
+                            'A files-pull conflict path is not valid base64.'
+                        );
+                    }
+                    return $path;
+                },
+                8 * 1024 * 1024,
+                true,
+                $this->state_dir
+            );
+            $conflict_sorter->sort($conflicts_temporary_path);
+            if (!rename($conflicts_temporary_path, $conflicts_path)) {
+                throw new RuntimeException(
+                    'Failed to publish the files-pull conflict list.'
+                );
+            }
+            return $conflicts_path;
+        } finally {
+            foreach ([
+                $conflicts_temporary_path,
+                $local_changes_path,
+                $remote_changes_path,
+                $fresh_local_index_path,
+            ] as $temporary_path) {
+                if (is_file($temporary_path)) {
+                    @unlink($temporary_path);
+                }
+            }
+        }
     }
 
     /**
@@ -12428,6 +13248,15 @@ if (
             'placeholder' => 'DIR',
             'help' => 'Additional remote directory to include in the export',
             'commands' => ['pull-files', 'files-pull', 'files-index'],
+        ],
+        [
+            'name' => 'on-conflict',
+            'type' => 'value',
+            'target' => 'on_conflict',
+            'placeholder' => 'POLICY',
+            'valid_values' => ['stop', 'remote-wins', 'our-wins'],
+            'help' => 'Handle paths changed both locally and remotely (stop|remote-wins|our-wins; default: stop)',
+            'commands' => ['pull-files', 'files-pull'],
         ],
 
         // ── db-pull options ──────────────────────────────────────

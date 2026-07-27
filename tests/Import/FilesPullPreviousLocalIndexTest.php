@@ -744,6 +744,220 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
         ], $records);
     }
 
+    public function testFilesPullStopsBeforeReplacingAFileChangedLocallyAndRemotely(): void
+    {
+        $localContents = 'local edit that must remain on disk';
+        $remoteContents = 'remote edit that must not be downloaded';
+        $this->prepareChangedFileConflict($localContents, $remoteContents);
+
+        $result = $this->runFilesPull();
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertSame(
+            $localContents,
+            file_get_contents($this->localTree . '/' . self::PULLED_PATH)
+        );
+        $this->assertStringContainsString(
+            'The remote and local path both changed',
+            $result['output']
+        );
+        $this->assertStringContainsString(
+            'path_b64=' . base64_encode(self::PULLED_PATH),
+            $result['output']
+        );
+
+        $continued = $this->runFilesPull([
+            '--on-conflict=our-wins',
+        ]);
+        $this->assertSame(0, $continued['exit'], $continued['output']);
+        $this->assertSame(
+            $localContents,
+            file_get_contents($this->localTree . '/' . self::PULLED_PATH)
+        );
+    }
+
+    public function testOurWinsKeepsAConflictingLocalEditPending(): void
+    {
+        $localContents = 'local edit retained by our-wins';
+        $this->prepareChangedFileConflict(
+            $localContents,
+            'remote edit rejected by our-wins'
+        );
+
+        $result = $this->runFilesPull([
+            '--on-conflict=our-wins',
+        ]);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertSame(
+            $localContents,
+            file_get_contents($this->localTree . '/' . self::PULLED_PATH)
+        );
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $this->assertSame([
+            $this->expectedPushRecord(self::PULLED_PATH, 'file'),
+            [
+                'command' => 'files-diff',
+                'status' => 'complete',
+                'local_paths_to_push' => 1,
+                'local_paths_to_delete' => 0,
+            ],
+        ], $this->filesDiffRecords($diff['stdout']));
+    }
+
+    public function testRemoteWinsReplacesAConflictingLocalEdit(): void
+    {
+        $remoteContents = 'remote edit selected by remote-wins';
+        $this->prepareChangedFileConflict(
+            'local edit replaced by remote-wins',
+            $remoteContents
+        );
+
+        $result = $this->runFilesPull([
+            '--on-conflict=remote-wins',
+        ]);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertSame(
+            $remoteContents,
+            file_get_contents($this->localTree . '/' . self::PULLED_PATH)
+        );
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $this->assertSame([[
+            'command' => 'files-diff',
+            'status' => 'complete',
+            'local_paths_to_push' => 0,
+            'local_paths_to_delete' => 0,
+        ]], $this->filesDiffRecords($diff['stdout']));
+    }
+
+    public function testOurWinsKeepsALocalEditWhenTheRemoteFileWasDeleted(): void
+    {
+        $this->completeEligiblePull();
+        $abort = $this->runFilesPull(['--abort']);
+        $this->assertSame(0, $abort['exit'], $abort['output']);
+        $localContents = 'local edit retained after a remote deletion';
+        file_put_contents(
+            $this->localTree . '/' . self::PULLED_PATH,
+            $localContents
+        );
+        $this->writeRemoteOverrides([
+            'removed_paths' => [self::PULLED_PATH],
+        ]);
+
+        $result = $this->runFilesPull([
+            '--on-conflict=our-wins',
+        ]);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertSame(
+            $localContents,
+            file_get_contents($this->localTree . '/' . self::PULLED_PATH)
+        );
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $records = $this->filesDiffRecords($diff['stdout']);
+        $this->assertSame(
+            $this->expectedPushRecord(self::PULLED_PATH, 'file'),
+            $records[0] ?? null
+        );
+    }
+
+    public function testFilesPullStopsBeforeDeletingAParentWithALocallyEditedChild(): void
+    {
+        $parent = 'remote-tree';
+        $child = $parent . '/child.txt';
+        $this->writeRemoteOverrides([
+            'added_directories' => [$parent],
+            'added_paths' => [$child],
+        ]);
+        $this->completeEligiblePull();
+        $abort = $this->runFilesPull(['--abort']);
+        $this->assertSame(0, $abort['exit'], $abort['output']);
+        $localContents = 'local child edit retained under remote deletion';
+        file_put_contents($this->localTree . '/' . $child, $localContents);
+        $this->writeRemoteOverrides([]);
+
+        $result = $this->runFilesPull();
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertSame(
+            $localContents,
+            file_get_contents($this->localTree . '/' . $child)
+        );
+        $this->assertStringContainsString(
+            'path_b64=' . base64_encode($parent),
+            $result['output']
+        );
+    }
+
+    public function testOurWinsKeepsALocalAdditionWhenTheRemoteAddedTheSamePath(): void
+    {
+        $this->completeEligiblePull();
+        $abort = $this->runFilesPull(['--abort']);
+        $this->assertSame(0, $abort['exit'], $abort['output']);
+        $path = 'added-on-both-sides.txt';
+        $localContents = 'local addition retained by our-wins';
+        file_put_contents($this->localTree . '/' . $path, $localContents);
+        $this->writeRemoteOverrides([
+            'added_paths' => [$path],
+        ]);
+
+        $result = $this->runFilesPull([
+            '--on-conflict=our-wins',
+        ]);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertSame(
+            $localContents,
+            file_get_contents($this->localTree . '/' . $path)
+        );
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $records = $this->filesDiffRecords($diff['stdout']);
+        $this->assertSame(
+            $this->expectedPushRecord($path, 'file'),
+            $records[0] ?? null
+        );
+    }
+
+    public function testOurWinsKeepsALocalDeletionWhenTheRemoteFileChanged(): void
+    {
+        $this->completeEligiblePull();
+        $abort = $this->runFilesPull(['--abort']);
+        $this->assertSame(0, $abort['exit'], $abort['output']);
+        unlink($this->localTree . '/' . self::PULLED_PATH);
+        $this->writeRemoteOverrides([
+            'pulled_ctime' => self::REMOTE_CTIME + 1,
+            'pulled_contents_b64' => base64_encode(
+                'remote edit rejected after the local deletion'
+            ),
+        ]);
+
+        $result = $this->runFilesPull([
+            '--on-conflict=our-wins',
+        ]);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertFileDoesNotExist(
+            $this->localTree . '/' . self::PULLED_PATH
+        );
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $records = $this->filesDiffRecords($diff['stdout']);
+        $this->assertSame(
+            $this->expectedPushRecord('selected', 'dir'),
+            $records[0] ?? null
+        );
+        $this->assertSame([
+            'command' => 'files-diff',
+            'action' => 'delete',
+            'path_b64' => base64_encode('selected'),
+        ], $records[1] ?? null);
+    }
+
     public function testSelectedDeltaPullKeepsChangesOutsideItsAppliedPathsPending(): void
     {
         $this->completeEligiblePull();
@@ -932,6 +1146,23 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
     {
         $result = $this->runFilesPull();
         $this->assertSame(0, $result['exit'], $result['output']);
+    }
+
+    private function prepareChangedFileConflict(
+        string $localContents,
+        string $remoteContents
+    ): void {
+        $this->completeEligiblePull();
+        $abort = $this->runFilesPull(['--abort']);
+        $this->assertSame(0, $abort['exit'], $abort['output']);
+        file_put_contents(
+            $this->localTree . '/' . self::PULLED_PATH,
+            $localContents
+        );
+        $this->writeRemoteOverrides([
+            'pulled_ctime' => self::REMOTE_CTIME + 1,
+            'pulled_contents_b64' => base64_encode($remoteContents),
+        ]);
     }
 
     private function corruptImportIndexOutputAfterFilesPullWritesWAL(
