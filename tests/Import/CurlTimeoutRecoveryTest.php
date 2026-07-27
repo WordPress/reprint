@@ -15,9 +15,8 @@ require_once __DIR__ . '/../../importer/import.php';
  * download_db_index) is tested by injecting a CurlTimeoutException via a
  * subclass that overrides fetch_streaming.
  *
- * Also verifies the consecutive-timeout safety net: after
- * MAX_CONSECUTIVE_TIMEOUTS with no cursor progress, the importer gives up
- * with a RuntimeException instead of retrying forever.
+ * Also verifies the no-progress safety net: after repeated interrupted
+ * responses with no cursor progress, the importer gives up.
  */
 class CurlTimeoutRecoveryTest extends TestCase
 {
@@ -423,79 +422,113 @@ class CurlTimeoutRecoveryTest extends TestCase
     {
         $e = new \CurlTimeoutException("Operation timed out");
         $this->assertInstanceOf(\RuntimeException::class, $e);
+        $this->assertInstanceOf(\InterruptedResponseException::class, $e);
     }
 
     // ---------------------------------------------------------------
-    // Consecutive timeout counter
+    // Consecutive interrupted-response counter
     // ---------------------------------------------------------------
 
     /**
-     * assert_can_retry_consecutive_timeout increments the counter when cursor didn't
-     * move. After MAX_CONSECUTIVE_TIMEOUTS it throws RuntimeException.
+     * assert_can_resume_after_interrupted_response increments the counter when the
+     * cursor did not move.
      */
-    public function testTrackConsecutiveTimeoutIncrementsOnNoProgress()
+    public function testTrackInterruptedResponsesIncrementsOnNoProgress()
     {
         $this->writeState([
             "active_resumable_command" => [
                 "command_name" => "db-pull",
                 "completion_state" => "in_progress",
             ],
-            "consecutive_timeouts" => 0,
+            "consecutive_interrupted_responses" => 0,
         ]);
 
         [$client, $reflection] = $this->prepareClient();
         $state = $reflection->getProperty('state');
 
-        $method = $reflection->getMethod('assert_can_retry_consecutive_timeout');
+        $method = $reflection->getMethod('assert_can_resume_after_interrupted_response');
 
         // First call — no progress (same cursor before and after)
-        $method->invoke($client, "sql_chunk", "abc", "abc");
-        $this->assertEquals(1, $state->getValue($client)->consecutive_timeouts);
+        $method->invoke(
+            $client,
+            "sql_chunk",
+            "abc",
+            "abc",
+            new \InterruptedResponseException("Response ended early"),
+        );
+        $this->assertEquals(
+            1,
+            $state->getValue($client)->consecutive_interrupted_responses,
+        );
 
         // Second call — still no progress
-        $method->invoke($client, "sql_chunk", "abc", "abc");
-        $this->assertEquals(2, $state->getValue($client)->consecutive_timeouts);
+        $method->invoke(
+            $client,
+            "sql_chunk",
+            "abc",
+            "abc",
+            new \InterruptedResponseException("Response ended early"),
+        );
+        $this->assertEquals(
+            2,
+            $state->getValue($client)->consecutive_interrupted_responses,
+        );
     }
 
-    public function testTrackConsecutiveTimeoutResetsOnProgress()
+    public function testTrackInterruptedResponsesResetsOnProgress()
     {
         $this->writeState([
             "active_resumable_command" => [
                 "command_name" => "db-pull",
                 "completion_state" => "in_progress",
             ],
-            "consecutive_timeouts" => 2,
+            "consecutive_interrupted_responses" => 2,
         ]);
 
         [$client, $reflection] = $this->prepareClient();
         $state = $reflection->getProperty('state');
 
-        $method = $reflection->getMethod('assert_can_retry_consecutive_timeout');
+        $method = $reflection->getMethod('assert_can_resume_after_interrupted_response');
 
         // Cursor advanced — should reset to 0
-        $method->invoke($client, "sql_chunk", "abc", "def");
-        $this->assertEquals(0, $state->getValue($client)->consecutive_timeouts);
+        $method->invoke(
+            $client,
+            "sql_chunk",
+            "abc",
+            "def",
+            new \InterruptedResponseException("Response ended early"),
+        );
+        $this->assertEquals(
+            0,
+            $state->getValue($client)->consecutive_interrupted_responses,
+        );
     }
 
-    public function testTrackConsecutiveTimeoutThrowsAtMax()
+    public function testTrackInterruptedResponsesThrowsAtMax()
     {
         $this->writeState([
             "active_resumable_command" => [
                 "command_name" => "db-pull",
                 "completion_state" => "in_progress",
             ],
-            "consecutive_timeouts" => 2,
+            "consecutive_interrupted_responses" => 2,
         ]);
 
         [$client, $reflection] = $this->prepareClient();
 
-        $method = $reflection->getMethod('assert_can_retry_consecutive_timeout');
+        $method = $reflection->getMethod('assert_can_resume_after_interrupted_response');
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('consecutive');
 
-        // 3rd no-progress timeout should throw
-        $method->invoke($client, "sql_chunk", "abc", "abc");
+        // The third response without progress should throw.
+        $method->invoke(
+            $client,
+            "sql_chunk",
+            "abc",
+            "abc",
+            new \InterruptedResponseException("Response ended early"),
+        );
     }
 
     /**
@@ -512,7 +545,7 @@ class CurlTimeoutRecoveryTest extends TestCase
                 "remote_cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
             ],
             "sql_bytes" => 1024,
-            "consecutive_timeouts" => 2,
+            "consecutive_interrupted_responses" => 2,
         ]);
 
         $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
@@ -540,7 +573,7 @@ class CurlTimeoutRecoveryTest extends TestCase
                 "remote_cursor" => base64_encode('{"table":"wp_posts","pk":42}'),
             ],
             "sql_bytes" => 1024,
-            "consecutive_timeouts" => 0,
+            "consecutive_interrupted_responses" => 0,
         ]);
 
         $sql_content = str_pad("", 1024, "INSERT INTO t VALUES (1);\n");
@@ -558,7 +591,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->assertEquals("partial", $state["active_resumable_command"]["completion_state"]);
         $this->assertEquals(
             1,
-            $state["consecutive_timeouts"],
+            $state["consecutive_interrupted_responses"],
             "First no-progress timeout should increment counter to 1"
         );
     }
@@ -574,7 +607,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "index" => [
                 "cursor" => base64_encode('{"dir":"/wp-content","offset":500}'),
             ],
-            "consecutive_timeouts" => 2,
+            "consecutive_interrupted_responses" => 2,
             "preflight" => [
                 "data" => [
                     "ok" => true,
@@ -598,8 +631,8 @@ class CurlTimeoutRecoveryTest extends TestCase
         $state = $this->readState();
         $this->assertEquals(
             0,
-            $state["consecutive_timeouts"],
-            "Successful request should reset consecutive_timeouts to 0"
+            $state["consecutive_interrupted_responses"],
+            "Successful request should reset consecutive_interrupted_responses to 0"
         );
     }
 

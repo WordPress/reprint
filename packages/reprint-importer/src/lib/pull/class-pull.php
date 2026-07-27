@@ -10,8 +10,8 @@ class PullFailureReportedException extends RuntimeException
  * High-level pull commands — orchestrate lower-level commands into
  * resumable pipelines.
  *
- * Each step retries automatically on server timeouts (exit code 2). If
- * the process is interrupted, re-running the same high-level command
+ * Each step resumes automatically after an interrupted response (exit code 2).
+ * If the process is interrupted, re-running the same high-level command
  * resumes from the last completed step. Like `git pull` composes fetch +
  * merge, `pull` composes preflight → files-pull → db-pull → db-apply →
  * flat-docroot → apply-runtime → start. `pull-files` runs the file
@@ -277,7 +277,7 @@ class Pull
                 $state->active_resumable_command->completion_state = null;
                 $state->active_resumable_command->remote_cursor = null;
                 $state->active_resumable_command->current_stage = null;
-                $state->consecutive_timeouts = 0;
+                $state->consecutive_interrupted_responses = 0;
                 $state->current_file = null;
                 $state->current_file_bytes = null;
                 $state->diff = new FileDiffProgressState();
@@ -303,7 +303,7 @@ class Pull
                 $state->active_resumable_command->completion_state = null;
                 $state->active_resumable_command->remote_cursor = null;
                 $state->active_resumable_command->current_stage = null;
-                $state->consecutive_timeouts = 0;
+                $state->consecutive_interrupted_responses = 0;
                 $state->sql_bytes = null;
                 $state->db_index = new DatabaseTableIndexState();
                 $this->client->save_import_state();
@@ -793,7 +793,7 @@ class Pull
         $state->active_resumable_command->completion_state = null;
         $state->active_resumable_command->remote_cursor = null;
         $state->active_resumable_command->current_stage = null;
-        $state->consecutive_timeouts = 0;
+        $state->consecutive_interrupted_responses = 0;
         if ($reset_file_transfer_state) {
             $state->current_file = null;
             $state->current_file_bytes = null;

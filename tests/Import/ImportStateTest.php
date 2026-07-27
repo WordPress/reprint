@@ -67,6 +67,28 @@ class ImportStateTest extends TestCase
         $this->assertSame($default_state, \ImportState::from_array($default_state)->to_array());
     }
 
+    public function testLegacyTimeoutCounterBecomesInterruptedResponseCounter(): void
+    {
+        $client = new \ImportClient(
+            'http://example.invalid',
+            sys_get_temp_dir() . '/reprint-import-state-test-state',
+            sys_get_temp_dir() . '/reprint-import-state-test-fs',
+        );
+        $reflection = new \ReflectionClass($client);
+        $normalize_state = $reflection->getMethod('normalize_state');
+        $normalized = $normalize_state->invoke($client, [
+            'consecutive_timeouts' => 2,
+        ]);
+        $state = \ImportState::from_array($normalized);
+
+        $this->assertSame(2, $state->consecutive_interrupted_responses);
+        $this->assertSame(
+            2,
+            $state->to_array()['consecutive_interrupted_responses'],
+        );
+        $this->assertArrayNotHasKey('consecutive_timeouts', $state->to_array());
+    }
+
     public function testStateObjectsDoNotExposeArrayOffsetMutation(): void
     {
         $state = \ImportState::from_array([]);

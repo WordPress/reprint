@@ -5,8 +5,8 @@
  * test_hook_before_sql_batch. When PHP dies mid-stream, the multipart
  * response is truncated and no completion chunk is sent. Before this
  * fix, the importer would throw "Buffered SQL was never executed" and
- * fail fatally. Now it treats the missing completion chunk as a
- * retryable partial response, saves state, and resumes on the next run.
+ * fail fatally. Now it treats the missing completion chunk as an
+ * interrupted response, saves partial state, and resumes on the next run.
  *
  * Note: The .sql-buffer file only contains data when the crash
  * interrupts a partial SQL statement (mid-chunk). With exit(1), PHP
@@ -69,8 +69,8 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
 
             // Deploy a hook that kills PHP after 3 SQL batches. This
             // simulates a real PHP crash (max_execution_time, OOM, fatal
-            // error) — the response is truncated mid-gzip, no completion
-            // chunk is sent, and the multipart stream is incomplete.
+            // error) — the response is truncated mid-gzip and no completion
+            // chunk is sent.
             writeTestHooks(site, [
                 'function test_hook_before_sql_batch(&$sql, $cursor) {',
                 `    $state_file = '/srv/e2e-sites/.e2e-hook-state-${site}';`,
@@ -124,7 +124,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
                 `Expected batch_count >= 3, got ${state.batch_count}`);
         });
 
-        it('state was saved for retry', () => {
+        it('state was saved for resume', () => {
             // The importer should have persisted its state so the next
             // run can resume. The cursor may be null if nginx buffered
             // the entire response and no multipart chunks reached the
@@ -137,14 +137,14 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
                 `Expected status=partial, got ${state.active_resumable_command.completion_state}`);
         });
 
-        it('audit log records the incomplete response', () => {
+        it('audit log records the interrupted response', () => {
             const audit = readAuditLog(tempDir);
             assert.ok(
-                audit.includes('INCOMPLETE RESPONSE') ||
+                audit.includes('INTERRUPTED RESPONSE') ||
                 audit.includes('BUFFER PRESERVED') ||
                 audit.includes('BUFFER NOT FLUSHED') ||
                 audit.includes('missing completion chunk'),
-                'Expected audit log to record the incomplete response'
+                'Expected audit log to record the interrupted response'
             );
         });
 
@@ -180,10 +180,10 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 120000 }, () => {
             const audit = readAuditLog(tempDir);
             // The CRASH RECOVERY entry only appears when .sql-buffer had
             // data to reload. With exit(1) between batches, the buffer is
-            // typically empty. Either way, the INCOMPLETE RESPONSE entry
+            // typically empty. Either way, the INTERRUPTED RESPONSE entry
             // from the first run proves the crash was detected.
             assert.ok(
-                audit.includes('INCOMPLETE RESPONSE') ||
+                audit.includes('INTERRUPTED RESPONSE') ||
                 audit.includes('CRASH RECOVERY'),
                 'Expected audit log to mention crash detection or recovery'
             );
