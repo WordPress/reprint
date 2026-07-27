@@ -133,6 +133,9 @@
     },
     "symlink-bundle": {
       "port": 8123
+    },
+    "adversarial-database": {
+      "port": 8124
     }
   }
 }
