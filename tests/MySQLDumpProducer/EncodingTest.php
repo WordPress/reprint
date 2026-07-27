@@ -1241,4 +1241,146 @@ class EncodingTest extends MySQLDumpProducerTestBase
         $import_pdo = $this->executeDumpInNewDatabase($sql);
         $this->assertDatabasesEqual($this->pdo, $import_pdo, ["t"]);
     }
+
+    /**
+     * A text primary key may contain bytes which are valid in the column's
+     * character set but are not valid UTF-8. Each one-row batch must resume
+     * from those bytes without passing them through the connection charset.
+     */
+    public function testReentrancyWithLatin1TextPrimaryKeyBytes(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE t (
+                id VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_bin PRIMARY KEY,
+                data VARCHAR(50)
+            )"
+        );
+        $this->pdo->exec(
+            "INSERT INTO t (id, data) VALUES
+                (CONVERT(X'41' USING latin1), 'ascii-a'),
+                (CONVERT(X'42' USING latin1), 'ascii-b'),
+                (CONVERT(X'80' USING latin1), 'byte-80'),
+                (CONVERT(X'E9' USING latin1), 'byte-e9')"
+        );
+
+        [$sql, $resume_count] = $this->exportWithResumeAfterEveryFragment([
+            "batch_size" => 1,
+        ]);
+
+        $this->assertGreaterThan(3, $resume_count);
+
+        $import_pdo = $this->executeDumpInNewDatabase($sql);
+        $this->assertSame(
+            ["41", "42", "80", "E9"],
+            $import_pdo
+                ->query("SELECT HEX(id) FROM t ORDER BY id")
+                ->fetchAll(PDO::FETCH_COLUMN)
+        );
+    }
+
+    /**
+     * Primary key comparison must follow the column type rather than PHP's
+     * classification of the fetched value. Numeric-looking VARCHAR values
+     * still use string ordering.
+     */
+    public function testReentrancyWithNumericLatin1TextPrimaryKeyValues(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE t (
+                id VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_bin PRIMARY KEY,
+                data VARCHAR(50)
+            )"
+        );
+        $this->pdo->exec(
+            "INSERT INTO t (id, data) VALUES
+                ('10', 'ten'),
+                ('100', 'one-hundred'),
+                ('2', 'two')"
+        );
+
+        [$sql, $resume_count] = $this->exportWithResumeAfterEveryFragment([
+            "batch_size" => 1,
+        ]);
+
+        $this->assertGreaterThan(3, $resume_count);
+
+        $import_pdo = $this->executeDumpInNewDatabase($sql);
+        $this->assertSame(
+            ["10", "100", "2"],
+            $import_pdo
+                ->query("SELECT id FROM t ORDER BY id")
+                ->fetchAll(PDO::FETCH_COLUMN)
+        );
+    }
+
+    /**
+     * The resume predicate and ORDER BY must both ignore the column collation.
+     * latin1_german2_ci sorts ä before b, while raw bytes sort b, z, then ä.
+     */
+    public function testReentrancyWithLatin1TextPrimaryKeyByteOrdering(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE t (
+                id VARCHAR(16) CHARACTER SET latin1 COLLATE latin1_german2_ci PRIMARY KEY,
+                data VARCHAR(50)
+            )"
+        );
+        $this->pdo->exec(
+            "INSERT INTO t (id, data) VALUES
+                (CONVERT(X'E4' USING latin1), 'umlaut-a'),
+                ('b', 'b'),
+                ('z', 'z')"
+        );
+
+        [$sql, $resume_count] = $this->exportWithResumeAfterEveryFragment([
+            "batch_size" => 1,
+        ]);
+
+        $this->assertGreaterThan(3, $resume_count);
+
+        $letter_b_position = strpos($sql, "FROM_BASE64('Yg==')");
+        $letter_z_position = strpos($sql, "FROM_BASE64('eg==')");
+        $umlaut_a_position = strpos($sql, "FROM_BASE64('5A==')");
+        $this->assertNotFalse($letter_b_position);
+        $this->assertNotFalse($letter_z_position);
+        $this->assertNotFalse($umlaut_a_position);
+        $this->assertTrue(
+            $letter_b_position < $letter_z_position &&
+            $letter_z_position < $umlaut_a_position,
+            "Text primary keys must be emitted in raw byte order"
+        );
+
+        $import_pdo = $this->executeDumpInNewDatabase($sql);
+        $this->assertSame(
+            ["E4", "62", "7A"],
+            $import_pdo
+                ->query("SELECT HEX(id) FROM t ORDER BY id")
+                ->fetchAll(PDO::FETCH_COLUMN)
+        );
+    }
+
+    /**
+     * Exports while replacing the producer from its cursor after every
+     * fragment, simulating a new request at each available resume boundary.
+     *
+     * @return array{0: string, 1: int} Dump SQL and number of resumes.
+     */
+    private function exportWithResumeAfterEveryFragment(array $options): array
+    {
+        $producer = $this->createProducer($options);
+        $fragments = [];
+        $resume_count = 0;
+
+        while ($producer->next_sql_fragment()) {
+            $fragments[] = $producer->get_sql_fragment();
+
+            if (!$producer->is_finished()) {
+                $options["cursor"] = $producer->get_reentrancy_cursor();
+                $producer = $this->createProducer($options);
+                ++$resume_count;
+            }
+        }
+
+        return [implode("\n", $fragments), $resume_count];
+    }
 }

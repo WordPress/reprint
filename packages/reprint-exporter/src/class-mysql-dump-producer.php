@@ -632,7 +632,7 @@ class MySQLDumpProducer
             }
 
             $order_cols = array_map(function ($col) {
-                return $this->quote_identifier($col) . " ASC";
+                return $this->build_primary_key_column_expression($col) . " ASC";
             }, $this->current_pk_columns);
             $query .= " ORDER BY " . implode(", ", $order_cols);
             $query .= " LIMIT {$this->batch_size}";
@@ -727,22 +727,49 @@ class MySQLDumpProducer
         return "(" . implode(" OR ", $conditions) . ")";
     }
 
-    /** Builds a single "column op value" SQL expression, handling NULL and quoting. */
+    /** Builds one primary key comparison without re-encoding database bytes. */
     private function build_comparison($column, $value, $operator)
     {
-        $quoted_col = $this->quote_identifier($column);
+        $column_expression = $this->build_primary_key_column_expression($column);
         if ($value === null) {
             return $operator === "="
-                ? "{$quoted_col} IS NULL"
-                : "{$quoted_col} IS NOT NULL";
+                ? "{$column_expression} IS NULL"
+                : "{$column_expression} IS NOT NULL";
         }
 
-        if (is_numeric($value)) {
-            return "{$quoted_col} {$operator} {$value}";
-        } else {
-            $quoted = $this->db->quote($value);
-            return "{$quoted_col} {$operator} {$quoted}";
+        if ($this->is_numeric_type($this->get_data_type($column))) {
+            return "{$column_expression} {$operator} {$value}";
         }
+
+        return "{$column_expression} {$operator} FROM_BASE64('" .
+            base64_encode($value) .
+            "')";
+    }
+
+    /**
+     * Builds the column expression shared by primary key comparison and order.
+     *
+     * Nonnumeric, nonbinary columns are cast to binary so pagination follows
+     * their raw bytes instead of a connection or column collation. Applying
+     * the same expression to WHERE and ORDER BY prevents skipped rows, although
+     * MySQL may no longer use a text primary key for an efficient range scan.
+     */
+    private function build_primary_key_column_expression($column)
+    {
+        $qualified_column =
+            $this->quote_identifier($this->current_table) .
+            "." .
+            $this->quote_identifier($column);
+        $data_type = $this->get_data_type($column);
+
+        if (
+            $this->is_numeric_type($data_type) ||
+            $this->is_binary_type($data_type)
+        ) {
+            return $qualified_column;
+        }
+
+        return "CAST({$qualified_column} AS BINARY)";
     }
 
     /** Returns primary key column names in ordinal order, or empty array if none. */
@@ -1396,14 +1423,7 @@ class MySQLDumpProducer
 
         $size = 0;
         foreach ($this->oversized_pk_values as $col => $value) {
-            $size += strlen($col) + 10; // `col` =
-            if ($value === null) {
-                $size += 10; // IS NULL
-            } elseif (is_numeric($value)) {
-                $size += strlen((string)$value);
-            } else {
-                $size += strlen((string)$value) * 1.1 + 2; // Quoted
-            }
+            $size += strlen($this->build_comparison($col, $value, "="));
             $size += 5; // AND
         }
 
@@ -1457,15 +1477,7 @@ class MySQLDumpProducer
 
         $where_parts = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
-            $quoted_pk = $this->quote_identifier($pk_col);
-            if ($pk_value === null) {
-                $where_parts[] = "{$quoted_pk} IS NULL";
-            } elseif (is_numeric($pk_value)) {
-                $where_parts[] = "{$quoted_pk} = {$pk_value}";
-            } else {
-                // Use FROM_BASE64() to avoid having to quote() the emitted value.
-                $where_parts[] = "{$quoted_pk} = FROM_BASE64('" . base64_encode($pk_value) . "')";
-            }
+            $where_parts[] = $this->build_comparison($pk_col, $pk_value, "=");
         }
         $where_clause = implode(" AND ", $where_parts);
 
@@ -1496,22 +1508,15 @@ class MySQLDumpProducer
         $quoted_column = $this->quote_identifier($column);
 
         $where_parts = [];
-        $params = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
-            $quoted_pk = $this->quote_identifier($pk_col);
-            if ($pk_value === null) {
-                $where_parts[] = "{$quoted_pk} IS NULL";
-            } else {
-                $where_parts[] = "{$quoted_pk} = ?";
-                $params[] = $pk_value;
-            }
+            $where_parts[] = $this->build_comparison($pk_col, $pk_value, "=");
         }
         $where_clause = implode(" AND ", $where_parts);
 
         $sql = "SELECT CAST(SUBSTRING({$quoted_column}, {$start}, {$length}) AS BINARY)"
              . " FROM {$quoted_table} WHERE {$where_clause}";
         $stmt = $this->db->prepare($sql);
-        $stmt->execute($params);
+        $stmt->execute();
         $result = $stmt->fetchColumn();
 
         if ($result === false) {

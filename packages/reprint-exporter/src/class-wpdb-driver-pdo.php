@@ -2,8 +2,8 @@
 /**
  * wpdb-backed PDO adapter for MySQL exports on PDO-less hosts.
  *
- * MySQLDumpProducer expects a PDO connection — prepare(), query(), quote(),
- * and the statement methods fetch(), fetchAll(), fetchColumn(), execute().
+ * MySQLDumpProducer expects a PDO connection — prepare(), query(), and the
+ * statement methods fetch(), fetchAll(), fetchColumn(), execute().
  * On hosts without ext-pdo / ext-pdo_mysql, this adapter wraps WordPress's
  * global $wpdb so the dump producer can run unchanged.
  *

@@ -2,8 +2,8 @@
 /**
  * PDO-compatible adapter for WP_SQLite_Driver.
  *
- * MySQLDumpProducer expects a PDO connection — prepare(), query(), quote(),
- * and the statement methods fetch(), fetchAll(), fetchColumn(), execute().
+ * MySQLDumpProducer expects a PDO connection — prepare(), query(), and the
+ * statement methods fetch(), fetchAll(), fetchColumn(), execute().
  * On SQLite sites, the WP_SQLite_Driver is already loaded by WordPress
  * (via the sqlite-database-integration plugin's db.php drop-in) and is
  * available at $wpdb->dbh. This adapter wraps that driver so the dump
