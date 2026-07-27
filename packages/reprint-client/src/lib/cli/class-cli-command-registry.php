@@ -29,67 +29,63 @@ use Reprint\Importer\Cli\Commands\PullFilesCommand;
  */
 class CliCommandRegistry {
 
-    /** @var array<string,CliCommand> Canonical command name to command. */
-    private $commands = [];
+	/** @var array<string,CliCommand> Canonical command name to command. */
+	private $commands = [];
 
-    /** @var array<string,string> Alias to canonical command name. */
-    private $aliases = [];
+	/** @var array<string,string> Alias to canonical command name. */
+	private $aliases = [];
 
-    /**
-     * @param array<int,CliCommand> $commands Commands to register.
-     */
-    public function __construct(array $commands)
-    {
-        foreach ($commands as $command) {
-            $name = $command->get_name();
-            if (isset($this->commands[$name]) || isset($this->aliases[$name])) {
-                throw new InvalidArgumentException("The CLI command name \"{$name}\" is registered more than once.");
-            }
-            $this->commands[$name] = $command;
-            foreach ($command->get_aliases() as $alias) {
-                if (isset($this->commands[$alias]) || isset($this->aliases[$alias])) {
-                    throw new InvalidArgumentException("The CLI command alias \"{$alias}\" is registered more than once.");
-                }
-                $this->aliases[$alias] = $name;
-            }
-        }
-    }
+	/**
+	 * @param array<int,CliCommand> $commands Commands to register.
+	 */
+	public function __construct( array $commands ) {
+		foreach ( $commands as $command ) {
+			$name = $command->get_name();
+			if ( isset( $this->commands[ $name ] ) || isset( $this->aliases[ $name ] ) ) {
+				throw new InvalidArgumentException( "The CLI command name \"{$name}\" is registered more than once." );
+			}
+			$this->commands[ $name ] = $command;
+			foreach ( $command->get_aliases() as $alias ) {
+				if ( isset( $this->commands[ $alias ] ) || isset( $this->aliases[ $alias ] ) ) {
+					throw new InvalidArgumentException( "The CLI command alias \"{$alias}\" is registered more than once." );
+				}
+				$this->aliases[ $alias ] = $name;
+			}
+		}
+	}
 
-    public static function create_default(): self
-    {
-        return new self([
-            new PullCommand(),
-            new PullFilesCommand(),
-            new PullDatabaseCommand(),
-            new InstallExporterCommand(),
-            new PreflightCommand(),
-            new PreflightAssertCommand(),
-            new FilesPullCommand(),
-            new FilesDiffCommand(),
-            new FilesPushCommand(),
-            new FilesIndexCommand(),
-            new FilesStatsCommand(),
-            new DatabasePullCommand(),
-            new DatabaseIndexCommand(),
-            new DatabaseDomainsCommand(),
-            new PullMetadataCommand(),
-            new DatabaseApplyCommand(),
-            new FlatDocumentRootCommand(),
-            new ApplyRuntimeCommand(),
-        ]);
-    }
+	public static function create_default(): self {
+		return new self( [
+			new PullCommand(),
+			new PullFilesCommand(),
+			new PullDatabaseCommand(),
+			new InstallExporterCommand(),
+			new PreflightCommand(),
+			new PreflightAssertCommand(),
+			new FilesPullCommand(),
+			new FilesDiffCommand(),
+			new FilesPushCommand(),
+			new FilesIndexCommand(),
+			new FilesStatsCommand(),
+			new DatabasePullCommand(),
+			new DatabaseIndexCommand(),
+			new DatabaseDomainsCommand(),
+			new PullMetadataCommand(),
+			new DatabaseApplyCommand(),
+			new FlatDocumentRootCommand(),
+			new ApplyRuntimeCommand(),
+		] );
+	}
 
-    public function find(string $name): ?CliCommand
-    {
-        $canonical_name = $this->aliases[$name] ?? $name;
-        return $this->commands[$canonical_name] ?? null;
-    }
+	public function find( string $name ): ?CliCommand {
+		$canonical_name = $this->aliases[ $name ] ?? $name;
+		return $this->commands[ $canonical_name ] ?? null;
+	}
 
-    /**
-     * @return array<string,CliCommand> Commands keyed by canonical name.
-     */
-    public function get_commands(): array
-    {
-        return $this->commands;
-    }
+	/**
+	 * @return array<string,CliCommand> Commands keyed by canonical name.
+	 */
+	public function get_commands(): array {
+		return $this->commands;
+	}
 }
