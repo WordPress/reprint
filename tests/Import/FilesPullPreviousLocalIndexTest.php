@@ -186,6 +186,82 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($diff['stdout']));
     }
 
+    public function testFilesPullStopsBeforeReplacingAFileChangedLocallyAndRemotely(): void
+    {
+        $localContents = 'local edit that must remain on disk';
+        $this->prepareChangedFileConflict(
+            $localContents,
+            'remote edit that must not be downloaded'
+        );
+
+        $result = $this->runFilesPull();
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertSame(
+            $localContents,
+            file_get_contents(
+                $this->localTree . '/' . self::PULLED_PATH
+            )
+        );
+        $this->assertStringContainsString(
+            'remote changes overlap local changes',
+            $result['output']
+        );
+    }
+
+    public function testOurWinsKeepsAConflictingLocalEditPending(): void
+    {
+        $localContents = 'local edit retained by our-wins';
+        $this->prepareChangedFileConflict(
+            $localContents,
+            'remote edit rejected by our-wins'
+        );
+
+        $result = $this->runFilesPull([
+            '--on-conflict=our-wins',
+        ]);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertSame(
+            $localContents,
+            file_get_contents(
+                $this->localTree . '/' . self::PULLED_PATH
+            )
+        );
+        $diff = $this->runFilesDiff();
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $this->assertSame([
+            $this->expectedPushRecord(self::PULLED_PATH, 'file'),
+            [
+                'command' => 'files-diff',
+                'status' => 'complete',
+                'local_paths_to_push' => 1,
+                'local_paths_to_delete' => 0,
+            ],
+        ], $this->filesDiffRecords($diff['stdout']));
+    }
+
+    public function testRemoteWinsReplacesAConflictingLocalEdit(): void
+    {
+        $remoteContents = 'remote edit selected by remote-wins';
+        $this->prepareChangedFileConflict(
+            'local edit replaced by remote-wins',
+            $remoteContents
+        );
+
+        $result = $this->runFilesPull([
+            '--on-conflict=remote-wins',
+        ]);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertSame(
+            $remoteContents,
+            file_get_contents(
+                $this->localTree . '/' . self::PULLED_PATH
+            )
+        );
+    }
+
     public function testCorruptedWALDoesNotAdvanceTheFetchCursorPastItsPathRecord(): void
     {
         $this->completeEligiblePull();
@@ -934,6 +1010,23 @@ final class FilesPullPreviousLocalIndexTest extends TestCase
         $this->assertSame(0, $result['exit'], $result['output']);
     }
 
+    private function prepareChangedFileConflict(
+        string $localContents,
+        string $remoteContents
+    ): void {
+        $this->completeEligiblePull();
+        $abort = $this->runFilesPull(['--abort']);
+        $this->assertSame(0, $abort['exit'], $abort['output']);
+        file_put_contents(
+            $this->localTree . '/' . self::PULLED_PATH,
+            $localContents
+        );
+        $this->writeRemoteOverrides([
+            'pulled_ctime' => self::REMOTE_CTIME + 1,
+            'pulled_contents_b64' => base64_encode($remoteContents),
+        ]);
+    }
+
     private function corruptImportIndexOutputAfterFilesPullWritesWAL(
         string $newPulledContents
     ): void {
@@ -1262,8 +1355,19 @@ if (
     && isset($_FILES['file_list']['tmp_name'])
     && is_file($_FILES['file_list']['tmp_name'])
 ) {
+    $file_list = json_decode(
+        (string) file_get_contents(
+            $_FILES['file_list']['tmp_name']
+        ),
+        true
+    );
     $requested_file_paths = array_fill_keys(
-        json_decode((string) file_get_contents($_FILES['file_list']['tmp_name']), true),
+        array_map(
+            static function (array $entry): string {
+                return base64_decode($entry['path']);
+            },
+            $file_list
+        ),
         true
     );
 }
@@ -1295,8 +1399,6 @@ if ($endpoint === 'preflight') {
     header('Content-Type: application/json');
     echo json_encode(array(
         'ok' => true,
-        'protocol_version' => 1,
-        'protocol_min_version' => 1,
         'runtime' => array(
             'document_root' => '/var/www/html',
             'ini_get_all' => array(),

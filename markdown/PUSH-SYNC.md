@@ -99,10 +99,16 @@ compatible partial
 unselected tree is not a complete starting point. The index records the local
 path type, size, and ctime; remote values cannot stand in because ctime belongs
 to the machine where it was observed. Compatible means `--filter=none`, no
-`--remap`, and no `--on-fs-root-nonempty=preserve-local`. The high-level
+`--include-caches`, no `--remap`, and no
+`--on-fs-root-nonempty=preserve-local`. The high-level
 `pull` command does not maintain the baseline because later stages may change
 the local tree. Besides planning the next push, the index feeds the local
 `files-diff` command, which reports the same comparison without pushing.
+
+Before a compatible delta pull changes the local tree, it compares remote
+changes with a `PushPlan` of local changes. `--on-conflict=stop` stops when the
+paths overlap, `remote-wins` applies the remote change, and `our-wins` skips
+that remote change so both sides remain pending.
 
 A files-pull lifecycle which cannot maintain the index — an incompatible
 option set or a pipeline that continues past the file stage — removes it before

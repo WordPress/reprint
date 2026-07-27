@@ -72,8 +72,6 @@ class CurlTimeoutRecoveryTest extends TestCase
                 "remote_cursor" => null,
             ],
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
-            "remote_protocol_version" => null,
-            "remote_protocol_min_version" => null,
             "version" => null,
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",

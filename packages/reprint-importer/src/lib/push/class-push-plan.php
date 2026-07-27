@@ -532,9 +532,7 @@ class PushPlan
     private function append_fresh_local_index_entry(array $index_entry): void
     {
         if ($index_entry["type"] === "other") {
-            throw new RuntimeException(
-                "Cannot push the unsupported local path: " . base64_encode($index_entry["path"]) . "."
-            );
+            return;
         }
         if ($index_entry["type"] === "dir" && !array_key_exists("empty", $index_entry)) {
             throw new RuntimeException(

@@ -90,11 +90,15 @@ class FileDiffProgressState
     /** @var string|null Last local path seen after the current remote offset. */
     public ?string $local_after = null;
 
+    /** @var int Offset of the next unread conflict path. */
+    public int $conflict_offset = 0;
+
     public static function from_array(array $data): self
     {
         $state = new self();
         $state->remote_offset = (int) ($data['remote_offset'] ?? 0);
         $state->local_after = isset($data['local_after']) ? (string) $data['local_after'] : null;
+        $state->conflict_offset = (int) $data['conflict_offset'];
         return $state;
     }
 
@@ -103,6 +107,7 @@ class FileDiffProgressState
         return [
             'remote_offset' => $this->remote_offset,
             'local_after' => $this->local_after,
+            'conflict_offset' => $this->conflict_offset,
         ];
     }
 }
@@ -330,17 +335,13 @@ class PullPipelineCheckpointState
 /**
  * In-process import state with typed properties for each persisted field.
  *
- * This object mirrors .import-state.json. Add new persistent state here first;
- * from_array() accepts missing legacy fields and to_array() keeps the JSON
- * schema stable for existing installations.
+ * This object mirrors .import-state.json.
  */
 class ImportState
 {
     public ResumableCommandCheckpointState $active_resumable_command;
     /** @var array<string,mixed>|null */
     public ?array $preflight = null;
-    public ?int $remote_protocol_version = null;
-    public ?int $remote_protocol_min_version = null;
     /** @var string|null Importer version saved with state. */
     public ?string $version = null;
     /** @var string|null Webhost detected during preflight. */
@@ -395,8 +396,6 @@ class ImportState
         $state = new self();
         $state->active_resumable_command = self::resumable_command_checkpoint_from($data['active_resumable_command'] ?? []);
         $state->preflight = isset($data['preflight']) && is_array($data['preflight']) ? $data['preflight'] : null;
-        $state->remote_protocol_version = isset($data['remote_protocol_version']) ? (int) $data['remote_protocol_version'] : null;
-        $state->remote_protocol_min_version = isset($data['remote_protocol_min_version']) ? (int) $data['remote_protocol_min_version'] : null;
         $state->version = isset($data['version']) ? (string) $data['version'] : null;
         $state->webhost = isset($data['webhost']) ? (string) $data['webhost'] : null;
         $state->follow_symlinks = (bool) ($data['follow_symlinks'] ?? true);
@@ -434,8 +433,6 @@ class ImportState
         return [
             'active_resumable_command' => $this->active_resumable_command->to_array(),
             'preflight' => $this->preflight,
-            'remote_protocol_version' => $this->remote_protocol_version,
-            'remote_protocol_min_version' => $this->remote_protocol_min_version,
             'version' => $this->version,
             'webhost' => $this->webhost,
             'follow_symlinks' => $this->follow_symlinks,

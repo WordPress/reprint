@@ -340,7 +340,16 @@ final class FileFetchCompressionTest extends TestCase
     private function runFileFetch(string $siteDir, array $paths): string
     {
         $listPath = $this->tempDir . '/file-list.json';
-        file_put_contents($listPath, json_encode($paths, JSON_THROW_ON_ERROR));
+        $fileList = array_map(
+            static function (string $path): array {
+                return ['path' => base64_encode($path)];
+            },
+            $paths
+        );
+        file_put_contents(
+            $listPath,
+            json_encode($fileList, JSON_THROW_ON_ERROR)
+        );
 
         $configPath = $this->tempDir . '/config.json';
         file_put_contents($configPath, json_encode([

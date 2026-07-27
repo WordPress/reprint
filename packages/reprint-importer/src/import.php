@@ -13,6 +13,7 @@
 use function WordPress\Filesystem\wp_join_unix_paths;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 use function WordPress\Reprint\Exporter\assert_valid_path;
+use function WordPress\Reprint\Exporter\compare_paths;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_within_root;
@@ -143,31 +144,6 @@ function reprint_apply_curl_ca_bundle($ch): ?string {
     curl_setopt($ch, CURLOPT_CAINFO, $cafile);
     return $cafile;
 }
-
-/**
- * The wire-protocol version this importer speaks.
- *
- * Both the export plugin (server) and the importer (client) are deployed
- * independently.  These two constants let them detect incompatibility at
- * preflight time instead of producing silent corruption.
- *
- * Bump this whenever a change to the wire protocol (cursor encoding,
- * multipart structure, header names, endpoint parameters, response format)
- * would break an older export plugin.
- */
-define('IMPORT_PROTOCOL_VERSION', 1);
-
-/**
- * The oldest *export plugin* protocol version this importer can talk to.
- *
- * During preflight-assert the importer checks that the remote's
- * protocol_version is >= this value; if not, it tells the user to
- * update the export plugin.
- *
- * Raise this when you drop backward-compatibility with old export plugins.
- * Keep it equal to IMPORT_PROTOCOL_VERSION if no backward compat is needed.
- */
-define('IMPORT_MIN_EXPORT_VERSION', 1);
 
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -407,6 +383,9 @@ class ImportClient
      * with no source).
      */
     private $include_caches = false;
+
+    /** @var string How files-pull handles overlapping local and remote changes. */
+    private $files_pull_conflict_policy = 'stop';
 
     /**
      * @var string Controls behavior when the fs root is non-empty at import start.
@@ -903,6 +882,8 @@ class ImportClient
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
         $this->include_caches = $options["include_caches"] ?? false;
+        $this->files_pull_conflict_policy =
+            $options['on_conflict'] ?? 'stop';
         $this->extra_directory = $options["extra_directory"] ?? null;
         if (isset($options["fs_root_nonempty_behavior"])) {
             $this->fs_root_nonempty_behavior = $options["fs_root_nonempty_behavior"];
@@ -2020,6 +2001,7 @@ class ImportClient
             @unlink($this->remote_index_file);
             $this->audit_log("FILE DELETE | {$this->remote_index_file}");
         }
+        @unlink($this->files_pull_conflicts_path());
         if (file_exists($this->download_list_file)) {
             @unlink($this->download_list_file);
             $this->audit_log("FILE DELETE | {$this->download_list_file}");
@@ -2103,14 +2085,6 @@ class ImportClient
         $wp_version = $payload["database"]["wp"]["wp_version"] ?? null;
         if (is_string($wp_version) && $wp_version !== "") {
             $this->import_state()->version = $wp_version;
-        }
-
-        // Store remote protocol version for compatibility checks
-        if (isset($payload["protocol_version"])) {
-            $this->import_state()->remote_protocol_version = (int) $payload["protocol_version"];
-        }
-        if (isset($payload["protocol_min_version"])) {
-            $this->import_state()->remote_protocol_min_version = (int) $payload["protocol_min_version"];
         }
 
         // Detect webhost environment from preflight data.
@@ -2237,7 +2211,14 @@ class ImportClient
             if ($tmp === false) {
                 continue;
             }
-            file_put_contents($tmp, json_encode($dir_files, JSON_UNESCAPED_SLASHES));
+            $file_list = [];
+            foreach ($dir_files as $path) {
+                $file_list[] = ["path" => base64_encode($path)];
+            }
+            file_put_contents(
+                $tmp,
+                json_encode($file_list, JSON_UNESCAPED_SLASHES)
+            );
 
             $post_data = [
                 "file_list" => new \CURLFile($tmp, "application/json", "file_list"),
@@ -2416,32 +2397,7 @@ class ImportClient
             $all_pass = false;
         }
 
-        // 3. Protocol version compatibility
-        $remote_ver = $this->import_state()->remote_protocol_version ?? null;
-        $remote_min = $this->import_state()->remote_protocol_min_version ?? null;
-        if ($remote_ver === null) {
-            $proto_ok = false;
-            $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";
-        } elseif ($remote_ver < IMPORT_MIN_EXPORT_VERSION) {
-            $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} is too old (client requires >= v" . IMPORT_MIN_EXPORT_VERSION . "). Update the export plugin.";
-        } elseif (IMPORT_PROTOCOL_VERSION < $remote_min) {
-            $proto_ok = false;
-            $proto_detail = "Client protocol v" . IMPORT_PROTOCOL_VERSION . " is too old (remote requires >= v{$remote_min}). Update the importer.";
-        } else {
-            $proto_ok = true;
-            $proto_detail = "remote v{$remote_ver}, client v" . IMPORT_PROTOCOL_VERSION;
-        }
-        $checks[] = [
-            "label" => "Protocol compatible",
-            "pass" => $proto_ok,
-            "detail" => $proto_detail,
-        ];
-        if (!$proto_ok) {
-            $all_pass = false;
-        }
-
-        // 4. Filesystem accessible
+        // 3. Filesystem accessible
         $fs = $data["filesystem"] ?? null;
         $fs_ok = is_array($fs) && !empty($fs["ok"]);
         $checks[] = [
@@ -2455,7 +2411,7 @@ class ImportClient
             $all_pass = false;
         }
 
-        // 5. Database accessible
+        // 4. Database accessible
         $db = $data["database"] ?? null;
         $db_ok = is_array($db) && !empty($db["connected"]);
         $checks[] = [
@@ -2695,6 +2651,7 @@ class ImportClient
         $maintains_previous_local_index =
             $maintain_previous_local_index
             && $this->filter === 'none'
+            && !$this->include_caches
             && $this->remap_rules === []
             && $this->fs_root_nonempty_behavior !== 'preserve-local'
             && $can_maintain_after_resume
@@ -3381,8 +3338,16 @@ class ImportClient
                 }
             }
             $this->sort_index_file($this->remote_index_file);
-            $this->import_state()->active_resumable_command->current_stage = "diff";
+            $stage =
+                $this->maintain_previous_local_index
+                && is_file($this->index_file)
+                && filesize($this->index_file) > 0
+                    ? "conflicts"
+                    : "diff";
+            $this->import_state()->active_resumable_command->current_stage =
+                $stage;
             $this->import_state()->diff = new FileDiffProgressState();
+            @unlink($this->files_pull_conflicts_path());
             if (file_exists($this->download_list_file)) {
                 @unlink($this->download_list_file);
                 $this->audit_log(
@@ -3396,7 +3361,29 @@ class ImportClient
                 );
             }
             $this->save_state($this->state);
+        }
+
+        if ($stage === "conflicts") {
+            $conflict_count = $this->prepare_files_pull_conflicts();
+            if ($conflict_count === null) {
+                $this->import_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state($this->state);
+                return;
+            }
+            if (
+                $conflict_count > 0
+                && $this->files_pull_conflict_policy === 'stop'
+            ) {
+                throw new RuntimeException(
+                    "files-pull stopped before changing the local tree because {$conflict_count} remote changes overlap local changes. "
+                    . 'Re-run with --on-conflict=remote-wins or --on-conflict=our-wins.'
+                );
+            }
             $stage = "diff";
+            $this->import_state()->active_resumable_command->current_stage =
+                $stage;
+            $this->import_state()->diff = new FileDiffProgressState();
+            $this->save_state($this->state);
         }
 
         if ($stage === "diff") {
@@ -6861,6 +6848,62 @@ class ImportClient
         $diff = $this->import_state()->diff;
         $remote_offset = $diff->remote_offset;
         $local_after = $diff->local_after;
+        $conflict_offset = $diff->conflict_offset;
+        $conflicts_handle = null;
+        $conflict_path = null;
+        $next_conflict_offset = $conflict_offset;
+        if (
+            $this->files_pull_conflict_policy === 'our-wins'
+            && is_file($this->files_pull_conflicts_path())
+        ) {
+            $conflicts_handle =
+                fopen($this->files_pull_conflicts_path(), 'rb');
+            if (!is_resource($conflicts_handle)) {
+                throw new RuntimeException(
+                    'Failed to open the files-pull conflict list.'
+                );
+            }
+            fseek($conflicts_handle, $conflict_offset);
+            $conflict_path = stream_get_line(
+                $conflicts_handle,
+                1048576,
+                "\0"
+            );
+            $next_conflict_offset = ftell($conflicts_handle);
+        }
+        $path_has_conflict = function (string $path) use (
+            $conflicts_handle,
+            &$conflict_path,
+            &$conflict_offset,
+            &$next_conflict_offset
+        ): bool {
+            if (!is_resource($conflicts_handle)) {
+                return false;
+            }
+            while (
+                is_string($conflict_path)
+                && compare_paths($conflict_path, $path) < 0
+            ) {
+                $conflict_offset = $next_conflict_offset;
+                $conflict_path = stream_get_line(
+                    $conflicts_handle,
+                    1048576,
+                    "\0"
+                );
+                $next_conflict_offset = ftell($conflicts_handle);
+            }
+            if ($conflict_path !== $path) {
+                return false;
+            }
+            $conflict_offset = $next_conflict_offset;
+            $conflict_path = stream_get_line(
+                $conflicts_handle,
+                1048576,
+                "\0"
+            );
+            $next_conflict_offset = ftell($conflicts_handle);
+            return true;
+        };
         $download_mode = $remote_offset > 0 ? "a" : "w";
         if ($download_mode === "w") {
             $this->audit_log(
@@ -6946,7 +6989,12 @@ class ImportClient
             ) {
                 // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-pull --only runs.
-                if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
+                if (
+                    $this->is_file_path_selected_by_pull_only_files(
+                        $local["path"]
+                    )
+                    && !$path_has_conflict($local["path"])
+                ) {
                     if ($this->delete_local_file_path($local["path"])) {
                         $this->delete_index_entry($local["path"], true);
                     }
@@ -6968,10 +7016,12 @@ class ImportClient
                     $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
                         ? $skipped_handle
                         : $download_handle;
-                    $this->append_download_list(
-                        $remote["path"],
-                        $target_handle,
-                    );
+                    if (!$path_has_conflict($remote["path"])) {
+                        $this->append_download_list(
+                            $remote["path"],
+                            $target_handle,
+                        );
+                    }
                 }
                 $local_after = $local["path"];
                 $local = $this->read_index_line($local_handle);
@@ -6983,7 +7033,7 @@ class ImportClient
                 if ($skip_reason) {
                     $this->audit_log($skip_reason, true);
                     $this->emit_skip_progress($remote["path"]);
-                } else {
+                } elseif (!$path_has_conflict($remote["path"])) {
                     $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
                         ? $skipped_handle
                         : $download_handle;
@@ -6995,6 +7045,8 @@ class ImportClient
             if ($processed % 200 === 0) {
                 $this->import_state()->diff->remote_offset = $remote_offset;
                 $this->import_state()->diff->local_after = $local_after;
+                $this->import_state()->diff->conflict_offset =
+                    $conflict_offset;
                 if (
                     $this->index_update_wal_handle
                     && !fflush($this->index_update_wal_handle)
@@ -7007,7 +7059,12 @@ class ImportClient
         }
 
         while ($local !== null) {
-            if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
+            if (
+                $this->is_file_path_selected_by_pull_only_files(
+                    $local["path"]
+                )
+                && !$path_has_conflict($local["path"])
+            ) {
                 if ($this->delete_local_file_path($local["path"])) {
                     $this->delete_index_entry($local["path"], true);
                 }
@@ -7019,6 +7076,9 @@ class ImportClient
         if ($local_handle) {
             fclose($local_handle);
         }
+        if (is_resource($conflicts_handle)) {
+            fclose($conflicts_handle);
+        }
         fclose($remote_handle);
         fclose($download_handle);
         if ($skipped_handle !== null) {
@@ -7027,10 +7087,275 @@ class ImportClient
 
         $this->import_state()->diff->remote_offset = $remote_offset;
         $this->import_state()->diff->local_after = $local_after;
+        $this->import_state()->diff->conflict_offset =
+            $conflict_offset;
         $this->apply_index_update_wal();
         $this->save_state($this->state);
 
+        if (!$this->shutdown_requested) {
+            @unlink($this->files_pull_conflicts_path());
+        }
         return !$this->shutdown_requested;
+    }
+
+    /**
+     * Builds the sorted list of remote changes which overlap local changes.
+     *
+     * The plan is disposable because this phase has not changed the local
+     * tree. An interrupted run removes it and starts this comparison again.
+     *
+     * @return int|null Conflict count, or null when interrupted.
+     */
+    private function prepare_files_pull_conflicts(): ?int
+    {
+        $context = $this->files_pull_pair_context();
+        $previous_local_index =
+            $context['push_state_directory']
+            . '/previous_local_index.jsonl';
+        $plan_directory =
+            $context['push_state_directory']
+            . '/files-pull-conflicts';
+        $conflicts_path = $this->files_pull_conflicts_path();
+        $swap_path = $conflicts_path . '.swap';
+        $this->remove_local_plan_directory($plan_directory);
+        if (!mkdir($plan_directory, 0755, true)) {
+            throw new RuntimeException(
+                'Failed to create the files-pull conflict plan.'
+            );
+        }
+        $excluded_paths_path =
+            $plan_directory . '/no_target_exclusions.json';
+        if (file_put_contents($excluded_paths_path, "[]\n") === false) {
+            throw new RuntimeException(
+                'Failed to create the files-pull conflict exclusions.'
+            );
+        }
+
+        $plan = PushPlan::start(
+            $plan_directory,
+            $context['local_tree'],
+            $previous_local_index,
+            $excluded_paths_path
+        );
+        try {
+            while ($plan->next_step()) {
+                if ($this->shutdown_requested) {
+                    return null;
+                }
+            }
+            $local_changes =
+                $this->files_pull_local_change_paths($plan);
+            $local_changes->rewind();
+            $local_path = $local_changes->valid()
+                ? $local_changes->current()
+                : null;
+            $conflicts_handle = fopen($swap_path, 'wb');
+            if (!is_resource($conflicts_handle)) {
+                throw new RuntimeException(
+                    'Failed to create the files-pull conflict list.'
+                );
+            }
+            $conflict_count = 0;
+            try {
+                foreach (
+                    $this->files_pull_remote_changes($context)
+                    as $remote_change
+                ) {
+                    if ($this->shutdown_requested) {
+                        return null;
+                    }
+                    while ($local_path !== null) {
+                        if (
+                            self::files_pull_paths_overlap(
+                                $local_path,
+                                $remote_change['local_path']
+                            )
+                        ) {
+                            $record =
+                                $remote_change['remote_path'] . "\0";
+                            if (
+                                fwrite($conflicts_handle, $record)
+                                !== strlen($record)
+                            ) {
+                                throw new RuntimeException(
+                                    'Failed to write the files-pull conflict list.'
+                                );
+                            }
+                            ++$conflict_count;
+                            break;
+                        }
+                        if (
+                            compare_paths(
+                                $local_path,
+                                $remote_change['local_path']
+                            ) > 0
+                        ) {
+                            break;
+                        }
+                        $local_changes->next();
+                        $local_path = $local_changes->valid()
+                            ? $local_changes->current()
+                            : null;
+                    }
+                }
+                if (!fflush($conflicts_handle)) {
+                    throw new RuntimeException(
+                        'Failed to flush the files-pull conflict list.'
+                    );
+                }
+            } finally {
+                fclose($conflicts_handle);
+            }
+            if (!rename($swap_path, $conflicts_path)) {
+                throw new RuntimeException(
+                    'Failed to publish the files-pull conflict list.'
+                );
+            }
+            return $conflict_count;
+        } finally {
+            $plan->close();
+            $this->remove_local_plan_directory($plan_directory);
+            if (is_file($swap_path)) {
+                @unlink($swap_path);
+            }
+        }
+    }
+
+    /**
+     * Merges the plan's two sorted local-change streams.
+     *
+     * @return \Generator<int,string,mixed,void>
+     */
+    private function files_pull_local_change_paths(
+        PushPlan $plan
+    ): \Generator {
+        $paths_to_push = $plan->read_planned_local_paths_to_push();
+        $paths_to_delete = $plan->read_planned_local_paths_to_delete();
+        $paths_to_push->rewind();
+        $paths_to_delete->rewind();
+        while ($paths_to_push->valid() || $paths_to_delete->valid()) {
+            $push_path = $paths_to_push->valid()
+                ? base64_decode($paths_to_push->current()['path'])
+                : null;
+            $delete_path = $paths_to_delete->valid()
+                ? $paths_to_delete->current()
+                : null;
+            if ($push_path === null) {
+                $path = $delete_path;
+            } elseif ($delete_path === null) {
+                $path = $push_path;
+            } else {
+                $path = compare_paths($push_path, $delete_path) <= 0
+                    ? $push_path
+                    : $delete_path;
+            }
+            yield $path;
+            if ($push_path === $path) {
+                $paths_to_push->next();
+            }
+            if ($delete_path === $path) {
+                $paths_to_delete->next();
+            }
+        }
+    }
+
+    /**
+     * Streams paths changed between the previous and current remote indexes.
+     *
+     * @param array $context Current files-pull pair context.
+     * @return \Generator<int,array{remote_path:string,local_path:string},mixed,void>
+     */
+    private function files_pull_remote_changes(array $context): \Generator
+    {
+        $previous_handle = fopen($this->index_file, 'rb');
+        $current_handle = fopen($this->remote_index_file, 'rb');
+        if (
+            !is_resource($previous_handle)
+            || !is_resource($current_handle)
+        ) {
+            throw new RuntimeException(
+                'Failed to open the remote indexes for conflict detection.'
+            );
+        }
+        try {
+            $previous = $this->read_index_line($previous_handle);
+            $current = $this->read_index_line($current_handle);
+            while ($previous !== null || $current !== null) {
+                if ($previous === null) {
+                    $comparison = 1;
+                } elseif ($current === null) {
+                    $comparison = -1;
+                } else {
+                    $comparison = compare_paths(
+                        $previous['path'],
+                        $current['path']
+                    );
+                }
+                $remote_path = null;
+                if ($comparison < 0) {
+                    if (
+                        $this->is_file_path_selected_by_pull_only_files(
+                            $previous['path']
+                        )
+                    ) {
+                        $remote_path = $previous['path'];
+                    }
+                    $previous =
+                        $this->read_index_line($previous_handle);
+                } elseif ($comparison > 0) {
+                    $remote_path = $current['path'];
+                    $current = $this->read_index_line($current_handle);
+                } else {
+                    if (
+                        $previous['ctime'] !== $current['ctime']
+                        || $previous['size'] !== $current['size']
+                        || $previous['type'] !== $current['type']
+                    ) {
+                        $remote_path = $current['path'];
+                    }
+                    $previous =
+                        $this->read_index_line($previous_handle);
+                    $current = $this->read_index_line($current_handle);
+                }
+                if ($remote_path === null) {
+                    continue;
+                }
+                $local_path =
+                    $this->remote_path_to_local_path_within_import_root(
+                        $remote_path
+                    );
+                $local_path = self::path_remainder_under(
+                    $local_path,
+                    $context['local_tree']
+                );
+                if ($local_path === null || $local_path === '') {
+                    continue;
+                }
+                yield [
+                    'remote_path' => $remote_path,
+                    'local_path' => ltrim($local_path, '/'),
+                ];
+            }
+        } finally {
+            fclose($previous_handle);
+            fclose($current_handle);
+        }
+    }
+
+    /** Whether either relative path is the other path or its ancestor. */
+    private static function files_pull_paths_overlap(
+        string $left,
+        string $right
+    ): bool {
+        return $left === $right
+            || strpos($left, $right . '/') === 0
+            || strpos($right, $left . '/') === 0;
+    }
+
+    /** Returns the durable sorted conflict list for the current files-pull. */
+    private function files_pull_conflicts_path(): string
+    {
+        return $this->state_dir . '/.import-file-conflicts';
     }
 
     /**
@@ -7243,9 +7568,6 @@ class ImportClient
 
         // Read lines from the download list (one JSON entry per line) and
         // accumulate them into the JSON array until we approach the size limit.
-        // The download list supports two formats:
-        //   - A bare JSON string:   "/path/to/file"
-        //   - A JSON object:        {"path": "<base64-encoded path>"}
         $bytes = 0;
         $entries = 0;
         $first = true;
@@ -7263,19 +7585,8 @@ class ImportClient
             if ($line === "") {
                 continue;
             }
-            $decoded = json_decode($line, true);
-            if (is_string($decoded)) {
-                $path = $decoded;
-            } elseif (is_array($decoded) && isset($decoded["path"])) {
-                $path = base64_decode($decoded["path"]);
-            } else {
-                continue;
-            }
-            if (!is_string($path) || $path === "") {
-                continue;
-            }
             $json_path = json_encode(
-                $path,
+                json_decode($line, true),
                 JSON_UNESCAPED_SLASHES,
             );
             if ($json_path === false) {
@@ -11468,8 +11779,6 @@ class ImportClient
                 "remote_cursor" => null,
             ],
             "preflight" => null,
-            "remote_protocol_version" => null,
-            "remote_protocol_min_version" => null,
             "version" => null,
             "webhost" => null,
             "follow_symlinks" => true,
@@ -11493,6 +11802,7 @@ class ImportClient
             "diff" => [
                 "remote_offset" => 0,
                 "local_after" => null,
+                "conflict_offset" => 0,
             ],
             "index" => [
                 "cursor" => null,
@@ -12363,6 +12673,15 @@ if (
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
+        ],
+        [
+            'name' => 'on-conflict',
+            'type' => 'value',
+            'target' => 'on_conflict',
+            'placeholder' => 'POLICY',
+            'valid_values' => ['stop', 'remote-wins', 'our-wins'],
+            'help' => 'Handle overlapping local and remote changes (stop|remote-wins|our-wins)',
+            'commands' => ['pull-files', 'files-pull'],
         ],
         [
             'name' => 'include-caches',
