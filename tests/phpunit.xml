@@ -25,6 +25,7 @@
         </testsuite>
         <testsuite name="Export Utility Tests">
             <file>BuildPdoDsnTest.php</file>
+            <file>CreateDbConnectionTest.php</file>
             <file>PushCommitTest.php</file>
             <file>ExportHttpServerTest.php</file>
             <file>FileIndexDedupTest.php</file>
