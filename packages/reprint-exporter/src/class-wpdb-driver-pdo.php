@@ -12,9 +12,9 @@
  * bar; behavioral divergence (wpdb's HTML error rendering, sticky last_error,
  * get_results null ambiguity) is normalized inside the adapter.
  *
- * Charset: wpdb uses the site's DB_CHARSET. The dump producer wraps non-numeric
- * columns in CAST(... AS BINARY) so the connection charset doesn't influence
- * emitted bytes — same guarantee as the real-PDO path.
+ * Charset: create_db_connection() gives PDO and wpdb the same utf8mb4_bin
+ * session context. The dump producer casts non-numeric result columns to
+ * binary, while text primary key comparisons retain their stored collation.
  */
 
 /**

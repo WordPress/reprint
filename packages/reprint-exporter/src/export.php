@@ -298,22 +298,31 @@ function create_db_connection(array $creds, array $options = [])
     // Gate on pdo_mysql, not pdo: ext-pdo core without the mysql driver
     // can't drive MySQL exports.
     if (!extension_loaded('pdo_mysql')) {
-        return create_wpdb_pdo_adapter();
+        $mysql = create_wpdb_pdo_adapter();
+    } else {
+        // MySQL path (also works for HyperDB — wp-config.php credentials
+        // point to the write master).
+        $default_options = [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        ];
+        $merged_options = $options + $default_options;
+
+        $mysql = new PDO(
+            build_pdo_dsn($creds['db_host'], $creds['db_name']),
+            $creds["db_user"],
+            $creds["db_password"],
+            $merged_options
+        );
     }
 
-    // MySQL path (also works for HyperDB — wp-config.php credentials
-    // point to the write master).
-    $default_options = [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-    ];
-    $merged_options = $options + $default_options;
-
-    return new PDO(
-        build_pdo_dsn($creds['db_host'], $creds['db_name']),
-        $creds["db_user"],
-        $creds["db_password"],
-        $merged_options
+    // SET NAMES normalizes the client, connection, and result charsets plus
+    // the connection collation for both PDO and wpdb. Text primary key
+    // comparisons still use each column's stored collation.
+    $mysql->query(
+        "SET NAMES utf8mb4 COLLATE utf8mb4_bin"
     );
+
+    return $mysql;
 }
 
 /**
