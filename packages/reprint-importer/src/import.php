@@ -6131,6 +6131,15 @@ class ImportClient
                 );
             }
 
+            /**
+             * Saves only at completed multipart boundaries.
+             *
+             * Streaming body callbacks may have written file bytes while the
+             * part cursor is not yet safe to save. The closing callback flushes
+             * those bytes and the index-update WAL before the cursor enters
+             * state. If the response stops mid-part, resume uses the preceding
+             * cursor and discards bytes beyond that checkpoint.
+             */
             if (!$is_streaming_body) {
                 if (isset($chunk["headers"]["x-cursor"])) {
                     $cursor = $chunk["headers"]["x-cursor"];
