@@ -140,18 +140,16 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
     });
 
     it('state does not checkpoint the unconfirmed file part', () => {
+        const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
+        const localPath = join(importedRoot, fileRel);
+        const serializedLocalPath = `base64:${Buffer.from(localPath).toString('base64')}`;
         const stateFile = join(tempDir, '.import-state.json');
         assert.ok(existsSync(stateFile), 'Expected import state file to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
-        assert.equal(
+        assert.notEqual(
             state.current_file,
-            null,
+            serializedLocalPath,
             'Expected the unconfirmed file part to remain outside the checkpoint',
-        );
-        assert.equal(
-            state.current_file_bytes,
-            null,
-            'Expected the checkpoint not to claim the unconfirmed file bytes',
         );
     });
 

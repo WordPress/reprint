@@ -288,23 +288,23 @@ class ImportClient
     private $index_file;
 
     /**
-     * @var string|null Path to .import-index-updates.jsonl — temporary append-only file that
-     * collects index mutations (upserts and deletes) during the current run. Merged into
-     * $index_file at the end of a successful sync.
+     * @var string Path to .import-index-updates.wal — the append-only write-ahead
+     * log for the current files-pull. Applied batches are cleared, but the file
+     * remains until the lifecycle completes or is aborted.
      */
-    private $index_updates_file;
+    private $index_update_wal_path;
 
-    /** @var resource|null Open file handle for $index_updates_file while writing. */
-    private $index_updates_handle;
+    /** @var resource|null Open file handle for $index_update_wal_path while writing. */
+    private $index_update_wal_handle;
 
-    /** @var int Number of entries written to $index_updates_file this run. */
-    private $index_updates_count = 0;
+    /** @var int Number of entries written to the open WAL batch. */
+    private $index_update_wal_record_count = 0;
 
     /**
      * Deduplication state for index updates. Consecutive upsert_index_entry() or
-     * delete_index_entry() calls for the same path are collapsed into one write.
+     * delete_index_entry() calls for the same path are collapsed into one WAL write.
      *
-     * @var string|null Last path written to the index updates file.
+     * @var string|null Last path written to the index-update WAL.
      */
     private $last_update_path = null;
 
@@ -557,8 +557,8 @@ class ImportClient
         $this->fs_root = rtrim($fs_root, "/");
         $this->state_file = $this->state_dir . "/.import-state.json";
         $this->index_file = $this->state_dir . "/.import-index.jsonl";
-        $this->index_updates_file =
-            $this->state_dir . "/.import-index-updates.jsonl";
+        $this->index_update_wal_path =
+            $this->state_dir . "/.import-index-updates.wal";
         $this->remote_index_file =
             $this->state_dir . "/.import-remote-index.jsonl";
         $this->download_list_file =
@@ -631,16 +631,11 @@ class ImportClient
         $this->record_index_update_deletion($path);
     }
 
-    /**
-     * Recover and merge any pending index updates from a previous run.
-     */
-    private function recover_index_updates(): void
+    /** Replays a WAL left by an interrupted batch. */
+    private function replay_index_update_wal(): void
     {
-        if (
-            $this->index_updates_file &&
-            file_exists($this->index_updates_file)
-        ) {
-            $this->finalize_index_updates();
+        if (is_file($this->index_update_wal_path)) {
+            $this->apply_index_update_wal();
         }
     }
 
@@ -1976,51 +1971,7 @@ class ImportClient
     {
         switch ($command) {
             case "files-pull":
-                // Clear sync progress (cursor, stage, status) and transient
-                // files, but keep the local index and downloaded files intact.
-                // This way the next `files-pull` sees a completed local index
-                // and runs a delta sync rather than re-downloading everything.
-                $this->audit_log(
-                    "RESTART | Clearing files-pull progress (keeping local index and files)",
-                    true,
-                );
-                $this->reset_state();
-
-                // Merge any pending index updates into the main index before
-                // clearing transient state so we don't lose work.
-                $this->recover_index_updates();
-                if (
-                    $this->index_updates_file &&
-                    file_exists($this->index_updates_file)
-                ) {
-                    @unlink($this->index_updates_file);
-                    $this->audit_log("FILE DELETE | {$this->index_updates_file}");
-                }
-                $this->index_updates_file = null;
-                $this->index_updates_handle = null;
-                $this->index_updates_count = 0;
-
-                if (file_exists($this->remote_index_file)) {
-                    @unlink($this->remote_index_file);
-                    $this->audit_log("FILE DELETE | {$this->remote_index_file}");
-                }
-                if (file_exists($this->download_list_file)) {
-                    @unlink($this->download_list_file);
-                    $this->audit_log("FILE DELETE | {$this->download_list_file}");
-                }
-                if (file_exists($this->skipped_download_list_file)) {
-                    @unlink($this->skipped_download_list_file);
-                    $this->audit_log("FILE DELETE | {$this->skipped_download_list_file}");
-                }
-                if (file_exists($this->volatile_files_file)) {
-                    @unlink($this->volatile_files_file);
-                    $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
-                }
-                $this->import_state()->index = new RemoteFileIndexCursorState();
-                $this->import_state()->fetch = new DownloadListFetchProgressState();
-                $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
-
-                $this->save_state($this->state);
+                $this->clear_files_pull_progress();
                 break;
 
             case "files-index":
@@ -2102,6 +2053,46 @@ class ImportClient
         $this->progress->show_lifecycle_line("State cleared for {$command}.\n");
 
         $this->output_progress(["status" => "aborted", "message" => "State cleared for {$command}."]);
+    }
+
+    /**
+     * Clear sync progress and transient files while keeping the local index
+     * and downloaded files, so the next files-pull computes a delta.
+     */
+    public function clear_files_pull_progress(): void
+    {
+        $this->audit_log(
+            "RESTART | Clearing files-pull progress (keeping local index and files)",
+            true,
+        );
+        // Replay the WAL before clearing the cursor which made its records durable.
+        $this->replay_index_update_wal();
+        $this->remove_index_update_wal();
+        $this->reset_state();
+        $this->index_update_wal_handle = null;
+        $this->index_update_wal_record_count = 0;
+
+        if (file_exists($this->remote_index_file)) {
+            @unlink($this->remote_index_file);
+            $this->audit_log("FILE DELETE | {$this->remote_index_file}");
+        }
+        if (file_exists($this->download_list_file)) {
+            @unlink($this->download_list_file);
+            $this->audit_log("FILE DELETE | {$this->download_list_file}");
+        }
+        if (file_exists($this->skipped_download_list_file)) {
+            @unlink($this->skipped_download_list_file);
+            $this->audit_log("FILE DELETE | {$this->skipped_download_list_file}");
+        }
+        if (file_exists($this->volatile_files_file)) {
+            @unlink($this->volatile_files_file);
+            $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
+        }
+        $this->import_state()->index = new RemoteFileIndexCursorState();
+        $this->import_state()->fetch = new DownloadListFetchProgressState();
+        $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
+
+        $this->save_state($this->state);
     }
 
     /**
@@ -2739,12 +2730,13 @@ class ImportClient
             $current_status !== null &&
             $current_status !== "complete";
 
-        $this->recover_index_updates();
+        $this->replay_index_update_wal();
         $this->assert_files_pull_only_unchanged_while_resuming($has_progress);
         $this->assert_symlink_bundle_directory_unchanged();
 
         // Already completed.
         if ($current_status === "complete") {
+            $this->remove_index_update_wal();
             $has_skipped =
                 file_exists($this->skipped_download_list_file) &&
                 filesize($this->skipped_download_list_file) > 0;
@@ -2776,6 +2768,7 @@ class ImportClient
                 $this->import_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
                 $this->import_state()->files_pull_summary = new FilesPullSummaryState();
                 $this->save_state($this->state);
+                $this->open_index_update_wal();
                 $this->run_files_sync_pipeline();
                 // The deferred tail reopens a completed files-pull. Once the
                 // tail finishes, restore the completed status so later filter
@@ -2785,6 +2778,7 @@ class ImportClient
                 }
                 $this->import_state()->active_resumable_command->completion_state = "complete";
                 $this->save_state($this->state);
+                $this->remove_index_update_wal();
                 return;
             }
 
@@ -2938,6 +2932,7 @@ class ImportClient
         $this->import_state()->active_resumable_command->completion_state = "in_progress";
         $this->save_state($this->state);
 
+        $this->open_index_update_wal();
         $this->run_files_sync_pipeline();
 
         // Pipeline returns early with partial status if interrupted
@@ -2947,6 +2942,7 @@ class ImportClient
 
         $this->import_state()->active_resumable_command->completion_state = "complete";
         $this->save_state($this->state);
+        $this->remove_index_update_wal();
 
         $this->progress->clear_progress_line();
         $index_size = $this->index_count();
@@ -6059,30 +6055,24 @@ class ImportClient
             // mid-body, the cursor already points to the end of the part
             // while file_bytes_written may still lag; at is_streaming_close
             // the bytes are on disk and we force a per-part checkpoint.
+            // Snapshot the file boundary before handle_file_chunk() may close
+            // the file so a stop after the close still retains its path and size.
             $is_streaming_body = !empty($chunk["is_streaming_body"]);
             $is_streaming_close = !empty($chunk["is_streaming_close"]);
-            if (!$is_streaming_body) {
-                $chunks_since_save++;
-                $force_save = $is_streaming_close;
-                if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                    $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-                    // Track current file for crash recovery
-                    if ($context->file_handle && $context->file_path) {
-                        // Flush to ensure bytes are on disk before saving state
-                        fflush($context->file_handle);
-                        $this->import_state()->current_file = $context->file_path;
-                        $this->import_state()->current_file_bytes = $context->file_bytes_written;
-                    } else {
-                        $this->import_state()->current_file = null;
-                        $this->import_state()->current_file_bytes = null;
-                    }
-                    $this->save_state($this->state);
-                    $chunks_since_save = 0;
+            $file_path_at_completed_part = null;
+            $file_bytes_at_completed_part = null;
+            if (
+                $is_streaming_close
+                && $context->file_handle
+                && $context->file_path
+            ) {
+                if (!fflush($context->file_handle)) {
+                    throw new RuntimeException(
+                        'Failed to flush the pulled file before saving its fetch cursor.'
+                    );
                 }
-            }
-
-            if (isset($chunk["headers"]["x-cursor"])) {
-                $cursor = $chunk["headers"]["x-cursor"];
+                $file_path_at_completed_part = $context->file_path;
+                $file_bytes_at_completed_part = $context->file_bytes_written;
             }
 
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
@@ -6140,6 +6130,59 @@ class ImportClient
                     true,
                 );
             }
+
+            /**
+             * Saves the fetch cursor only after the multipart part is complete.
+             *
+             * One file chunk travels as one multipart part, whose body may
+             * arrive across several streaming callbacks. Each callback writes
+             * its bytes to the local file immediately. Until the parser receives
+             * the closing boundary, those bytes may be only a prefix of the file
+             * chunk. The part cursor points past the complete chunk, so saving it
+             * early would make resume skip the missing suffix.
+             *
+             * On the closing callback, flush the file and index-update WAL
+             * before storing the cursor in .import-state.json. If the response
+             * stops first, state retains the preceding cursor; resume truncates
+             * the later bytes and requests the multipart part again.
+             */
+            if (!$is_streaming_body) {
+                if (isset($chunk["headers"]["x-cursor"])) {
+                    $cursor = $chunk["headers"]["x-cursor"];
+                }
+                $chunks_since_save++;
+                $force_save = $is_streaming_close;
+                if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+                    if ($file_path_at_completed_part !== null) {
+                        $this->import_state()->current_file =
+                            $file_path_at_completed_part;
+                        $this->import_state()->current_file_bytes =
+                            $file_bytes_at_completed_part;
+                    } elseif ($context->file_handle && $context->file_path) {
+                        // Flush to ensure bytes are on disk before saving state.
+                        if (!fflush($context->file_handle)) {
+                            throw new RuntimeException(
+                                'Failed to flush the pulled file before saving its fetch cursor.'
+                            );
+                        }
+                        // Track the current file for crash recovery.
+                        $this->import_state()->current_file = $context->file_path;
+                        $this->import_state()->current_file_bytes = $context->file_bytes_written;
+                    } else {
+                        $this->import_state()->current_file = null;
+                        $this->import_state()->current_file_bytes = null;
+                    }
+                    if (
+                        $this->index_update_wal_handle
+                        && !fflush($this->index_update_wal_handle)
+                    ) {
+                        throw new RuntimeException('Failed to flush the index-update WAL.');
+                    }
+                    $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
+                    $this->save_state($this->state);
+                    $chunks_since_save = 0;
+                }
+            }
         };
 
         $cursor_before = $cursor;
@@ -6170,7 +6213,7 @@ class ImportClient
                 fclose($context->file_handle);
                 $context->file_handle = null;
             }
-            $this->finalize_index_updates();
+            $this->apply_index_update_wal();
             $this->import_state()->active_resumable_command->completion_state = "partial";
             $this->save_state($this->state);
             return false;
@@ -6184,10 +6227,14 @@ class ImportClient
             $context->response_stats ?? [],
         );
         $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-        $this->finalize_index_updates();
+        $this->apply_index_update_wal();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
-            fflush($context->file_handle);
+            if (!fflush($context->file_handle)) {
+                throw new RuntimeException(
+                    'Failed to flush the pulled file before saving its fetch cursor.'
+                );
+            }
             $this->import_state()->current_file = $context->file_path;
             $this->import_state()->current_file_bytes = $context->file_bytes_written;
         } else {
@@ -6516,7 +6563,7 @@ class ImportClient
                 $local = $this->read_index_line($local_handle);
             }
         }
-        $this->begin_index_updates();
+        $this->open_index_update_wal();
         $processed = 0;
 
         while (($line = fgets($remote_handle)) !== false) {
@@ -6588,6 +6635,12 @@ class ImportClient
             if ($processed % 200 === 0) {
                 $this->import_state()->diff->remote_offset = $remote_offset;
                 $this->import_state()->diff->local_after = $local_after;
+                if (
+                    $this->index_update_wal_handle
+                    && !fflush($this->index_update_wal_handle)
+                ) {
+                    throw new RuntimeException('Failed to flush the index-update WAL.');
+                }
                 $this->save_state($this->state);
                 $this->progress->tick_spinner();
             }
@@ -6613,9 +6666,8 @@ class ImportClient
 
         $this->import_state()->diff->remote_offset = $remote_offset;
         $this->import_state()->diff->local_after = $local_after;
+        $this->apply_index_update_wal();
         $this->save_state($this->state);
-
-        $this->finalize_index_updates();
 
         return !$this->shutdown_requested;
     }
@@ -7084,43 +7136,23 @@ class ImportClient
         ];
     }
 
-    /**
-     * Start collecting index updates into a temp file for streaming merge.
-     */
-    private function begin_index_updates(): void
+    /** Opens the current index-update WAL for append. */
+    private function open_index_update_wal(): void
     {
-        if ($this->index_updates_handle) {
+        if ($this->index_update_wal_handle) {
             return;
         }
-        $is_new = false;
-        if ($this->index_updates_file === null) {
-            $tmp = tempnam(sys_get_temp_dir(), "index-updates-");
-            if ($tmp === false) {
-                throw new RuntimeException(
-                    "Failed to create temp index updates file",
-                );
-            }
-            $this->index_updates_file = $tmp;
-            $is_new = true;
-        } elseif (!file_exists($this->index_updates_file)) {
-            $dir = dirname($this->index_updates_file);
-            if (!is_dir($dir)) {
-                mkdir($dir, 0755, true);
-            }
-            $is_new = true;
-        }
-        $this->index_updates_handle = fopen($this->index_updates_file, "a");
-        if (!$this->index_updates_handle) {
-            throw new RuntimeException(
-                "Failed to open temp index updates file",
-            );
+        $is_new = !is_file($this->index_update_wal_path);
+        $this->index_update_wal_handle = fopen($this->index_update_wal_path, "a");
+        if (!$this->index_update_wal_handle) {
+            throw new RuntimeException("Failed to open the index-update WAL.");
         }
         if ($is_new) {
             $this->audit_log(
-                "FILE CREATE | {$this->index_updates_file} | index updates buffer",
+                "FILE CREATE | {$this->index_update_wal_path} | index-update WAL",
             );
         }
-        $this->index_updates_count = 0;
+        $this->index_update_wal_record_count = 0;
         $this->last_update_path = null;
         $this->last_update_delete = null;
         $this->last_update_ctime = null;
@@ -7129,7 +7161,7 @@ class ImportClient
     }
 
     /**
-     * Record a file upsert into the index updates stream.
+     * Record a file upsert in the index-update WAL.
      */
     private function record_index_update_file(
         string $path,
@@ -7137,8 +7169,8 @@ class ImportClient
         int $size,
         string $type
     ): void {
-        if (!$this->index_updates_handle) {
-            $this->begin_index_updates();
+        if (!$this->index_update_wal_handle) {
+            $this->open_index_update_wal();
         }
         if (
             $this->last_update_path === $path &&
@@ -7160,12 +7192,13 @@ class ImportClient
             JSON_UNESCAPED_SLASHES,
         );
         if ($line !== false) {
-            $bytes = fwrite($this->index_updates_handle, $line . "\n");
-            if ($bytes === false) {
-                throw new RuntimeException("Failed to write to index updates file (disk full?)");
+            $line .= "\n";
+            $bytes = fwrite($this->index_update_wal_handle, $line);
+            if ($bytes !== strlen($line)) {
+                throw new RuntimeException("Failed to write to the index-update WAL (disk full?).");
             }
         }
-        $this->index_updates_count++;
+        $this->index_update_wal_record_count++;
         $this->last_update_path = $path;
         $this->last_update_delete = false;
         $this->last_update_ctime = $ctime;
@@ -7174,12 +7207,12 @@ class ImportClient
     }
 
     /**
-     * Record a deletion into the index updates stream.
+     * Record a deletion in the index-update WAL.
      */
     private function record_index_update_deletion(string $path): void
     {
-        if (!$this->index_updates_handle) {
-            $this->begin_index_updates();
+        if (!$this->index_update_wal_handle) {
+            $this->open_index_update_wal();
         }
         if (
             $this->last_update_path === $path &&
@@ -7195,12 +7228,13 @@ class ImportClient
             JSON_UNESCAPED_SLASHES,
         );
         if ($line !== false) {
-            $bytes = fwrite($this->index_updates_handle, $line . "\n");
-            if ($bytes === false) {
-                throw new RuntimeException("Failed to write to index updates file (disk full?)");
+            $line .= "\n";
+            $bytes = fwrite($this->index_update_wal_handle, $line);
+            if ($bytes !== strlen($line)) {
+                throw new RuntimeException("Failed to write to the index-update WAL (disk full?).");
             }
         }
-        $this->index_updates_count++;
+        $this->index_update_wal_record_count++;
         $this->last_update_path = $path;
         $this->last_update_delete = true;
         $this->last_update_ctime = null;
@@ -7208,14 +7242,15 @@ class ImportClient
         $this->last_update_type = null;
     }
 
-    /**
-     * Merge the collected updates with the existing sorted index without loading it into memory.
-     */
-    private function finalize_index_updates(): void
+    /** Applies the current WAL to the import index. */
+    private function apply_index_update_wal(): void
     {
-        if ($this->index_updates_handle) {
-            fclose($this->index_updates_handle);
-            $this->index_updates_handle = null;
+        if ($this->index_update_wal_handle) {
+            $closed = fclose($this->index_update_wal_handle);
+            $this->index_update_wal_handle = null;
+            if (!$closed) {
+                throw new RuntimeException("Failed to flush the index-update WAL.");
+            }
         }
         $this->last_update_path = null;
         $this->last_update_delete = null;
@@ -7224,26 +7259,15 @@ class ImportClient
         $this->last_update_type = null;
 
         $has_updates =
-            $this->index_updates_count > 0 ||
-            ($this->index_updates_file &&
-                file_exists($this->index_updates_file) &&
-                filesize($this->index_updates_file) > 0);
+            $this->index_update_wal_record_count > 0 ||
+            (is_file($this->index_update_wal_path) &&
+                filesize($this->index_update_wal_path) > 0);
 
         if (!$has_updates) {
-            if (
-                $this->index_updates_file &&
-                file_exists($this->index_updates_file)
-            ) {
-                @unlink($this->index_updates_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->index_updates_file} | no updates to merge",
-                );
-            }
-            $this->index_updates_count = 0;
+            $this->index_update_wal_record_count = 0;
             return;
         }
 
-        $updates_path = $this->index_updates_file;
         $new_index = $this->index_file . ".new";
 
         $this->audit_log(
@@ -7253,7 +7277,7 @@ class ImportClient
         $old_handle = file_exists($this->index_file)
             ? fopen($this->index_file, "r")
             : null;
-        $upd_handle = fopen($updates_path, "r");
+        $upd_handle = fopen($this->index_update_wal_path, "r");
         $new_handle = fopen($new_index, "w");
 
         if (!$upd_handle || !$new_handle) {
@@ -7333,9 +7357,38 @@ class ImportClient
         }
         $this->audit_log("INDEX MERGE COMPLETE | {$this->index_file} updated");
 
-        @unlink($updates_path);
-        $this->audit_log("FILE DELETE | {$updates_path} | updates merged");
-        $this->index_updates_count = 0;
+        if (file_put_contents($this->index_update_wal_path, '') === false) {
+            throw new RuntimeException("Failed to clear the applied index-update WAL.");
+        }
+        $this->audit_log(
+            "FILE TRUNCATE | {$this->index_update_wal_path} | WAL batch applied"
+        );
+        $this->index_update_wal_record_count = 0;
+    }
+
+    /** Removes the WAL marker after files-pull completes or is aborted. */
+    private function remove_index_update_wal(): void
+    {
+        if (is_resource($this->index_update_wal_handle)) {
+            if (!fclose($this->index_update_wal_handle)) {
+                throw new RuntimeException("Failed to flush the index-update WAL.");
+            }
+            $this->index_update_wal_handle = null;
+        }
+        clearstatcache(true, $this->index_update_wal_path);
+        if (
+            is_file($this->index_update_wal_path)
+            && filesize($this->index_update_wal_path) > 0
+        ) {
+            throw new RuntimeException("Cannot remove an unapplied index-update WAL.");
+        }
+        if (
+            is_file($this->index_update_wal_path)
+            && !unlink($this->index_update_wal_path)
+        ) {
+            throw new RuntimeException("Failed to remove the index-update WAL.");
+        }
+        $this->index_update_wal_record_count = 0;
     }
 
     /**
@@ -7364,6 +7417,9 @@ class ImportClient
             return null;
         }
         while (($line = fgets($handle)) !== false) {
+            if (substr($line, -1) !== "\n" && feof($handle)) {
+                return null;
+            }
             $line = trim($line);
             if ($line === "") {
                 continue;
@@ -11568,15 +11624,16 @@ class ImportClient
         $this->shutdown_requested = true;
         $this->progress->clear_progress_line();
 
-        // Flush index updates so progress is not lost on interrupt
-        try {
-            $this->finalize_index_updates();
-        } catch (Exception $e) {
-            $this->audit_log(
-                "Failed to finalize index updates on shutdown: " .
-                    $e->getMessage(),
-                true,
-            );
+        if (is_resource($this->index_update_wal_handle)) {
+            try {
+                $this->apply_index_update_wal();
+            } catch (Exception $e) {
+                $this->audit_log(
+                    "Failed to apply the index-update WAL on shutdown: " .
+                        $e->getMessage(),
+                    true,
+                );
+            }
         }
 
         // Log final progress before exit
