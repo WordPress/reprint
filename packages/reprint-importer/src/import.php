@@ -6132,14 +6132,19 @@ class ImportClient
             }
 
             /**
-             * Persists the fetch cursor only after its file and index state is
-             * durable.
+             * Saves the fetch cursor only after the multipart part is complete.
              *
-             * Streaming body callbacks may have written file bytes while the
-             * part cursor is not yet safe to store in .import-state.json. The
-             * closing callback flushes those bytes and the index-update WAL
-             * before storing the cursor. If the response stops mid-part, resume
-             * uses the preceding cursor and discards bytes beyond that checkpoint.
+             * One file chunk travels as one multipart part, whose body may
+             * arrive across several streaming callbacks. Each callback writes
+             * its bytes to the local file immediately. Until the parser receives
+             * the closing boundary, those bytes may be only a prefix of the file
+             * chunk. The part cursor points past the complete chunk, so saving it
+             * early would make resume skip the missing suffix.
+             *
+             * On the closing callback, flush the file and index-update WAL
+             * before storing the cursor in .import-state.json. If the response
+             * stops first, state retains the preceding cursor; resume truncates
+             * the later bytes and requests the multipart part again.
              */
             if (!$is_streaming_body) {
                 if (isset($chunk["headers"]["x-cursor"])) {
