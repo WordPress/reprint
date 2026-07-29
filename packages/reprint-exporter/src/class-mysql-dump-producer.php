@@ -31,7 +31,7 @@ use PDOStatement;
  * of UPDATE ... SET col = CONCAT(col, chunk) statements.
  *
  * Known limitations:
- * 
+ *
  * - Rows too large to be SELECTed. If a row is larger than max_allowed_packet or the
  *   PHP memory_limit, it won't be exported. The underlying assumption is that WordPress
  *   wouldn't be able to use that data anyway. If that turns out to be wrong, and there
@@ -520,8 +520,9 @@ class MySQLDumpProducer
      * These are restored in emit_sql_footer(). Without disabling FK checks, tables
      * that reference each other would need to be imported in dependency order.
      *
-     * The SQL_MODE explicitly omits NO_ZERO_DATE and NO_ZERO_IN_DATE. This is
-     * intentional: many WordPress databases contain zero dates like '0000-00-00'
+     * The SQL_MODE explicitly omits NO_ZERO_DATE, NO_ZERO_IN_DATE, and NO_ENGINE_SUBSTITUTION.
+     *
+     * For dates, many WordPress databases contain zero dates like '0000-00-00'
      * or '0000-00-00 00:00:00' (e.g. in wp_posts.post_date for drafts). The
      * source server may have been running without those restrictions, and the
      * dump must be importable regardless of the target server's default sql_mode.
@@ -542,8 +543,14 @@ class MySQLDumpProducer
      * By omitting both flags while keeping STRICT_TRANS_TABLES, the dump
      * preserves MySQL's permissive behavior toward zero dates during import.
      *
+     * By omitting NO_ENGINE_SUBSTITUTION, we allow imports to succeed under stricter requirements.
+     * Example: A MyISAM source table carries ENGINE=MyISAM into the dump, and the target
+     * database uses enforce_storage_engine to InnoDB. With NO_ENGINE_SUBSTITUTION, the
+     * import would fail because the target engine is not MyISAM and cannot be substituted.
+     *
      * @see https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html#sqlmode_no_zero_date
      * @see https://dev.mysql.com/doc/refman/8.0/en/sql-mode.html#sqlmode_no_zero_in_date
+     * @see https://mariadb.com/docs/reference/mdb/system-variables/enforce_storage_engine/
      */
     private function emit_sql_header()
     {
@@ -551,7 +558,7 @@ class MySQLDumpProducer
             "SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0;\n" .
             "SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;\n" .
             // @TODO: Restore STRICT_TRANS_TABLES
-            "SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='ONLY_FULL_GROUP_BY,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';\n" .
+            "SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='ONLY_FULL_GROUP_BY,ERROR_FOR_DIVISION_BY_ZERO';\n" .
             "SET AUTOCOMMIT=0;\n";
         $this->current_sql_fragment = $header;
     }
@@ -854,7 +861,7 @@ class MySQLDumpProducer
 
     /**
      * Discovers all BASE TABLEs in the current database (excludes views).
-     * 
+     *
      * @TODO: Use pagination or approach to support large databases with millions of tables.
      */
     private function initialize_tables_to_process()
@@ -905,7 +912,7 @@ class MySQLDumpProducer
             "rows_in_batch" => $this->rows_in_batch,
             "current_column_names" => $this->current_column_names,
             /**
-             * Tracking for rows that are larger than max_allowed_packet or 
+             * Tracking for rows that are larger than max_allowed_packet or
              * max_statement_size.
              */
             "oversized_queue" => $encoded_oversized_queue,
@@ -1431,7 +1438,7 @@ class MySQLDumpProducer
     private function estimate_pk_where_size()
     {
         if (!$this->oversized_pk_values) {
-            /** 
+            /**
              * A wild guess. 1KB is probably more than necessary, but we're trying to stay
              * on the safe side.
              */
