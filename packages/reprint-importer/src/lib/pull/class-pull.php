@@ -1,10 +1,14 @@
 <?php
-/**
- * Signals that Pull already emitted the stage-specific error/status output.
- */
-class PullFailureReportedException extends RuntimeException
-{
-}
+
+use Reprint\Importer\Pull\PullFailureReportedException;
+use Reprint\Importer\State\DatabaseApplyCommandState;
+use Reprint\Importer\State\DatabaseTableIndexState;
+use Reprint\Importer\State\FetchListProgressState;
+use Reprint\Importer\State\FileDiffProgressState;
+use Reprint\Importer\State\FilesPullSummaryState;
+use Reprint\Importer\State\RemoteFileIndexCursorState;
+
+require_once __DIR__ . '/class-pull-failure-reported-exception.php';
 
 /**
  * High-level pull commands — orchestrate lower-level commands into

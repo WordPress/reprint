@@ -11,7 +11,23 @@
  */
 
 use function WordPress\Filesystem\wp_join_unix_paths;
+use Reprint\Importer\CurlTimeoutException;
+use Reprint\Importer\PreserveLocalSkipException;
+use Reprint\Importer\Pull\PullFailureReportedException;
+use Reprint\Importer\State\DatabaseApplyCommandState;
+use Reprint\Importer\State\DatabaseTableIndexState;
+use Reprint\Importer\State\FetchListProgressState;
+use Reprint\Importer\State\FileDiffProgressState;
+use Reprint\Importer\State\FilesPullSummaryState;
+use Reprint\Importer\State\RemoteFileIndexCursorState;
+use Reprint\Importer\StreamingContext;
+use Reprint\Importer\TransientInterruptionException;
 use Reprint\Importer\Tuning\AdaptiveTuner;
+use function Reprint\Importer\apply_curl_ca_bundle;
+use function Reprint\Importer\apply_curl_proxy_from_environment;
+use function Reprint\Importer\register_sqlite_function;
+use function Reprint\Importer\resolve_sqlite_integration_path;
+use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
@@ -62,7 +78,7 @@ require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
 // Typed state objects for the persisted pull state.
-require_once __DIR__ . '/lib/state/class-pull-state.php';
+require_once __DIR__ . '/lib/state/load.php';
 
 // Adaptive sizing for push request bodies
 require_once __DIR__ . '/lib/upload/class-push-request-sizer.php';
@@ -70,70 +86,11 @@ require_once __DIR__ . '/lib/upload/class-multipart-push-stream-client.php';
 require_once __DIR__ . '/lib/push/class-push-plan.php';
 require_once __DIR__ . '/lib/push/class-push-files-sender.php';
 
+// Import command execution and its supporting symbols.
+require_once __DIR__ . '/lib/import/load.php';
+
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
-
-/**
- * If the ALL_PROXY environment variable is set, apply it to the cURL
- * handle via CURLOPT_PROXY.
- *
- * libcurl does inspect ALL_PROXY on its own, but only when curl is
- * built against a libc that exports the env var and when no one has
- * unset it in the PHP process. Some SAPIs and managed runtimes strip
- * the environment before PHP starts, so setting CURLOPT_PROXY
- * explicitly makes the behavior deterministic across hosts.
- *
- * Empty values are ignored — an explicit empty ALL_PROXY is the
- * shell idiom for "no proxy".
- */
-function reprint_apply_curl_proxy_from_env($ch): ?string {
-    $proxy = getenv('ALL_PROXY');
-    if (!is_string($proxy) || $proxy === '') {
-        return null;
-    }
-    curl_setopt($ch, CURLOPT_PROXY, $proxy);
-    return $proxy;
-}
-
-/**
- * Mirror PHP's `openssl.cafile` ini value onto the cURL handle as
- * `CURLOPT_CAINFO` — workaround for WordPress Playground, where the
- * WASM curl build doesn't honor `curl.cainfo` / `openssl.cafile`
- * (both are PHP_INI_SYSTEM, and curl can't see PHP-level ini values
- * anyway). Reading the ini value in PHP and passing the path via a
- * per-handle option is the only knob that works there.
- *
- * No-op when `openssl.cafile` is empty (the typical Linux case —
- * curl uses its compile-time default). When it's set and points at
- * a readable file, we mirror it; if `curl.cainfo` was also set to
- * the same path PHP's curl extension already applied it to the
- * handle, so the per-handle setopt is a benign re-set.
- *
- * TODO: remove once https://github.com/WordPress/wordpress-playground
- * resolves `openssl.cafile` natively inside its WASM curl bundle.
- */
-function reprint_apply_curl_ca_bundle($ch): ?string {
-    // Insecure-TLS escape hatch for environments where neither
-    // CURLOPT_CAINFO nor any other knob persuades the TLS layer to
-    // trust the source's cert — notably WordPress Playground in the
-    // browser, where networking goes through a JS TLS library running
-    // inside the page (not libcurl's TLS) and that library may have
-    // a CA store that pre-dates the Let's Encrypt intermediate the
-    // source's cert is signed by. The wizard sets this env when it
-    // hands off; we never set it for any other caller.
-    if (getenv('REPRINT_INSECURE_TLS') === '1') {
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
-        return '(insecure)';
-    }
-
-    $cafile = (string) ini_get('openssl.cafile');
-    if ($cafile === '' || !is_readable($cafile)) {
-        return null;
-    }
-    curl_setopt($ch, CURLOPT_CAINFO, $cafile);
-    return $cafile;
-}
 
 /**
  * The wire-protocol version this importer speaks.
@@ -167,50 +124,6 @@ register_shutdown_function(function () {
     }
     fwrite(STDERR, $json . "\n");
 });
-
-function resolve_sqlite_integration_path(string $suffix = ''): string
-{
-    foreach ([dirname(__DIR__, 3), dirname(__DIR__, 4)] as $project_root) {
-        $candidate = $project_root . '/lib/sqlite-database-integration' . $suffix;
-        if (file_exists($candidate)) {
-            return $candidate;
-        }
-    }
-
-    throw new RuntimeException(
-        'SQLite target support requires lib/sqlite-database-integration to be initialized.'
-    );
-}
-
-function resolve_sqlite_integration_plugin_path(): string
-{
-    foreach ([dirname(__DIR__, 3), dirname(__DIR__, 4)] as $project_root) {
-        $root = $project_root . '/lib/sqlite-database-integration';
-        $package = $root . '/packages/plugin-sqlite-database-integration';
-        if (is_dir($package)) {
-            return $package;
-        }
-    }
-
-    throw new RuntimeException(
-        'SQLite runtime support requires lib/sqlite-database-integration to be initialized.'
-    );
-}
-
-/**
- * Register a user-defined SQL function on a SQLite PDO. PHP 8.4 introduced
- * Pdo\Sqlite::createFunction(); PDO::sqliteCreateFunction() serves earlier
- * supported PHP versions and is deprecated in 8.5.
- */
-function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn, int $num_args = 1): void
-{
-    if ($sqlite_pdo instanceof PDO\SQLite) {
-        $sqlite_pdo->createFunction($name, $fn, $num_args);
-    } else {
-        $sqlite_pdo->sqliteCreateFunction($name, $fn, $num_args);
-    }
-}
-
 
 class ImportClient
 {
@@ -1142,7 +1055,7 @@ class ImportClient
                         break;
                 }
             } catch (\Exception $e) {
-                if ($e instanceof \PullFailureReportedException) {
+                if ($e instanceof PullFailureReportedException) {
                     $previous = $e->getPrevious();
                     if ($previous instanceof \Exception) {
                         throw $previous;
@@ -10621,8 +10534,8 @@ class ImportClient
         $this->audit_log("HTTP_REQUEST | GET | {$url}", false);
 
         $ch = curl_init($url);
-        reprint_apply_curl_proxy_from_env($ch);
-        reprint_apply_curl_ca_bundle($ch);
+        apply_curl_proxy_from_environment($ch);
+        apply_curl_ca_bundle($ch);
 
         $headers = [
             ...$this->get_base_headers("application/json"),
@@ -10749,8 +10662,8 @@ class ImportClient
         $this->audit_log(implode(" | ", $log_parts), false);
 
         $ch = curl_init($url);
-        reprint_apply_curl_proxy_from_env($ch);
-        reprint_apply_curl_ca_bundle($ch);
+        apply_curl_proxy_from_environment($ch);
+        apply_curl_ca_bundle($ch);
 
         $parser = null;
         $current_chunk = null;
@@ -11576,53 +11489,6 @@ class ImportClient
         }
     }
 }
-
-/**
- * Context object passed to streaming callbacks.
- */
-class StreamingContext
-{
-    public $on_chunk = null;
-    public $file_handle = null;
-    public $file_path = null;
-    public $file_ctime = null;
-    // Crash recovery: track bytes written for current file
-    public $file_bytes_written = 0;
-    // Last response stats from completion chunk
-    public $response_stats = [];
-    // Stream integrity
-    public $saw_completion = false;
-    // When true, skip writing the current file (preserve-local mode)
-    public $skip_current_file = false;
-}
-
-/**
- * Thrown by create_directory_if_missing() in preserve-local mode when a directory
- * component is not writable or a symlink blocks directory creation.
- * Callers catch this to skip the current file/directory/symlink gracefully.
- */
-class PreserveLocalSkipException extends RuntimeException {}
-
-/**
- * Thrown when a streaming response loses its framing or ends before a valid
- * completion part.
- */
-class InterruptedResponseException extends RuntimeException {}
-
-/**
- * Thrown when an interrupted response can be requested again from its last
- * durable cursor.
- */
-// phpcs:ignore Generic.Files.OneObjectStructurePerFile.MultipleFound, WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound
-class TransientInterruptionException extends InterruptedResponseException {}
-
-/**
- * Thrown when a cURL request times out (CURLE_OPERATION_TIMEDOUT).
- * Callers catch this to save state and exit with "partial" status instead
- * of crashing with a fatal error — the next invocation resumes from the
- * last saved cursor.
- */
-class CurlTimeoutException extends TransientInterruptionException {}
 
 // ============================================================================
 // CLI Entry Point

@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\StreamingContext;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -437,7 +438,7 @@ class FilesPullStateTest extends TestCase
 
         // Send a file chunk with new content
         $method = $reflection->getMethod('handle_file_chunk');
-        $context = new \StreamingContext();
+        $context = new StreamingContext();
         $chunk = [
             'headers' => [
                 'x-file-path' => base64_encode('/wp-content/themes/flavor/style.css'),
@@ -471,7 +472,7 @@ class CompletedFileFetchClient extends \ImportClient
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
-        \StreamingContext $context,
+        StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {

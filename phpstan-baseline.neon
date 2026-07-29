@@ -38,9 +38,9 @@ parameters:
 		-
 			message: "#^Class PDO\\\\SQLite not found\\.$#"
 			count: 1
-			path: packages/reprint-importer/src/import.php
+			path: packages/reprint-importer/src/lib/import/functions.php
 
 		-
 			message: "#^Call to method createFunction\\(\\) on an unknown class PDO\\\\SQLite\\.$#"
 			count: 1
-			path: packages/reprint-importer/src/import.php
+			path: packages/reprint-importer/src/lib/import/functions.php

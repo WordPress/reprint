@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Protocol\MultipartStreamParser;
+use Reprint\Importer\StreamingContext;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -37,7 +38,7 @@ class FileBodyStreamingTest extends TestCase
         $reflection->getProperty('is_tty')->setValue($client, true);
 
         $handleFileChunk = $reflection->getMethod('handle_file_chunk');
-        $context = new \StreamingContext();
+        $context = new StreamingContext();
         $bodyLengths = [];
         $context->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context, &$bodyLengths): void {
             if (($chunk['headers']['x-chunk-type'] ?? '') === 'file') {
@@ -117,7 +118,7 @@ class FileBodyStreamingTest extends TestCase
         // sending it — so on resume we re-receive the whole part body. To
         // mimic the *intended* behaviour (server cooperates and skips the
         // already-written prefix), pass 2 sends only the missing tail.
-        $context1 = new \StreamingContext();
+        $context1 = new StreamingContext();
         $handleFileChunk = $reflection->getMethod('handle_file_chunk');
         $context1->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context1): void {
             $handleFileChunk->invoke($client, $chunk, $context1);
@@ -166,7 +167,7 @@ class FileBodyStreamingTest extends TestCase
         }
         $trackedBytes = $context1->file_bytes_written;
 
-        $context2 = new \StreamingContext();
+        $context2 = new StreamingContext();
         $context2->file_handle = fopen($target, 'ab');
         $context2->file_path = $target;
         $context2->file_ctime = 1234567890;
