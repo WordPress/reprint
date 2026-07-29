@@ -43,7 +43,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertNull(ImportClient::files_push_stop_cause(1000.0, PHP_INT_MAX, 0, -1, $chunkBytes));
     }
 
-    public function testPairContextUsesTheTrimmedTargetAndCanonicalLocalTree(): void
+    public function testCommandContextUsesTheTrimmedTargetAndCanonicalLocalTree(): void
     {
         $targetUrl = 'https://example.test/?reprint-api=1&&';
         $context = ImportClient::prepare_files_push_context(
@@ -55,14 +55,23 @@ final class FilesPushCommandTest extends TestCase
         $canonicalLocalTree = realpath($this->localTree);
         $this->assertIsString($canonicalLocalTree);
         $trimmedTargetUrl = rtrim($targetUrl, '?&');
-        $expectedPair = hash('sha256', $trimmedTargetUrl . "\0" . $canonicalLocalTree);
+        $expectedTargetLocalTreeHash = hash(
+            'sha256',
+            $trimmedTargetUrl . "\0" . $canonicalLocalTree
+        );
 
         $this->assertSame($trimmedTargetUrl, $context['target_url']);
         $this->assertSame($canonicalLocalTree, $context['local_tree']);
-        $this->assertSame($expectedPair, $context['pair']);
         $this->assertSame(
-            realpath($this->stateDirectory) . '/push/' . $expectedPair,
+            realpath($this->stateDirectory) . '/push/' . $expectedTargetLocalTreeHash,
             $context['push_state_directory']
+        );
+        $this->assertSame(
+            realpath($this->stateDirectory)
+                . '/local-index/'
+                . $expectedTargetLocalTreeHash
+                . '.jsonl',
+            $context['local_index_path']
         );
 
         $differentQuery = ImportClient::prepare_files_push_context(
@@ -80,8 +89,40 @@ final class FilesPushCommandTest extends TestCase
             ['secret' => 'token', 'force_http' => false]
         );
 
-        $this->assertNotSame($context['pair'], $differentQuery['pair']);
-        $this->assertNotSame($context['pair'], $differentTree['pair']);
+        $this->assertNotSame(
+            $context['push_state_directory'],
+            $differentQuery['push_state_directory']
+        );
+        $this->assertNotSame(
+            $context['local_index_path'],
+            $differentTree['local_index_path']
+        );
+    }
+
+    public function testPullSecretDoesNotChangeTheLocalIndexPath(): void
+    {
+        $targetUrl = 'https://example.test/?site-export-api';
+        $withoutSecret = ImportClient::prepare_files_command_context(
+            $targetUrl,
+            $this->stateDirectory,
+            $this->localTree,
+            'files-diff'
+        );
+        $withSecret = ImportClient::prepare_files_command_context(
+            $targetUrl . '&SECRET_KEY=pull-token',
+            $this->stateDirectory,
+            $this->localTree,
+            'files-diff'
+        );
+
+        $this->assertSame(
+            $withoutSecret['push_state_directory'],
+            $withSecret['push_state_directory']
+        );
+        $this->assertSame(
+            $withoutSecret['local_index_path'],
+            $withSecret['local_index_path']
+        );
     }
 
     public function testFilesPushRejectsOptionsOutsideItsExactAllowlist(): void
@@ -111,7 +152,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame(1, $olderCommand['exit'], $olderCommand['output']);
         $this->assertStringContainsString('--force-http is accepted only by files-push.', $olderCommand['output']);
 
-        $existingPairValue = $this->runCli([
+        $dbApplyResult = $this->runCli([
             'db-apply',
             '-',
             '--state-dir=' . $this->stateDirectory,
@@ -122,7 +163,7 @@ final class FilesPushCommandTest extends TestCase
         ]);
         $this->assertStringNotContainsString(
             '--force-http is accepted only by files-push.',
-            $existingPairValue['output']
+            $dbApplyResult['output']
         );
     }
 
@@ -134,7 +175,6 @@ final class FilesPushCommandTest extends TestCase
         $missingSecretError = $this->lastJsonLine($missingSecret['stderr']);
         $this->assertArrayHasKey('error', $missingSecretError);
         $this->assertArrayNotHasKey('command', $missingSecretError);
-        $this->assertArrayNotHasKey('pair', $missingSecretError);
         $this->assertArrayNotHasKey('phase', $missingSecretError);
 
         $querySecret = $this->runFilesPush(
@@ -269,7 +309,6 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame(1, $result['exit'], $result['output']);
         $finalLine = $this->lastJsonLine($result['stdout']);
         $this->assertSame('files-push', $finalLine['command'] ?? null);
-        $this->assertSame($context['pair'], $finalLine['pair'] ?? null);
         $this->assertSame('error', $finalLine['status'] ?? null);
         $this->assertSame('starting_plan', $finalLine['phase'] ?? null);
         $this->assertSame('unexpected_error', $finalLine['reason'] ?? null);
@@ -283,13 +322,20 @@ final class FilesPushCommandTest extends TestCase
             JSON_THROW_ON_ERROR
         );
         $this->assertSame(
-            ['command', 'pair', 'status', 'phase', 'reason', 'detail', 'ts'],
+            [
+                'command',
+                'status',
+                'phase',
+                'reason',
+                'detail',
+                'ts',
+            ],
             array_keys($status)
         );
         $this->assertSame('error', $status['status']);
         $audit = (string) file_get_contents($this->stateDirectory . '/.import-audit.log');
         $this->assertSame(1, substr_count($audit, 'ERROR files-push'));
-        $this->assertStringContainsString('pair=' . $context['pair'], $audit);
+        $this->assertStringContainsString('ERROR files-push | phase=starting_plan', $audit);
     }
 
     /** @param list<string> $extraOptions */

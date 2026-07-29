@@ -31,32 +31,76 @@ final class IndexUpdateWalTest extends TestCase
         $this->removeTree($this->root);
     }
 
-    public function testAppliedBatchLeavesTheWalMarkerUntilCompletion(): void
+    public function testOneWalRecordUpdatesBothIndexes(): void
     {
+        mkdir($this->fileRoot . '/site');
+        file_put_contents($this->fileRoot . '/site/file.txt', 'hello');
+
         $client = $this->client();
+        $client->get_import_state()->preflight = [
+            'http_code' => 200,
+            'data' => [
+                'ok' => true,
+                'runtime' => [
+                    'document_root' => '/site',
+                ],
+            ],
+        ];
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('record_index_update_file')->invoke(
+        $reflection->getMethod('record_pulled_path')->invoke(
             $client,
             '/site/file.txt',
+            realpath($this->fileRoot . '/site/file.txt'),
             42,
             5,
             'file'
         );
+        $walHandle = $reflection->getProperty('index_update_wal_handle')
+            ->getValue($client);
+        $this->assertIsResource($walHandle);
+        $this->assertTrue(fflush($walHandle));
+        $walLines = file(
+            $this->stateDirectory . '/.import-index-updates.wal',
+            FILE_IGNORE_NEW_LINES
+        );
+        $this->assertIsArray($walLines);
+        $this->assertCount(1, $walLines);
+        $walRecord = json_decode(
+            $walLines[0],
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertSame(
+            '/site/file.txt',
+            base64_decode($walRecord['path'])
+        );
+        $this->assertSame(
+            'file.txt',
+            base64_decode($walRecord['local_path_b64'])
+        );
+
         $reflection->getMethod('apply_index_update_wal')->invoke($client);
 
         $walPath = $this->stateDirectory . '/.import-index-updates.wal';
         $this->assertFileExists($walPath);
         $this->assertSame('', file_get_contents($walPath));
+        $this->assertSame('/site/file.txt', $this->firstIndexPath());
+        $localIndexPaths = glob(
+            $this->stateDirectory . '/local-index/*.jsonl'
+        );
+        $this->assertIsArray($localIndexPaths);
+        $this->assertCount(1, $localIndexPaths);
         $this->assertSame(
-            '/site/file.txt',
-            $this->firstIndexPath()
+            'file.txt',
+            $this->firstIndexPath($localIndexPaths[0])
         );
 
         $reflection->getMethod('remove_index_update_wal')->invoke($client);
         $this->assertFileDoesNotExist($walPath);
     }
 
-    public function testReplayDiscardsAnUnterminatedFinalRecord(): void
+    public function testApplyingWalDiscardsACorruptUnterminatedFinalRecord(): void
     {
         $completeRecord = json_encode([
             'op' => 'F',
@@ -72,7 +116,7 @@ final class IndexUpdateWalTest extends TestCase
 
         $client = $this->client();
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('replay_index_update_wal')->invoke($client);
+        $reflection->getMethod('apply_index_update_wal')->invoke($client);
 
         $this->assertSame('/site/complete.txt', $this->firstIndexPath());
         $this->assertSame(
@@ -137,17 +181,18 @@ final class IndexUpdateWalTest extends TestCase
         );
     }
 
-    private function firstIndexPath(): string
+    private function firstIndexPath(?string $indexPath = null): string
     {
         $lines = file(
-            $this->stateDirectory . '/.import-index.jsonl',
+            $indexPath ?? $this->stateDirectory . '/.import-index.jsonl',
             FILE_IGNORE_NEW_LINES
         );
         $this->assertIsArray($lines);
         $line = $lines[0] ?? null;
         $this->assertIsString($line);
         $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-        $path = base64_decode((string) $entry['path']);
+        $encodedPath = (string) $entry['path'];
+        $path = base64_decode($encodedPath);
         $this->assertIsString($path);
         return $path;
     }

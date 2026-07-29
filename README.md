@@ -679,7 +679,7 @@ truncated or rotated, so it provides a complete history of the migration.
 ```
 [2025-01-15 10:30:01] VOLATILE | path=/srv/htdocs/wp-content/debug.log | count=1
 [2025-01-15 10:30:05] VOLATILE CLEARED | path=/srv/htdocs/wp-content/debug.log
-[2025-01-15 10:31:12] FILE DELETE | .import-index-updates.jsonl
+[2025-01-15 10:31:12] FILE TRUNCATE | .import-index-updates.wal | WAL batch applied
 ```
 
 Pass `--verbose` to also print audit log entries to the console as they happen.
@@ -698,6 +698,8 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `pull-files` — Runs `preflight` and `files-pull` as one resumable high-level command.
 * `pull-db` — Runs `preflight`, `db-pull`, and `db-apply` as one resumable high-level command.
 * `files-pull` — Pull all files (initial) or only changes (delta). Runs files-index if needed.
+* `files-diff` — Reports the local paths that files-push would send or delete. Makes no network request.
+* `files-push` — Pushes one local file tree without database work, a plan display, or a confirmation prompt.
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
@@ -707,4 +709,28 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+`files-pull`, `files-diff`, and `files-push` use one local index for each target
+URL and canonical local tree:
+
+```text
+<state-dir>/local-index/<sha256(target URL with user-info and SECRET_KEY removed + NUL + canonical local tree)>.jsonl
+```
+
+URL user-info and `SECRET_KEY` do not affect the hash; changing any other query
+parameter selects a different local index and push-state directory.
+
+files-pull records each local path it changes through its existing index-update
+WAL, except paths skipped by the local indexer's default rules. Selected,
+filtered, remapped, and preserve-local pulls also refresh those paths'
+directory ancestors and remove descendants of deleted or replaced paths.
+Other branches remain unchanged. A completed files-push updates the index
+after its target commit succeeds.
+
+`--abort` is available for `pull`, `pull-files`, `pull-db`, `files-pull`,
+`files-index`, `db-pull`, `db-index`, and `db-apply`. It clears that command's
+current sync state and exits. Aborting `files-pull`, `pull-files`, or `pull`
+while its files-pull stage is active applies any retained index-update WAL
+batch to the import index and local index, clears sync progress, and keeps
+downloaded files; the next run performs a delta sync. For `db-pull` and
+`db-index`, `--abort` clears the output file so the next run starts from
+scratch. Interrupted commands automatically resume from the last saved cursor.

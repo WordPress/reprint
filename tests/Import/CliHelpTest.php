@@ -61,8 +61,14 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('Usage: reprint files-diff <target-url>', $output);
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
-        $this->assertStringContainsString('previous local index', $output);
+        $this->assertStringContainsString('Compares the local tree at --fs-root with the local index', $output);
         $this->assertStringContainsString('completed files-push', $output);
+        $this->assertStringContainsString('files-pull and pull-files', $output);
+        $this->assertStringContainsString('update entries for paths they change', $output);
+        $this->assertStringContainsString('paths committed by the target', $output);
+        $this->assertStringContainsString('Complete files-pull, pull-files, or files-push once', $output);
+        $this->assertStringContainsString('omit URL user-info and SECRET_KEY', $output);
+        $this->assertStringContainsString('same files-pull with --abort', $output);
         $this->assertStringContainsString('push operation plan', $output);
         $this->assertStringContainsString('default-skipped paths', $output);
         $this->assertStringContainsString('No network calls', $output);
