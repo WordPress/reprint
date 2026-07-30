@@ -11,7 +11,7 @@ require_once __DIR__ . '/../../importer/import.php';
  *   - resolve_pull_only_files_with_path_prefixes(): :token: templates / absolute paths → real source
  *     prefixes (sharing --remap's WordPress path token table), with expansion for plugins, mu-plugins, and uploads
  *     directories outside WP_CONTENT_DIR and covered-prefix collapse.
- *   - is_file_path_selected_by_pull_only_files(): per-path membership (no --only ⇒ every file path).
+ *   - is_selected_for_pulling(): per-path membership (no --only ⇒ every file path).
  *   - get_export_directories(): with --only, a *replace* of the export roots.
  * Orthogonal to --remap (--only file prefixes decide what gets pulled, not where it lands).
  */
@@ -218,13 +218,13 @@ class OnlyFilesPathPrefixTest extends TestCase
     {
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
         // No --only: every file path is selected (keeps the diff deleting orphans).
-        $this->assertTrue($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/anything/at/all.php')));
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/anything/at/all.php')));
 
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content'));
-        $this->assertTrue($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/var/www/html/wp-content/themes/a.css')));
-        $this->assertFalse($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/var/www/html/wp-config.php')));
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css')));
+        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-config.php')));
         // Byte-order sibling must not match the prefix.
-        $this->assertFalse($this->call($c, 'is_file_path_selected_by_pull_only_files', array('/var/www/html/wp-content.bak/x')));
+        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content.bak/x')));
     }
 
     public function testChangingOnlyPrefixesWhileResumingFilesPullIsRejected(): void

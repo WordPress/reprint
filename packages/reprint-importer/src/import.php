@@ -6593,9 +6593,8 @@ class ImportClient
                 $local_index_entry !== null &&
                 strcmp($local_index_entry["path"], $remote_index_entry["path"]) < 0
             ) {
-                // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-pull --only runs.
-                if ($this->is_file_path_selected_by_pull_only_files($local_index_entry["path"])) {
+                if ($this->is_selected_for_pulling($local_index_entry["path"])) {
                     $remote_absolute_path = $local_index_entry["path"];
                     $this->apply_remote_deletion_locally($remote_absolute_path);
                     $this->delete_index_entry($remote_absolute_path);
@@ -6616,14 +6615,21 @@ class ImportClient
                     // protect files we own.
                     $fetch_list_handle = (
                         $skipped_handle !== null &&
-                        $this->is_remote_absolute_path_in_uploads_directory(
-                            $remote_index_entry["path"],
-                            $uploads_basedir
+                        (
+                            $uploads_basedir !== null
+                                ? path_is_within_root(
+                                    $remote_index_entry["path"],
+                                    $uploads_basedir
+                                )
+                                : strpos(
+                                    $remote_index_entry["path"],
+                                    "wp-content/uploads/"
+                                ) !== false
                         )
                     )
                         ? $skipped_handle
                         : $fetch_list_handle;
-                    $this->append_fetch_list(
+                    $this->append_to_fetch_list(
                         $remote_index_entry["path"],
                         $fetch_list_handle,
                     );
@@ -6641,14 +6647,21 @@ class ImportClient
                 } else {
                     $fetch_list_handle = (
                         $skipped_handle !== null &&
-                        $this->is_remote_absolute_path_in_uploads_directory(
-                            $remote_index_entry["path"],
-                            $uploads_basedir
+                        (
+                            $uploads_basedir !== null
+                                ? path_is_within_root(
+                                    $remote_index_entry["path"],
+                                    $uploads_basedir
+                                )
+                                : strpos(
+                                    $remote_index_entry["path"],
+                                    "wp-content/uploads/"
+                                ) !== false
                         )
                     )
                         ? $skipped_handle
                         : $fetch_list_handle;
-                    $this->append_fetch_list($remote_index_entry["path"], $fetch_list_handle);
+                    $this->append_to_fetch_list($remote_index_entry["path"], $fetch_list_handle);
                 }
             }
 
@@ -6668,7 +6681,7 @@ class ImportClient
         }
 
         while ($local_index_entry !== null) {
-            if ($this->is_file_path_selected_by_pull_only_files($local_index_entry["path"])) {
+            if ($this->is_selected_for_pulling($local_index_entry["path"])) {
                 $remote_absolute_path = $local_index_entry["path"];
                 $this->apply_remote_deletion_locally($remote_absolute_path);
                 $this->delete_index_entry($remote_absolute_path);
@@ -7013,8 +7026,6 @@ class ImportClient
     /**
      * Return the uploads basedir from preflight data (e.g. "/wp-content/uploads").
      *
-     * Falls back to a heuristic pattern match if the preflight doesn't contain
-     * explicit uploads path information.
      */
     private function get_uploads_basedir(): ?string
     {
@@ -7026,31 +7037,13 @@ class ImportClient
         if (!is_string($basedir) || $basedir === "") {
             return null;
         }
-        return rtrim($basedir, "/") . "/";
-    }
-
-    /**
-     * Check whether a remote absolute path belongs to the uploads directory.
-     *
-     * Uses the preflight-reported uploads basedir when available, otherwise
-     * falls back to matching "wp-content/uploads/" anywhere in the path.
-     */
-    private function is_remote_absolute_path_in_uploads_directory(
-        string $remote_absolute_path,
-        ?string $uploads_basedir
-    ): bool
-    {
-        if ($uploads_basedir !== null) {
-            return strpos($remote_absolute_path, $uploads_basedir) !== false;
-        }
-        // Fallback: match the conventional WordPress uploads path
-        return strpos($remote_absolute_path, "wp-content/uploads/") !== false;
+        return rtrim($basedir, "/");
     }
 
     /**
      * Append a path to the fetch list file.
      */
-    private function append_fetch_list(string $path, $handle): void
+    private function append_to_fetch_list(string $path, $handle): void
     {
         $line = json_encode(
             ["path" => base64_encode($path)],
@@ -8869,27 +8862,23 @@ class ImportClient
     }
 
     /**
-     * Whether $path is selected by the active --only file path prefixes. With no
-     * --only flag, every file path is selected (returns true) — this keeps
-     * the diff's delete drains at their default behavior. When --only is set,
-     * true only when $path falls under one of those file path prefixes IF it is
-     * NOT the directory itself (when the path remainder is an empty string): an
-     * --only remote index lists what is inside each selected directory, never
-     * the directory itself, so to the diff the selected directories always
-     * appear deleted-on-remote even though they exist.
+     * Whether a remote absolute path is selected by the active --only file path
+     * prefixes. With no --only flag, every path is selected. A selected root is
+     * excluded because a filtered remote index lists its contents, not the root.
      */
-    private function is_file_path_selected_by_pull_only_files(string $path): bool
+    private function is_selected_for_pulling(string $remote_absolute_path): bool
     {
         if (empty($this->pull_only_files_with_path_prefixes)) {
             return true;
         }
 
-        foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
-            $remainder = self::path_remainder_under($path, $prefix);
-            if ($remainder === "") {
+        $remote_absolute_path = rtrim($remote_absolute_path, "/");
+        foreach ($this->pull_only_files_with_path_prefixes as $pull_only_files_prefix) {
+            $pull_only_files_prefix = rtrim($pull_only_files_prefix, "/");
+            if ($remote_absolute_path === $pull_only_files_prefix) {
                 return false;
             }
-            if ($remainder !== null) {
+            if (path_is_within_root($remote_absolute_path, $pull_only_files_prefix)) {
                 return true;
             }
         }
