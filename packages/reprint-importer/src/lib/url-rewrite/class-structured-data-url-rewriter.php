@@ -38,6 +38,9 @@ class StructuredDataUrlRewriter
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
 
+    /** @var array<string, string> Exact source base URLs and their JSON-escaped spellings. */
+    private array $literal_base_url_replacements;
+
     /**
      * Pre-parsed url_mapping: each entry is
      *   [ 'from_url' => <parsed URL>, 'to_url' => <parsed URL> ]
@@ -98,12 +101,21 @@ class StructuredDataUrlRewriter
         // (scheme/host/path tokenisation, punycode, etc.) and used to be
         // repeated on every leaf we rewrote.
         $this->parsed_mapping = [];
+        $this->literal_base_url_replacements = [];
         foreach ($url_mapping as $from_url_string => $to_url_string) {
             $this->parsed_mapping[] = [
                 'from_url' => WPURL::parse($from_url_string),
                 'to_url'   => WPURL::parse($to_url_string),
             ];
+            $this->literal_base_url_replacements[$from_url_string] = $to_url_string;
+            $this->literal_base_url_replacements[str_replace('/', '\/', $from_url_string)] = str_replace('/', '\/', $to_url_string);
         }
+        uksort(
+            $this->literal_base_url_replacements,
+            static function (string $first_source_url, string $second_source_url): int {
+                return strlen($second_source_url) <=> strlen($first_source_url);
+            }
+        );
         $this->mapping_cache_key = sha1(json_encode($url_mapping, JSON_UNESCAPED_SLASHES));
 
         // Default base_url: first from-url in the mapping. Preserves the
@@ -331,12 +343,9 @@ class StructuredDataUrlRewriter
     /**
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
-     * Block markup owns HTML attributes, block-comment JSON, CSS url() values,
-     * text URLs, entity decoding, URL casing, and IDN canonicalization. This
-     * intentionally routes through the structured parser instead of doing a
-     * literal source-base replacement, because one database value may contain
-     * multiple spellings of the same URL that only the parser can recognize as
-     * equivalent.
+     * In text-only values, exact source base URLs are replaced without
+     * reserializing surrounding CSS or shortcode syntax. Actual markup and
+     * any remaining source-domain spelling go through the block parser.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
@@ -457,6 +466,48 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
+                // The block processor selects known URL attributes in actual markup.
+                // Text-only post content has no such structure, and replacing an
+                // exact base URL directly avoids reserializing unrelated CSS or
+                // shortcode punctuation.
+                if (strpos($content, '<') === false) {
+                    $has_literal_url = false;
+                    $literal_urls_are_bounded = true;
+                    foreach (array_keys($this->literal_base_url_replacements) as $source_url) {
+                        $offset = 0;
+                        while (true) {
+                            $position = strpos($content, $source_url, $offset);
+                            if ($position === false) {
+                                break;
+                            }
+                            $previous_character = $position > 0 ? $content[$position - 1] : null;
+                            $next_position = $position + strlen($source_url);
+                            $next_character = $next_position < strlen($content) ? $content[$next_position] : null;
+                            $has_start_boundary = $previous_character === null
+                                || ctype_space($previous_character)
+                                || strpos('"\'([{,:>', $previous_character) !== false;
+                            $has_end_boundary = $next_character === null
+                                || $content[$next_position - 1] === '/'
+                                || ctype_space($next_character)
+                                || strpos('/\\?#"\'<)]},;', $next_character) !== false;
+                            if (!$has_start_boundary || !$has_end_boundary) {
+                                $literal_urls_are_bounded = false;
+                                break 2;
+                            }
+                            $has_literal_url = true;
+                            $offset = $next_position;
+                        }
+                    }
+
+                    if ($has_literal_url && $literal_urls_are_bounded) {
+                        $literal_rewrite = strtr($content, $this->literal_base_url_replacements);
+                        if (!$this->value_might_contain_source_domain($literal_rewrite)) {
+                            return $literal_rewrite;
+                        }
+                        $content = $literal_rewrite;
+                    }
+                }
+
                 $p = new BlockMarkupUrlProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
                     $raw_url = $p->get_raw_url();
