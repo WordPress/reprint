@@ -246,7 +246,7 @@ class SymlinkBundleTest extends TestCase
         // Pretend the target subtree was followed + indexed.
         $rc->getProperty('remote_index_prefix_cache')->setValue($c, [$target => true]);
 
-        $result = $rc->getMethod('map_symlink_target_for_local_mirror')->invoke(
+        $result = $rc->getMethod('rewrite_symlink_target_for_local_filesystem')->invoke(
             $c,
             '/src/wp-content/plugins/p/link',            // source symlink path
             $this->root . '/wp-content/plugins/p/link',  // local path

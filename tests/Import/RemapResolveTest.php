@@ -79,7 +79,7 @@ class RemapResolveTest extends TestCase
 
     private function assertRemapConsistent($c): void
     {
-        $this->call($c, 'assert_files_remap_consistent');
+        $this->call($c, 'assert_resolved_path_mappings_consistent');
     }
 
     private function writeLocalIndex(): void

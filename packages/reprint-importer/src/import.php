@@ -717,7 +717,7 @@ class ImportClient
         }
 
         if ($assert_remap) {
-            $this->assert_files_remap_consistent();
+            $this->assert_resolved_path_mappings_consistent();
         }
     }
 
@@ -3555,7 +3555,7 @@ class ImportClient
             // Repoint through the same seam regular symlink chunks use, so the
             // link targets wherever the content actually landed (filesystem root,
             // remapped, or bundled) instead of the raw source spelling.
-            $symlink_target = $this->map_symlink_target_for_local_mirror(
+            $symlink_target = $this->rewrite_symlink_target_for_local_filesystem(
                 $remote_absolute_path,
                 $local_absolute_path,
                 $symlink_target
@@ -3570,7 +3570,7 @@ class ImportClient
             $parent = dirname($local_absolute_path);
             if (!is_dir($parent)) {
                 try {
-                    $this->ensure_directory_path($parent);
+                    $this->create_directory_if_missing($parent);
                 } catch (RuntimeException $e) {
                     $this->audit_log(
                         "INTERMEDIATE SYMLINK SKIP: failed to prepare parent for {$remote_absolute_path}: " .
@@ -7056,7 +7056,7 @@ class ImportClient
     }
 
     /**
-     * Remove the local mirror entry for a deletion reported by the remote index.
+     * Remove the local filesystem entry for a deletion reported by the remote index.
      */
     private function apply_remote_deletion_locally(string $remote_absolute_path): void
     {
@@ -8453,7 +8453,7 @@ class ImportClient
     }
 
     /**
-     * Map a remote symlink target to the filesystem root mirror when possible.
+     * Rewrite a remote symlink target for the local filesystem when possible.
      *
      * Handles both absolute and relative targets (relative ones are resolved
      * against the symlink's source directory). In-scope and non-followed targets
@@ -8484,9 +8484,9 @@ class ImportClient
      * Without this mapping, the symlink would point at /tmp/e2e-shared-themes/pub/indice
      * (which does not exist on the local machine, or worse, exists with unrelated content).
      * With this mapping, the symlink is rewritten to a relative path that resolves to the
-     * mirrored local copy under filesystem root.
+     * local copy under filesystem root.
      */
-    private function map_symlink_target_for_local_mirror(
+    private function rewrite_symlink_target_for_local_filesystem(
         string $remote_absolute_path,
         string $local_absolute_path,
         string $target
@@ -8604,10 +8604,10 @@ class ImportClient
      * local absolute paths from the current remap rules, so changing those rules while the
      * same index is still in use can point future updates at the wrong path.
      */
-    private function assert_files_remap_consistent(): void
+    private function assert_resolved_path_mappings_consistent(): void
     {
-        $fingerprint = $this->files_remap_fingerprint();
-        $previous = $this->import_state()->files_remap_fingerprint ?? null;
+        $fingerprint = $this->resolved_path_mappings_fingerprint();
+        $previous = $this->import_state()->resolved_path_mappings_fingerprint ?? null;
 
         $has_existing_index = file_exists($this->local_index_file) && filesize($this->local_index_file) > 0;
         if ($previous === null && $has_existing_index && !empty($this->resolved_path_mappings)) {
@@ -8625,18 +8625,18 @@ class ImportClient
         }
 
         if ($previous === null) {
-            $this->import_state()->files_remap_fingerprint = $fingerprint;
+            $this->import_state()->resolved_path_mappings_fingerprint = $fingerprint;
             $this->save_state($this->state);
         }
     }
 
     /**
-     * Stable fingerprint for the resolved remap rule set.
+     * Stable fingerprint for the resolved path mappings.
      *
      * Rule order does not matter: remap matching chooses the deepest source
      * path, not the first matching rule.
      */
-    private function files_remap_fingerprint(): string
+    private function resolved_path_mappings_fingerprint(): string
     {
         $rules = $this->resolved_path_mappings;
         ksort($rules, SORT_STRING);
@@ -8995,30 +8995,6 @@ class ImportClient
     }
 
     /**
-     * Map a remote absolute path through the resolved path mappings, or
-     * return null when no mapping applies. The deepest remote prefix wins.
-     *
-     * Matching mapping prefixes are nested, so the longest remote prefix is
-     * the most specific match.
-     */
-    private function map_remote_absolute_path_with_resolved_mappings(
-        string $remote_absolute_path
-    ): ?string {
-        $local_absolute_path = null;
-        $longest_remote_prefix_length = -1;
-
-        foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
-            $remainder = self::path_remainder_under($remote_absolute_path, $remote_prefix);
-            if ($remainder !== null && strlen($remote_prefix) > $longest_remote_prefix_length) {
-                $local_absolute_path = wp_join_unix_paths($local_prefix, $remainder);
-                $longest_remote_prefix_length = strlen($remote_prefix);
-            }
-        }
-
-        return $local_absolute_path;
-    }
-
-    /**
      * Map a remote absolute path to a local absolute path under the filesystem
      * root. Symlink traversal checks prevent writes outside the filesystem root.
      *
@@ -9030,13 +9006,17 @@ class ImportClient
         string $remote_absolute_path
     ): string {
         assert_valid_path($remote_absolute_path, "remote absolute path");
-        if (!empty($this->resolved_path_mappings)) {
-            $local_absolute_path = $this->map_remote_absolute_path_with_resolved_mappings(
-                $remote_absolute_path
-            );
-            if ($local_absolute_path !== null) {
-                return $local_absolute_path;
+        $local_absolute_path = null;
+        $longest_remote_prefix_length = -1;
+        foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
+            $remainder = self::path_remainder_under($remote_absolute_path, $remote_prefix);
+            if ($remainder !== null && strlen($remote_prefix) > $longest_remote_prefix_length) {
+                $local_absolute_path = wp_join_unix_paths($local_prefix, $remainder);
+                $longest_remote_prefix_length = strlen($remote_prefix);
             }
+        }
+        if ($local_absolute_path !== null) {
+            return $local_absolute_path;
         }
 
         // Following symlinks is currently the only way paths outside the original export scope reach this mapper.
@@ -9193,7 +9173,7 @@ class ImportClient
             if (!is_dir($dir)) {
                 // Check if any component of the path exists as a file and remove it
                 try {
-                    $this->ensure_directory_path($dir);
+                    $this->create_directory_if_missing($dir);
                 } catch (PreserveLocalSkipException $e) {
                     $context->skip_current_file = true;
                     $this->audit_log($e->getMessage(), true);
@@ -9362,12 +9342,12 @@ class ImportClient
     }
 
     /**
-     * Ensure a directory path exists, removing any files that block it.
+     * Create a directory path when missing, removing blockers.
      *
-     * @param string $dir Directory path to ensure
+     * @param string $dir Directory path to create
      * @throws RuntimeException if directory cannot be created or is outside allowed path
      */
-    private function ensure_directory_path(string $dir): void
+    private function create_directory_if_missing(string $dir): void
     {
         // Security: Ensure path is under the filesystem root
         $real_filesystem_root = $this->get_filesystem_root_path();
@@ -9561,7 +9541,7 @@ class ImportClient
 
         // Create directory, removing any files that block the path
         try {
-            $this->ensure_directory_path($local_absolute_path);
+            $this->create_directory_if_missing($local_absolute_path);
         } catch (PreserveLocalSkipException $e) {
             $this->audit_log($e->getMessage(), true);
             $this->emit_skip_progress($remote_absolute_path);
@@ -9608,7 +9588,7 @@ class ImportClient
         }
 
         $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path($path);
-        $target_for_local = $this->map_symlink_target_for_local_mirror(
+        $target_for_local = $this->rewrite_symlink_target_for_local_filesystem(
             $path,
             $local_absolute_path,
             $target,
@@ -9675,7 +9655,7 @@ class ImportClient
         $dir = dirname($local_absolute_path);
         if (!is_dir($dir)) {
             try {
-                $this->ensure_directory_path($dir);
+                $this->create_directory_if_missing($dir);
             } catch (PreserveLocalSkipException $e) {
                 $this->audit_log($e->getMessage(), true);
                 $this->emit_skip_progress($path);
@@ -11047,7 +11027,7 @@ class ImportClient
         $follow = $this->import_state()->follow_symlinks ?? false;
         $nonempty = $this->import_state()->fs_root_nonempty_behavior ?? "error";
         $max_packet = $this->import_state()->max_allowed_packet ?? null;
-        $files_remap_fingerprint = $this->import_state()->files_remap_fingerprint ?? null;
+        $resolved_path_mappings_fingerprint = $this->import_state()->resolved_path_mappings_fingerprint ?? null;
         $pull = $this->import_state()->pull_pipeline ?? null;
         $this->state = new ImportState();
         $this->import_state()->preflight = $preflight;
@@ -11056,7 +11036,7 @@ class ImportClient
         $this->import_state()->follow_symlinks = $follow;
         $this->import_state()->fs_root_nonempty_behavior = $nonempty;
         $this->import_state()->max_allowed_packet = $max_packet;
-        $this->import_state()->files_remap_fingerprint = $files_remap_fingerprint;
+        $this->import_state()->resolved_path_mappings_fingerprint = $resolved_path_mappings_fingerprint;
         if ($pull !== null) {
             $this->import_state()->pull_pipeline = $pull;
         }
@@ -11593,7 +11573,7 @@ class StreamingContext
 }
 
 /**
- * Thrown by ensure_directory_path() in preserve-local mode when a directory
+ * Thrown by create_directory_if_missing() in preserve-local mode when a directory
  * component is not writable or a symlink blocks directory creation.
  * Callers catch this to skip the current file/directory/symlink gracefully.
  */
