@@ -745,7 +745,7 @@ class ImportClient
         if (isset($masked[2]) && $command !== 'apply-runtime') {
             $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
             if ($command === 'files-push') {
-                $masked[2] = self::mask_files_push_url_user_info($masked[2]);
+                $masked[2] = self::mask_files_push_remote_reprint_api_url_user_info($masked[2]);
             }
         }
         foreach ($masked as $argument_index => $argument) {
