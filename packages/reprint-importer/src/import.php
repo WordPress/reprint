@@ -259,8 +259,8 @@ class ImportClient
      */
     private const MAX_CONSECUTIVE_INTERRUPTED_RESPONSES = 3;
 
-    /** @var string Target exporter API URL. */
-    public $target_url;
+    /** @var string Remote Reprint API URL. */
+    public $remote_reprint_api_url;
 
     /** @var string State directory for this filesystem root (.import-state.json, db.sql, etc.). */
     public $state_dir;
@@ -528,7 +528,7 @@ class ImportClient
     public $exit_code = 0;
 
     public function __construct(
-        string $target_url,
+        string $remote_reprint_api_url,
         string $state_dir,
         string $filesystem_root,
         ?string $signal_handling_command = null
@@ -551,7 +551,7 @@ class ImportClient
             }
         }
 
-        $this->target_url = rtrim($target_url, "?&");
+        $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->filesystem_root = rtrim($filesystem_root, "/");
         $this->state_file = $this->state_dir . "/.import-state.json";
@@ -1323,7 +1323,7 @@ class ImportClient
     private function run_files_diff(array $options): void
     {
         $context = $options['files_diff_context'] ?? self::prepare_files_pair_context(
-            $this->target_url,
+            $this->remote_reprint_api_url,
             $this->state_dir,
             $this->filesystem_root,
             'files-diff'
@@ -1336,7 +1336,7 @@ class ImportClient
         $previous_local_index = $push_state_directory . '/previous_local_index.jsonl';
         $missing_previous_local_index_message =
             'files-diff requires the pair\'s previous local index, which a completed files-push publishes '
-            . 'for the same target URL, state directory, and filesystem root.';
+            . 'for the same remote Reprint API URL, state directory, and filesystem root.';
         if (!is_dir($push_state_directory)) {
             throw new RuntimeException($missing_previous_local_index_message);
         }
@@ -1541,7 +1541,7 @@ class ImportClient
     {
         $started_at = hrtime(true) / 1000000000;
         $context = $options['files_push_context'] ?? self::prepare_files_push_context(
-            $this->target_url,
+            $this->remote_reprint_api_url,
             $this->state_dir,
             $this->filesystem_root,
             $options
@@ -1567,7 +1567,7 @@ class ImportClient
         $sender_options = [
             'filesystem_root' => $context['filesystem_root'],
             'push_state_directory' => $context['push_state_directory'],
-            'base_url' => $context['target_url'],
+            'base_url' => $context['remote_reprint_api_url'],
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['force_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,
@@ -1760,15 +1760,15 @@ class ImportClient
      * @return array {
      *     Validated files-push command context.
      *
-     *     @type string $target_url           Target exporter API URL.
+     *     @type string $remote_reprint_api_url Remote Reprint API URL.
      *     @type string $filesystem_root  Resolved filesystem root being sent.
      *     @type string $pair                 Target/filesystem-root pair key.
      *     @type string $push_state_directory Local push state directory.
      * }
-     * @phpstan-return array{target_url:string,filesystem_root:string,pair:string,push_state_directory:string}
+     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
      */
     public static function prepare_files_push_context(
-        string $target_url,
+        string $remote_reprint_api_url,
         string $state_dir,
         string $filesystem_root,
         array $options
@@ -1777,25 +1777,26 @@ class ImportClient
         if (!is_string($secret) || $secret === '') {
             throw new InvalidArgumentException('files-push requires --secret=TOKEN.');
         }
-        if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $target_url) === 1) {
+        if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $remote_reprint_api_url) === 1) {
             throw new InvalidArgumentException(
-                'files-push does not accept SECRET_KEY in the target URL; pass --secret=TOKEN.'
+                'files-push does not accept SECRET_KEY in the remote Reprint API URL; pass --secret=TOKEN.'
             );
         }
 
         $context = self::prepare_files_pair_context(
-            $target_url,
+            $remote_reprint_api_url,
             $state_dir,
             $filesystem_root,
             'files-push'
         );
-        $masked_target_url = self::mask_files_push_url_user_info($target_url);
+        $masked_remote_reprint_api_url =
+            self::mask_files_push_remote_reprint_api_url_user_info($remote_reprint_api_url);
         $force_http = $options['force_http'] ?? false;
-        $scheme = strtolower( (string) parse_url($target_url, PHP_URL_SCHEME) );
+        $scheme = strtolower( (string) parse_url($remote_reprint_api_url, PHP_URL_SCHEME) );
         if ($scheme !== 'https' && !( $scheme === 'http' && $force_http === true )) {
             throw new InvalidArgumentException(
-                'The files-push target must use HTTPS: ' . $masked_target_url
-                . '. Pass --force-http only for a target you trust.'
+                'The files-push remote Reprint API URL must use HTTPS: ' . $masked_remote_reprint_api_url
+                . '. Pass --force-http only for a remote Reprint API URL you trust.'
             );
         }
         return $context;
@@ -1811,30 +1812,31 @@ class ImportClient
      * @return array {
      *     Validated pair context.
      *
-     *     @type string $target_url           Target exporter API URL.
+     *     @type string $remote_reprint_api_url Remote Reprint API URL.
      *     @type string $filesystem_root  Resolved filesystem root.
      *     @type string $pair                 Target/filesystem-root pair key.
      *     @type string $push_state_directory Local push state directory.
      * }
-     * @phpstan-return array{target_url:string,filesystem_root:string,pair:string,push_state_directory:string}
+     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
      */
     public static function prepare_files_pair_context(
-        string $target_url,
+        string $remote_reprint_api_url,
         string $state_dir,
         string $filesystem_root,
         string $command
     ): array {
-        $masked_target_url = self::mask_files_push_url_user_info($target_url);
-        if (strpos($target_url, '#') !== false) {
+        $masked_remote_reprint_api_url =
+            self::mask_files_push_remote_reprint_api_url_user_info($remote_reprint_api_url);
+        if (strpos($remote_reprint_api_url, '#') !== false) {
             throw new InvalidArgumentException(
-                'The ' . $command . ' target URL must not contain a fragment: ' . $masked_target_url . '.'
+                'The ' . $command . ' remote Reprint API URL must not contain a fragment: ' . $masked_remote_reprint_api_url . '.'
             );
         }
-        $target_url_user = parse_url($target_url, PHP_URL_USER);
-        $target_url_password = parse_url($target_url, PHP_URL_PASS);
-        if (is_string($target_url_user) || is_string($target_url_password)) {
+        $remote_reprint_api_url_user = parse_url($remote_reprint_api_url, PHP_URL_USER);
+        $remote_reprint_api_url_password = parse_url($remote_reprint_api_url, PHP_URL_PASS);
+        if (is_string($remote_reprint_api_url_user) || is_string($remote_reprint_api_url_password)) {
             throw new InvalidArgumentException(
-                'The ' . $command . ' target URL must not contain URL user-info: ' . $masked_target_url . '.'
+                'The ' . $command . ' remote Reprint API URL must not contain URL user-info: ' . $masked_remote_reprint_api_url . '.'
             );
         }
         if (is_link($filesystem_root)) {
@@ -1852,8 +1854,8 @@ class ImportClient
             );
         }
         $resolved_filesystem_root = rtrim($resolved_filesystem_root, '/') ?: '/';
-        $target_url = rtrim($target_url, '?&');
-        $pair = hash('sha256', $target_url . "\0" . $resolved_filesystem_root);
+        $remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
+        $pair = hash('sha256', $remote_reprint_api_url . "\0" . $resolved_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
         $push_state_directory = $state_dir . '/push/' . $pair;
         if (strpos($push_state_directory, '/') !== 0) {
@@ -1894,7 +1896,7 @@ class ImportClient
         }
 
         return [
-            'target_url' => $target_url,
+            'remote_reprint_api_url' => $remote_reprint_api_url,
             'filesystem_root' => $resolved_filesystem_root,
             'pair' => $pair,
             'push_state_directory' => $push_state_directory,
@@ -1949,7 +1951,7 @@ class ImportClient
     }
 
     /** Masks URL authority credentials without changing the pair-key input. */
-    private static function mask_files_push_url_user_info(string $url): string
+    private static function mask_files_push_remote_reprint_api_url_user_info(string $url): string
     {
         $masked = preg_replace(
             '~^([a-z][a-z0-9+.-]*://)[^/?#]*@~i',
@@ -5019,7 +5021,7 @@ class ImportClient
             return;
         }
 
-        $parsed_url = parse_url($this->target_url);
+        $parsed_url = parse_url($this->remote_reprint_api_url);
         if (!$parsed_url || !isset($parsed_url['scheme'], $parsed_url['host'])) {
             throw new InvalidArgumentException(
                 "--new-site-url requires a valid export URL to derive the source site origin.",
@@ -7609,7 +7611,7 @@ class ImportClient
         // always appears in .import-domains.json even if the SQL dump
         // hasn't been fully scanned yet.
         if ($domain_collector) {
-            $parsed_url = parse_url($this->target_url);
+            $parsed_url = parse_url($this->remote_reprint_api_url);
             if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
                 $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
                 if (!empty($parsed_url['port'])) {
@@ -9782,7 +9784,7 @@ class ImportClient
         ?string $cursor,
         array $params = []
     ): string {
-        $url = $this->target_url;
+        $url = $this->remote_reprint_api_url;
         $separator = strpos($url, "?") === false ? "?" : "&";
 
         $params["endpoint"] = $endpoint;
@@ -12225,7 +12227,7 @@ if (
         echo "Mirror any WordPress site over HTTP.\n";
         echo "Version " . get_importer_version() . "\n";
         echo "\n";
-        echo "Usage: reprint <command> <remote-url> [options]\n";
+        echo "Usage: reprint <command> <remote-reprint-api-url> [options]\n";
         echo "\n";
 
         $high = array_filter($command_info, fn($i) => ($i['level'] ?? 'low') === 'high');
@@ -12283,7 +12285,7 @@ if (
         }
 
         $info = $command_info[$command];
-        $usage = $info["usage"] ?? "reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]";
+        $usage = $info["usage"] ?? "reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]";
         echo "Usage: {$usage}\n";
         echo "\n";
         echo $info["description"];
@@ -12620,11 +12622,11 @@ if (
         "files-diff" => [
             "level" => "low",
             "short" => "Show local file changes since the last push",
-            "usage" => "reprint files-diff <target-url> --state-dir=DIR --fs-root=DIR",
+            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR",
             "description" =>
                 "Shows which local paths a files-push would send or delete, comparing\n" .
                 "the filesystem root at --fs-root with the pair's previous local index —\n" .
-                "the index a completed files-push publishes for the same target URL,\n" .
+                "the index a completed files-push publishes for the same remote Reprint API URL,\n" .
                 "state directory, and filesystem root.\n" .
                 "The output is a local minimized push operation plan before target\n" .
                 "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
@@ -12641,9 +12643,9 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <target-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
             "description" =>
-                "Sends the existing filesystem root at --fs-root to the target exporter API.\n" .
+                "Sends the existing filesystem root at --fs-root to the remote Reprint API.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
                 "It does not require pull preflight.\n" .
@@ -12873,13 +12875,13 @@ if (
     $is_local_only = in_array($command, $local_only_commands, true);
 
     if ($is_local_only) {
-        $target_url = "-";
+        $remote_reprint_api_url = "-";
         $option_start_index = 2; // options start right after the command
     } else {
-        $target_url = $argv[2] ?? null;
-        if (!$target_url) {
-            fwrite(STDERR, "Error: <remote-url> is required\n");
-            fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        $remote_reprint_api_url = $argv[2] ?? null;
+        if (!$remote_reprint_api_url) {
+            fwrite(STDERR, "Error: <remote-reprint-api-url> is required\n");
+            fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
             exit(1);
         }
         $option_start_index = 3;
@@ -12925,7 +12927,7 @@ if (
 
     if (!$state_dir) {
         fwrite(STDERR, "Error: --state-dir=DIR is required\n");
-        fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
 
@@ -12938,7 +12940,7 @@ if (
     }
     if (!$filesystem_root && !$flat_document_root && $command !== "import-metadata") {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
-        fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
     if (!$filesystem_root) {
@@ -12958,20 +12960,20 @@ if (
         $reprint_files_diff_context = null;
         if ($command === 'files-push') {
             $reprint_files_push_context = ImportClient::prepare_files_push_context(
-                $target_url,
+                $remote_reprint_api_url,
                 $state_dir,
                 $filesystem_root,
                 $options
             );
         } elseif ($command === 'files-diff') {
             $reprint_files_diff_context = ImportClient::prepare_files_pair_context(
-                $target_url,
+                $remote_reprint_api_url,
                 $state_dir,
                 $filesystem_root,
                 'files-diff'
             );
         }
-        $client = new ImportClient($target_url, $state_dir, $filesystem_root, $command);
+        $client = new ImportClient($remote_reprint_api_url, $state_dir, $filesystem_root, $command);
         $reprint_files_pair = $reprint_files_push_context['pair'] ?? ( $reprint_files_diff_context['pair'] ?? null );
         $client->audit_log_argv($command, $argv, $reprint_files_pair);
         $client->run(

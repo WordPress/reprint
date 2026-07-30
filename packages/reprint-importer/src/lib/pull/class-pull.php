@@ -338,7 +338,7 @@ class Pull
             }
         }
 
-        $host = parse_url($this->client->target_url, PHP_URL_HOST) ?? $this->client->target_url;
+        $host = parse_url($this->client->remote_reprint_api_url, PHP_URL_HOST) ?? $this->client->remote_reprint_api_url;
         $bold = "\033[1m";
         $r = "\033[0m";
         $this->progress->print_line("\n{$bold}{$title} {$host}{$r}\n");
@@ -750,10 +750,10 @@ class Pull
      */
     private function normalize_url(): void
     {
-        $url = $this->client->target_url;
+        $url = $this->client->remote_reprint_api_url;
         if (strpos($url, 'site-export-api') === false) {
             $separator = strpos($url, '?') === false ? '?' : '&';
-            $this->client->target_url = $url . $separator . 'site-export-api';
+            $this->client->remote_reprint_api_url = $url . $separator . 'site-export-api';
         }
     }
 

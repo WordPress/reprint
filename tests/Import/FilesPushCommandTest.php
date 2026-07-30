@@ -43,22 +43,22 @@ final class FilesPushCommandTest extends TestCase
         $this->assertNull(ImportClient::files_push_stop_cause(1000.0, PHP_INT_MAX, 0, -1, $chunkBytes));
     }
 
-    public function testPairContextUsesTheTrimmedTargetAndResolvedLocalDocumentRoot(): void
+    public function testPairContextUsesTheTrimmedRemoteReprintApiUrlAndResolvedFilesystemRoot(): void
     {
-        $targetUrl = 'https://example.test/?reprint-api=1&&';
+        $remoteReprintApiUrl = 'https://example.test/?reprint-api=1&&';
         $context = ImportClient::prepare_files_push_context(
-            $targetUrl,
+            $remoteReprintApiUrl,
             $this->stateDirectory,
             $this->localTree,
             ['secret' => 'token', 'force_http' => false]
         );
-        $resolvedLocalDocumentRoot = realpath($this->localTree);
-        $this->assertIsString($resolvedLocalDocumentRoot);
-        $trimmedTargetUrl = rtrim($targetUrl, '?&');
-        $expectedPair = hash('sha256', $trimmedTargetUrl . "\0" . $resolvedLocalDocumentRoot);
+        $resolvedFilesystemRoot = realpath($this->localTree);
+        $this->assertIsString($resolvedFilesystemRoot);
+        $trimmedRemoteReprintApiUrl = rtrim($remoteReprintApiUrl, '?&');
+        $expectedPair = hash('sha256', $trimmedRemoteReprintApiUrl . "\0" . $resolvedFilesystemRoot);
 
-        $this->assertSame($trimmedTargetUrl, $context['target_url']);
-        $this->assertSame($resolvedLocalDocumentRoot, $context['filesystem_root']);
+        $this->assertSame($trimmedRemoteReprintApiUrl, $context['remote_reprint_api_url']);
+        $this->assertSame($resolvedFilesystemRoot, $context['filesystem_root']);
         $this->assertSame($expectedPair, $context['pair']);
         $this->assertSame(
             realpath($this->stateDirectory) . '/push/' . $expectedPair,
@@ -74,7 +74,7 @@ final class FilesPushCommandTest extends TestCase
         $otherTree = $this->root . '/other-tree';
         mkdir($otherTree);
         $differentTree = ImportClient::prepare_files_push_context(
-            $targetUrl,
+            $remoteReprintApiUrl,
             $this->stateDirectory,
             $otherTree,
             ['secret' => 'token', 'force_http' => false]
@@ -143,7 +143,7 @@ final class FilesPushCommandTest extends TestCase
         );
         $this->assertSame(1, $querySecret['exit']);
         $this->assertStringContainsString(
-            'files-push does not accept SECRET_KEY in the target URL; pass --secret=TOKEN.',
+            'files-push does not accept SECRET_KEY in the remote Reprint API URL; pass --secret=TOKEN.',
             $querySecret['output']
         );
         $this->assertStringNotContainsString('query-secret', $querySecret['output']);
@@ -225,8 +225,8 @@ final class FilesPushCommandTest extends TestCase
     public function testFilesPushMasksTheSharedSecretInOutputAndStateFiles(): void
     {
         $secret = 'shared-secret-' . bin2hex(random_bytes(6));
-        $targetUrl = 'https://127.0.0.1:1/?reprint-api=1';
-        $result = $this->runFilesPush($targetUrl, ['--secret=' . $secret]);
+        $remoteReprintApiUrl = 'https://127.0.0.1:1/?reprint-api=1';
+        $result = $this->runFilesPush($remoteReprintApiUrl, ['--secret=' . $secret]);
 
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertStringNotContainsString($secret, $result['output']);
@@ -241,9 +241,9 @@ final class FilesPushCommandTest extends TestCase
 
     public function testCorruptSenderStateUsesTheStructuredWorkflowErrorResult(): void
     {
-        $targetUrl = 'https://127.0.0.1:1/?reprint-api=1';
+        $remoteReprintApiUrl = 'https://127.0.0.1:1/?reprint-api=1';
         $context = ImportClient::prepare_files_push_context(
-            $targetUrl,
+            $remoteReprintApiUrl,
             $this->stateDirectory,
             $this->localTree,
             ['secret' => 'token', 'force_http' => false]
@@ -264,7 +264,7 @@ final class FilesPushCommandTest extends TestCase
             ], JSON_THROW_ON_ERROR)
         );
 
-        $result = $this->runFilesPush($targetUrl, ['--secret=token']);
+        $result = $this->runFilesPush($remoteReprintApiUrl, ['--secret=token']);
 
         $this->assertSame(1, $result['exit'], $result['output']);
         $finalLine = $this->lastJsonLine($result['stdout']);
@@ -293,11 +293,11 @@ final class FilesPushCommandTest extends TestCase
     }
 
     /** @param list<string> $extraOptions */
-    private function runFilesPush(string $targetUrl, array $extraOptions): array
+    private function runFilesPush(string $remoteReprintApiUrl, array $extraOptions): array
     {
         return $this->runCli(array_merge([
             'files-push',
-            $targetUrl,
+            $remoteReprintApiUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->localTree,
         ], $extraOptions));

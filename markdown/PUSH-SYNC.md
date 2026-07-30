@@ -81,8 +81,8 @@ one. It only answers "what changed locally since my last successful push to
 this remote" by comparing the current local paths and rows against the pair's
 previous local index and the previously pushed rows.
 
-The local machine keeps these files **per target URL and resolved local
-tree**, overwritten after each successful commit:
+The local machine keeps these files **per remote Reprint API URL and resolved
+filesystem root**, overwritten after each successful commit:
 
     <state-dir>/push/<pair-key>/previous_local_index.jsonl
     <state-dir>/push/<pair-key>/previously_pushed_rows.jsonl   (phase two)
@@ -406,7 +406,7 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 
 ## Low-level files-push command
 
-`reprint files-push <target-url>` is the production CLI caller for one
+`reprint files-push <remote-reprint-api-url>` is the production CLI caller for one
 `PushFilesSender`. It sends only the resolved filesystem root named by `--fs-root`.
 It requires `--state-dir`, `--fs-root`, and `--secret`; HTTPS is required unless
 the operator passes `--force-http`. It does not run pull preflight, read or
@@ -417,7 +417,7 @@ database, retry a failed request, or start a replacement sender after a
 The command derives one pair key without general URL normalization:
 
 ```text
-sha256(rtrim(<target-url>, "?&") + "\0" + <resolved-filesystem-root>)
+sha256(rtrim(<remote-reprint-api-url>, "?&") + "\0" + <resolved-filesystem-root>)
 ```
 
 Its sender state lives at `<state-dir>/push/<pair-key>/`. A different target
@@ -451,7 +451,7 @@ neither file copies receiver cursors or tentative upload positions.
 
 ## Local files-diff command
 
-`reprint files-diff <target-url> --state-dir=DIR --fs-root=DIR` reports a local
+`reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR` reports a local
 minimized push operation plan before target exclusions: the local paths a
 files-push would send or delete, compared against the pair's previous local
 index published by a completed files-push. It uses the files-push pair-key

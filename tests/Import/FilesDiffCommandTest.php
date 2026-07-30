@@ -228,7 +228,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertCanonicalSingleJsonLine($result['stderr']);
         $this->assertStringContainsString('completed files-push', $result['output']);
         $this->assertStringContainsString(
-            'same target URL, state directory, and filesystem root',
+            'same remote Reprint API URL, state directory, and filesystem root',
             $result['output']
         );
     }
@@ -244,7 +244,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertCanonicalSingleJsonLine($result['stderr']);
         $this->assertStringContainsString('completed files-push', $result['output']);
         $this->assertStringContainsString(
-            'same target URL, state directory, and filesystem root',
+            'same remote Reprint API URL, state directory, and filesystem root',
             $result['output']
         );
     }

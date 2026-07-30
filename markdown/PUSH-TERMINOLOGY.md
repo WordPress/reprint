@@ -15,11 +15,9 @@ is filesystem-absolute, filesystem-root-relative, or document-root-relative.
   filesystem is reconstructed and whose contents are compared, pulled, and
   pushed. Use `$filesystem_root`.
 - A **target** is the site addressed by the configured exporter API URL. It is
-  the source during pull and the destination during push. Use `$target_url`.
-- The **target base URL** removes URL user-info, `SECRET_KEY`, and the
-  `site-export-api` alias from the target URL. Use `$target_base_url`.
-- The **target fingerprint** is the SHA-256 of the target base URL and is
-  only a directory-safe identifier. Use `$target_fingerprint`.
+  the source during pull and the destination during push.
+- The **remote Reprint API URL** is the configured URL used for Reprint
+  requests. Use `$remote_reprint_api_url`.
 - The **target document root** is the absolute document root on the target
   machine. Use `$target_document_root`.
 
@@ -74,11 +72,10 @@ maps every relevant filesystem-root-relative path to exactly one target document
 target document root; an **ambiguous mapping** has more than one target path,
 and an **unaddressable mapping** has none. An **identity mapping** leaves local
 and target document paths identical. `path-mapping.json` stores the resolved
-path mapping for its target.
+path mapping.
 
-A state directory belongs to one filesystem root and may contain several
-targets. Target-specific state is keyed by target fingerprint. Reusing mapped
-target state with another filesystem root is rejected.
+A state directory belongs to one filesystem root. Reusing its mapping state
+with another filesystem root is rejected.
 
 ## Core nouns
 
@@ -269,7 +266,7 @@ reports `complete`, `restart`, or `failed`.
 
 ## Files-diff CLI names
 
-The local-only command is `files-diff`. Its `target URL`, `filesystem root`, `pair
+The local-only command is `files-diff`. Its `remote Reprint API URL`, `filesystem root`, `pair
 key`, and `local push state directory` have the same meanings and pair-key
 formula as `files-push`. It reads the pair's `previous_local_index.jsonl`,
 which a completed files-push publishes, and never changes it.
@@ -291,15 +288,15 @@ running the command again prints the complete report.
 
 ## Files-push CLI names
 
-The low-level, files-only command is `files-push`. Its `target URL` is the
+The low-level, files-only command is `files-push`. Its `remote Reprint API URL` is the
 exporter API URL, and its `filesystem root` is the resolved absolute directory supplied by
 `--fs-root`. It requires `--secret=TOKEN`; `--force-http` is the explicit
 plain-HTTP opt-in.
 
-The `pair key` identifies exactly one target URL and resolved filesystem root:
+The `pair key` identifies exactly one remote Reprint API URL and resolved filesystem root:
 
 ```text
-sha256(rtrim(<target-url>, "?&") + "\0" + <resolved-filesystem-root>)
+sha256(rtrim(<remote-reprint-api-url>, "?&") + "\0" + <resolved-filesystem-root>)
 ```
 
 The `local push state directory` is `<state-dir>/push/<pair-key>/`. `files-push`
