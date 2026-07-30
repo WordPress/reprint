@@ -9,7 +9,7 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../importer/import.php';
 
-final class IndexUpdateWalTest extends TestCase
+final class LocalIndexWalTest extends TestCase
 {
     private string $root;
     private string $stateDirectory;
@@ -18,7 +18,7 @@ final class IndexUpdateWalTest extends TestCase
     protected function setUp(): void
     {
         $this->root = sys_get_temp_dir()
-            . '/index-update-wal-'
+            . '/local-index-wal-'
             . bin2hex(random_bytes(6));
         $this->stateDirectory = $this->root . '/state';
         $this->fileRoot = $this->root . '/files';
@@ -31,29 +31,29 @@ final class IndexUpdateWalTest extends TestCase
         $this->removeTree($this->root);
     }
 
-    public function testAppliedBatchLeavesTheWalMarkerUntilCompletion(): void
+    public function testAppliedBatchLeavesTheLocalIndexWalMarkerUntilCompletion(): void
     {
         $client = $this->client();
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('record_index_update_file')->invoke(
+        $reflection->getMethod('record_local_index_wal_file')->invoke(
             $client,
             '/site/file.txt',
             42,
             5,
             'file'
         );
-        $reflection->getMethod('apply_index_update_wal')->invoke($client);
+        $reflection->getMethod('apply_local_index_wal')->invoke($client);
 
-        $walPath = $this->stateDirectory . '/.import-index-updates.wal';
-        $this->assertFileExists($walPath);
-        $this->assertSame('', file_get_contents($walPath));
+        $localIndexWalPath = $this->stateDirectory . '/.import-local-index.wal';
+        $this->assertFileExists($localIndexWalPath);
+        $this->assertSame('', file_get_contents($localIndexWalPath));
         $this->assertSame(
             '/site/file.txt',
             $this->firstIndexPath()
         );
 
-        $reflection->getMethod('remove_index_update_wal')->invoke($client);
-        $this->assertFileDoesNotExist($walPath);
+        $reflection->getMethod('remove_local_index_wal')->invoke($client);
+        $this->assertFileDoesNotExist($localIndexWalPath);
     }
 
     public function testReplayDiscardsAnUnterminatedFinalRecord(): void
@@ -66,19 +66,19 @@ final class IndexUpdateWalTest extends TestCase
             'type' => 'file',
         ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
         file_put_contents(
-            $this->stateDirectory . '/.import-index-updates.wal',
+            $this->stateDirectory . '/.import-local-index.wal',
             $completeRecord . '{"op":"F","path":"'
         );
 
         $client = $this->client();
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('replay_index_update_wal')->invoke($client);
+        $reflection->getMethod('replay_local_index_wal')->invoke($client);
 
         $this->assertSame('/site/complete.txt', $this->firstIndexPath());
         $this->assertSame(
             '',
             file_get_contents(
-                $this->stateDirectory . '/.import-index-updates.wal'
+                $this->stateDirectory . '/.import-local-index.wal'
             )
         );
     }
@@ -86,10 +86,10 @@ final class IndexUpdateWalTest extends TestCase
     /**
      * @dataProvider abortCommandProvider
      */
-    public function testAbortReplaysAndRemovesTheWal(string $command): void
+    public function testAbortReplaysAndRemovesTheLocalIndexWal(string $command): void
     {
         file_put_contents(
-            $this->stateDirectory . '/.import-index-updates.wal',
+            $this->stateDirectory . '/.import-local-index.wal',
             json_encode([
                 'op' => 'F',
                 'path' => base64_encode('/site/aborted.txt'),
@@ -115,7 +115,7 @@ final class IndexUpdateWalTest extends TestCase
 
         $this->assertSame('/site/aborted.txt', $this->firstIndexPath());
         $this->assertFileDoesNotExist(
-            $this->stateDirectory . '/.import-index-updates.wal'
+            $this->stateDirectory . '/.import-local-index.wal'
         );
     }
 

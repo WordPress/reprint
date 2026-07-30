@@ -287,37 +287,37 @@ class ImportClient
     private $local_index_file;
 
     /**
-     * @var string Path to .import-index-updates.wal — the append-only write-ahead
+     * @var string Path to .import-local-index.wal — the append-only write-ahead
      * log for the current files-pull. Applied batches are cleared, but the file
      * remains until the lifecycle completes or is aborted.
      */
-    private $index_update_wal_path;
+    private $local_index_wal_path;
 
-    /** @var resource|null Open file handle for $index_update_wal_path while writing. */
-    private $index_update_wal_handle;
+    /** @var resource|null Open file handle for $local_index_wal_path while writing. */
+    private $local_index_wal_handle;
 
-    /** @var int Number of entries written to the open WAL batch. */
-    private $index_update_wal_record_count = 0;
+    /** @var int Number of entries written to the open local index WAL batch. */
+    private $local_index_wal_record_count = 0;
 
     /**
-     * Deduplication state for index updates. Consecutive upsert_index_entry() or
-     * delete_index_entry() calls for the same path are collapsed into one WAL write.
+     * Deduplication state for local index WAL records. Consecutive upsert_index_entry() or
+     * delete_index_entry() calls for the same path are collapsed into one local index WAL write.
      *
-     * @var string|null Last path written to the index-update WAL.
+     * @var string|null Last path written to the local index WAL.
      */
-    private $last_update_path = null;
+    private $last_local_index_wal_path = null;
 
-    /** @var bool|null Whether the last index update was a deletion (true) or upsert (false). */
-    private $last_update_delete = null;
+    /** @var bool|null Whether the last local index WAL record was a deletion (true) or upsert (false). */
+    private $last_local_index_wal_deletion = null;
 
-    /** @var int|null ctime of the last upserted index entry. */
-    private $last_update_ctime = null;
+    /** @var int|null ctime of the last local index WAL file record. */
+    private $last_local_index_wal_ctime = null;
 
     /** @var int|null Size in bytes of the last upserted index entry. */
-    private $last_update_size = null;
+    private $last_local_index_wal_size = null;
 
     /** @var string|null Type ("file", "link", "dir") of the last upserted index entry. */
-    private $last_update_type = null;
+    private $last_local_index_wal_type = null;
 
     /**
      * @var string Remote index file .import-remote-index.jsonl, including
@@ -556,8 +556,8 @@ class ImportClient
         $this->filesystem_root = rtrim($filesystem_root, "/");
         $this->state_file = $this->state_dir . "/.import-state.json";
         $this->local_index_file = $this->state_dir . "/.import-index.jsonl";
-        $this->index_update_wal_path =
-            $this->state_dir . "/.import-index-updates.wal";
+        $this->local_index_wal_path =
+            $this->state_dir . "/.import-local-index.wal";
         $this->remote_index_file =
             $this->state_dir . "/.import-remote-index.jsonl";
         $this->fetch_list_file =
@@ -619,7 +619,7 @@ class ImportClient
         int $size,
         string $type
     ): void {
-        $this->record_index_update_file($path, $ctime, $size, $type);
+        $this->record_local_index_wal_file($path, $ctime, $size, $type);
     }
 
     /**
@@ -627,14 +627,14 @@ class ImportClient
      */
     private function delete_index_entry(string $path): void
     {
-        $this->record_index_update_deletion($path);
+        $this->record_local_index_wal_deletion($path);
     }
 
-    /** Replays a WAL left by an interrupted batch. */
-    private function replay_index_update_wal(): void
+    /** Replays a local index WAL left by an interrupted batch. */
+    private function replay_local_index_wal(): void
     {
-        if (is_file($this->index_update_wal_path)) {
-            $this->apply_index_update_wal();
+        if (is_file($this->local_index_wal_path)) {
+            $this->apply_local_index_wal();
         }
     }
 
@@ -2066,12 +2066,12 @@ class ImportClient
             "RESTART | Clearing files-pull progress (keeping local index and files)",
             true,
         );
-        // Replay the WAL before clearing the cursor which made its records durable.
-        $this->replay_index_update_wal();
-        $this->remove_index_update_wal();
+        // Replay the local index WAL before clearing the cursor which made its records durable.
+        $this->replay_local_index_wal();
+        $this->remove_local_index_wal();
         $this->reset_state();
-        $this->index_update_wal_handle = null;
-        $this->index_update_wal_record_count = 0;
+        $this->local_index_wal_handle = null;
+        $this->local_index_wal_record_count = 0;
 
         if (file_exists($this->remote_index_file)) {
             @unlink($this->remote_index_file);
@@ -2731,13 +2731,13 @@ class ImportClient
             $current_status !== null &&
             $current_status !== "complete";
 
-        $this->replay_index_update_wal();
+        $this->replay_local_index_wal();
         $this->assert_files_pull_only_unchanged_while_resuming($has_progress);
         $this->assert_symlink_bundle_directory_unchanged();
 
         // Already completed.
         if ($current_status === "complete") {
-            $this->remove_index_update_wal();
+            $this->remove_local_index_wal();
             $has_skipped =
                 file_exists($this->skipped_fetch_list_file) &&
                 filesize($this->skipped_fetch_list_file) > 0;
@@ -2769,7 +2769,7 @@ class ImportClient
                 $this->import_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
                 $this->import_state()->files_pull_summary = new FilesPullSummaryState();
                 $this->save_state($this->state);
-                $this->open_index_update_wal();
+                $this->open_local_index_wal();
                 $this->run_files_sync_pipeline();
                 // The deferred tail reopens a completed files-pull. Once the
                 // tail finishes, restore the completed status so later filter
@@ -2779,7 +2779,7 @@ class ImportClient
                 }
                 $this->import_state()->active_resumable_command->completion_state = "complete";
                 $this->save_state($this->state);
-                $this->remove_index_update_wal();
+                $this->remove_local_index_wal();
                 return;
             }
 
@@ -2933,7 +2933,7 @@ class ImportClient
         $this->import_state()->active_resumable_command->completion_state = "in_progress";
         $this->save_state($this->state);
 
-        $this->open_index_update_wal();
+        $this->open_local_index_wal();
         $this->run_files_sync_pipeline();
 
         // Pipeline returns early with partial status if interrupted
@@ -2943,7 +2943,7 @@ class ImportClient
 
         $this->import_state()->active_resumable_command->completion_state = "complete";
         $this->save_state($this->state);
-        $this->remove_index_update_wal();
+        $this->remove_local_index_wal();
 
         $this->progress->clear_progress_line();
         $index_size = $this->index_count();
@@ -6148,7 +6148,7 @@ class ImportClient
              * chunk. The part cursor points past the complete chunk, so saving it
              * early would make resume skip the missing suffix.
              *
-             * On the closing callback, flush the file and index-update WAL
+             * On the closing callback, flush the file and local index WAL
              * before storing the cursor in .import-state.json. If the response
              * stops first, state retains the preceding cursor; resume truncates
              * the later bytes and requests the multipart part again.
@@ -6180,10 +6180,10 @@ class ImportClient
                         $this->import_state()->current_file_bytes = null;
                     }
                     if (
-                        $this->index_update_wal_handle
-                        && !fflush($this->index_update_wal_handle)
+                        $this->local_index_wal_handle
+                        && !fflush($this->local_index_wal_handle)
                     ) {
-                        throw new RuntimeException('Failed to flush the index-update WAL.');
+                        throw new RuntimeException('Failed to flush the local index WAL.');
                     }
                     $this->get_fetch_list_progress_state($state_key)->cursor = $cursor;
                     $this->save_state($this->state);
@@ -6220,7 +6220,7 @@ class ImportClient
                 fclose($context->file_handle);
                 $context->file_handle = null;
             }
-            $this->apply_index_update_wal();
+            $this->apply_local_index_wal();
             $this->import_state()->active_resumable_command->completion_state = "partial";
             $this->save_state($this->state);
             return false;
@@ -6234,7 +6234,7 @@ class ImportClient
             $context->response_stats ?? [],
         );
         $this->get_fetch_list_progress_state($state_key)->cursor = $cursor;
-        $this->apply_index_update_wal();
+        $this->apply_local_index_wal();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
             if (!fflush($context->file_handle)) {
@@ -6571,7 +6571,7 @@ class ImportClient
                 $local_index_entry = $this->read_index_line($local_index_handle);
             }
         }
-        $this->open_index_update_wal();
+        $this->open_local_index_wal();
         $processed = 0;
 
         while (($line = fgets($remote_index_handle)) !== false) {
@@ -6670,10 +6670,10 @@ class ImportClient
                 $this->import_state()->diff->remote_offset = $remote_offset;
                 $this->import_state()->diff->local_after = $last_local_index_entry_path;
                 if (
-                    $this->index_update_wal_handle
-                    && !fflush($this->index_update_wal_handle)
+                    $this->local_index_wal_handle
+                    && !fflush($this->local_index_wal_handle)
                 ) {
-                    throw new RuntimeException('Failed to flush the index-update WAL.');
+                    throw new RuntimeException('Failed to flush the local index WAL.');
                 }
                 $this->save_state($this->state);
                 $this->progress->tick_spinner();
@@ -6701,7 +6701,7 @@ class ImportClient
 
         $this->import_state()->diff->remote_offset = $remote_offset;
         $this->import_state()->diff->local_after = $last_local_index_entry_path;
-        $this->apply_index_update_wal();
+        $this->apply_local_index_wal();
         $this->save_state($this->state);
 
         return !$this->shutdown_requested;
@@ -7156,48 +7156,48 @@ class ImportClient
         ];
     }
 
-    /** Opens the current index-update WAL for append. */
-    private function open_index_update_wal(): void
+    /** Opens the current local index WAL for append. */
+    private function open_local_index_wal(): void
     {
-        if ($this->index_update_wal_handle) {
+        if ($this->local_index_wal_handle) {
             return;
         }
-        $is_new = !is_file($this->index_update_wal_path);
-        $this->index_update_wal_handle = fopen($this->index_update_wal_path, "a");
-        if (!$this->index_update_wal_handle) {
-            throw new RuntimeException("Failed to open the index-update WAL.");
+        $is_new = !is_file($this->local_index_wal_path);
+        $this->local_index_wal_handle = fopen($this->local_index_wal_path, "a");
+        if (!$this->local_index_wal_handle) {
+            throw new RuntimeException("Failed to open the local index WAL.");
         }
         if ($is_new) {
             $this->audit_log(
-                "FILE CREATE | {$this->index_update_wal_path} | index-update WAL",
+                "FILE CREATE | {$this->local_index_wal_path} | local index WAL",
             );
         }
-        $this->index_update_wal_record_count = 0;
-        $this->last_update_path = null;
-        $this->last_update_delete = null;
-        $this->last_update_ctime = null;
-        $this->last_update_size = null;
-        $this->last_update_type = null;
+        $this->local_index_wal_record_count = 0;
+        $this->last_local_index_wal_path = null;
+        $this->last_local_index_wal_deletion = null;
+        $this->last_local_index_wal_ctime = null;
+        $this->last_local_index_wal_size = null;
+        $this->last_local_index_wal_type = null;
     }
 
     /**
-     * Record a file upsert in the index-update WAL.
+     * Record a file upsert in the local index WAL.
      */
-    private function record_index_update_file(
+    private function record_local_index_wal_file(
         string $path,
         int $ctime,
         int $size,
         string $type
     ): void {
-        if (!$this->index_update_wal_handle) {
-            $this->open_index_update_wal();
+        if (!$this->local_index_wal_handle) {
+            $this->open_local_index_wal();
         }
         if (
-            $this->last_update_path === $path &&
-            $this->last_update_delete === false &&
-            $this->last_update_ctime === $ctime &&
-            $this->last_update_size === $size &&
-            $this->last_update_type === $type
+            $this->last_local_index_wal_path === $path &&
+            $this->last_local_index_wal_deletion === false &&
+            $this->last_local_index_wal_ctime === $ctime &&
+            $this->last_local_index_wal_size === $size &&
+            $this->last_local_index_wal_type === $type
         ) {
             return;
         }
@@ -7213,30 +7213,30 @@ class ImportClient
         );
         if ($line !== false) {
             $line .= "\n";
-            $bytes = fwrite($this->index_update_wal_handle, $line);
+            $bytes = fwrite($this->local_index_wal_handle, $line);
             if ($bytes !== strlen($line)) {
-                throw new RuntimeException("Failed to write to the index-update WAL (disk full?).");
+                throw new RuntimeException("Failed to write to the local index WAL (disk full?).");
             }
         }
-        $this->index_update_wal_record_count++;
-        $this->last_update_path = $path;
-        $this->last_update_delete = false;
-        $this->last_update_ctime = $ctime;
-        $this->last_update_size = $size;
-        $this->last_update_type = $type;
+        $this->local_index_wal_record_count++;
+        $this->last_local_index_wal_path = $path;
+        $this->last_local_index_wal_deletion = false;
+        $this->last_local_index_wal_ctime = $ctime;
+        $this->last_local_index_wal_size = $size;
+        $this->last_local_index_wal_type = $type;
     }
 
     /**
-     * Record a deletion in the index-update WAL.
+     * Record a deletion in the local index WAL.
      */
-    private function record_index_update_deletion(string $path): void
+    private function record_local_index_wal_deletion(string $path): void
     {
-        if (!$this->index_update_wal_handle) {
-            $this->open_index_update_wal();
+        if (!$this->local_index_wal_handle) {
+            $this->open_local_index_wal();
         }
         if (
-            $this->last_update_path === $path &&
-            $this->last_update_delete === true
+            $this->last_local_index_wal_path === $path &&
+            $this->last_local_index_wal_deletion === true
         ) {
             return;
         }
@@ -7249,59 +7249,59 @@ class ImportClient
         );
         if ($line !== false) {
             $line .= "\n";
-            $bytes = fwrite($this->index_update_wal_handle, $line);
+            $bytes = fwrite($this->local_index_wal_handle, $line);
             if ($bytes !== strlen($line)) {
-                throw new RuntimeException("Failed to write to the index-update WAL (disk full?).");
+                throw new RuntimeException("Failed to write to the local index WAL (disk full?).");
             }
         }
-        $this->index_update_wal_record_count++;
-        $this->last_update_path = $path;
-        $this->last_update_delete = true;
-        $this->last_update_ctime = null;
-        $this->last_update_size = null;
-        $this->last_update_type = null;
+        $this->local_index_wal_record_count++;
+        $this->last_local_index_wal_path = $path;
+        $this->last_local_index_wal_deletion = true;
+        $this->last_local_index_wal_ctime = null;
+        $this->last_local_index_wal_size = null;
+        $this->last_local_index_wal_type = null;
     }
 
-    /** Applies the current WAL to the import index. */
-    private function apply_index_update_wal(): void
+    /** Applies the current local index WAL to the local index. */
+    private function apply_local_index_wal(): void
     {
-        if ($this->index_update_wal_handle) {
-            $closed = fclose($this->index_update_wal_handle);
-            $this->index_update_wal_handle = null;
+        if ($this->local_index_wal_handle) {
+            $closed = fclose($this->local_index_wal_handle);
+            $this->local_index_wal_handle = null;
             if (!$closed) {
-                throw new RuntimeException("Failed to flush the index-update WAL.");
+                throw new RuntimeException("Failed to flush the local index WAL.");
             }
         }
-        $this->last_update_path = null;
-        $this->last_update_delete = null;
-        $this->last_update_ctime = null;
-        $this->last_update_size = null;
-        $this->last_update_type = null;
+        $this->last_local_index_wal_path = null;
+        $this->last_local_index_wal_deletion = null;
+        $this->last_local_index_wal_ctime = null;
+        $this->last_local_index_wal_size = null;
+        $this->last_local_index_wal_type = null;
 
-        $has_updates =
-            $this->index_update_wal_record_count > 0 ||
-            (is_file($this->index_update_wal_path) &&
-                filesize($this->index_update_wal_path) > 0);
+        $has_local_index_wal_records =
+            $this->local_index_wal_record_count > 0 ||
+            (is_file($this->local_index_wal_path) &&
+                filesize($this->local_index_wal_path) > 0);
 
-        if (!$has_updates) {
-            $this->index_update_wal_record_count = 0;
+        if (!$has_local_index_wal_records) {
+            $this->local_index_wal_record_count = 0;
             return;
         }
 
         $new_index = $this->local_index_file . ".new";
 
         $this->audit_log(
-            "INDEX MERGE START | merging updates into {$this->local_index_file}",
+            "INDEX MERGE START | merging local index WAL into {$this->local_index_file}",
         );
 
         $old_handle = file_exists($this->local_index_file)
             ? fopen($this->local_index_file, "r")
             : null;
-        $upd_handle = fopen($this->index_update_wal_path, "r");
+        $local_index_wal_read_handle = fopen($this->local_index_wal_path, "r");
         $new_handle = fopen($new_index, "w");
 
-        if (!$upd_handle || !$new_handle) {
-            throw new RuntimeException("Failed to merge index updates");
+        if (!$local_index_wal_read_handle || !$new_handle) {
+            throw new RuntimeException("Failed to merge local index WAL records");
         }
 
         $write_line = function ($handle, array $entry): void {
@@ -7320,12 +7320,15 @@ class ImportClient
         };
 
         $old = $this->read_index_line($old_handle);
-        $carry = null;
-        $upd = $this->read_update_line($upd_handle, $carry);
+        $local_index_wal_lookahead_entry = null;
+        $local_index_wal_entry = $this->read_local_index_wal_line(
+            $local_index_wal_read_handle,
+            $local_index_wal_lookahead_entry
+        );
         $last_written_path = null;
 
-        while ($old !== null || $upd !== null) {
-            if ($upd === null) {
+        while ($old !== null || $local_index_wal_entry !== null) {
+            if ($local_index_wal_entry === null) {
                 if ($last_written_path !== $old["path"]) {
                     $write_line($new_handle, $old);
                     $last_written_path = $old["path"];
@@ -7335,22 +7338,34 @@ class ImportClient
             }
 
             if ($old === null) {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
+                if (
+                    !$local_index_wal_entry["delete"] &&
+                    $last_written_path !== $local_index_wal_entry["path"]
+                ) {
+                    $write_line($new_handle, $local_index_wal_entry);
+                    $last_written_path = $local_index_wal_entry["path"];
                 }
-                $upd = $this->read_update_line($upd_handle, $carry);
+                $local_index_wal_entry = $this->read_local_index_wal_line(
+                    $local_index_wal_read_handle,
+                    $local_index_wal_lookahead_entry
+                );
                 continue;
             }
 
-            $cmp = strcmp($old["path"], $upd["path"]);
+            $cmp = strcmp($old["path"], $local_index_wal_entry["path"]);
             if ($cmp === 0) {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
+                if (
+                    !$local_index_wal_entry["delete"] &&
+                    $last_written_path !== $local_index_wal_entry["path"]
+                ) {
+                    $write_line($new_handle, $local_index_wal_entry);
+                    $last_written_path = $local_index_wal_entry["path"];
                 }
                 $old = $this->read_index_line($old_handle);
-                $upd = $this->read_update_line($upd_handle, $carry);
+                $local_index_wal_entry = $this->read_local_index_wal_line(
+                    $local_index_wal_read_handle,
+                    $local_index_wal_lookahead_entry
+                );
             } elseif ($cmp < 0) {
                 if ($last_written_path !== $old["path"]) {
                     $write_line($new_handle, $old);
@@ -7358,18 +7373,24 @@ class ImportClient
                 }
                 $old = $this->read_index_line($old_handle);
             } else {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
+                if (
+                    !$local_index_wal_entry["delete"] &&
+                    $last_written_path !== $local_index_wal_entry["path"]
+                ) {
+                    $write_line($new_handle, $local_index_wal_entry);
+                    $last_written_path = $local_index_wal_entry["path"];
                 }
-                $upd = $this->read_update_line($upd_handle, $carry);
+                $local_index_wal_entry = $this->read_local_index_wal_line(
+                    $local_index_wal_read_handle,
+                    $local_index_wal_lookahead_entry
+                );
             }
         }
 
         if ($old_handle) {
             fclose($old_handle);
         }
-        fclose($upd_handle);
+        fclose($local_index_wal_read_handle);
         fclose($new_handle);
 
         if (!rename($new_index, $this->local_index_file)) {
@@ -7377,38 +7398,38 @@ class ImportClient
         }
         $this->audit_log("INDEX MERGE COMPLETE | {$this->local_index_file} updated");
 
-        if (file_put_contents($this->index_update_wal_path, '') === false) {
-            throw new RuntimeException("Failed to clear the applied index-update WAL.");
+        if (file_put_contents($this->local_index_wal_path, '') === false) {
+            throw new RuntimeException("Failed to clear the applied local index WAL.");
         }
         $this->audit_log(
-            "FILE TRUNCATE | {$this->index_update_wal_path} | WAL batch applied"
+            "FILE TRUNCATE | {$this->local_index_wal_path} | local index WAL batch applied"
         );
-        $this->index_update_wal_record_count = 0;
+        $this->local_index_wal_record_count = 0;
     }
 
-    /** Removes the WAL marker after files-pull completes or is aborted. */
-    private function remove_index_update_wal(): void
+    /** Removes the local index WAL marker after files-pull completes or is aborted. */
+    private function remove_local_index_wal(): void
     {
-        if (is_resource($this->index_update_wal_handle)) {
-            if (!fclose($this->index_update_wal_handle)) {
-                throw new RuntimeException("Failed to flush the index-update WAL.");
+        if (is_resource($this->local_index_wal_handle)) {
+            if (!fclose($this->local_index_wal_handle)) {
+                throw new RuntimeException("Failed to flush the local index WAL.");
             }
-            $this->index_update_wal_handle = null;
+            $this->local_index_wal_handle = null;
         }
-        clearstatcache(true, $this->index_update_wal_path);
+        clearstatcache(true, $this->local_index_wal_path);
         if (
-            is_file($this->index_update_wal_path)
-            && filesize($this->index_update_wal_path) > 0
+            is_file($this->local_index_wal_path)
+            && filesize($this->local_index_wal_path) > 0
         ) {
-            throw new RuntimeException("Cannot remove an unapplied index-update WAL.");
+            throw new RuntimeException("Cannot remove an unapplied local index WAL.");
         }
         if (
-            is_file($this->index_update_wal_path)
-            && !unlink($this->index_update_wal_path)
+            is_file($this->local_index_wal_path)
+            && !unlink($this->local_index_wal_path)
         ) {
-            throw new RuntimeException("Failed to remove the index-update WAL.");
+            throw new RuntimeException("Failed to remove the local index WAL.");
         }
-        $this->index_update_wal_record_count = 0;
+        $this->local_index_wal_record_count = 0;
     }
 
     /**
@@ -7429,9 +7450,9 @@ class ImportClient
     }
 
     /**
-     * Read one raw update record (F/D) from the updates file.
+     * Read one raw local index WAL record (F/D).
      */
-    private function read_update_line_raw($handle): ?array
+    private function read_local_index_wal_line_raw($handle): ?array
     {
         if (!$handle) {
             return null;
@@ -7446,16 +7467,16 @@ class ImportClient
             }
             $data = json_decode($line, true);
             if (!is_array($data)) {
-                throw new RuntimeException("Invalid index update line format");
+                throw new RuntimeException("Invalid local index WAL line format");
             }
             $op = $data["op"] ?? null;
             $path_encoded = $data["path"] ?? null;
             if (!is_string($path_encoded) || $path_encoded === "") {
-                throw new RuntimeException("Invalid index update path");
+                throw new RuntimeException("Invalid local index WAL path");
             }
             $path = base64_decode($path_encoded);
             if ($path === false || $path === "") {
-                throw new RuntimeException("Invalid index update path (base64 decode failed)");
+                throw new RuntimeException("Invalid local index WAL path (base64 decode failed)");
             }
             if ($op === "D") {
                 return [
@@ -7480,24 +7501,24 @@ class ImportClient
     }
 
     /**
-     * Read one update record, coalescing consecutive updates to the same path.
+     * Read one local index WAL record, coalescing consecutive records for the same path.
      *
-     * @param mixed $handle Update file handle
-     * @param array|null $carry Read-ahead buffer for the next record
+     * @param mixed $handle Local index WAL file handle
+     * @param array|null $carry Local index WAL lookahead entry
      */
-    private function read_update_line($handle, ?array &$carry = null): ?array
+    private function read_local_index_wal_line($handle, ?array &$carry = null): ?array
     {
         if (!$handle) {
             return null;
         }
-        $current = $carry ?? $this->read_update_line_raw($handle);
+        $current = $carry ?? $this->read_local_index_wal_line_raw($handle);
         $carry = null;
         if ($current === null) {
             return null;
         }
 
         while (true) {
-            $next = $this->read_update_line_raw($handle);
+            $next = $this->read_local_index_wal_line_raw($handle);
             if ($next === null) {
                 return $current;
             }
@@ -7505,7 +7526,7 @@ class ImportClient
                 $carry = $next;
                 return $current;
             }
-            // Same path: keep the latest update.
+            // Same path: keep the latest local index WAL record.
             $current = $next;
         }
     }
@@ -11443,12 +11464,12 @@ class ImportClient
         $this->shutdown_requested = true;
         $this->progress->clear_progress_line();
 
-        if (is_resource($this->index_update_wal_handle)) {
+        if (is_resource($this->local_index_wal_handle)) {
             try {
-                $this->apply_index_update_wal();
+                $this->apply_local_index_wal();
             } catch (Exception $e) {
                 $this->audit_log(
-                    "Failed to apply the index-update WAL on shutdown: " .
+                    "Failed to apply the local index WAL on shutdown: " .
                         $e->getMessage(),
                     true,
                 );

@@ -56,8 +56,8 @@ local relative path to a push-root-relative path.
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
-- The **index-update WAL** records completed pull mutations awaiting application
-  to the remote and local indexes.
+- The **local index WAL** records completed pull mutations awaiting application
+  to the local index.
 - A **pull plan** lists remote absolute paths still scheduled for download or
   deletion. A **push plan** pairs local relative paths with push-root-relative
   paths.
@@ -171,11 +171,11 @@ none. `PushFilesSender::start()` and `PushFilesSender::resume()` receive that
 open lock from the caller; sender `close()` does not release it. This local
 lock is separate from the receiver's push-session and commit locks.
 
-## Pull index-update WAL
+## Pull local index WAL
 
-Call the single pull-side write-ahead log the **index-update WAL**. It lives at
-`<state-dir>/.import-index-updates.wal`; use `.import-index-updates.wal`,
-`$index_update_wal_path`, and `$index_update_wal_handle`.
+Call the single pull-side write-ahead log the **local index WAL**. It lives at
+`<state-dir>/.import-local-index.wal`; use `.import-local-index.wal`,
+`$local_index_wal_path`, and `$local_index_wal_handle`.
 Applied batch records are cleared, but the empty WAL remains as a marker until
 files-pull completes. A retained WAL is consumed only while resuming or
 aborting the interrupted files-pull, including through a high-level pull
