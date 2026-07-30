@@ -153,9 +153,9 @@ class PlaygroundCliApplier implements RuntimeApplier
     {
         $mounts = [];
         $runtime_file_mounts = [
-            'STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE'
+            'REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE'
                 => '/tmp/reprint/.import-state.json',
-            'STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'
+            'REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'
                 => '/tmp/reprint/.import-fetch-list-skipped.jsonl',
         ];
 

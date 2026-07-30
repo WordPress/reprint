@@ -3,10 +3,10 @@
  * Loader for MySQL lexer, parser, and query stream classes.
  *
  * The lexer, parser, and grammar come from the WordPress/sqlite-database-integration
- * submodule at lib/sqlite-database-integration/. Its root loader selects the
- * optional native Rust parser classes when the wp_mysql_parser extension is
- * loaded and falls back to the pure-PHP parser otherwise. The query streams are
- * local to this project.
+ * submodule at lib/sqlite-database-integration/. The mysql-on-sqlite package
+ * loader selects the optional native Rust parser classes when the
+ * wp_mysql_parser extension is loaded and falls back to the pure-PHP parser
+ * otherwise. The query streams are local to this project.
  *
  * If you see "failed to open stream" errors, run:
  *   git submodule update --init
@@ -14,8 +14,8 @@
 
 $sdi_loader = null;
 foreach ([
-    dirname(__DIR__, 5) . '/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php',
-    dirname(__DIR__, 6) . '/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php',
+    dirname(__DIR__, 5) . '/lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php',
+    dirname(__DIR__, 6) . '/lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php',
 ] as $candidate) {
     if (file_exists($candidate)) {
         $sdi_loader = $candidate;

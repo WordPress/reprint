@@ -41,15 +41,9 @@ require_once __DIR__ . '/lib/wp-stubs.php';
 
 // Streaming protocol parsers.
 require_once __DIR__ . '/lib/protocol/class-multipart-stream-parser.php';
-if (!class_exists('MultipartStreamParser', false)) {
-    class_alias(\Reprint\Importer\Protocol\MultipartStreamParser::class, 'MultipartStreamParser');
-}
 
 // Adaptive request sizing and pacing.
 require_once __DIR__ . '/lib/tuning/class-adaptive-tuner.php';
-if (!class_exists('AdaptiveTuner', false)) {
-    class_alias(\Reprint\Importer\Tuning\AdaptiveTuner::class, 'AdaptiveTuner');
-}
 
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
@@ -176,21 +170,10 @@ register_shutdown_function(function () {
 
 function resolve_sqlite_integration_path(string $suffix = ''): string
 {
-    $suffixes = [$suffix];
-    $moved_paths = [
-        '/php-polyfills.php' => '/packages/mysql-on-sqlite/src/php-polyfills.php',
-        '/version.php' => '/packages/mysql-on-sqlite/src/version.php',
-    ];
-    if (isset($moved_paths[$suffix])) {
-        $suffixes[] = $moved_paths[$suffix];
-    }
-
     foreach ([dirname(__DIR__, 3), dirname(__DIR__, 4)] as $project_root) {
-        foreach ($suffixes as $candidate_suffix) {
-            $candidate = $project_root . '/lib/sqlite-database-integration' . $candidate_suffix;
-            if (file_exists($candidate)) {
-                return $candidate;
-            }
+        $candidate = $project_root . '/lib/sqlite-database-integration' . $suffix;
+        if (file_exists($candidate)) {
+            return $candidate;
         }
     }
 
@@ -207,9 +190,6 @@ function resolve_sqlite_integration_plugin_path(): string
         if (is_dir($package)) {
             return $package;
         }
-        if (is_dir($root . '/wp-includes/sqlite')) {
-            return $root;
-        }
     }
 
     throw new RuntimeException(
@@ -218,9 +198,9 @@ function resolve_sqlite_integration_plugin_path(): string
 }
 
 /**
- * Register a user-defined SQL function on a SQLite PDO. Routes to
- * Pdo\Sqlite::createFunction() on 8.4+; the legacy
- * PDO::sqliteCreateFunction() alias is deprecated in 8.5.
+ * Register a user-defined SQL function on a SQLite PDO. PHP 8.4 introduced
+ * Pdo\Sqlite::createFunction(); PDO::sqliteCreateFunction() serves earlier
+ * supported PHP versions and is deprecated in 8.5.
  */
 function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn, int $num_args = 1): void
 {
@@ -4331,11 +4311,11 @@ class ImportClient
             return;
         }
 
-        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL"] = $base_url;
+        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
         $state_dir = realpath($this->state_dir) ?: $this->state_dir;
-        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
+        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
             rtrim($state_dir, "/") . "/.import-state.json";
-        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
+        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
             rtrim($state_dir, "/") . "/.import-fetch-list-skipped.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
@@ -5051,7 +5031,7 @@ class ImportClient
         // a fatal "name already in use". Skip the loader entirely when the
         // host's copy is already in memory — both trees expose the same
         // public class names, so the existing instance is fine.
-        $driver_loader = resolve_sqlite_integration_path("/wp-pdo-mysql-on-sqlite.php");
+        $driver_loader = resolve_sqlite_integration_path("/packages/mysql-on-sqlite/src/load.php");
         if (
             class_exists("WP_PDO_MySQL_On_SQLite", false) &&
             class_exists("WP_Parser_Grammar", false)

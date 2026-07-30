@@ -10,7 +10,7 @@
 // Load HTML5 named character references (global variable, not autoloaded).
 // Required by WP_HTML_Decoder for parsing HTML entities like &quot;.
 $_html5_ncr_file = null;
-foreach ([4, 5, 2, 3, 6] as $_html5_ncr_levels) {
+foreach ([4, 5, 2] as $_html5_ncr_levels) {
     $_html5_ncr_candidate = dirname(__DIR__, $_html5_ncr_levels) .
         '/vendor/wp-php-toolkit/html/html5-named-character-references.php';
     if (file_exists($_html5_ncr_candidate)) {

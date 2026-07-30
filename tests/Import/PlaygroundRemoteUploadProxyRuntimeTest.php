@@ -68,11 +68,11 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
     public function testPlaygroundMountsProxyStateFilesIntoVfs(): void
     {
         $manifest = new \RuntimeManifest('other');
-        $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL'] =
+        $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL'] =
             'https://source.example/wp-content/uploads';
-        $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE'] =
+        $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE'] =
             $this->stateFile;
-        $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'] =
+        $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'] =
             $this->skippedFile;
         $manifest->routes[] = [
             'handler' => 'remote-upload-proxy',
