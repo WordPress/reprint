@@ -17,8 +17,6 @@
 
 require __DIR__ . '/bootstrap.php';
 
-reprint_session_start();
-
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
 switch ($action) {
