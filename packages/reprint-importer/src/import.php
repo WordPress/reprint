@@ -2268,7 +2268,7 @@ class ImportClient
     }
 
     /**
-     * Download a list of remote absolute paths into $local_absolute_directory,
+     * Download a list of remote absolute paths into $path,
      * preserving their directory structure.
      *
      * Issues one file_fetch request per parent directory so that an
@@ -2277,7 +2277,7 @@ class ImportClient
      *
      * @return int Number of files successfully downloaded.
      */
-    private function fetch_files_into(string $local_absolute_directory, array $files): int
+    private function fetch_files_into(string $path, array $files): int
     {
         $by_dir = [];
         foreach ($files as $f) {
@@ -2306,19 +2306,19 @@ class ImportClient
             $context->file_path = null;
             $context->file_ctime = null;
 
-            $context->on_chunk = function ($chunk) use ($local_absolute_directory, $context, &$downloaded) {
+            $context->on_chunk = function ($chunk) use ($path, $context, &$downloaded) {
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                 if ($chunk_type === "file") {
                     $raw = $chunk["headers"]["x-file-path"] ?? "";
-                    $path = base64_decode($raw, true);
-                    if ($path === false || $path === "") {
+                    $remote_absolute_path = base64_decode($raw, true);
+                    if ($remote_absolute_path === false || $remote_absolute_path === "") {
                         return;
                     }
 
                     $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
                     $is_last = ($chunk["headers"]["x-last-chunk"] ?? "0") === "1";
-                    $local_absolute_path = $local_absolute_directory . $path;
+                    $local_absolute_path = $path . $remote_absolute_path;
 
                     if ($is_first) {
                         if ($context->file_handle) {
@@ -2341,7 +2341,7 @@ class ImportClient
                         fclose($context->file_handle);
                         $context->file_handle = null;
                         $downloaded++;
-                        $this->audit_log("Saved {$path} → {$local_absolute_path}");
+                        $this->audit_log("Saved {$remote_absolute_path} → {$local_absolute_path}");
                     }
                 } elseif ($chunk_type === "error") {
                     $body = json_decode($chunk["body"] ?? "{}", true);
