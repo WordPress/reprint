@@ -1567,7 +1567,7 @@ class ImportClient
         $sender_options = [
             'filesystem_root' => $context['filesystem_root'],
             'push_state_directory' => $context['push_state_directory'],
-            'base_url' => $context['remote_reprint_api_url'],
+            'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['force_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,

@@ -35,7 +35,7 @@ final class PushEndpointsTest extends TestCase {
     private string $gate_endpoint_configuration_path;
     private string $gate_ready_path;
     private string $gate_release_path;
-    private string $base_url;
+    private string $remote_reprint_api_url;
 
     protected function setUp(): void
     {
@@ -72,7 +72,7 @@ final class PushEndpointsTest extends TestCase {
         file_put_contents($this->docroot . '/remove.txt', 'old');
         mkdir($this->docroot . '/preserved');
         file_put_contents($this->docroot . '/preserved/value.txt', 'keep');
-        [$this->server_process, $this->server_pipes, $this->base_url] = $this->startServer(self::POST_MAX_BYTES);
+        [$this->server_process, $this->server_pipes, $this->remote_reprint_api_url] = $this->startServer(self::POST_MAX_BYTES);
     }
 
     protected function tearDown(): void
@@ -713,7 +713,7 @@ final class PushEndpointsTest extends TestCase {
     public function testUploadReportsDeclaredRequestBodyLimitOn413(): void
     {
         $push_session_id = str_repeat('d', 32);
-        $url = $this->base_url . '&endpoint=push_upload&push_session_id=' . $push_session_id;
+        $url = $this->remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $push_session_id;
         $headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_envelope_auth_headers('POST', $url);
         $curl_headers = ['Content-Type: multipart/mixed; boundary=oversized-endpoint-test'];
         foreach ($headers as $name => $value) {
@@ -782,10 +782,10 @@ final class PushEndpointsTest extends TestCase {
             'document_root' => $this->docroot,
             'maximum_part_bytes' => $maximum_request_body_bytes,
         ]);
-        [$server_process, $server_pipes, $base_url] = $this->startServer($maximum_request_body_bytes);
+        [$server_process, $server_pipes, $remote_reprint_api_url] = $this->startServer($maximum_request_body_bytes);
 
         try {
-            $client = $this->newClient(self::SECRET, $base_url);
+            $client = $this->newClient(self::SECRET, $remote_reprint_api_url);
             $clean_push_session_id = str_repeat('0', 32);
             $clean_create = $client->send_push_request('POST', 'push_create', [
                 'push_session_id' => $clean_push_session_id,
@@ -810,7 +810,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame($maximum_request_body_bytes, strlen($multipart_body));
 
             $clean_upload = $this->sendChunkedUploadRequest(
-                $base_url,
+                $remote_reprint_api_url,
                 $clean_push_session_id,
                 $boundary,
                 $multipart_body
@@ -824,7 +824,7 @@ final class PushEndpointsTest extends TestCase {
             ], ['created']);
             $this->assertSame('complete', $over_limit_create['status'], (string) json_encode($over_limit_create));
             $over_limit_upload = $this->sendChunkedUploadRequest(
-                $base_url,
+                $remote_reprint_api_url,
                 $over_limit_push_session_id,
                 $boundary,
                 $multipart_body,
@@ -840,9 +840,9 @@ final class PushEndpointsTest extends TestCase {
         }
 
         $larger_maximum_request_body_bytes = $maximum_request_body_bytes * 2;
-        [$server_process, $server_pipes, $base_url] = $this->startServer($larger_maximum_request_body_bytes);
+        [$server_process, $server_pipes, $remote_reprint_api_url] = $this->startServer($larger_maximum_request_body_bytes);
         try {
-            $client = $this->newClient(self::SECRET, $base_url);
+            $client = $this->newClient(self::SECRET, $remote_reprint_api_url);
             $trailing_byte_push_session_id = str_repeat('2', 32);
             $create = $client->send_push_request('POST', 'push_create', [
                 'push_session_id' => $trailing_byte_push_session_id,
@@ -851,7 +851,7 @@ final class PushEndpointsTest extends TestCase {
             $this->assertSame($larger_maximum_request_body_bytes, $create['response']['post_max_bytes']);
 
             $trailing_byte_upload = $this->sendChunkedUploadRequest(
-                $base_url,
+                $remote_reprint_api_url,
                 $trailing_byte_push_session_id,
                 $boundary,
                 $multipart_body,
@@ -1194,7 +1194,7 @@ final class PushEndpointsTest extends TestCase {
     {
         file_put_contents($this->push_authorization_configuration_path, '');
         file_put_contents($this->reprint_configuration_path, $this->docroot . '/invalid-push-directory');
-        $url = $this->base_url . '&endpoint=preflight';
+        $url = $this->remote_reprint_api_url . '&endpoint=preflight';
         $headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_curl_headers();
         $handle = curl_init($url);
         curl_setopt_array($handle, [
@@ -1281,7 +1281,7 @@ final class PushEndpointsTest extends TestCase {
         flock($push_lock, LOCK_UN);
         fclose($push_lock);
 
-        $url = $this->base_url . '&endpoint=push_upload&push_session_id=' . $push_session_id;
+        $url = $this->remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $push_session_id;
         $headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_envelope_auth_headers('POST', $url);
         $curl_headers = ['Content-Type: application/json'];
         foreach ($headers as $name => $value) {
@@ -2427,7 +2427,7 @@ final class PushEndpointsTest extends TestCase {
         $sender = $this->startSender([
             'filesystem_root' => $local_docroot,
             'push_state_directory' => $push_state_directory,
-            'base_url' => 'http://' . $address . '/?reprint-api=1',
+            'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
@@ -2492,7 +2492,7 @@ final class PushEndpointsTest extends TestCase {
             . "Content-Length: 0\r\n\r\n\r\n"
             . '--' . $boundary . "--\r\n";
         $this->sendPostAndDiscardResponse(
-            $this->base_url . '&endpoint=push_upload&push_session_id=' . $state['push_session_id'],
+            $this->remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $state['push_session_id'],
             'multipart/mixed; boundary=' . $boundary,
             $delete_body
         );
@@ -2507,7 +2507,7 @@ final class PushEndpointsTest extends TestCase {
         }
         $this->assertIsArray($state);
         $this->sendPostAndDiscardResponse(
-            $this->base_url . '&endpoint=push_commit&push_session_id=' . $state['push_session_id'],
+            $this->remote_reprint_api_url . '&endpoint=push_commit&push_session_id=' . $state['push_session_id'],
             null,
             ''
         );
@@ -2584,7 +2584,7 @@ final class PushEndpointsTest extends TestCase {
                 PHP_BINARY,
                 __DIR__ . '/../importer/import.php',
                 'files-diff',
-                $this->base_url,
+                $this->remote_reprint_api_url,
                 '--state-dir=' . $state_directory,
                 '--fs-root=' . $local_docroot,
             ],
@@ -2789,7 +2789,7 @@ final class PushEndpointsTest extends TestCase {
             $this->markTestSkipped('files-push process-death coverage requires POSIX signals.');
         }
         $this->stopServer($this->server_process, $this->server_pipes);
-        [$this->server_process, $this->server_pipes, $this->base_url] = $this->startServer(16 * 1024 * 1024);
+        [$this->server_process, $this->server_pipes, $this->remote_reprint_api_url] = $this->startServer(16 * 1024 * 1024);
         $this->writeDocrootConfiguration([
             'document_root' => $this->docroot,
             'maximum_part_bytes' => 64,
@@ -2962,7 +2962,7 @@ final class PushEndpointsTest extends TestCase {
         $command = array_merge($command, [
             __DIR__ . '/../importer/import.php',
             'files-push',
-            $this->base_url,
+            $this->remote_reprint_api_url,
             '--state-dir=' . $state_directory,
             '--fs-root=' . $local_docroot,
             '--secret=' . self::SECRET,
@@ -3022,7 +3022,7 @@ final class PushEndpointsTest extends TestCase {
     ): string {
         $canonical_local_docroot = realpath($local_docroot);
         $this->assertIsString($canonical_local_docroot);
-        $pair = hash('sha256', rtrim($this->base_url, '?&') . "\0" . $canonical_local_docroot);
+        $pair = hash('sha256', rtrim($this->remote_reprint_api_url, '?&') . "\0" . $canonical_local_docroot);
         return $state_directory . '/push/' . $pair;
     }
 
@@ -3034,7 +3034,7 @@ final class PushEndpointsTest extends TestCase {
         return [
             'filesystem_root' => $filesystem_root,
             'push_state_directory' => $push_state_directory,
-            'base_url' => $this->base_url,
+            'remote_reprint_api_url' => $this->remote_reprint_api_url,
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4 * 1024 * 1024,
@@ -3109,13 +3109,13 @@ final class PushEndpointsTest extends TestCase {
      * @return array{http_code:int,response:array<string,mixed>} Decoded raw HTTP response.
      */
     private function sendChunkedUploadRequest(
-        string $base_url,
+        string $remote_reprint_api_url,
         string $push_session_id,
         string $boundary,
         string $multipart_body,
         string $trailing_bytes = ''
     ): array {
-        $request_url = $base_url . '&endpoint=push_upload&push_session_id=' . $push_session_id;
+        $request_url = $remote_reprint_api_url . '&endpoint=push_upload&push_session_id=' . $push_session_id;
         $url = parse_url($request_url);
         $this->assertIsArray($url);
         $this->assertSame('http', $url['scheme'] ?? null);
@@ -3287,7 +3287,7 @@ final class PushEndpointsTest extends TestCase {
         return [
             'filesystem_root' => $filesystem_root,
             'push_state_directory' => $push_state_directory,
-            'base_url' => $this->base_url,
+            'remote_reprint_api_url' => $this->remote_reprint_api_url,
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 64,
@@ -3563,10 +3563,10 @@ final class PushEndpointsTest extends TestCase {
         proc_close($process);
     }
 
-    private function newClient(string $secret, ?string $base_url = null): MultipartPushStreamClient
+    private function newClient(string $secret, ?string $remote_reprint_api_url = null): MultipartPushStreamClient
     {
         return new MultipartPushStreamClient([
-            'base_url' => $base_url ?? $this->base_url,
+            'remote_reprint_api_url' => $remote_reprint_api_url ?? $this->remote_reprint_api_url,
             'allow_http' => true,
             'hmac_client' => new Site_Export_HMAC_Client($secret),
             'chunk_bytes' => 4,
@@ -3619,7 +3619,7 @@ final class PushEndpointsTest extends TestCase {
             '&',
             PHP_QUERY_RFC3986
         );
-        $url = $this->base_url . '&' . $query;
+        $url = $this->remote_reprint_api_url . '&' . $query;
         $authentication_headers = ( new Site_Export_HMAC_Client($secret) )->get_envelope_auth_headers($method, $url);
         $request_headers = [];
         foreach ($authentication_headers as $name => $value) {
@@ -3674,7 +3674,7 @@ final class PushEndpointsTest extends TestCase {
         ?string $body = null,
         ?string $content_type = null
     ): array {
-        $url = $this->base_url
+        $url = $this->remote_reprint_api_url
             . '&endpoint=' . rawurlencode($endpoint)
             . '&push_session_id=' . rawurlencode($push_session_id);
         $curl_headers = [];

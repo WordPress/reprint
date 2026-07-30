@@ -199,7 +199,7 @@ Inside a class, omit the class name when context already supplies it: use
 - Classify remote rejections by the protocol's own design: `busy` and
   `offset_gap` are recoverable (retry with the returned cursor); auth
   failures and redirects fail permanently with pointed messages ("The target
-  redirected to X. Use that address as the push base_url."). "Retry" must
+  redirected to X. Use that address as the remote Reprint API URL."). "Retry" must
   never be a final status — exhausted retries become `failed`.
 - Cursors and status responses report only what the store has confirmed —
   never echo a sender's claimed offset back as truth.

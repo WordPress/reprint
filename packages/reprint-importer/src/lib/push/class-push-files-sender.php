@@ -233,7 +233,7 @@ final class PushFilesSender
      *
      *     @type string                  $filesystem_root                Required filesystem root directory.
      *     @type string                  $push_state_directory    Required local push state directory.
-     *     @type string                  $base_url                Required exporter API URL.
+     *     @type string                  $remote_reprint_api_url  Required remote Reprint API URL.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
      *     @type bool                    $allow_http              Explicit plain-HTTP opt-in. Default false.
      *     @type int|float|string        $chunk_bytes             Maximum bytes read from one local file. Default 4 MiB.
@@ -346,7 +346,7 @@ final class PushFilesSender
         }
 
         $push_stream_client_options = [
-            'base_url' => $options['base_url'] ?? null,
+            'remote_reprint_api_url' => $options['remote_reprint_api_url'] ?? null,
             'hmac_client' => $options['hmac_client'] ?? null,
             'allow_http' => $options['allow_http'] ?? false,
         ];
