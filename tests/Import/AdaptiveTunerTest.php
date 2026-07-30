@@ -53,10 +53,16 @@ class AdaptiveTunerTest extends TestCase
     {
         $tuner = $this->makeTuner();
         $config = $tuner->get_config();
+        $state = $tuner->get_state();
 
         $this->assertTrue($config["enabled"]);
         $this->assertSame(5, $config["max_execution_time"]);
         $this->assertSame(0.5, $config["duty"]);
+        $this->assertSame(5 * 1024 * 1024, $state["file_chunk_size"]);
+        $this->assertSame(5000, $state["index_batch_size"]);
+        $this->assertSame(1000, $state["sql_fragments_per_batch"]);
+        $this->assertNull($state["file_throughput_ema"]);
+        $this->assertSame(0, $state["error_backoff_remaining"]);
     }
 
     public function testStartSizesUsedAsInitialState(): void
@@ -101,8 +107,18 @@ class AdaptiveTunerTest extends TestCase
         $params = $tuner->get_request_params("file_fetch");
 
         $this->assertSame(2048, $params["chunk_size"]);
-        $this->assertArrayHasKey("max_execution_time", $params);
+        $this->assertSame(5, $params["max_execution_time"]);
         $this->assertArrayHasKey("memory_threshold", $params);
+        $this->assertArrayNotHasKey("batch_size", $params);
+    }
+
+    public function testIndexParamsIncludeBatchSize(): void
+    {
+        $tuner = $this->makeTuner(["index_batch_start" => 2000]);
+        $params = $tuner->get_request_params("file_index");
+
+        $this->assertSame(2000, $params["batch_size"]);
+        $this->assertArrayNotHasKey("chunk_size", $params);
     }
 
     public function testRequestParamsUnknownEndpoint(): void
@@ -111,17 +127,21 @@ class AdaptiveTunerTest extends TestCase
         $params = $tuner->get_request_params("nonexistent");
 
         $this->assertArrayHasKey("max_execution_time", $params);
+        $this->assertArrayHasKey("memory_threshold", $params);
         $this->assertArrayNotHasKey("chunk_size", $params);
+        $this->assertCount(2, $params);
     }
 
     public function testSqlParamsIncludeDbOptions(): void
     {
         $tuner = $this->makeTuner([
+            "sql_fragments_start" => 500,
             "db_unbuffered" => true,
             "db_query_time_limit" => 3,
         ]);
         $params = $tuner->get_request_params("sql_chunk");
 
+        $this->assertSame(500, $params["fragments_per_batch"]);
         $this->assertSame(1, $params["db_unbuffered"]);
         $this->assertSame(3, $params["db_query_time_limit"]);
     }
@@ -142,12 +162,12 @@ class AdaptiveTunerTest extends TestCase
         // First request seeds the EMA (warmup).
         [$tuner, $r1] = $this->runRequests($tuner, "file_fetch", 1);
         $this->assertSame("warmup", $r1["decision"]);
-        $sizeAfterWarmup = $tuner->get_state()["file_chunk_size"];
+        $this->assertSame(1000, $tuner->get_state()["file_chunk_size"]);
 
         // Second request should increase.
         [$tuner, $r2] = $this->runRequests($tuner, "file_fetch", 1);
         $this->assertSame("increase", $r2["decision"]);
-        $this->assertGreaterThan($sizeAfterWarmup, $tuner->get_state()["file_chunk_size"]);
+        $this->assertSame(1100, $tuner->get_state()["file_chunk_size"]);
     }
 
     public function testSizeNeverExceedsMax(): void
@@ -189,7 +209,8 @@ class AdaptiveTunerTest extends TestCase
         ]);
 
         $this->assertSame("decrease", $result["decision"]);
-        $this->assertLessThan($sizeBefore, $tuner->get_state()["file_chunk_size"]);
+        $expectedFileChunkSize = (int) round($sizeBefore * 0.5);
+        $this->assertSame($expectedFileChunkSize, $tuner->get_state()["file_chunk_size"]);
     }
 
     public function testSizeNeverDropsBelowMin(): void
@@ -302,7 +323,7 @@ class AdaptiveTunerTest extends TestCase
 
         // duty=0.5 means sleep should equal elapsed time (2s work → 2s sleep).
         $this->assertGreaterThan(0.0, $r["sleep_seconds"]);
-        $this->assertEqualsWithDelta(2.0, $r["sleep_seconds"], 0.5);
+        $this->assertEqualsWithDelta(2.0, $r["sleep_seconds"], 0.01);
     }
 
     public function testNoSleepOnComplete(): void
@@ -391,9 +412,7 @@ class AdaptiveTunerTest extends TestCase
         // Create a new tuner from the saved state.
         $tuner2 = $this->makeTuner(["file_chunk_start" => 2000], $savedState);
 
-        $this->assertSame($savedState["file_chunk_size"], $tuner2->get_state()["file_chunk_size"]);
-        $this->assertSame($savedState["file_throughput_ema"], $tuner2->get_state()["file_throughput_ema"]);
-        $this->assertSame($savedState["duty"], $tuner2->get_state()["duty"]);
+        $this->assertSame($savedState, $tuner2->get_state());
     }
 
     // ---------------------------------------------------------------

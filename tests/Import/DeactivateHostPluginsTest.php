@@ -238,8 +238,8 @@ class DeactivateHostPluginsTest extends TestCase
             $this->markTestSkipped('pdo_sqlite extension required');
         }
 
-        $polyfills = resolve_sqlite_integration_path('/php-polyfills.php');
-        $driver = resolve_sqlite_integration_path('/wp-pdo-mysql-on-sqlite.php');
+        $polyfills = resolve_sqlite_integration_path('/packages/mysql-on-sqlite/src/php-polyfills.php');
+        $driver = resolve_sqlite_integration_path('/packages/mysql-on-sqlite/src/load.php');
         require_once $polyfills;
         require_once $driver;
 

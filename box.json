@@ -32,7 +32,6 @@
 
     "files": [
         "packages/reprint-importer/src/VERSION",
-        "lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php",
         "vendor/autoload.php"
     ],
 

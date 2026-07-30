@@ -16,13 +16,13 @@ function remote_upload_proxy_code(): string
  * relays the response status, headers, and body to the visitor.
  */
 (function() {
-	if (!defined('STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL')) return;
-	if (!defined('STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE')) return;
-	if (!defined('STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE')) return;
+	if (!defined('REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL')) return;
+	if (!defined('REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE')) return;
+	if (!defined('REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE')) return;
 	if (!function_exists('curl_init')) return;
 
 	$proxy_enabled = false;
-	$skipped_file = STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE;
+	$skipped_file = REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE;
 	if (
 		is_string($skipped_file) &&
 		$skipped_file !== '' &&
@@ -31,7 +31,7 @@ function remote_upload_proxy_code(): string
 	) {
 		$proxy_enabled = true;
 	} else {
-		$state_file = STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE;
+		$state_file = REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE;
 		if (
 			is_string($state_file) &&
 			$state_file !== '' &&
@@ -66,7 +66,7 @@ function remote_upload_proxy_code(): string
 	$local_path = $content_dir . '/uploads/' . ltrim($matches[1], '/');
 	if (file_exists($local_path)) return;
 
-	$target_url = rtrim(STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL, '/') . '/' . ltrim($matches[1], '/');
+	$target_url = rtrim(REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL, '/') . '/' . ltrim($matches[1], '/');
 	$query = parse_url($uri, PHP_URL_QUERY);
 	if (is_string($query) && $query !== '') {
 		$target_url .= '?' . $query;
