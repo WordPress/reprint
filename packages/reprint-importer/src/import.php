@@ -1942,9 +1942,7 @@ class ImportClient
                     "RESTART | Clearing files-index state",
                     true,
                 );
-                $this->import_state()->active_resumable_command->command_name = "files-index";
-                $this->import_state()->active_resumable_command->completion_state = null;
-                $this->import_state()->active_resumable_command->current_stage = null;
+                $this->clear_active_resumable_command_state("files-index");
                 $this->import_state()->index = new RemoteFileIndexCursorState();
                 if (file_exists($this->remote_index_file)) {
                     @unlink($this->remote_index_file);
@@ -1958,7 +1956,15 @@ class ImportClient
                     "RESTART | Clearing db-pull state",
                     true,
                 );
-                $this->reset_state();
+                $this->clear_active_resumable_command_state("db-pull");
+                $this->import_state()->db_index = new DatabaseTableIndexState();
+                $this->import_state()->sql_bytes = null;
+                $this->import_state()->sql_statements_counted = 0;
+                $this->import_state()->sql_output = null;
+                $this->import_state()->mysql_host = null;
+                $this->import_state()->mysql_port = null;
+                $this->import_state()->mysql_user = null;
+                $this->import_state()->mysql_database = null;
                 $this->save_state($this->state);
 
                 if ($this->sql_output_mode === "file") {
@@ -1991,7 +1997,8 @@ class ImportClient
                     "RESTART | Clearing db-index state",
                     true,
                 );
-                $this->reset_state();
+                $this->clear_active_resumable_command_state("db-index");
+                $this->import_state()->db_index = new DatabaseTableIndexState();
                 $this->save_state($this->state);
 
                 $tables_file = $this->state_dir . "/db-tables.jsonl";
@@ -2008,7 +2015,8 @@ class ImportClient
                     "RESTART | Clearing db-apply state",
                     true,
                 );
-                $this->reset_state();
+                $this->clear_active_resumable_command_state("db-apply");
+                $this->import_state()->apply = new DatabaseApplyCommandState();
                 $this->save_state($this->state);
                 break;
         }
@@ -2016,6 +2024,13 @@ class ImportClient
         $this->progress->show_lifecycle_line("State cleared for {$command}.\n");
 
         $this->output_progress(["status" => "aborted", "message" => "State cleared for {$command}."]);
+    }
+
+    private function clear_active_resumable_command_state(string $command): void
+    {
+        $this->import_state()->active_resumable_command = new ResumableCommandCheckpointState();
+        $this->import_state()->active_resumable_command->command_name = $command;
+        $this->import_state()->consecutive_interrupted_responses = 0;
     }
 
     /**
@@ -2031,7 +2046,6 @@ class ImportClient
         // Replay the local index WAL before clearing the cursor which made its records durable.
         $this->replay_local_index_wal();
         $this->remove_local_index_wal();
-        $this->reset_state();
         $this->local_index_wal_handle = null;
         $this->local_index_wal_record_count = 0;
 
@@ -2051,9 +2065,17 @@ class ImportClient
             @unlink($this->volatile_files_file);
             $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
         }
+        $this->clear_active_resumable_command_state("files-pull");
+        $this->import_state()->local_followed_symlinks_root_fingerprint = null;
+        $this->import_state()->filter = "none";
+        $this->import_state()->files_pull_only_fingerprint = null;
+        $this->import_state()->files_pull_summary = new FilesPullSummaryState();
+        $this->import_state()->diff = new FileDiffProgressState();
         $this->import_state()->index = new RemoteFileIndexCursorState();
         $this->import_state()->fetch = new FetchListProgressState();
         $this->import_state()->fetch_skipped = new FetchListProgressState();
+        $this->import_state()->current_file = null;
+        $this->import_state()->current_file_bytes = null;
 
         $this->save_state($this->state);
     }
@@ -10968,23 +10990,6 @@ class ImportClient
                 "Invalid response: missing completion chunk from server.",
             );
         }
-    }
-
-    /**
-     * Reset command state while preserving data shared across commands.
-     */
-    private function reset_state(): void
-    {
-        $previous_state = $this->state;
-        $this->state = new ImportState();
-        $this->state->preflight = $previous_state->preflight;
-        $this->state->version = $previous_state->version;
-        $this->state->webhost = $previous_state->webhost;
-        $this->state->follow_symlinks = $previous_state->follow_symlinks;
-        $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
-        $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
-        $this->state->resolved_path_mappings_fingerprint = $previous_state->resolved_path_mappings_fingerprint;
-        $this->state->pull_pipeline = $previous_state->pull_pipeline;
     }
 
     /** Return the in-process import state. */
