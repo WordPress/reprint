@@ -49,8 +49,8 @@ local relative path to a push-root-relative path.
 - A **remote index** is the last remote filesystem state accepted by pull.
   Its entries use remote absolute paths and remote-observed metadata. Use
   `$remote_index_file`.
-- A **local index** is the locally accounted baseline. Its entries use
-  local relative paths and locally observed metadata. Use
+- A **local index** is the locally accounted pull baseline. Its entries use
+  remote absolute paths as the merge key and locally observed metadata. Use
   `$local_index_file`.
 - A **fresh local index** is the current filesystem-root scan created while
   planning a push. Use `$fresh_local_index_file`.

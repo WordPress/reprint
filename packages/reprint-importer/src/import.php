@@ -6508,7 +6508,7 @@ class ImportClient
 
         $diff = $this->import_state()->diff;
         $remote_offset = $diff->remote_offset;
-        $local_after = $diff->local_after;
+        $last_local_index_entry_path = $diff->local_after;
         $download_mode = $remote_offset > 0 ? "a" : "w";
         if ($download_mode === "w") {
             $this->audit_log(
@@ -6549,31 +6549,32 @@ class ImportClient
             );
         }
 
-        $remote_handle = fopen($this->remote_index_file, "r");
-        if (!$remote_handle) {
+        $remote_index_handle = fopen($this->remote_index_file, "r");
+        if (!$remote_index_handle) {
             fclose($download_handle);
             throw new RuntimeException("Failed to open remote index file");
         }
         if ($remote_offset > 0) {
-            fseek($remote_handle, $remote_offset);
+            fseek($remote_index_handle, $remote_offset);
         }
 
-        $local_handle = file_exists($this->local_index_file)
+        $local_index_handle = file_exists($this->local_index_file)
             ? fopen($this->local_index_file, "r")
             : null;
-        $local = $this->read_index_line($local_handle);
-        if ($local_after) {
+        // Local index entries retain remote absolute paths as the merge key.
+        $local_index_entry = $this->read_index_line($local_index_handle);
+        if ($last_local_index_entry_path) {
             while (
-                $local !== null &&
-                strcmp($local["path"], $local_after) <= 0
+                $local_index_entry !== null &&
+                strcmp($local_index_entry["path"], $last_local_index_entry_path) <= 0
             ) {
-                $local = $this->read_index_line($local_handle);
+                $local_index_entry = $this->read_index_line($local_index_handle);
             }
         }
         $this->open_index_update_wal();
         $processed = 0;
 
-        while (($line = fgets($remote_handle)) !== false) {
+        while (($line = fgets($remote_index_handle)) !== false) {
             if ($this->shutdown_requested) {
                 break;
             }
@@ -6582,31 +6583,32 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $remote_offset = ftell($remote_handle);
-            $remote = $this->parse_index_line($line);
-            if (!$remote) {
+            $remote_offset = ftell($remote_index_handle);
+            $remote_index_entry = $this->parse_index_line($line);
+            if (!$remote_index_entry) {
                 continue;
             }
 
             while (
-                $local !== null &&
-                strcmp($local["path"], $remote["path"]) < 0
+                $local_index_entry !== null &&
+                strcmp($local_index_entry["path"], $remote_index_entry["path"]) < 0
             ) {
                 // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-pull --only runs.
-                if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                    $this->apply_remote_deletion_locally($local["path"]);
-                    $this->delete_index_entry($local["path"]);
+                if ($this->is_file_path_selected_by_pull_only_files($local_index_entry["path"])) {
+                    $remote_absolute_path = $local_index_entry["path"];
+                    $this->apply_remote_deletion_locally($remote_absolute_path);
+                    $this->delete_index_entry($remote_absolute_path);
                 }
-                $local_after = $local["path"];
-                $local = $this->read_index_line($local_handle);
+                $last_local_index_entry_path = $local_index_entry["path"];
+                $local_index_entry = $this->read_index_line($local_index_handle);
             }
 
-            if ($local !== null && $local["path"] === $remote["path"]) {
+            if ($local_index_entry !== null && $local_index_entry["path"] === $remote_index_entry["path"]) {
                 if (
-                    $local["ctime"] !== $remote["ctime"] ||
-                    $local["size"] !== $remote["size"] ||
-                    $local["type"] !== $remote["type"]
+                    $local_index_entry["ctime"] !== $remote_index_entry["ctime"] ||
+                    $local_index_entry["size"] !== $remote_index_entry["size"] ||
+                    $local_index_entry["type"] !== $remote_index_entry["type"]
                 ) {
                     // File is in both indexes but changed on the remote.
                     // Always re-download — this file is in our local index,
@@ -6615,45 +6617,45 @@ class ImportClient
                     $download_list_handle = (
                         $skipped_handle !== null &&
                         $this->is_remote_absolute_path_in_uploads_directory(
-                            $remote["path"],
+                            $remote_index_entry["path"],
                             $uploads_basedir
                         )
                     )
                         ? $skipped_handle
                         : $download_handle;
                     $this->append_download_list(
-                        $remote["path"],
+                        $remote_index_entry["path"],
                         $download_list_handle,
                     );
                 }
-                $local_after = $local["path"];
-                $local = $this->read_index_line($local_handle);
+                $last_local_index_entry_path = $local_index_entry["path"];
+                $local_index_entry = $this->read_index_line($local_index_handle);
             } elseif (
-                $local === null ||
-                strcmp($local["path"], $remote["path"]) > 0
+                $local_index_entry === null ||
+                strcmp($local_index_entry["path"], $remote_index_entry["path"]) > 0
             ) {
-                $skip_reason = $this->should_skip_for_preserve_local($remote["path"]);
+                $skip_reason = $this->should_skip_for_preserve_local($remote_index_entry["path"]);
                 if ($skip_reason) {
                     $this->audit_log($skip_reason, true);
-                    $this->emit_skip_progress($remote["path"]);
+                    $this->emit_skip_progress($remote_index_entry["path"]);
                 } else {
                     $download_list_handle = (
                         $skipped_handle !== null &&
                         $this->is_remote_absolute_path_in_uploads_directory(
-                            $remote["path"],
+                            $remote_index_entry["path"],
                             $uploads_basedir
                         )
                     )
                         ? $skipped_handle
                         : $download_handle;
-                    $this->append_download_list($remote["path"], $download_list_handle);
+                    $this->append_download_list($remote_index_entry["path"], $download_list_handle);
                 }
             }
 
             $processed++;
             if ($processed % 200 === 0) {
                 $this->import_state()->diff->remote_offset = $remote_offset;
-                $this->import_state()->diff->local_after = $local_after;
+                $this->import_state()->diff->local_after = $last_local_index_entry_path;
                 if (
                     $this->index_update_wal_handle
                     && !fflush($this->index_update_wal_handle)
@@ -6665,26 +6667,27 @@ class ImportClient
             }
         }
 
-        while ($local !== null) {
-            if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                $this->apply_remote_deletion_locally($local["path"]);
-                $this->delete_index_entry($local["path"]);
+        while ($local_index_entry !== null) {
+            if ($this->is_file_path_selected_by_pull_only_files($local_index_entry["path"])) {
+                $remote_absolute_path = $local_index_entry["path"];
+                $this->apply_remote_deletion_locally($remote_absolute_path);
+                $this->delete_index_entry($remote_absolute_path);
             }
-            $local_after = $local["path"];
-            $local = $this->read_index_line($local_handle);
+            $last_local_index_entry_path = $local_index_entry["path"];
+            $local_index_entry = $this->read_index_line($local_index_handle);
         }
 
-        if ($local_handle) {
-            fclose($local_handle);
+        if ($local_index_handle) {
+            fclose($local_index_handle);
         }
-        fclose($remote_handle);
+        fclose($remote_index_handle);
         fclose($download_handle);
         if ($skipped_handle !== null) {
             fclose($skipped_handle);
         }
 
         $this->import_state()->diff->remote_offset = $remote_offset;
-        $this->import_state()->diff->local_after = $local_after;
+        $this->import_state()->diff->local_after = $last_local_index_entry_path;
         $this->apply_index_update_wal();
         $this->save_state($this->state);
 
