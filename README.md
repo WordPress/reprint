@@ -569,7 +569,7 @@ structured file counters:
 
 | Field         | Type           | Description |
 |---------------|----------------|-------------|
-| `files_done`  | `int`          | Files already processed (cumulative across restarts). Derived from the fetch list byte offset plus the current batch's `files_imported`. |
+| `files_done`  | `int`          | Files already processed (cumulative across restarts). Derived from the fetch list byte offset plus the current batch count. |
 | `files_total` | `int`          | Total non-empty entries in the fetch list. Fixed once the diff phase completes. |
 
 Both fields are emitted together only when the fetch list exists — they
@@ -646,12 +646,12 @@ still running, completed, or needs resuming. The `command` + `status` fields
 tell you where the pipeline is. The `stage` field gives finer granularity
 (e.g., `"scanning"`, `"sorting"`, `"streaming"` for file sync).
 
-For pull lifecycle and source-site details, prefer `import-metadata` over
-reading `pull/state.json` directly. It exposes a small, stable JSON contract
-for host integrations:
+For pull lifecycle and source-site details, prefer `pull-metadata` over reading
+`pull/state.json` directly. It exposes a small, stable JSON contract for host
+integrations:
 
 ```bash
-php reprint.phar import-metadata --state-dir="$STATE_DIR" | jq '.hasCompletedOnce'
+php reprint.phar pull-metadata --state-dir="$STATE_DIR" | jq '.hasCompletedOnce'
 ```
 
 The `sourceSite` object contains the source WordPress home URL, site URL, table
@@ -714,7 +714,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-domains` — Lists domains discovered in the SQL dump. Reads `pull/domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
-* `import-metadata` — Prints pull lifecycle and source-site metadata as JSON. Requires only `--state-dir`; no network calls are made.
+* `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. Requires only `--state-dir`; no network calls are made.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 

@@ -7,16 +7,16 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Test import symlink recreation
+ * Test pull symlink recreation
  */
-class ImportSymlinkTest extends TestCase
+class PullSymlinkTest extends TestCase
 {
     private $tempDir;
 
     protected function setUp(): void
     {
         parent::setUp();
-        $this->tempDir = sys_get_temp_dir() . '/import-symlink-test-' . uniqid();
+        $this->tempDir = sys_get_temp_dir() . '/pull-symlink-test-' . uniqid();
         mkdir($this->tempDir, 0755, true);
         mkdir($this->tempDir . '/fs-root', 0755, true);
     }

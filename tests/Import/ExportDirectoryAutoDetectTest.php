@@ -99,7 +99,7 @@ class ExportDirectoryAutoDetectTest extends TestCase
             'max_allowed_packet' => null,
         ];
 
-        \write_current_import_state($this->makeClient(), array_replace_recursive($defaults, $state));
+        \write_current_pull_state($this->makeClient(), array_replace_recursive($defaults, $state));
     }
 
     private function makeClient(): \ImportClient

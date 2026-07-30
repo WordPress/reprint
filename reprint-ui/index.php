@@ -824,7 +824,7 @@ $('#start-btn')?.addEventListener('click', async () => {
     provisioned = await res.json();
   } catch (e) {
     setPhase('provision', 'error', e.message.slice(0, 80));
-    showImportError('Provision failed: ' + e.message);
+    showPullError('Provision failed: ' + e.message);
     return;
   }
 
@@ -884,7 +884,7 @@ function goToPlayground({ api_url, secret, site_url }) {
 }
 
 
-function showImportError(msg) {
+function showPullError(msg) {
   const banner = $('#error-banner');
   banner.textContent = msg;
   banner.classList.remove('hidden');

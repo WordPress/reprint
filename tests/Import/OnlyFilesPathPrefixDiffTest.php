@@ -112,7 +112,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
         ];
-        \write_current_import_state(
+        \write_current_pull_state(
             new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root),
             $state
         );
