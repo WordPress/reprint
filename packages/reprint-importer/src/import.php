@@ -6595,7 +6595,7 @@ class ImportClient
                 // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-pull --only runs.
                 if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                    $this->delete_remote_absolute_path($local["path"]);
+                    $this->apply_remote_deletion_locally($local["path"]);
                     $this->delete_index_entry($local["path"]);
                 }
                 $local_after = $local["path"];
@@ -6667,7 +6667,7 @@ class ImportClient
 
         while ($local !== null) {
             if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                $this->delete_remote_absolute_path($local["path"]);
+                $this->apply_remote_deletion_locally($local["path"]);
                 $this->delete_index_entry($local["path"]);
             }
             $local_after = $local["path"];
@@ -7062,7 +7062,7 @@ class ImportClient
     /**
      * Delete the local absolute path mapped from a remote absolute path.
      */
-    private function delete_remote_absolute_path(string $remote_absolute_path): void
+    private function apply_remote_deletion_locally(string $remote_absolute_path): void
     {
         if ($remote_absolute_path === "") {
             return;
