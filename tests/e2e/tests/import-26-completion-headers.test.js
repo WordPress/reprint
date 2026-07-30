@@ -7,7 +7,7 @@ import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     apiRequest,
-    getSiteUrl, getSiteSecret, getSiteDir,
+    getSiteDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 

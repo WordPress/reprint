@@ -10,8 +10,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     apiRequest, apiRequestWithFileList,
-    getSiteUrl, getSiteSecret, getSiteDir,
-    sha1File,
+    getSiteDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 

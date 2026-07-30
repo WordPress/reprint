@@ -344,26 +344,6 @@ class StructuredDataUrlRewriter
     }
 
     /**
-     * Rewrite a decoded value known from schema context to be scalar text.
-     *
-     * This still routes through URLInTextProcessor; it only skips the
-     * serialized-PHP and JSON container probes that are impossible for narrow
-     * core URL columns such as wp_posts.guid or wp_users.user_url.
-     */
-    public function rewrite_known_plain_text_value(string $value): string
-    {
-        if ($value === '') {
-            return $value;
-        }
-
-        if (!$this->maybe_contains_rewritable_urls($value)) {
-            return $value;
-        }
-
-        return $this->rewrite_urls($value, self::PLAIN_TEXT);
-    }
-
-    /**
      * Return whether a decoded value may contain one of the configured source
      * domains. This intentionally checks hosts instead of full source URLs so
      * escaped spellings of `://` in block markup or JSON do not matter.

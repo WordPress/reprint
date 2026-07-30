@@ -306,7 +306,7 @@ final class FileFetchCompressionTest extends TestCase
     public function testPathExtensionClassifier(string $path, bool $expected): void
     {
         require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
-        $this->assertSame($expected, path_extension_is_compressible($path), "classifier for $path");
+        $this->assertSame($expected, path_extension_compressibility($path) === 'yes', "classifier for $path");
     }
 
     public static function pathExtensionCases(): array

@@ -1059,7 +1059,7 @@ final class Site_Export_Push_Session {
             $inflight['phase'] = 'completing';
             $this->write_json($this->work_inflight_path, $inflight);
             $this->ensure_private_parent($complete_path);
-            if (($existing = $this->lstat_path($complete_path)) !== null) {
+            if ($this->lstat_path($complete_path) !== null) {
                 $this->remove_work_path($complete_path);
             }
             if (!@rename($this->work_inflight_data_path, $complete_path)) {
@@ -2448,7 +2448,7 @@ final class Site_Export_Push_Session {
      * @param string $type Human-readable part type for errors.
      */
     private function require_only_headers(array $headers, array $allowed, string $type): void {
-        foreach ($headers as $name => $value) {
+        foreach (array_keys($headers) as $name) {
             if (!in_array($name, $allowed, true)) {
                 throw new InvalidArgumentException('Multipart ' . $type . ' part does not allow header ' . json_encode($name) . '.');
             }

@@ -30,7 +30,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     writeTestHooks, removeTestHooks,
-    writeHookState, clearHookState,
+    clearHookState,
     fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -67,7 +67,6 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
             files: 'none',
             afterCreate: async (siteDir) => {
                 sourceFilePath = join(siteDir, fileRel);
-                const dir = join(siteDir, 'test-data');
                 // Use sudo via execSync — the site dir is owned by nginx
                 // by the time afterCreate runs in some site-setup paths,
                 // but for newly-created sites Node still has write access.
@@ -85,7 +84,7 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
         clearHookState(site);
         try {
             execSync(`sudo rm -f /srv/e2e-sites/.e2e-hook-fired-${site}`);
-        } catch (e) { /* ignore */ }
+        } catch { /* ignore */ }
         cleanupTempDir(tempDir);
     });
 

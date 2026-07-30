@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    writeTestHooks, removeTestHooks, readAuditLog,
+    writeTestHooks, removeTestHooks,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
