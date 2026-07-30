@@ -972,9 +972,9 @@ class Pull
         $bold = "\033[1m";
         $dim = "\033[2m";
         $r = "\033[0m";
-        $import_root = $this->client->import_root;
+        $filesystem_root = $this->client->filesystem_root;
         $this->progress->print_line(
-            "\n{$green}{$bold}Done.{$r} {$dim}Files in {$import_root}{$r}\n"
+            "\n{$green}{$bold}Done.{$r} {$dim}Files in {$filesystem_root}{$r}\n"
         );
         if ($this->client->get_import_state()->pull_pipeline->skipped_pending) {
             $this->progress->print_line(

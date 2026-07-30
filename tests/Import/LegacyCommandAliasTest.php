@@ -14,16 +14,16 @@ class LegacyCommandAliasTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
-    private $import_root;
+    private $filesystem_root;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/import-alias-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $this->import_root = $this->tempDir . '/fs-root';
+        $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->import_root, 0755, true);
+        mkdir($this->filesystem_root, 0755, true);
     }
 
     protected function tearDown(): void
@@ -62,7 +62,7 @@ class LegacyCommandAliasTest extends TestCase
      */
     public function testLegacyCommandNameIsAccepted(string $legacy_name, string $canonical_name): void
     {
-        $client = new \ImportClient('http://fake.invalid', $this->stateDir, $this->import_root);
+        $client = new \ImportClient('http://fake.invalid', $this->stateDir, $this->filesystem_root);
 
         // Write a preflight so commands that require it don't bail early.
         file_put_contents(
@@ -115,7 +115,7 @@ class LegacyCommandAliasTest extends TestCase
             ]),
         );
 
-        $client = new \ImportClient('http://fake.invalid', $this->stateDir, $this->import_root);
+        $client = new \ImportClient('http://fake.invalid', $this->stateDir, $this->filesystem_root);
         $reflection = new \ReflectionClass($client);
         $loadState = $reflection->getMethod('load_state');
         $state = $loadState->invoke($client)->to_array();

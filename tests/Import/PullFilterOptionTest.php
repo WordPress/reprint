@@ -20,10 +20,10 @@ class PullFilterFakeClient extends \ImportClient
     /** @var resource|null */
     private $terminal_progress_stream = null;
 
-    public function __construct(string $state_directory, string $import_root, bool $create_skipped_list)
+    public function __construct(string $state_directory, string $filesystem_root, bool $create_skipped_list)
     {
         $this->create_skipped_list = $create_skipped_list;
-        parent::__construct('http://fake.invalid', $state_directory, $import_root);
+        parent::__construct('http://fake.invalid', $state_directory, $filesystem_root);
     }
 
     public function audit_log(string $message, bool $to_console = true): void
@@ -183,16 +183,16 @@ class PullFilterOptionTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
-    private $import_root;
+    private $filesystem_root;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/pull-filter-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $this->import_root = $this->tempDir . '/fs-root';
+        $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->import_root, 0755, true);
+        mkdir($this->filesystem_root, 0755, true);
     }
 
     protected function tearDown(): void
@@ -224,7 +224,7 @@ class PullFilterOptionTest extends TestCase
 
     private function makeClient(bool $create_skipped_list): PullFilterFakeClient
     {
-        return new PullFilterFakeClient($this->stateDir, $this->import_root, $create_skipped_list);
+        return new PullFilterFakeClient($this->stateDir, $this->filesystem_root, $create_skipped_list);
     }
 
     private function readState(): array
@@ -261,7 +261,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullDoesNotAdvancePastFailedPreflight(): void
     {
-        $client = new PullFailingPreflightFakeClient($this->stateDir, $this->import_root, false);
+        $client = new PullFailingPreflightFakeClient($this->stateDir, $this->filesystem_root, false);
 
         try {
             ob_start();
@@ -496,7 +496,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullFilesDoesNotAdvancePastFailedPreflight(): void
     {
-        $client = new PullFailingPreflightFakeClient($this->stateDir, $this->import_root, false);
+        $client = new PullFailingPreflightFakeClient($this->stateDir, $this->filesystem_root, false);
 
         try {
             ob_start();
@@ -842,7 +842,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullDerivesFlatDocumentRootFromFlattenTo(): void
     {
-        $client = new PullBridgeFakeClient($this->stateDir, $this->import_root, false);
+        $client = new PullBridgeFakeClient($this->stateDir, $this->filesystem_root, false);
         $flatten_to = $this->tempDir . '/flattened-site';
 
         ob_start();

@@ -58,7 +58,7 @@ final class FilesPushCommandTest extends TestCase
         $expectedPair = hash('sha256', $trimmedTargetUrl . "\0" . $resolvedLocalDocumentRoot);
 
         $this->assertSame($trimmedTargetUrl, $context['target_url']);
-        $this->assertSame($resolvedLocalDocumentRoot, $context['local_document_root']);
+        $this->assertSame($resolvedLocalDocumentRoot, $context['filesystem_root']);
         $this->assertSame($expectedPair, $context['pair']);
         $this->assertSame(
             realpath($this->stateDirectory) . '/push/' . $expectedPair,
@@ -184,7 +184,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame(1, $missingTreeResult['exit']);
         $missingTreeError = $this->lastJsonLine($missingTreeResult['stderr']);
         $this->assertSame(
-            'The local document root does not exist or is not a directory: ' . $missingTree . '.',
+            'The filesystem root does not exist or is not a directory: ' . $missingTree . '.',
             $missingTreeError['error'] ?? null
         );
         $this->assertDirectoryDoesNotExist($missingTree);
@@ -201,7 +201,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame(1, $symlinkResult['exit']);
         $symlinkError = $this->lastJsonLine($symlinkResult['stderr']);
         $this->assertSame(
-            'The local document root must not be a symlink: ' . $symlinkedTree . '.',
+            'The filesystem root must not be a symlink: ' . $symlinkedTree . '.',
             $symlinkError['error'] ?? null
         );
 
@@ -215,7 +215,7 @@ final class FilesPushCommandTest extends TestCase
         ]);
         $this->assertSame(1, $nestedStateResult['exit']);
         $nestedStateError = $this->lastJsonLine($nestedStateResult['stderr']);
-        $this->assertStringContainsString('must be outside the local document root', $nestedStateError['error'] ?? '');
+        $this->assertStringContainsString('must be outside the filesystem root', $nestedStateError['error'] ?? '');
         $this->assertStringContainsString( (string) realpath($this->localTree), $nestedStateError['error'] ?? '' );
 
         $this->assertNoSenderState($this->stateDirectory);

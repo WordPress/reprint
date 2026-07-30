@@ -22,16 +22,16 @@ class RuntimeFilesTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
-    private $import_root;
+    private $filesystem_root;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/runtime-files-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $this->import_root = $this->tempDir . '/fs-root';
+        $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->import_root, 0755, true);
+        mkdir($this->filesystem_root, 0755, true);
     }
 
     protected function tearDown(): void
@@ -63,7 +63,7 @@ class RuntimeFilesTest extends TestCase
 
     private function makeClient(): \ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->import_root);
+        return new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);
     }
 
     private function writeState(array $state): void

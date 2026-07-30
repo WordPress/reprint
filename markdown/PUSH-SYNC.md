@@ -149,7 +149,7 @@ sender run. Keeping another cursor and retained handle for this post-commit copy
 is not justified until measurements from materially larger installations show
 that it matters.
 
-The cursor contains the plan directory, local document root, previous local
+The cursor contains the plan directory, filesystem root, previous local
 index, and current planning position. During indexing, that
 position contains the `FileIndexProcessor` cursor and committed fresh-index byte
 offset. During diffing, each step flushes only the path list or append-only
@@ -362,7 +362,7 @@ uploads retain those values in memory for later deletion steps. Those
 receiver-owned values are the only work-delete cursor; `sender.json` does not
 duplicate it. Each uploaded deletion-list part contains one complete local path.
 The sender trusts this completed, immutable plan without consulting the fresh
-local index or live local document root again. If a deleted path reappears after planning,
+local index or live filesystem root again. If a deleted path reappears after planning,
 the current push may delete it on the target and the next push will send it.
 
 A changed local path to push, a vanished path to push, or a directory to push
@@ -407,7 +407,7 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 ## Low-level files-push command
 
 `reprint files-push <target-url>` is the production CLI caller for one
-`PushFilesSender`. It sends only the resolved local document root named by `--fs-root`.
+`PushFilesSender`. It sends only the resolved filesystem root named by `--fs-root`.
 It requires `--state-dir`, `--fs-root`, and `--secret`; HTTPS is required unless
 the operator passes `--force-http`. It does not run pull preflight, read or
 write `.import-state.json`, show a plan, ask for confirmation, transfer a
@@ -417,13 +417,13 @@ database, retry a failed request, or start a replacement sender after a
 The command derives one pair key without general URL normalization:
 
 ```text
-sha256(rtrim(<target-url>, "?&") + "\0" + <resolved-local-document-root>)
+sha256(rtrim(<target-url>, "?&") + "\0" + <resolved-filesystem-root>)
 ```
 
 Its sender state lives at `<state-dir>/push/<pair-key>/`. A different target
-query or resolved local document root therefore selects a different retained local
+query or resolved filesystem root therefore selects a different retained local
 index. Fragments, URL user-info, and `SECRET_KEY` target parameters are
-rejected. The local push state directory must be outside the local document root so
+rejected. The local push state directory must be outside the filesystem root so
 planning cannot index its own changing files.
 
 One process starts or resumes exactly one sender. Before every `next_step()` it
@@ -456,7 +456,7 @@ minimized push operation plan before target exclusions: the local paths a
 files-push would send or delete, compared against the pair's previous local
 index published by a completed files-push. It uses the files-push pair-key
 formula, including its trailing `?` and `&` trim, so another URL query or
-local document root cannot reuse the index. It accepts only `--state-dir` and
+filesystem root cannot reuse the index. It accepts only `--state-dir` and
 `--fs-root`; it needs no secret, performs no preflight, and makes no network
 request. It runs one complete PushPlan against `previous_local_index.jsonl` in
 `files-diff-plan/` while the command holds the state-directory-wide Reprint

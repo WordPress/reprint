@@ -17,16 +17,16 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
-    private $import_root;
+    private $filesystem_root;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/only-diff-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $this->import_root = $this->tempDir . '/fs-root';
+        $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->import_root, 0755, true);
+        mkdir($this->filesystem_root, 0755, true);
     }
 
     protected function tearDown(): void
@@ -69,7 +69,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
     /** Create a local file under fs_root for a (source-absolute) index path. */
     private function seedLocalFile(string $path, string $contents = "x"): string
     {
-        $full = $this->import_root . $path;
+        $full = $this->filesystem_root . $path;
         if (!is_dir(dirname($full))) {
             mkdir(dirname($full), 0755, true);
         }
@@ -116,7 +116,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             json_encode($defaults, JSON_PRETTY_PRINT),
         );
 
-        $client = new \ImportClient('http://fake.url', $this->stateDir, $this->import_root);
+        $client = new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);
         $r = new \ReflectionClass($client);
         $r->getProperty('state')->setValue($client, $r->getMethod('load_state')->invoke($client));
         $r->getProperty('is_tty')->setValue($client, false);
@@ -179,7 +179,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $r->getMethod('diff_indexes_and_build_fetch_list')->invoke($client);
 
         // The selected root, its matched contents, and its index entry survive…
-        $this->assertDirectoryExists($this->import_root . '/wp-content/themes');
+        $this->assertDirectoryExists($this->filesystem_root . '/wp-content/themes');
         $this->assertFileExists($kept);
         $this->assertContains('/wp-content/themes', $this->readLocalIndexPaths());
         // …while a genuine orphan inside it is still drained.

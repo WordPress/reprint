@@ -2425,7 +2425,7 @@ final class PushEndpointsTest extends TestCase {
         $push_state_directory = $this->root . '/malformed-state';
         mkdir($local_docroot, 0700, true);
         $sender = $this->startSender([
-            'docroot' => $local_docroot,
+            'filesystem_root' => $local_docroot,
             'push_state_directory' => $push_state_directory,
             'base_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
@@ -2931,12 +2931,12 @@ final class PushEndpointsTest extends TestCase {
      * @return array{exit:int,stdout:string,stderr:string,output:string}
      */
     private function runFilesPushCli(
-        string $local_docroot,
+        string $filesystem_root,
         string $state_directory,
         array $ini_settings = []
     ): array {
         [$process, $pipes] = $this->startFilesPushCli(
-            $local_docroot,
+            $filesystem_root,
             $state_directory,
             $ini_settings
         );
@@ -3028,11 +3028,11 @@ final class PushEndpointsTest extends TestCase {
 
     /** @return array<string,mixed> */
     private function filesPushSenderOptions(
-        string $local_docroot,
+        string $filesystem_root,
         string $push_state_directory
     ): array {
         return [
-            'docroot' => $local_docroot,
+            'filesystem_root' => $filesystem_root,
             'push_state_directory' => $push_state_directory,
             'base_url' => $this->base_url,
             'allow_http' => true,
@@ -3276,7 +3276,7 @@ final class PushEndpointsTest extends TestCase {
      * @return array<string,mixed> PushFilesSender start or resume options.
      */
     private function senderOptions(
-        string $local_docroot,
+        string $filesystem_root,
         string $push_state_directory
     ): array
     {
@@ -3285,7 +3285,7 @@ final class PushEndpointsTest extends TestCase {
             'maximum_part_bytes' => 64,
         ]);
         return [
-            'docroot' => $local_docroot,
+            'filesystem_root' => $filesystem_root,
             'push_state_directory' => $push_state_directory,
             'base_url' => $this->base_url,
             'allow_http' => true,

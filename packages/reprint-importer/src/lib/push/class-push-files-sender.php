@@ -82,7 +82,7 @@
  * local index used for planning. The sender compares the live path with those
  * values before sending and again after each read. A difference removes the
  * upload-only push session, because its work and the planned local index no
- * longer describe the same local document root.
+ * longer describe the same filesystem root.
  *
  * Receiver-confirmed file and deletion-list positions are never copied into
  * active state. A newly opened sender reads them from `push_status`; a
@@ -126,8 +126,8 @@
  */
 final class PushFilesSender
 {
-    /** @var string Local document root whose local paths to push are sent. */
-    private string $docroot;
+    /** @var string Filesystem root whose local paths to push are sent. */
+    private string $filesystem_root;
 
     /** @var string Local push state directory owned by this sender. */
     private string $push_state_directory;
@@ -231,7 +231,7 @@ final class PushFilesSender
      * @param array $options {
      *     Push, push stream client, and local-file options.
      *
-     *     @type string                  $docroot                Required local document-root directory.
+     *     @type string                  $filesystem_root                Required filesystem root directory.
      *     @type string                  $push_state_directory    Required local push state directory.
      *     @type string                  $base_url                Required exporter API URL.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
@@ -329,10 +329,10 @@ final class PushFilesSender
      */
     private function __construct(array $options, ReprintProcessLock $process_lock)
     {
-        $docroot = $options['docroot'] ?? null;
+        $filesystem_root = $options['filesystem_root'] ?? null;
         $push_state_directory = $options['push_state_directory'] ?? null;
-        if (!is_string($docroot) || !is_dir($docroot) || is_link($docroot)) {
-            throw new InvalidArgumentException('PushFilesSender requires a real docroot directory.');
+        if (!is_string($filesystem_root) || !is_dir($filesystem_root) || is_link($filesystem_root)) {
+            throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
         }
         if (!is_string($push_state_directory) || $push_state_directory === '') {
             throw new InvalidArgumentException('PushFilesSender requires a push_state_directory.');
@@ -356,11 +356,11 @@ final class PushFilesSender
             }
         }
 
-        $resolved_local_document_root = realpath($docroot);
-        if ($resolved_local_document_root === false) {
-            throw new InvalidArgumentException('PushFilesSender requires a real docroot directory.');
+        $resolved_filesystem_root = realpath($filesystem_root);
+        if ($resolved_filesystem_root === false) {
+            throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
         }
-        $this->docroot = rtrim($resolved_local_document_root, '/');
+        $this->filesystem_root = rtrim($resolved_filesystem_root, '/');
         $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->plan_directory = $this->push_state_directory . '/plan';
@@ -586,7 +586,7 @@ final class PushFilesSender
     {
         $this->plan = PushPlan::start(
             $this->plan_directory,
-            $this->docroot,
+            $this->filesystem_root,
             $this->previous_local_index,
             $this->excluded_paths_path
         );
@@ -778,7 +778,7 @@ final class PushFilesSender
             ];
             $upload_completes_local_path = true;
         } elseif ($local_path_type_size_and_ctime['type'] === 'symlink') {
-            $symlink_target = @readlink($this->docroot . '/' . $local_path_to_push['path']);
+            $symlink_target = @readlink($this->filesystem_root . '/' . $local_path_to_push['path']);
             $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
@@ -824,7 +824,7 @@ final class PushFilesSender
                 $local_io_failure_detail = null;
                 if (!is_resource($this->local_file_handle)) {
                     $this->local_file_handle = fopen(
-                        $this->docroot . '/' . $local_path_to_push['path'],
+                        $this->filesystem_root . '/' . $local_path_to_push['path'],
                         'rb'
                     );
                 }
@@ -1119,7 +1119,7 @@ final class PushFilesSender
     }
 
     /**
-     * Moves a changed local document root to push-session removal.
+     * Moves a changed filesystem root to push-session removal.
      */
     private function start_removing_push_session_after_local_change(): void
     {
@@ -1424,7 +1424,7 @@ final class PushFilesSender
      */
     private function directory_is_empty(string $path): ?bool
     {
-        $directory_handle = @opendir($this->docroot . '/' . $path);
+        $directory_handle = @opendir($this->filesystem_root . '/' . $path);
         if ($directory_handle === false) {
             return null;
         }
@@ -1456,7 +1456,7 @@ final class PushFilesSender
      */
     private function stat_local_path(string $path): ?array
     {
-        $absolute_path = $this->docroot . '/' . $path;
+        $absolute_path = $this->filesystem_root . '/' . $path;
         clearstatcache(true, $absolute_path);
         $path_stat = @lstat($absolute_path);
         if (!is_array($path_stat)) {

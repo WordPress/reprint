@@ -262,11 +262,11 @@ class ImportClient
     /** @var string Target exporter API URL. */
     public $target_url;
 
-    /** @var string State directory for this local document root (.import-state.json, db.sql, etc.). */
+    /** @var string State directory for this filesystem root (.import-state.json, db.sql, etc.). */
     public $state_directory;
 
-    /** @var string Import root where the target filesystem is reconstructed. */
-    public $import_root;
+    /** @var string Filesystem root where the target filesystem is reconstructed. */
+    public $filesystem_root;
 
     /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
     private $state_file;
@@ -404,14 +404,14 @@ class ImportClient
     private $include_caches = false;
 
     /**
-     * @var string Controls behavior when the import root is non-empty at import start.
+     * @var string Controls behavior when the filesystem root is non-empty at import start.
      *
-     * 'error' (default): throw an error if the import root is non-empty.
+     * 'error' (default): throw an error if the filesystem root is non-empty.
      * 'preserve-local': preserve existing files, symlinks, and directories in the
-     * import root instead of overwriting them; non-writable directories are skipped
+     * filesystem root instead of overwriting them; non-writable directories are skipped
      * gracefully and logged to the audit log.
      *
-     * On the first sync, existing import root content is left untouched — any file,
+     * On the first sync, existing filesystem root content is left untouched — any file,
      * symlink, or directory that already exists at a path the remote tries to write
      * is skipped and never added to the local index.
      *
@@ -442,7 +442,7 @@ class ImportClient
     /**
      * @var array<string,string> Resolved path mappings from target filesystem
      * paths to local filesystem paths. Both sides are absolute. Empty means
-     * the identity mapping beneath the import root.
+     * the identity mapping beneath the filesystem root.
      */
     private $resolved_path_mappings = [];
 
@@ -530,7 +530,7 @@ class ImportClient
     public function __construct(
         string $target_url,
         string $state_directory,
-        string $import_root,
+        string $filesystem_root,
         ?string $signal_handling_command = null
     )
     {
@@ -553,7 +553,7 @@ class ImportClient
 
         $this->target_url = rtrim($target_url, "?&");
         $this->state_directory = rtrim($state_directory, "/");
-        $this->import_root = rtrim($import_root, "/");
+        $this->filesystem_root = rtrim($filesystem_root, "/");
         $this->state_file = $this->state_directory . "/.import-state.json";
         $this->local_index_file = $this->state_directory . "/.import-index.jsonl";
         $this->index_update_wal_path =
@@ -581,9 +581,9 @@ class ImportClient
                 throw new RuntimeException("Failed to create directory: {$this->state_directory}");
             }
         }
-        if (!is_dir($this->import_root)) {
-            if (!mkdir($this->import_root, 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->import_root}");
+        if (!is_dir($this->filesystem_root)) {
+            if (!mkdir($this->filesystem_root, 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->filesystem_root}");
             }
         }
 
@@ -1325,7 +1325,7 @@ class ImportClient
         $context = $options['files_diff_context'] ?? self::prepare_files_pair_context(
             $this->target_url,
             $this->state_directory,
-            $this->import_root,
+            $this->filesystem_root,
             'files-diff'
         );
         if (!is_array($context)) {
@@ -1336,7 +1336,7 @@ class ImportClient
         $previous_local_index = $push_state_directory . '/previous_local_index.jsonl';
         $missing_previous_local_index_message =
             'files-diff requires the pair\'s previous local index, which a completed files-push publishes '
-            . 'for the same target URL, state directory, and local document root.';
+            . 'for the same target URL, state directory, and filesystem root.';
         if (!is_dir($push_state_directory)) {
             throw new RuntimeException($missing_previous_local_index_message);
         }
@@ -1359,7 +1359,7 @@ class ImportClient
             }
             $plan = PushPlan::start(
                 $plan_directory,
-                $context['local_document_root'],
+                $context['filesystem_root'],
                 $previous_local_index,
                 $excluded_paths_path
             );
@@ -1543,7 +1543,7 @@ class ImportClient
         $context = $options['files_push_context'] ?? self::prepare_files_push_context(
             $this->target_url,
             $this->state_directory,
-            $this->import_root,
+            $this->filesystem_root,
             $options
         );
         if (!is_array($context)) {
@@ -1565,7 +1565,7 @@ class ImportClient
             ? -1
             : parse_size($memory_limit_value);
         $sender_options = [
-            'docroot' => $context['local_document_root'],
+            'filesystem_root' => $context['filesystem_root'],
             'push_state_directory' => $context['push_state_directory'],
             'base_url' => $context['target_url'],
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
@@ -1761,16 +1761,16 @@ class ImportClient
      *     Validated files-push command context.
      *
      *     @type string $target_url           Target exporter API URL.
-     *     @type string $local_document_root  Resolved local document root being sent.
-     *     @type string $pair                 Target/local-document-root pair key.
+     *     @type string $filesystem_root  Resolved filesystem root being sent.
+     *     @type string $pair                 Target/filesystem-root pair key.
      *     @type string $push_state_directory Local push state directory.
      * }
-     * @phpstan-return array{target_url:string,local_document_root:string,pair:string,push_state_directory:string}
+     * @phpstan-return array{target_url:string,filesystem_root:string,pair:string,push_state_directory:string}
      */
     public static function prepare_files_push_context(
         string $target_url,
         string $state_directory,
-        string $local_document_root,
+        string $filesystem_root,
         array $options
     ): array {
         $secret = $options['secret'] ?? null;
@@ -1786,7 +1786,7 @@ class ImportClient
         $context = self::prepare_files_pair_context(
             $target_url,
             $state_directory,
-            $local_document_root,
+            $filesystem_root,
             'files-push'
         );
         $masked_target_url = self::mask_files_push_url_user_info($target_url);
@@ -1812,16 +1812,16 @@ class ImportClient
      *     Validated pair context.
      *
      *     @type string $target_url           Target exporter API URL.
-     *     @type string $local_document_root  Resolved local document root.
-     *     @type string $pair                 Target/local-document-root pair key.
+     *     @type string $filesystem_root  Resolved filesystem root.
+     *     @type string $pair                 Target/filesystem-root pair key.
      *     @type string $push_state_directory Local push state directory.
      * }
-     * @phpstan-return array{target_url:string,local_document_root:string,pair:string,push_state_directory:string}
+     * @phpstan-return array{target_url:string,filesystem_root:string,pair:string,push_state_directory:string}
      */
     public static function prepare_files_pair_context(
         string $target_url,
         string $state_directory,
-        string $local_document_root,
+        string $filesystem_root,
         string $command
     ): array {
         $masked_target_url = self::mask_files_push_url_user_info($target_url);
@@ -1837,23 +1837,23 @@ class ImportClient
                 'The ' . $command . ' target URL must not contain URL user-info: ' . $masked_target_url . '.'
             );
         }
-        if (is_link($local_document_root)) {
-            throw new InvalidArgumentException('The local document root must not be a symlink: ' . $local_document_root . '.');
+        if (is_link($filesystem_root)) {
+            throw new InvalidArgumentException('The filesystem root must not be a symlink: ' . $filesystem_root . '.');
         }
-        if (!is_dir($local_document_root)) {
+        if (!is_dir($filesystem_root)) {
             throw new InvalidArgumentException(
-                'The local document root does not exist or is not a directory: ' . $local_document_root . '.'
+                'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
             );
         }
-        $resolved_local_document_root = realpath($local_document_root);
-        if ($resolved_local_document_root === false) {
+        $resolved_filesystem_root = realpath($filesystem_root);
+        if ($resolved_filesystem_root === false) {
             throw new InvalidArgumentException(
-                'The local document root does not exist or is not a directory: ' . $local_document_root . '.'
+                'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
             );
         }
-        $resolved_local_document_root = rtrim($resolved_local_document_root, '/') ?: '/';
+        $resolved_filesystem_root = rtrim($resolved_filesystem_root, '/') ?: '/';
         $target_url = rtrim($target_url, '?&');
-        $pair = hash('sha256', $target_url . "\0" . $resolved_local_document_root);
+        $pair = hash('sha256', $target_url . "\0" . $resolved_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
         $push_state_directory = $state_directory . '/push/' . $pair;
         if (strpos($push_state_directory, '/') !== 0) {
@@ -1884,18 +1884,18 @@ class ImportClient
             );
         }
         if (
-            $resolved_local_document_root === '/'
-            || path_is_within_root($push_state_directory, $resolved_local_document_root)
+            $resolved_filesystem_root === '/'
+            || path_is_within_root($push_state_directory, $resolved_filesystem_root)
         ) {
             throw new InvalidArgumentException(
                 'The local push state directory ' . $push_state_directory
-                . ' must be outside the local document root ' . $resolved_local_document_root . '.'
+                . ' must be outside the filesystem root ' . $resolved_filesystem_root . '.'
             );
         }
 
         return [
             'target_url' => $target_url,
-            'local_document_root' => $resolved_local_document_root,
+            'filesystem_root' => $resolved_filesystem_root,
             'pair' => $pair,
             'push_state_directory' => $push_state_directory,
         ];
@@ -2170,10 +2170,10 @@ class ImportClient
 
         // Detect webhost environment from preflight data.
         // The host analyzers score based on preflight signals. We also
-        // check the import root for a __wp__ symlink as a fallback
+        // check the filesystem root for a __wp__ symlink as a fallback
         // when the remote preflight didn't report enough filesystem data.
         $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
-        if ($detected_webhost === 'other' && is_link($this->import_root . '/__wp__')) {
+        if ($detected_webhost === 'other' && is_link($this->filesystem_root . '/__wp__')) {
             $detected_webhost = 'wpcloud';
         }
         $this->import_state()->webhost = $detected_webhost;
@@ -2828,8 +2828,8 @@ class ImportClient
         // Filter out "." and ".." explicitly: standard PHP scandir() returns them,
         // but WASM PHP (WordPress Playground) does not, so a `count <= 2` shortcut
         // would mis-classify directories with one or two real entries as empty.
-        $is_empty = !is_dir($this->import_root) || count(array_diff(
-            scandir($this->import_root) ?: [],
+        $is_empty = !is_dir($this->filesystem_root) || count(array_diff(
+            scandir($this->filesystem_root) ?: [],
             [".", ".."]
         )) === 0;
 
@@ -2871,7 +2871,7 @@ class ImportClient
             ], true);
         } else {
             // Starting fresh — validate that target directory is empty.
-            // A delta sync ($is_delta) naturally has a non-empty import root
+            // A delta sync ($is_delta) naturally has a non-empty filesystem root
             // because we put those files there during the initial sync.
             if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
                 throw new RuntimeException(
@@ -3490,8 +3490,8 @@ class ImportClient
      *
      * Since the server indexes everything under realpath()-resolved paths,
      * the files are already downloaded to the target location (e.g.
-     * import root/wordpress/...).  We just need to create the symlink
-     * (e.g. import root/srv/wordpress -> /wordpress) so the directory
+     * filesystem root/wordpress/...).  We just need to create the symlink
+     * (e.g. filesystem root/srv/wordpress -> /wordpress) so the directory
      * layout matches the server.
      */
     private function recreate_intermediate_symlinks(): void
@@ -3549,7 +3549,7 @@ class ImportClient
             }
 
             // Repoint through the same seam regular symlink chunks use, so the
-            // link targets wherever the content actually landed (import root,
+            // link targets wherever the content actually landed (filesystem root,
             // remapped, or bundled) instead of the raw source spelling.
             $target = $this->map_symlink_target_for_local_mirror($path, $local_path, $target);
 
@@ -3590,7 +3590,7 @@ class ImportClient
             }
 
             // Validate that the symlink target doesn't escape the filesystem root.
-            $root = $this->get_import_root_path();
+            $root = $this->get_filesystem_root_path();
             try {
                 $this->assert_symlink_target_within_root(
                     dirname($local_path),
@@ -4049,9 +4049,9 @@ class ImportClient
      * the applier writes the files the target server needs to fulfill those
      * requirements.
      *
-     * The effective import root is --fs-root + the remote site's document_root
+     * The effective filesystem root is --fs-root + the remote site's document_root
      * prefix (from preflight). For example, if the remote document_root is
-     * /srv/htdocs and --fs-root is ./files, the effective import root is
+     * /srv/htdocs and --fs-root is ./files, the effective filesystem root is
      * ./files/srv/htdocs. If the site was flattened with flat-docroot,
      * pass the flattened directory as --fs-root directly and the prefix
      * is not applied.
@@ -4084,7 +4084,7 @@ class ImportClient
         $preflight_data = $entry["data"];
         $webhost = $this->import_state()->webhost ?? "other";
 
-        // Resolve the effective import root from either --flat-document-root
+        // Resolve the effective filesystem root from either --flat-document-root
         // (used as-is) or --fs-root (prefixed with the remote document_root).
         // Mutual exclusion is already enforced at the CLI level.
         $flat_document_root = $options["flat_document_root"] ?? null;
@@ -4096,7 +4096,7 @@ class ImportClient
             // --fs-root: the raw download directory. The remote site's
             // document_root tells us where the web root lived on the
             // source server. Files are downloaded preserving the full
-            // target filesystem path, so the effective import root is --fs-root +
+            // target filesystem path, so the effective filesystem root is --fs-root +
             // document_root.
             $remote_doc_root = $preflight_data["runtime"]["document_root"] ?? "";
             if (is_string($remote_doc_root)) {
@@ -4106,14 +4106,14 @@ class ImportClient
             }
 
             if ($remote_doc_root !== "") {
-                $effective_fs_root = $this->import_root . $remote_doc_root;
+                $effective_fs_root = $this->filesystem_root . $remote_doc_root;
             } else {
-                $effective_fs_root = $this->import_root;
+                $effective_fs_root = $this->filesystem_root;
             }
 
             if (!is_dir($effective_fs_root)) {
                 throw new RuntimeException(
-                    "Effective import root does not exist: {$effective_fs_root}\n" .
+                    "Effective filesystem root does not exist: {$effective_fs_root}\n" .
                     "The remote document_root was: {$remote_doc_root}\n" .
                     "If you used flat-docroot, pass the flattened directory " .
                     "with --flat-document-root instead of --fs-root."
@@ -4170,7 +4170,7 @@ class ImportClient
                 $db_dir = rtrim(dirname($sqlite_path), '/') . '/';
                 $db_file = basename($sqlite_path);
             } else {
-                $db_dir = '{import root}/wp-content/database/';
+                $db_dir = '{fs-root}/wp-content/database/';
                 $db_file = '.ht.sqlite';
             }
             $manifest->sqlite = [
@@ -4204,7 +4204,7 @@ class ImportClient
         }
 
         // Resolve the path to WordPress's index.php. On standard hosts it
-        // lives in the import root. On WPCloud the ABSPATH is a different
+        // lives in the filesystem root. On WPCloud the ABSPATH is a different
         // directory (e.g. /wordpress/core/X.Y.Z) which maps to
         // download_root + abspath when using --fs-root.
         $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
@@ -4214,8 +4214,8 @@ class ImportClient
             $wordpress_index = $abs_fs_root . '/index.php';
         } elseif ($abspath !== "") {
             // Raw download: ABSPATH is relative to the download root,
-            // not the effective import root (which is download_root + document_root).
-            $wordpress_index = realpath($this->import_root . $abspath . '/index.php') ?: '';
+            // not the effective filesystem root (which is download_root + document_root).
+            $wordpress_index = realpath($this->filesystem_root . $abspath . '/index.php') ?: '';
         } else {
             $wordpress_index = $abs_fs_root . '/index.php';
         }
@@ -4243,7 +4243,7 @@ class ImportClient
             // Replace the source path with the copied-to path so the
             // generated runtime.php points to the output directory.
             $manifest->sqlite['plugin_dir'] = $copied_plugin;
-            // Resolve {import root} in db_dir now that we have the real path.
+            // Resolve {fs-root} in db_dir now that we have the real path.
             $manifest->sqlite['db_dir'] = resolve_runtime_placeholders(
                 $manifest->sqlite['db_dir'],
                 $abs_fs_root,
@@ -4415,9 +4415,9 @@ class ImportClient
      *
      * Creates a directory at the specified --flatten-to path that mirrors
      * a vanilla WordPress installation layout by symlinking entries from
-     * the import root. Uses preflight data (paths_urls) to determine
+     * the filesystem root. Uses preflight data (paths_urls) to determine
      * where each WordPress component actually lives, rather than blindly
-     * scanning import root top-level entries.
+     * scanning filesystem root top-level entries.
      *
      * This is essential when the source site uses a non-standard layout
      * (e.g. WP Cloud with ABSPATH=/srv/htdocs and WP_CONTENT_DIR=/tmp/__wp__/wp-content)
@@ -4440,10 +4440,10 @@ class ImportClient
         $flatten_to = rtrim($flatten_to, "/");
         $force = $options["force"] ?? false;
 
-        // Ensure the import root exists
-        if (!is_dir($this->import_root)) {
+        // Ensure the filesystem root exists
+        if (!is_dir($this->filesystem_root)) {
             throw new RuntimeException(
-                "Fs root does not exist: {$this->import_root}",
+                "Fs root does not exist: {$this->filesystem_root}",
             );
         }
 
@@ -4488,32 +4488,32 @@ class ImportClient
             );
         }
 
-        // Map target filesystem paths to local paths within import root
-        $local_abspath = $this->import_root . $abspath;
+        // Map target filesystem paths to local paths within filesystem root
+        $local_abspath = $this->filesystem_root . $abspath;
         if (!is_dir($local_abspath)) {
             throw new RuntimeException(
-                "WordPress ABSPATH directory not found in import root: {$local_abspath} " .
+                "WordPress ABSPATH directory not found in filesystem root: {$local_abspath} " .
                     "(remote ABSPATH: {$abspath}). Has the file sync completed?",
             );
         }
 
         $local_wp_admin = $wp_admin_path !== null
-            ? $this->import_root . $wp_admin_path
+            ? $this->filesystem_root . $wp_admin_path
             : null;
         $local_wp_includes = $wp_includes_path !== null
-            ? $this->import_root . $wp_includes_path
+            ? $this->filesystem_root . $wp_includes_path
             : null;
         $local_content_dir = $content_dir !== null
-            ? $this->import_root . $content_dir
+            ? $this->filesystem_root . $content_dir
             : null;
         $local_plugins_dir = $plugins_dir !== null
-            ? $this->import_root . $plugins_dir
+            ? $this->filesystem_root . $plugins_dir
             : null;
         $local_mu_plugins_dir = $mu_plugins_dir !== null
-            ? $this->import_root . $mu_plugins_dir
+            ? $this->filesystem_root . $mu_plugins_dir
             : null;
         $local_uploads_basedir = $uploads_basedir !== null
-            ? $this->import_root . $uploads_basedir
+            ? $this->filesystem_root . $uploads_basedir
             : null;
 
         // Determine which components are "detached" — located outside
@@ -4653,7 +4653,7 @@ class ImportClient
         $wp_config_in_flatten = $flatten_to . "/wp-config.php";
         if (!file_exists($wp_config_in_flatten)) {
             $parent_of_abspath = dirname($abspath);
-            $local_parent_wp_config = $this->import_root . $parent_of_abspath . "/wp-config.php";
+            $local_parent_wp_config = $this->filesystem_root . $parent_of_abspath . "/wp-config.php";
             if (file_exists($local_parent_wp_config)) {
                 $this->flatten_place_symlink(
                     $local_parent_wp_config,
@@ -4766,7 +4766,7 @@ class ImportClient
                 );
             } else {
                 $this->audit_log(
-                    "FLAT-DOCUMENT-ROOT | Warning: content_dir not found in import root: " .
+                    "FLAT-DOCUMENT-ROOT | Warning: content_dir not found in filesystem root: " .
                         "{$local_content_dir} (remote: {$content_dir})",
                     true,
                 );
@@ -4786,7 +4786,7 @@ class ImportClient
         $result = [
             "status" => "complete",
             "flatten_to" => $flatten_to,
-            "fs_root" => $this->import_root,
+            "fs_root" => $this->filesystem_root,
             "abspath" => $abspath,
             "wp_admin_path" => $wp_admin_path,
             "wp_includes_path" => $wp_includes_path,
@@ -5146,7 +5146,7 @@ class ImportClient
                         "--target-sqlite-path option is required but was missing.",
                     );
                 }
-                $target_path = $this->get_import_root_path() . $content_dir . '/database/.ht.sqlite';
+                $target_path = $this->get_filesystem_root_path() . $content_dir . '/database/.ht.sqlite';
                 $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
                 $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
             }
@@ -7037,7 +7037,7 @@ class ImportClient
     }
 
     /**
-     * Delete a local file path safely under the import root.
+     * Delete a local file path safely under the filesystem root.
      */
     private function delete_target_filesystem_path(string $path): void
     {
@@ -8411,7 +8411,7 @@ class ImportClient
     }
 
     /**
-     * Map a remote symlink target to the import root mirror when possible.
+     * Map a remote symlink target to the filesystem root mirror when possible.
      *
      * Handles both absolute and relative targets (relative ones are resolved
      * against the symlink's source directory). In-scope and non-followed targets
@@ -8432,7 +8432,7 @@ class ImportClient
      *
      * Local import state:
      *
-     *   <state-dir>/import root/
+     *   <state-dir>/filesystem root/
      *   |-- tmp/e2e-shared-themes/pub/indice/
      *   |   |-- style.css
      *   |   `-- index.php
@@ -8442,7 +8442,7 @@ class ImportClient
      * Without this mapping, the symlink would point at /tmp/e2e-shared-themes/pub/indice
      * (which does not exist on the local machine, or worse, exists with unrelated content).
      * With this mapping, the symlink is rewritten to a relative path that resolves to the
-     * mirrored local copy under import root.
+     * mirrored local copy under filesystem root.
      */
     private function map_symlink_target_for_local_mirror(
         string $target_filesystem_path,
@@ -8533,22 +8533,22 @@ class ImportClient
     }
 
     /**
-     * Return the resolved absolute import root, creating it if it doesn't exist.
+     * Return the resolved absolute filesystem root, creating it if it doesn't exist.
      */
-    private function get_import_root_path(): string
+    private function get_filesystem_root_path(): string
     {
-        if (!is_dir($this->import_root)) {
-            if (!mkdir($this->import_root, 0755, true) && !is_dir($this->import_root)) {
+        if (!is_dir($this->filesystem_root)) {
+            if (!mkdir($this->filesystem_root, 0755, true) && !is_dir($this->filesystem_root)) {
                 throw new RuntimeException(
-                    "Failed to create import root directory: {$this->import_root}",
+                    "Failed to create filesystem root directory: {$this->filesystem_root}",
                 );
             }
         }
 
-        $real = realpath($this->import_root);
+        $real = realpath($this->filesystem_root);
         if ($real === false) {
             throw new RuntimeException(
-                "Failed to resolve import root path: {$this->import_root}",
+                "Failed to resolve filesystem root path: {$this->filesystem_root}",
             );
         }
 
@@ -8674,12 +8674,12 @@ class ImportClient
 
     /**
      * Fingerprint of the effective bundle placement root. No bundle directory
-     * (and bare --follow-symlinks) fingerprints as import root, which is the
+     * (and bare --follow-symlinks) fingerprints as filesystem root, which is the
      * equivalent placement — so switching between those spellings is allowed.
      */
     private function symlink_bundle_directory_fingerprint(): string
     {
-        $effective = $this->symlink_bundle_directory ?? rtrim($this->get_import_root_path(), "/");
+        $effective = $this->symlink_bundle_directory ?? rtrim($this->get_filesystem_root_path(), "/");
         return hash("sha256", $effective);
     }
 
@@ -8691,12 +8691,12 @@ class ImportClient
      */
     private function resolve_symlink_bundle_directory(string $raw): string
     {
-        $import_root = rtrim($this->get_import_root_path(), "/");
-        $directory = $this->resolve_token_path($raw, ["fs-root" => $import_root]);
+        $filesystem_root = rtrim($this->get_filesystem_root_path(), "/");
+        $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root]);
 
-        if (!path_is_within_root($directory, $import_root)) {
+        if (!path_is_within_root($directory, $filesystem_root)) {
             throw new InvalidArgumentException(
-                "--follow-symlinks bundle directory \"{$directory}\" resolves outside --fs-root ({$import_root}); " .
+                "--follow-symlinks bundle directory \"{$directory}\" resolves outside --fs-root ({$filesystem_root}); " .
                     "it must stay within the destination root",
             );
         }
@@ -8717,10 +8717,10 @@ class ImportClient
      */
     private function resolve_remap(array $remap_raw): array
     {
-        $import_root = rtrim($this->get_import_root_path(), "/");
+        $filesystem_root = rtrim($this->get_filesystem_root_path(), "/");
 
         $source_tokens = $this->wp_source_path_tokens();
-        $target_tokens = ["fs-root" => $import_root];
+        $target_tokens = ["fs-root" => $filesystem_root];
 
         $rules = [];
         $wp_content_target = null;
@@ -8728,9 +8728,9 @@ class ImportClient
             $source = $this->resolve_token_path($source_raw, $source_tokens);
             $target = $this->resolve_token_path($target_raw, $target_tokens);
 
-            if (!path_is_within_root($target, $import_root)) {
+            if (!path_is_within_root($target, $filesystem_root)) {
                 throw new InvalidArgumentException(
-                    "--remap target \"{$target}\" resolves outside --fs-root ({$import_root}); " .
+                    "--remap target \"{$target}\" resolves outside --fs-root ({$filesystem_root}); " .
                         "targets must stay within the destination root",
                 );
             }
@@ -8982,7 +8982,7 @@ class ImportClient
 
     /**
      * Map a target filesystem path to a local filesystem path under the import
-     * root. Symlink traversal checks prevent writes outside the import root.
+     * root. Symlink traversal checks prevent writes outside the filesystem root.
      *
      * With --remap active, a matched target filesystem path is routed to its
      * mapped local filesystem path. An unmatched path remains nested beneath
@@ -9008,7 +9008,7 @@ class ImportClient
             return $this->symlink_bundle_directory . $target_filesystem_path;
         }
 
-        return $this->get_import_root_path() . $target_filesystem_path;
+        return $this->get_filesystem_root_path() . $target_filesystem_path;
     }
 
 
@@ -9299,7 +9299,7 @@ class ImportClient
 
     private function path_traverses_symlink(string $path): bool
     {
-        $root = $this->get_import_root_path();
+        $root = $this->get_filesystem_root_path();
         $relative = ltrim(substr($path, strlen($root)), "/");
         if ($relative === "") {
             return false;
@@ -9329,8 +9329,8 @@ class ImportClient
      */
     private function ensure_directory_path(string $dir): void
     {
-        // Security: Ensure path is under the import root
-        $real_filesystem_root = $this->get_import_root_path();
+        // Security: Ensure path is under the filesystem root
+        $real_filesystem_root = $this->get_filesystem_root_path();
 
         // Resolve the target path (or what it would be)
         // For non-existent paths, resolve the parent and append the final component
@@ -9349,16 +9349,16 @@ class ImportClient
                 !path_is_within_root($real_check, $real_filesystem_root)
             ) {
                 // In preserve-local mode, a path that resolves outside the
-                // import root is expected when a directory like wp-content/plugins
+                // filesystem root is expected when a directory like wp-content/plugins
                 // is symlinked to a shared hosting location.  Skip gracefully
                 // instead of treating it as a security violation.
                 if ($this->fs_root_nonempty_behavior === 'preserve-local') {
                     throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: path resolves outside import root via symlink: {$dir}",
+                        "PRESERVE-LOCAL: path resolves outside filesystem root via symlink: {$dir}",
                     );
                 }
                 throw new RuntimeException(
-                    "Security: Refusing to create directory outside import root: {$dir}",
+                    "Security: Refusing to create directory outside filesystem root: {$dir}",
                 );
             }
         }
@@ -9377,7 +9377,7 @@ class ImportClient
             !str_starts_with($dir, $real_filesystem_root . "/")
         ) {
             throw new RuntimeException(
-                "Security: Refusing to create directory outside import root: {$dir}",
+                "Security: Refusing to create directory outside filesystem root: {$dir}",
             );
         }
 
@@ -9452,7 +9452,7 @@ class ImportClient
             $resolved = realpath($current);
             if ($resolved === false || !path_is_within_root($resolved, $real_filesystem_root)) {
                 throw new RuntimeException(
-                    "Security: Refusing to create directory outside import root: {$current}",
+                    "Security: Refusing to create directory outside filesystem root: {$current}",
                 );
             }
         }
@@ -9590,7 +9590,7 @@ class ImportClient
         }
 
         // Validate that the symlink target doesn't escape the filesystem root.
-        $root = $this->get_import_root_path();
+        $root = $this->get_filesystem_root_path();
         try {
             $this->assert_symlink_target_within_root(
                 dirname($local_path),
@@ -9726,7 +9726,7 @@ class ImportClient
             true,
         );
         if ($path !== "" && $is_file_error) {
-            $local_path = $this->import_root . $path;
+            $local_path = $this->filesystem_root . $path;
             if ($context->file_handle && $context->file_path === $local_path) {
                 fclose($context->file_handle);
                 $context->file_handle = null;
@@ -11633,7 +11633,7 @@ if (
     //                  'value-or-next' --name=VAL or --name VAL
     //                  'pair'          --name A B (repeatable, takes 2 args)
     //   target         Where to store the parsed value:
-    //                  'state_directory' | 'import_root' → special local variables
+    //                  'state_directory' | 'filesystem_root' → special local variables
     //                  'key'                   → $options['key']
     //                  'tuning_config.key'     → $options['tuning_config']['key']
     //   help           Description for --help output (null = hidden)
@@ -11663,7 +11663,7 @@ if (
         [
             'name' => 'fs-root',
             'type' => 'value',
-            'target' => 'import_root',
+            'target' => 'filesystem_root',
             'placeholder' => 'DIR',
             'help' => 'Local directory read from or written to for site files',
             'help_section' => 'required',
@@ -11737,7 +11737,7 @@ if (
             'type' => 'value',
             'target' => 'fs_root_nonempty_behavior',
             'placeholder' => 'MODE',
-            'help' => 'What to do when import root is non-empty (error|preserve-local)',
+            'help' => 'What to do when filesystem root is non-empty (error|preserve-local)',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
@@ -12085,7 +12085,7 @@ if (
     function _cli_parse_options(array $argv, int $argc, int $start, array $option_defs): array
     {
         $state_directory = null;
-        $import_root = null;
+        $filesystem_root = null;
         $options = [
             "abort" => false,
             "verbose" => false,
@@ -12114,7 +12114,7 @@ if (
                                     fwrite(STDERR, "Invalid --{$def['name']} value: {$raw}. Valid values: " . implode(", ", $def['valid_values']) . "\n");
                                     exit(1);
                                 }
-                                _cli_store($def, $value, $state_directory, $import_root, $options);
+                                _cli_store($def, $value, $state_directory, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
                             }
@@ -12122,7 +12122,7 @@ if (
 
                         case 'flag':
                             if ($arg === "--{$cli_name}" || (isset($def['short']) && $arg === "-{$def['short']}")) {
-                                _cli_store($def, $def['flag_value'] ?? true, $state_directory, $import_root, $options);
+                                _cli_store($def, $def['flag_value'] ?? true, $state_directory, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
                             }
@@ -12132,7 +12132,7 @@ if (
                             $prefix = "--{$cli_name}=";
                             if (strpos($arg, $prefix) === 0) {
                                 $raw = substr($arg, strlen($prefix));
-                                _cli_store($def, $raw, $state_directory, $import_root, $options);
+                                _cli_store($def, $raw, $state_directory, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
                             }
@@ -12141,7 +12141,7 @@ if (
                                     fwrite(STDERR, "--{$def['name']} requires one argument: " . ($def['placeholder'] ?? 'VALUE') . "\n");
                                     exit(1);
                                 }
-                                _cli_store($def, $argv[$i + 1], $state_directory, $import_root, $options);
+                                _cli_store($def, $argv[$i + 1], $state_directory, $filesystem_root, $options);
                                 $i += 1;
                                 $matched = true;
                                 break 3;
@@ -12174,7 +12174,7 @@ if (
             }
         }
 
-        return [$state_directory, $import_root, $options];
+        return [$state_directory, $filesystem_root, $options];
     }
 
     /** @internal */
@@ -12189,11 +12189,11 @@ if (
     }
 
     /** @internal */
-    function _cli_store(array $def, $value, ?string &$state_directory, ?string &$import_root, array &$options): void
+    function _cli_store(array $def, $value, ?string &$state_directory, ?string &$filesystem_root, array &$options): void
     {
         $target = $def['target'];
         if ($target === 'state_directory') { $state_directory = $value; return; }
-        if ($target === 'import_root')      { $import_root = $value; return; }
+        if ($target === 'filesystem_root')      { $filesystem_root = $value; return; }
         if (strpos($target, 'tuning_config.') === 0) {
             $options['tuning_config'][substr($target, strlen('tuning_config.'))] = $value;
             return;
@@ -12609,7 +12609,7 @@ if (
                 "  skipped-earlier   Pull only files skipped by a prior essential-files run.\n" .
                 "\n" .
                 "Output files:\n" .
-                "  (import root)/                              Downloaded files\n" .
+                "  (filesystem root)/                              Downloaded files\n" .
                 "  .import-index.jsonl                     Local file index\n" .
                 "  .import-remote-index.jsonl              Target index snapshot\n" .
                 "  .import-download-list.jsonl             Files pending download\n" .
@@ -12623,9 +12623,9 @@ if (
             "usage" => "reprint files-diff <target-url> --state-dir=DIR --fs-root=DIR",
             "description" =>
                 "Shows which local paths a files-push would send or delete, comparing\n" .
-                "the local document root at --fs-root with the pair's previous local index —\n" .
+                "the filesystem root at --fs-root with the pair's previous local index —\n" .
                 "the index a completed files-push publishes for the same target URL,\n" .
-                "state directory, and local document root.\n" .
+                "state directory, and filesystem root.\n" .
                 "The output is a local minimized push operation plan before target\n" .
                 "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
                 "default-skipped paths include generated wp-content caches, version-\n" .
@@ -12643,7 +12643,7 @@ if (
             "short" => "Push one local file tree without database work",
             "usage" => "reprint files-push <target-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
             "description" =>
-                "Sends the existing local document root at --fs-root to the target exporter API.\n" .
+                "Sends the existing filesystem root at --fs-root to the target exporter API.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
                 "It does not require pull preflight.\n" .
@@ -12804,7 +12804,7 @@ if (
                 "  DB_USER, and DB_PASSWORD. For SQLite targets, the sqlite-database-\n" .
                 "  integration plugin is copied into the output directory and a lazy-\n" .
                 "  loading \$wpdb proxy is generated in runtime.php (Playground-style,\n" .
-                "  no files placed in the import root).\n" .
+                "  no files placed in the filesystem root).\n" .
                 "\n" .
                 "Output files (nginx-fpm):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
@@ -12853,7 +12853,7 @@ if (
         $command = $command_aliases[$command];
     }
 
-    // install-exporter is a standalone guide — no URL, state-dir, or import root needed.
+    // install-exporter is a standalone guide — no URL, state-dir, or filesystem root needed.
     // Handle it before per-command --help so it always shows the full guide.
     if ($command === "install-exporter") {
         _cli_render_install_exporter();
@@ -12885,7 +12885,7 @@ if (
         $option_start_index = 3;
     }
 
-    [$state_directory, $import_root, $options] = _cli_parse_options(
+    [$state_directory, $filesystem_root, $options] = _cli_parse_options(
         $argv, $argc, $option_start_index, $option_defs
     );
     $options["command"] = $command;
@@ -12931,23 +12931,23 @@ if (
 
     // apply-runtime accepts --flat-document-root as an alternative to --fs-root.
     $flat_document_root = $options["flat_document_root"] ?? null;
-    if ($import_root && $flat_document_root) {
+    if ($filesystem_root && $flat_document_root) {
         fwrite(STDERR, "Error: --fs-root and --flat-document-root are mutually exclusive.\n");
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$import_root && !$flat_document_root && $command !== "import-metadata") {
+    if (!$filesystem_root && !$flat_document_root && $command !== "import-metadata") {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
-    if (!$import_root) {
-        // For commands that need an import root in the constructor, use the
-        // flattened import root. run_apply_runtime will resolve it properly.
+    if (!$filesystem_root) {
+        // For commands that need a filesystem root in the constructor, use the
+        // flattened filesystem root. run_apply_runtime will resolve it properly.
         // import-metadata reads only state, but ImportClient still expects
-        // an import root path. Point it at state-dir rather than requiring an
+        // a filesystem root path. Point it at state-dir rather than requiring an
         // otherwise-unused CLI option.
-        $import_root = $flat_document_root ?: $state_directory;
+        $filesystem_root = $flat_document_root ?: $state_directory;
     }
 
     try {
@@ -12960,18 +12960,18 @@ if (
             $reprint_files_push_context = ImportClient::prepare_files_push_context(
                 $target_url,
                 $state_directory,
-                $import_root,
+                $filesystem_root,
                 $options
             );
         } elseif ($command === 'files-diff') {
             $reprint_files_diff_context = ImportClient::prepare_files_pair_context(
                 $target_url,
                 $state_directory,
-                $import_root,
+                $filesystem_root,
                 'files-diff'
             );
         }
-        $client = new ImportClient($target_url, $state_directory, $import_root, $command);
+        $client = new ImportClient($target_url, $state_directory, $filesystem_root, $command);
         $reprint_files_pair = $reprint_files_push_context['pair'] ?? ( $reprint_files_diff_context['pair'] ?? null );
         $client->audit_log_argv($command, $argv, $reprint_files_pair);
         $client->run(
