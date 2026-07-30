@@ -10,21 +10,16 @@ Every path name states the machine whose coordinates it uses and whether it
 is filesystem-absolute, filesystem-root-relative, or document-root-relative.
 
 - A **state directory** is the caller-selected local directory containing
-  Reprint state for one filesystem root. Use `$state_directory`.
+  Reprint state for one filesystem root. Use `$state_dir`.
 - The **filesystem root** is the local directory under which a pulled target
   filesystem is reconstructed and whose contents are compared, pulled, and
   pushed. Use `$filesystem_root`.
 - A **target** is the site addressed by the configured exporter API URL. It is
   the source during pull and the destination during push. Use `$target_url`.
-- The **target identity URL** removes URL user-info, `SECRET_KEY`, and the
-  `site-export-api` alias from the target URL. Use `$target_identity_url`.
-- The **target fingerprint** is the SHA-256 of the target identity URL and is
+- The **target base URL** removes URL user-info, `SECRET_KEY`, and the
+  `site-export-api` alias from the target URL. Use `$target_base_url`.
+- The **target fingerprint** is the SHA-256 of the target base URL and is
   only a directory-safe identifier. Use `$target_fingerprint`.
-- A **target relationship** is the synchronization relationship between the
-  state directory's filesystem root and one target.
-- A **target relationship directory** is the local
-  `remote-<target-fingerprint>/` directory containing one target
-  relationship's state. Use `$target_relationship_directory`.
 - The **target document root** is the absolute document root on the target
   machine. Use `$target_document_root`.
 
@@ -79,12 +74,11 @@ maps every relevant filesystem-root-relative path to exactly one target document
 target document root; an **ambiguous mapping** has more than one target path,
 and an **unaddressable mapping** has none. An **identity mapping** leaves local
 and target document paths identical. `path-mapping.json` stores the resolved
-path mapping for a target relationship.
+path mapping for its target.
 
 A state directory belongs to one filesystem root and may contain several
-target relationships. Each target relationship directory is keyed only by its
-target fingerprint. Reusing a mapped relationship with another filesystem root
-is rejected.
+targets. Target-specific state is keyed by target fingerprint. Reusing mapped
+target state with another filesystem root is rejected.
 
 ## Core nouns
 

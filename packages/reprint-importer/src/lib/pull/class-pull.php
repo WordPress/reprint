@@ -277,7 +277,7 @@ class Pull
             // high-level command skip its matching stage: the pipeline has not
             // recorded that stage as complete. Clear the direct command
             // checkpoint first so the stage computes a fresh delta.
-            $state_directory = $this->client->state_directory;
+            $state_dir = $this->client->state_dir;
             if ($state_command === 'files-pull' && in_array('files-pull', $stages, true)) {
                 // Keep the local file index, but clear transient files-pull
                 // download state so this pipeline computes a fresh
@@ -298,9 +298,9 @@ class Pull
                 $state->files_pull_only_fingerprint = null;
                 $this->client->save_import_state();
                 foreach ([
-                    "{$state_directory}/.import-remote-index.jsonl",
-                    "{$state_directory}/.import-download-list.jsonl",
-                    "{$state_directory}/.import-download-list-skipped.jsonl",
+                    "{$state_dir}/.import-remote-index.jsonl",
+                    "{$state_dir}/.import-download-list.jsonl",
+                    "{$state_dir}/.import-download-list-skipped.jsonl",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -318,9 +318,9 @@ class Pull
                 $state->db_index = new DatabaseTableIndexState();
                 $this->client->save_import_state();
                 foreach ([
-                    "{$state_directory}/db.sql",
-                    "{$state_directory}/db-tables.jsonl",
-                    "{$state_directory}/.import-domains.json",
+                    "{$state_dir}/db.sql",
+                    "{$state_dir}/db-tables.jsonl",
+                    "{$state_dir}/.import-domains.json",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -462,13 +462,13 @@ class Pull
                 if (
                     $state->active_resumable_command->command_name !== 'db-pull' ||
                     $state->active_resumable_command->completion_state !== 'complete' ||
-                    !file_exists($this->client->state_directory . '/db.sql')
+                    !file_exists($this->client->state_dir . '/db.sql')
                 ) {
                     $this->run_until_complete('db-pull', function () {
                         $this->client->run_db_sync();
                     });
                 }
-                $sql_file = $this->client->state_directory . "/db.sql";
+                $sql_file = $this->client->state_dir . "/db.sql";
                 $size = null;
                 if (file_exists($sql_file)) {
                     $bytes = filesize($sql_file);
@@ -566,7 +566,7 @@ class Pull
         $options = $this->validate_database_target_options($options);
 
         if (empty($options['output_dir'])) {
-            $options['output_dir'] = $this->client->state_directory . '/runtime';
+            $options['output_dir'] = $this->client->state_dir . '/runtime';
         }
 
         if (!isset($options['filter'])) {
@@ -767,7 +767,7 @@ class Pull
      */
     private function prepare_repull(string $command): void
     {
-        $state_directory = $this->client->state_directory;
+        $state_dir = $this->client->state_dir;
         switch ($command) {
             case 'pull':
                 $reset_file_transfer_state = true;
@@ -826,14 +826,14 @@ class Pull
 
         $paths = [];
         if ($reset_file_transfer_state) {
-            $paths[] = $state_directory . "/.import-remote-index.jsonl";
-            $paths[] = $state_directory . "/.import-download-list.jsonl";
-            $paths[] = $state_directory . "/.import-download-list-skipped.jsonl";
+            $paths[] = $state_dir . "/.import-remote-index.jsonl";
+            $paths[] = $state_dir . "/.import-download-list.jsonl";
+            $paths[] = $state_dir . "/.import-download-list-skipped.jsonl";
         }
         if ($reset_db_state) {
-            $paths[] = $state_directory . "/db.sql";
-            $paths[] = $state_directory . "/db-tables.jsonl";
-            $paths[] = $state_directory . "/.import-domains.json";
+            $paths[] = $state_dir . "/db.sql";
+            $paths[] = $state_dir . "/db-tables.jsonl";
+            $paths[] = $state_dir . "/.import-domains.json";
         }
 
         foreach ($paths as $path) {
@@ -878,7 +878,7 @@ class Pull
      */
     private function start_server(array $options): void
     {
-        $output_dir = $options['output_dir'] ?? $this->client->state_directory . '/runtime';
+        $output_dir = $options['output_dir'] ?? $this->client->state_dir . '/runtime';
         $start_sh = $output_dir . '/start.sh';
 
         if (!file_exists($start_sh)) {

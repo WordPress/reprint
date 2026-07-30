@@ -263,7 +263,7 @@ class ImportClient
     public $target_url;
 
     /** @var string State directory for this filesystem root (.import-state.json, db.sql, etc.). */
-    public $state_directory;
+    public $state_dir;
 
     /** @var string Filesystem root where the target filesystem is reconstructed. */
     public $filesystem_root;
@@ -529,7 +529,7 @@ class ImportClient
 
     public function __construct(
         string $target_url,
-        string $state_directory,
+        string $state_dir,
         string $filesystem_root,
         ?string $signal_handling_command = null
     )
@@ -552,21 +552,21 @@ class ImportClient
         }
 
         $this->target_url = rtrim($target_url, "?&");
-        $this->state_directory = rtrim($state_directory, "/");
+        $this->state_dir = rtrim($state_dir, "/");
         $this->filesystem_root = rtrim($filesystem_root, "/");
-        $this->state_file = $this->state_directory . "/.import-state.json";
-        $this->local_index_file = $this->state_directory . "/.import-index.jsonl";
+        $this->state_file = $this->state_dir . "/.import-state.json";
+        $this->local_index_file = $this->state_dir . "/.import-index.jsonl";
         $this->index_update_wal_path =
-            $this->state_directory . "/.import-index-updates.wal";
+            $this->state_dir . "/.import-index-updates.wal";
         $this->target_index_file =
-            $this->state_directory . "/.import-remote-index.jsonl";
+            $this->state_dir . "/.import-remote-index.jsonl";
         $this->download_list_file =
-            $this->state_directory . "/.import-download-list.jsonl";
+            $this->state_dir . "/.import-download-list.jsonl";
         $this->skipped_download_list_file =
-            $this->state_directory . "/.import-download-list-skipped.jsonl";
-        $this->audit_log = $this->state_directory . "/.import-audit.log";
-        $this->volatile_files_file = $this->state_directory . "/.import-volatile-files.json";
-        $this->status_file = $this->state_directory . "/.import-status.json";
+            $this->state_dir . "/.import-download-list-skipped.jsonl";
+        $this->audit_log = $this->state_dir . "/.import-audit.log";
+        $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
+        $this->status_file = $this->state_dir . "/.import-status.json";
 
         // Detect TTY for progress display. In stdout mode this is re-evaluated
         // against STDERR in run() once we know the output mode.
@@ -576,9 +576,9 @@ class ImportClient
         $this->pull = new Pull($this, $this->progress);
 
         // Create directories
-        if (!is_dir($this->state_directory)) {
-            if (!mkdir($this->state_directory, 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->state_directory}");
+        if (!is_dir($this->state_dir)) {
+            if (!mkdir($this->state_dir, 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->state_dir}");
             }
         }
         if (!is_dir($this->filesystem_root)) {
@@ -890,7 +890,7 @@ class ImportClient
         ?ReprintProcessLock $process_lock = null
     ): void
     {
-        $process_lock = $process_lock ?? new ReprintProcessLock($this->state_directory);
+        $process_lock = $process_lock ?? new ReprintProcessLock($this->state_dir);
         if (!$process_lock->is_held()) {
             throw new InvalidArgumentException(
                 'ImportClient requires a held Reprint process lock.'
@@ -1324,7 +1324,7 @@ class ImportClient
     {
         $context = $options['files_diff_context'] ?? self::prepare_files_pair_context(
             $this->target_url,
-            $this->state_directory,
+            $this->state_dir,
             $this->filesystem_root,
             'files-diff'
         );
@@ -1542,7 +1542,7 @@ class ImportClient
         $started_at = hrtime(true) / 1000000000;
         $context = $options['files_push_context'] ?? self::prepare_files_push_context(
             $this->target_url,
-            $this->state_directory,
+            $this->state_dir,
             $this->filesystem_root,
             $options
         );
@@ -1769,7 +1769,7 @@ class ImportClient
      */
     public static function prepare_files_push_context(
         string $target_url,
-        string $state_directory,
+        string $state_dir,
         string $filesystem_root,
         array $options
     ): array {
@@ -1785,7 +1785,7 @@ class ImportClient
 
         $context = self::prepare_files_pair_context(
             $target_url,
-            $state_directory,
+            $state_dir,
             $filesystem_root,
             'files-push'
         );
@@ -1820,7 +1820,7 @@ class ImportClient
      */
     public static function prepare_files_pair_context(
         string $target_url,
-        string $state_directory,
+        string $state_dir,
         string $filesystem_root,
         string $command
     ): array {
@@ -1855,7 +1855,7 @@ class ImportClient
         $target_url = rtrim($target_url, '?&');
         $pair = hash('sha256', $target_url . "\0" . $resolved_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
-        $push_state_directory = $state_directory . '/push/' . $pair;
+        $push_state_directory = $state_dir . '/push/' . $pair;
         if (strpos($push_state_directory, '/') !== 0) {
             $working_directory = getcwd();
             if ($working_directory === false) {
@@ -1998,7 +1998,7 @@ class ImportClient
                 $this->save_state($this->state);
 
                 if ($this->sql_output_mode === "file") {
-                    $sql_file = $this->state_directory . "/db.sql";
+                    $sql_file = $this->state_dir . "/db.sql";
                     if (file_exists($sql_file)) {
                         unlink($sql_file);
                         $this->audit_log(
@@ -2006,14 +2006,14 @@ class ImportClient
                         );
                     }
                 }
-                $tables_file = $this->state_directory . "/db-tables.jsonl";
+                $tables_file = $this->state_dir . "/db-tables.jsonl";
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
                     $this->audit_log(
                         "FILE DELETE | {$tables_file} | abort db-pull",
                     );
                 }
-                $domains_file = $this->state_directory . "/.import-domains.json";
+                $domains_file = $this->state_dir . "/.import-domains.json";
                 if (file_exists($domains_file)) {
                     unlink($domains_file);
                     $this->audit_log(
@@ -2030,7 +2030,7 @@ class ImportClient
                 $this->reset_state();
                 $this->save_state($this->state);
 
-                $tables_file = $this->state_directory . "/db-tables.jsonl";
+                $tables_file = $this->state_dir . "/db-tables.jsonl";
                 if (file_exists($tables_file)) {
                     unlink($tables_file);
                     $this->audit_log(
@@ -2231,7 +2231,7 @@ class ImportClient
      */
     private function download_runtime_files(): void
     {
-        $runtime_dir = $this->state_directory . "/runtime_files";
+        $runtime_dir = $this->state_dir . "/runtime_files";
 
         // Always wipe and recreate so the directory reflects current state.
         if (is_dir($runtime_dir)) {
@@ -3640,7 +3640,7 @@ class ImportClient
     public function run_db_sync(): void
     {
         $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
-        $sql_file = $this->state_directory . "/db.sql";
+        $sql_file = $this->state_dir . "/db.sql";
 
         $has_progress =
             $state_command === "db-pull" &&
@@ -3798,8 +3798,8 @@ class ImportClient
      */
     private function run_db_domains(): void
     {
-        $domains_file = $this->state_directory . "/.import-domains.json";
-        $sql_file = $this->state_directory . "/db.sql";
+        $domains_file = $this->state_dir . "/.import-domains.json";
+        $sql_file = $this->state_dir . "/db.sql";
 
         if (file_exists($domains_file)) {
             // Fast path: domains were already discovered during db-pull
@@ -3851,7 +3851,7 @@ class ImportClient
             );
         } else {
             throw new RuntimeException(
-                "No domain data found. Run db-pull first, or place a db.sql file in {$this->state_directory}.",
+                "No domain data found. Run db-pull first, or place a db.sql file in {$this->state_dir}.",
             );
         }
 
@@ -4344,11 +4344,11 @@ class ImportClient
         }
 
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL"] = $base_url;
-        $state_directory = realpath($this->state_directory) ?: $this->state_directory;
+        $state_dir = realpath($this->state_dir) ?: $this->state_dir;
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
-            rtrim($state_directory, "/") . "/.import-state.json";
+            rtrim($state_dir, "/") . "/.import-state.json";
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
-            rtrim($state_directory, "/") . "/.import-download-list-skipped.jsonl";
+            rtrim($state_dir, "/") . "/.import-download-list-skipped.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
@@ -5215,10 +5215,10 @@ class ImportClient
 
     public function run_db_apply(array $options): void
     {
-        $sql_file = $this->state_directory . "/db.sql";
+        $sql_file = $this->state_dir . "/db.sql";
         if (!file_exists($sql_file)) {
             throw new RuntimeException(
-                "db.sql not found in {$this->state_directory}. Run db-pull first.",
+                "db.sql not found in {$this->state_dir}. Run db-pull first.",
             );
         }
 
@@ -5235,7 +5235,7 @@ class ImportClient
         }
 
         // Show discovered domains if available
-        $domains_file = $this->state_directory . "/.import-domains.json";
+        $domains_file = $this->state_dir . "/.import-domains.json";
         if (file_exists($domains_file)) {
             $domains = json_decode(file_get_contents($domains_file), true);
             if (is_array($domains) && !empty($domains)) {
@@ -5403,7 +5403,7 @@ class ImportClient
         $stmts_since_save = 0;
 
         // Load pre-computed statement count from db-pull for progress reporting
-        $sql_stats_file = $this->state_directory . "/.import-sql-stats.json";
+        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
         $statements_total = null;
         if (file_exists($sql_stats_file)) {
             $stats = json_decode(file_get_contents($sql_stats_file), true);
@@ -5867,7 +5867,7 @@ class ImportClient
     private function run_db_index(): void
     {
         $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
-        $tables_file = $this->state_directory . "/db-tables.jsonl";
+        $tables_file = $this->state_dir . "/db-tables.jsonl";
 
         $has_cursor =
             $state_command === "db-index" &&
@@ -7506,7 +7506,7 @@ class ImportClient
         $sql_buffer = "";
 
         if ($mode === "file") {
-            $sql_file = $this->state_directory . "/db.sql";
+            $sql_file = $this->state_dir . "/db.sql";
 
             // Crash recovery: if SQL file is larger than expected, truncate it.
             // This happens if we crashed after writing but before saving the new cursor.
@@ -7578,7 +7578,7 @@ class ImportClient
             // Each SQL chunk is appended to this file as it arrives; when the
             // query completes and executes, the file is truncated. If the process
             // dies at any point, the next run reloads whatever was accumulated.
-            $buffer_file = $this->state_directory . "/.sql-buffer";
+            $buffer_file = $this->state_dir . "/.sql-buffer";
             if (file_exists($buffer_file)) {
                 $sql_buffer = file_get_contents($buffer_file);
                 $this->audit_log(
@@ -7601,8 +7601,8 @@ class ImportClient
         $domain_collector = class_exists('DomainCollector')
             ? new \DomainCollector()
             : null;
-        $domains_file = $this->state_directory . "/.import-domains.json";
-        $sql_stats_file = $this->state_directory . "/.import-sql-stats.json";
+        $domains_file = $this->state_dir . "/.import-domains.json";
+        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
         $sql_statements_counted = (int) ($this->import_state()->sql_statements_counted ?? 0);
 
         // Auto-detect the source site domain from the export URL so it
@@ -7941,7 +7941,7 @@ class ImportClient
                 $mysql_conn = null;
                 // Clean up buffer file — if we got here with an empty buffer,
                 // all queries were executed successfully.
-                $buffer_file = $this->state_directory . "/.sql-buffer";
+                $buffer_file = $this->state_dir . "/.sql-buffer";
                 if ($pending === "" && file_exists($buffer_file)) {
                     unlink($buffer_file);
                 }
@@ -8201,7 +8201,7 @@ class ImportClient
     {
         $cursor = $this->import_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
-        $tables_file = $this->state_directory . "/db-tables.jsonl";
+        $tables_file = $this->state_dir . "/db-tables.jsonl";
 
         $stats = $this->import_state()->db_index;
         $tables_written = $stats->tables;
@@ -11633,7 +11633,7 @@ if (
     //                  'value-or-next' --name=VAL or --name VAL
     //                  'pair'          --name A B (repeatable, takes 2 args)
     //   target         Where to store the parsed value:
-    //                  'state_directory' | 'filesystem_root' → special local variables
+    //                  'state_dir' | 'filesystem_root' → special local variables
     //                  'key'                   → $options['key']
     //                  'tuning_config.key'     → $options['tuning_config']['key']
     //   help           Description for --help output (null = hidden)
@@ -11654,7 +11654,7 @@ if (
         [
             'name' => 'state-dir',
             'type' => 'value',
-            'target' => 'state_directory',
+            'target' => 'state_dir',
             'placeholder' => 'DIR',
             'help' => 'Directory for import state files and SQL dumps',
             'help_section' => 'required',
@@ -12084,7 +12084,7 @@ if (
      */
     function _cli_parse_options(array $argv, int $argc, int $start, array $option_defs): array
     {
-        $state_directory = null;
+        $state_dir = null;
         $filesystem_root = null;
         $options = [
             "abort" => false,
@@ -12114,7 +12114,7 @@ if (
                                     fwrite(STDERR, "Invalid --{$def['name']} value: {$raw}. Valid values: " . implode(", ", $def['valid_values']) . "\n");
                                     exit(1);
                                 }
-                                _cli_store($def, $value, $state_directory, $filesystem_root, $options);
+                                _cli_store($def, $value, $state_dir, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
                             }
@@ -12122,7 +12122,7 @@ if (
 
                         case 'flag':
                             if ($arg === "--{$cli_name}" || (isset($def['short']) && $arg === "-{$def['short']}")) {
-                                _cli_store($def, $def['flag_value'] ?? true, $state_directory, $filesystem_root, $options);
+                                _cli_store($def, $def['flag_value'] ?? true, $state_dir, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
                             }
@@ -12132,7 +12132,7 @@ if (
                             $prefix = "--{$cli_name}=";
                             if (strpos($arg, $prefix) === 0) {
                                 $raw = substr($arg, strlen($prefix));
-                                _cli_store($def, $raw, $state_directory, $filesystem_root, $options);
+                                _cli_store($def, $raw, $state_dir, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
                             }
@@ -12141,7 +12141,7 @@ if (
                                     fwrite(STDERR, "--{$def['name']} requires one argument: " . ($def['placeholder'] ?? 'VALUE') . "\n");
                                     exit(1);
                                 }
-                                _cli_store($def, $argv[$i + 1], $state_directory, $filesystem_root, $options);
+                                _cli_store($def, $argv[$i + 1], $state_dir, $filesystem_root, $options);
                                 $i += 1;
                                 $matched = true;
                                 break 3;
@@ -12174,7 +12174,7 @@ if (
             }
         }
 
-        return [$state_directory, $filesystem_root, $options];
+        return [$state_dir, $filesystem_root, $options];
     }
 
     /** @internal */
@@ -12189,10 +12189,10 @@ if (
     }
 
     /** @internal */
-    function _cli_store(array $def, $value, ?string &$state_directory, ?string &$filesystem_root, array &$options): void
+    function _cli_store(array $def, $value, ?string &$state_dir, ?string &$filesystem_root, array &$options): void
     {
         $target = $def['target'];
-        if ($target === 'state_directory') { $state_directory = $value; return; }
+        if ($target === 'state_dir') { $state_dir = $value; return; }
         if ($target === 'filesystem_root')      { $filesystem_root = $value; return; }
         if (strpos($target, 'tuning_config.') === 0) {
             $options['tuning_config'][substr($target, strlen('tuning_config.'))] = $value;
@@ -12885,7 +12885,7 @@ if (
         $option_start_index = 3;
     }
 
-    [$state_directory, $filesystem_root, $options] = _cli_parse_options(
+    [$state_dir, $filesystem_root, $options] = _cli_parse_options(
         $argv, $argc, $option_start_index, $option_defs
     );
     $options["command"] = $command;
@@ -12923,7 +12923,7 @@ if (
         exit(1);
     }
 
-    if (!$state_directory) {
+    if (!$state_dir) {
         fwrite(STDERR, "Error: --state-dir=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
@@ -12947,31 +12947,31 @@ if (
         // import-metadata reads only state, but ImportClient still expects
         // a filesystem root path. Point it at state-dir rather than requiring an
         // otherwise-unused CLI option.
-        $filesystem_root = $flat_document_root ?: $state_directory;
+        $filesystem_root = $flat_document_root ?: $state_dir;
     }
 
     try {
         // Acquire the lock before pair setup and audit writes so each command
         // owns every local state transition for its complete invocation.
-        $reprint_process_lock = new ReprintProcessLock($state_directory);
+        $reprint_process_lock = new ReprintProcessLock($state_dir);
         $reprint_files_push_context = null;
         $reprint_files_diff_context = null;
         if ($command === 'files-push') {
             $reprint_files_push_context = ImportClient::prepare_files_push_context(
                 $target_url,
-                $state_directory,
+                $state_dir,
                 $filesystem_root,
                 $options
             );
         } elseif ($command === 'files-diff') {
             $reprint_files_diff_context = ImportClient::prepare_files_pair_context(
                 $target_url,
-                $state_directory,
+                $state_dir,
                 $filesystem_root,
                 'files-diff'
             );
         }
-        $client = new ImportClient($target_url, $state_directory, $filesystem_root, $command);
+        $client = new ImportClient($target_url, $state_dir, $filesystem_root, $command);
         $reprint_files_pair = $reprint_files_push_context['pair'] ?? ( $reprint_files_diff_context['pair'] ?? null );
         $client->audit_log_argv($command, $argv, $reprint_files_pair);
         $client->run(

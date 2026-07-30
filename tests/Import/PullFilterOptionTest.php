@@ -20,10 +20,10 @@ class PullFilterFakeClient extends \ImportClient
     /** @var resource|null */
     private $terminal_progress_stream = null;
 
-    public function __construct(string $state_directory, string $filesystem_root, bool $create_skipped_list)
+    public function __construct(string $state_dir, string $filesystem_root, bool $create_skipped_list)
     {
         $this->create_skipped_list = $create_skipped_list;
-        parent::__construct('http://fake.invalid', $state_directory, $filesystem_root);
+        parent::__construct('http://fake.invalid', $state_dir, $filesystem_root);
     }
 
     public function audit_log(string $message, bool $to_console = true): void
@@ -103,11 +103,11 @@ class PullFilterFakeClient extends \ImportClient
         $this->files_sync_runs++;
         if ($this->create_skipped_list) {
             file_put_contents(
-                $this->state_directory . '/.import-download-list-skipped.jsonl',
+                $this->state_dir . '/.import-download-list-skipped.jsonl',
                 "{\"path\":\"" . base64_encode('/wp-content/uploads/2024/01/photo.jpg') . "\"}\n",
             );
         } else {
-            @unlink($this->state_directory . '/.import-download-list-skipped.jsonl');
+            @unlink($this->state_dir . '/.import-download-list-skipped.jsonl');
         }
 
         $state = $this->get_import_state();
@@ -121,7 +121,7 @@ class PullFilterFakeClient extends \ImportClient
     public function run_db_sync(): void
     {
         $this->db_sync_runs++;
-        file_put_contents($this->state_directory . '/db.sql', "SELECT 1;\n");
+        file_put_contents($this->state_dir . '/db.sql', "SELECT 1;\n");
         $state = $this->get_import_state();
         $state->active_resumable_command->command_name = "db-pull";
         $state->active_resumable_command->completion_state = "complete";
