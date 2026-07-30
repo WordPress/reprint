@@ -10,8 +10,7 @@ Every path name states the machine whose coordinates it uses and whether it
 is absolute or relative to a named root.
 
 - A **state directory** is the caller-selected local directory containing
-  outputs such as `db.sql` and private Reprint state for one filesystem root.
-  Use `$state_dir`.
+  Reprint state for one filesystem root. Use `$state_dir`.
 - The **filesystem root** is the local directory under which a pulled remote
   filesystem is reconstructed and whose contents are compared, pulled, and
   pushed. Use `$filesystem_root`.

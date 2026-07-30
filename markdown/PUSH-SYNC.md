@@ -280,7 +280,7 @@ passes the open lock to `ImportClient::run()` and releases it after the command.
 A direct `ImportClient::run()` call acquires the lock when its caller supplies
 none. The one state-directory-wide Reprint process lock prevents concurrent
 pull, push, diff, and other local Reprint processes from using that site state,
-regardless of their remote Reprint API URL or filesystem-root pair.
+regardless of their target or local-tree pair.
 
 An active push keeps these files under `<state-dir>/push/<pair-key>/`:
 
@@ -420,11 +420,11 @@ The command derives one pair key without general URL normalization:
 sha256(rtrim(<remote-reprint-api-url>, "?&") + "\0" + <resolved-filesystem-root>)
 ```
 
-Its sender state lives at `<state-dir>/push/<pair-key>/`. A different
-remote Reprint API URL query or resolved filesystem root therefore selects a
-different retained local index. Fragments, URL user-info, and `SECRET_KEY`
-target parameters are rejected. The local push state directory must be outside
-the filesystem root so planning cannot index its own changing files.
+Its sender state lives at `<state-dir>/push/<pair-key>/`. A different target
+query or resolved filesystem root therefore selects a different retained local
+index. Fragments, URL user-info, and `SECRET_KEY` target parameters are
+rejected. The local push state directory must be outside the filesystem root so
+planning cannot index its own changing files.
 
 One process starts or resumes exactly one sender. Before every `next_step()` it
 checks whether another step may begin. The wall-clock admission deadline is 80

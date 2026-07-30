@@ -29,24 +29,20 @@ final class ReprintProcessLock
      */
     public function __construct(string $state_dir)
     {
-        $state_dir = rtrim($state_dir, '/') ?: '/';
         if (
             !is_dir($state_dir)
             && !mkdir($state_dir, 0755, true)
             && !is_dir($state_dir)
         ) {
             throw new RuntimeException(
-                'Failed to create the state directory: '
+                'Failed to create the Reprint state directory: '
                 . $state_dir . '.'
             );
         }
         $process_lock_path = rtrim($state_dir, '/') . '/process.lock';
         $this->handle = fopen($process_lock_path, 'c+b');
         if (!is_resource($this->handle)) {
-            throw new RuntimeException(
-                'Failed to open the Reprint process lock: '
-                . $process_lock_path . '.'
-            );
+            throw new RuntimeException('Failed to open the Reprint process lock: ' . $process_lock_path . '.');
         }
         if (!flock($this->handle, LOCK_EX | LOCK_NB)) {
             fclose($this->handle);

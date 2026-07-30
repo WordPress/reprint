@@ -677,9 +677,9 @@ from the tracker. The file is deleted entirely once all entries are cleared.
 
 #### `audit.log` — append-only event log
 
-Every significant Reprint event is recorded in `audit.log` as a
+Every significant event during import is recorded in `audit.log` as a
 timestamped line. This includes file downloads, deletions, volatile file
-detections, push lifecycle events, errors, and state transitions. The log is append-only — it's never
+detections, errors, and state transitions. The log is append-only — it's never
 truncated or rotated, so it provides a complete history of the migration.
 
 ```

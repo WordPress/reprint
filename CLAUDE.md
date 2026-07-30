@@ -239,8 +239,7 @@ Always consult these when working on the respective components.
 
 ### Progress Computation
 
-Progress is computed client-side by reading state and outputs inside the
-caller-supplied `--state-dir`:
+Progress is computed client-side by reading state files (all in `--state-dir`):
 - `pull/state.json`: Current command, status, cursor, stage
 - `pull/local-index.jsonl`: Local file index (line count = files indexed)
 - `pull/remote-index.jsonl`: Remote file index (for delta comparison)

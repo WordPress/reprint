@@ -232,9 +232,6 @@ class ImportClient
     /** @var string Caller-selected state directory for this filesystem root. */
     public $state_dir;
 
-    /** @var string Pull state directory at <state-dir>/pull. */
-    public $pull_state_directory;
-
     /** @var string Filesystem root where the remote filesystem is reconstructed. */
     public $filesystem_root;
 
@@ -306,9 +303,6 @@ class ImportClient
 
     /** @var string Path to pull/volatile-files.json — files the server marks as frequently-changing. */
     private $volatile_files_file;
-
-    /** @var string Path to pull/domains.json — domains discovered in the SQL dump. */
-    private $domains_file;
 
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
@@ -522,20 +516,18 @@ class ImportClient
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->filesystem_root = rtrim($filesystem_root, "/");
-        $this->pull_state_directory = $this->state_dir . "/pull";
-        $this->pull_state_file = $this->pull_state_directory . "/state.json";
-        $this->local_index_file = $this->pull_state_directory . "/local-index.jsonl";
+        $this->pull_state_file = $this->state_dir . "/pull/state.json";
+        $this->local_index_file = $this->state_dir . "/pull/local-index.jsonl";
         $this->local_index_wal_path =
-            $this->pull_state_directory . "/local-index.wal";
+            $this->state_dir . "/pull/local-index.wal";
         $this->remote_index_file =
-            $this->pull_state_directory . "/remote-index.jsonl";
+            $this->state_dir . "/pull/remote-index.jsonl";
         $this->fetch_list_file =
-            $this->pull_state_directory . "/fetch-list.jsonl";
+            $this->state_dir . "/pull/fetch-list.jsonl";
         $this->skipped_fetch_list_file =
-            $this->pull_state_directory . "/skipped-fetch-list.jsonl";
+            $this->state_dir . "/pull/skipped-fetch-list.jsonl";
         $this->audit_log_file = $this->state_dir . "/audit.log";
-        $this->volatile_files_file = $this->pull_state_directory . "/volatile-files.json";
-        $this->domains_file = $this->pull_state_directory . "/domains.json";
+        $this->volatile_files_file = $this->state_dir . "/pull/volatile-files.json";
         $this->progress_file = $this->state_dir . "/progress.json";
 
         // Detect TTY for progress display. In stdout mode this is re-evaluated
@@ -546,15 +538,9 @@ class ImportClient
         $this->pull = new Pull($this, $this->progress);
 
         // Create directories
-        if (!is_dir($this->state_dir)) {
-            if (!mkdir($this->state_dir, 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->state_dir}");
-            }
-        }
-        if (!is_dir($this->pull_state_directory)) {
-            if (!mkdir($this->pull_state_directory, 0755, true)) {
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem path in a CLI exception.
-                throw new RuntimeException("Failed to create directory: {$this->pull_state_directory}");
+        if (!is_dir($this->state_dir . "/pull")) {
+            if (!mkdir($this->state_dir . "/pull", 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->state_dir}/pull");
             }
         }
         if (!is_dir($this->filesystem_root)) {
@@ -1738,8 +1724,7 @@ class ImportClient
      *
      *     @type string $remote_reprint_api_url Remote Reprint API URL.
      *     @type string $filesystem_root  Resolved filesystem root being sent.
-     *     @type string $pair                 Pair key for the remote Reprint API URL
-     *                                        and resolved filesystem root.
+     *     @type string $pair                 Target/filesystem-root pair key.
      *     @type string $push_state_directory Local push state directory.
      * }
      * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
@@ -1791,8 +1776,7 @@ class ImportClient
      *
      *     @type string $remote_reprint_api_url Remote Reprint API URL.
      *     @type string $filesystem_root  Resolved filesystem root.
-     *     @type string $pair                 Pair key for the remote Reprint API URL
-     *                                        and resolved filesystem root.
+     *     @type string $pair                 Target/filesystem-root pair key.
      *     @type string $push_state_directory Local push state directory.
      * }
      * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
@@ -1835,7 +1819,7 @@ class ImportClient
         $remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
         $pair = hash('sha256', $remote_reprint_api_url . "\0" . $resolved_local_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
-        $push_state_directory = rtrim($state_dir, '/') . '/push/' . $pair;
+        $push_state_directory = $state_dir . '/push/' . $pair;
         if (strpos($push_state_directory, '/') !== 0) {
             $working_directory = getcwd();
             if ($working_directory === false) {
@@ -1993,7 +1977,7 @@ class ImportClient
                         "FILE DELETE | {$tables_file} | abort db-pull",
                     );
                 }
-                $domains_file = $this->domains_file;
+                $domains_file = $this->state_dir . "/pull/domains.json";
                 if (file_exists($domains_file)) {
                     unlink($domains_file);
                     $this->audit_log(
@@ -3782,7 +3766,7 @@ class ImportClient
      */
     private function run_db_domains(): void
     {
-        $domains_file = $this->domains_file;
+        $domains_file = $this->state_dir . "/pull/domains.json";
         $sql_file = $this->state_dir . "/db.sql";
 
         if (file_exists($domains_file)) {
@@ -4328,12 +4312,11 @@ class ImportClient
         }
 
         $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
-        $pull_state_directory =
-            realpath($this->pull_state_directory) ?: $this->pull_state_directory;
+        $state_dir = realpath($this->state_dir) ?: $this->state_dir;
         $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
-            rtrim($pull_state_directory, "/") . "/state.json";
+            rtrim($state_dir, "/") . "/pull/state.json";
         $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
-            rtrim($pull_state_directory, "/") . "/skipped-fetch-list.jsonl";
+            rtrim($state_dir, "/") . "/pull/skipped-fetch-list.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
@@ -5220,7 +5203,7 @@ class ImportClient
         }
 
         // Show discovered domains if available
-        $domains_file = $this->domains_file;
+        $domains_file = $this->state_dir . "/pull/domains.json";
         if (file_exists($domains_file)) {
             $domains = json_decode(file_get_contents($domains_file), true);
             if (is_array($domains) && !empty($domains)) {
@@ -5387,7 +5370,7 @@ class ImportClient
         $stmts_since_save = 0;
 
         // Load pre-computed statement count from db-pull for progress reporting
-        $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
+        $sql_stats_file = $this->state_dir . "/pull/sql-stats.json";
         $statements_total = null;
         if (file_exists($sql_stats_file)) {
             $stats = json_decode(file_get_contents($sql_stats_file), true);
@@ -7597,7 +7580,7 @@ class ImportClient
             // Each SQL chunk is appended to this file as it arrives; when the
             // query completes and executes, the file is truncated. If the process
             // dies at any point, the next run reloads whatever was accumulated.
-            $sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
+            $sql_buffer_file = $this->state_dir . "/pull/sql-buffer";
             if (file_exists($sql_buffer_file)) {
                 $sql_buffer = file_get_contents($sql_buffer_file);
                 $this->audit_log(
@@ -7620,8 +7603,8 @@ class ImportClient
         $domain_collector = class_exists('DomainCollector')
             ? new \DomainCollector()
             : null;
-        $domains_file = $this->domains_file;
-        $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
+        $domains_file = $this->state_dir . "/pull/domains.json";
+        $sql_stats_file = $this->state_dir . "/pull/sql-stats.json";
         $sql_statements_counted = (int) ($this->import_state()->sql_statements_counted ?? 0);
 
         // Auto-detect the source site domain from the export URL so it
@@ -7959,7 +7942,7 @@ class ImportClient
                 $mysql_conn = null;
                 // Clean up buffer file — if we got here with an empty buffer,
                 // all queries were executed successfully.
-                $sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
+                $sql_buffer_file = $this->state_dir . "/pull/sql-buffer";
                 if ($pending === "" && file_exists($sql_buffer_file)) {
                     unlink($sql_buffer_file);
                 }
