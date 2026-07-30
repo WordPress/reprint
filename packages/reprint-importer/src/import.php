@@ -2318,7 +2318,7 @@ class ImportClient
 
                     $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
                     $is_last = ($chunk["headers"]["x-last-chunk"] ?? "0") === "1";
-                    $local_absolute_path = $path . $remote_absolute_path;
+                    $local_absolute_path = wp_join_unix_paths($path, $remote_absolute_path);
 
                     if ($is_first) {
                         if ($context->file_handle) {
