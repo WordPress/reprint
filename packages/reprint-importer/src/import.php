@@ -3446,8 +3446,8 @@ class ImportClient
             if (!empty($entry["intermediate"])) {
                 continue;
             }
-            $target_encoded = $entry["target"] ?? null;
-            if (!is_string($target_encoded) || $target_encoded === "") {
+            $symlink_target_encoded = $entry["target"] ?? null;
+            if (!is_string($symlink_target_encoded) || $symlink_target_encoded === "") {
                 continue;
             }
             $target = base64_decode($target_encoded);
@@ -3535,8 +3535,8 @@ class ImportClient
              * @see https://www.php.net/base64_decode
              */
             $remote_absolute_path = base64_decode($path_encoded, true);
-            $target = base64_decode($target_encoded, true);
-            if ($remote_absolute_path === false || $remote_absolute_path === "" || $target === false || $target === "") {
+            $symlink_target = base64_decode($symlink_target_encoded, true);
+            if ($remote_absolute_path === false || $remote_absolute_path === "" || $symlink_target === false || $symlink_target === "") {
                 continue;
             }
 
@@ -3555,14 +3555,14 @@ class ImportClient
             // Repoint through the same seam regular symlink chunks use, so the
             // link targets wherever the content actually landed (filesystem root,
             // remapped, or bundled) instead of the raw source spelling.
-            $target = $this->map_symlink_target_for_local_mirror(
+            $symlink_target = $this->map_symlink_target_for_local_mirror(
                 $remote_absolute_path,
                 $local_absolute_path,
-                $target
+                $symlink_target
             );
 
             // Already correct — skip
-            if (is_link($local_absolute_path) && readlink($local_absolute_path) === $target) {
+            if (is_link($local_absolute_path) && readlink($local_absolute_path) === $symlink_target) {
                 continue;
             }
 
@@ -3602,7 +3602,7 @@ class ImportClient
             try {
                 $this->assert_symlink_target_within_root(
                     dirname($local_absolute_path),
-                    $target,
+                    $symlink_target,
                     $root
                 );
             } catch (RuntimeException $e) {
@@ -3613,15 +3613,15 @@ class ImportClient
                 continue;
             }
 
-            if (@symlink($target, $local_absolute_path)) {
+            if (@symlink($symlink_target, $local_absolute_path)) {
                 $created++;
                 $this->audit_log(
-                    "INTERMEDIATE SYMLINK: {$remote_absolute_path} -> {$target}",
+                    "INTERMEDIATE SYMLINK: {$remote_absolute_path} -> {$symlink_target}",
                     false,
                 );
             } else {
                 $this->audit_log(
-                    "Failed to create intermediate symlink: {$remote_absolute_path} -> {$target}",
+                    "Failed to create intermediate symlink: {$remote_absolute_path} -> {$symlink_target}",
                     true,
                 );
             }
