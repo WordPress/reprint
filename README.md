@@ -253,7 +253,8 @@ php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 
 The pipeline proceeds as usual through indexing and diffing, but skips uploads. When the essential
 files are done, the sync marks itself **complete**. The skipped file list stays on disk at
-`.import-download-list-skipped.jsonl`. At this point you can apply the database and bring the site online.
+`remote-<hash>/pull-plan.skipped.jsonl`. At this point you can apply the
+database and bring the site online.
 
 ```bash
 # Step 2: download the uploads
@@ -647,11 +648,11 @@ stable JSON contract for host integrations:
 php reprint.phar import-metadata --state-dir="$STATE_DIR" | jq '.hasCompletedOnce'
 ```
 
-#### `.import-volatile-files.json` — files that changed during sync
+#### `remote-<hash>/pull-volatile-files.json` — files that changed during sync
 
 During `files-pull`, a file on the source may be modified while the importer is
 streaming it. When that happens, the server returns a different content hash than
-expected and the importer records the file in `.import-volatile-files.json`
+expected and the importer records the file in `pull-volatile-files.json`
 instead of failing.
 
 The file is a flat JSON object mapping paths to the number of times each file
@@ -679,7 +680,7 @@ truncated or rotated, so it provides a complete history of the migration.
 ```
 [2025-01-15 10:30:01] VOLATILE | path=/srv/htdocs/wp-content/debug.log | count=1
 [2025-01-15 10:30:05] VOLATILE CLEARED | path=/srv/htdocs/wp-content/debug.log
-[2025-01-15 10:31:12] FILE TRUNCATE | .import-index-updates.wal | WAL batch applied
+[2025-01-15 10:31:12] FILE TRUNCATE | remote-<hash>/pull-index-updates.wal | WAL batch applied
 ```
 
 Pass `--verbose` to also print audit log entries to the console as they happen.
@@ -710,17 +711,19 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
 `files-pull`, `files-diff`, and `files-push` use one local index for each target
-URL and canonical local tree:
+URL in a state directory:
 
 ```text
-<state-dir>/local-index/<sha256(target URL with user-info and SECRET_KEY removed + NUL + canonical local tree)>.jsonl
+<state-dir>/remote-<sha256(target URL with user-info and SECRET_KEY removed)>/.local-index.jsonl
 ```
 
 URL user-info and `SECRET_KEY` do not affect the hash; changing any other query
-parameter selects a different local index and push-state directory.
+parameter selects a different local index and push-state directory. Use a
+different state directory for a different local document root.
 
-files-pull records each local path it changes through its existing index-update
-WAL, except paths skipped by the local indexer's default rules. Selected,
+files-pull records each local path it changes through
+`remote-<hash>/pull-index-updates.wal`, except paths skipped by the local
+indexer's default rules. Selected,
 filtered, remapped, and preserve-local pulls also refresh those paths'
 directory ancestors and remove descendants of deleted or replaced paths.
 Other branches remain unchanged. A completed files-push updates the index
@@ -730,7 +733,7 @@ after its target commit succeeds.
 `files-index`, `db-pull`, `db-index`, and `db-apply`. It clears that command's
 current sync state and exits. Aborting `files-pull`, `pull-files`, or `pull`
 while its files-pull stage is active applies any retained index-update WAL
-batch to the import index and local index, clears sync progress, and keeps
+batch to the remote index and local index, clears sync progress, and keeps
 downloaded files; the next run performs a delta sync. For `db-pull` and
 `db-index`, `--abort` clears the output file so the next run starts from
 scratch. Interrupted commands automatically resume from the last saved cursor.

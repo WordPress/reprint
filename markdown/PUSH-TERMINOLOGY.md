@@ -104,27 +104,45 @@ lock is separate from the receiver's push-session and commit locks.
 ## Pull index-update WAL
 
 Call the single pull-side write-ahead log the **index-update WAL**. It lives at
-`<state-dir>/.import-index-updates.wal`; use `.import-index-updates.wal`,
+`<state-dir>/remote-<hash>/pull-index-updates.wal`; use
+`pull-index-updates.wal`,
 `$index_update_wal_path`, and `$index_update_wal_handle`.
 Applied batch records are cleared, but the empty WAL remains as a marker until
 files-pull completes. A retained WAL is consumed only while resuming or
 aborting the interrupted files-pull, including through a high-level pull
 command; unrelated commands do not consume it.
 
+Each WAL record has an `op` of `F` or `D` and a
+`remote_path_b64`. F records also have `remote_type`, `remote_size`, and
+`remote_ctime`. A completed local mutation adds `local_path_b64`; its F record
+also has `local_type`, `local_size`, and `local_ctime`. Replay applies the
+remote projection to `.remote-index.jsonl`, then applies the local projection
+to `.local-index.jsonl`. The WAL is cleared only after both replacements
+succeed.
+
 ## Local index and push state
 
-The local index for one target URL and canonical local tree lives at:
+One target URL in a state directory uses:
 
 ```text
-<state-dir>/local-index/<sha256(target URL with user-info and SECRET_KEY removed + NUL + canonical local tree)>.jsonl
+<state-dir>/remote-<sha256(target URL with user-info and SECRET_KEY removed)>/
+  .remote-index.jsonl
+  .remote-index.next.jsonl
+  .local-index.jsonl
+  pull-plan.jsonl
+  pull-index-updates.wal
+  push/
 ```
 
 The hash omits URL user-info and `SECRET_KEY`; changing any other query
-parameter selects a different local index and push-state directory.
+parameter selects a different remote state directory. A different local
+document root uses a different state directory.
 
-Use `local_index_path`, `$local_index_path`, and `local index`. The same hash names
-the sender directory under `<state-dir>/push/<hash>/`. The hash is only a
-directory and file name; it is not part of the command result or sender cursor.
+Use `remote_state_directory`, `$remote_state_directory`, and `remote state
+directory` for `remote-<hash>/`. Use `local_index_path`, `$local_index_path`,
+and `local index` for `.local-index.jsonl`. The local push state directory is
+`remote-<hash>/push/`. The hash is only a directory name; it is not part of
+the command result or sender cursor.
 
 Use these names verbatim:
 
@@ -153,19 +171,19 @@ PushPlan with the local index path and sender-owned excluded paths.
 inside `plan/`.
 
 Completing files-pull creates the local index when it is missing. Each actual
-local mutation is recorded in the existing `.import-index-updates.wal` with the
-local path and, for an F record, the local path type, size, and ctime observed
-after the mutation. Applying a WAL batch first updates the import index, then
-applies those local mutation records to the local index. An F update also adds
-its directory ancestors. A D update removes the path and its descendants.
+local mutation is recorded in `pull-index-updates.wal` with the local path and,
+for an F record, the local path type, size, and ctime observed after the
+mutation. Applying a WAL batch first updates the remote index, then applies
+those local mutation records to the local index. An F update also adds its
+directory ancestors. A D update removes the path and its descendants.
 Default-skipped paths do not enter the local index. The WAL batch is cleared
-only after both index updates finish.
+only after both index replacements finish.
 
 Selected, filtered, remapped, and preserve-local pulls update only paths they
 actually change, their directory ancestors, and descendants removed by a
 deletion or type replacement. Other branches remain unchanged, so local
 additions, edits, and deletions elsewhere remain pending. Aborting files-pull
-replays the current WAL batch into the import index and local index before it
+replays the current WAL batch into the remote index and local index before it
 clears pull progress and keeps the local index. Resuming or aborting files-pull
 is the only way to consume its retained WAL. files-pull refuses to start while
 the same target and local tree have an unfinished files-push, so the local
@@ -261,14 +279,14 @@ plain-HTTP opt-in.
 The same SHA-256 digest names the local index and local push state directory:
 
 ```text
-sha256(<target-url-without-authentication> + "\0" + <canonical-local-tree-path>)
+sha256(<target-url-without-authentication>)
 ```
 
-The local index is `<state-dir>/local-index/<hash>.jsonl`, and the `local push
-state directory` is `<state-dir>/push/<hash>/`. `files-push`
+The local index is `<state-dir>/remote-<hash>/.local-index.jsonl`, and the
+`local push state directory` is `<state-dir>/remote-<hash>/push/`. `files-push`
 chooses `start` or `resume` only from whether `sender.json` exists there. The
 hash omits URL user-info and `SECRET_KEY`; files-push receives its secret
-through `--secret`.
+through `--secret`. A different local tree uses a different state directory.
 receiver-confirmed upload positions remain receiver-owned; they are not a
 files-push cursor and are not copied into `.import-state.json` or
 `.import-status.json`.

@@ -220,6 +220,23 @@ export function fsRootDir(outputDir) {
 }
 
 /**
+ * Return the target relationship state directory containing one state file.
+ */
+export function getRemoteStateDirectory(outputDir, stateFileName) {
+    const relationshipDirectories = readdirSync(outputDir, { withFileTypes: true })
+        .filter(entry => entry.isDirectory() && entry.name.startsWith('remote-'));
+    const matchingDirectories = relationshipDirectories.filter(
+        entry => existsSync(join(outputDir, entry.name, stateFileName)),
+    );
+    assert.equal(
+        matchingDirectories.length,
+        1,
+        `Expected one target relationship state directory containing ${stateFileName} in ${outputDir}`,
+    );
+    return join(outputDir, matchingDirectories[0].name);
+}
+
+/**
  * Run the importer CLI.
  * @param {string} url - Export URL
  * @param {string} outputDir - Local output directory (state files live here; fs-root is outputDir/fs-root)
@@ -685,10 +702,13 @@ export function readAuditLog(outputDir) {
 
 /**
  * Assert that the import indexed at least minCount files.
- * Checks .import-index.jsonl line count.
+ * Checks the target-observed index line count.
  */
 export function assertFileCount(outputDir, minCount = 3000) {
-    const indexPath = join(outputDir, '.import-index.jsonl');
+    const indexPath = join(
+        getRemoteStateDirectory(outputDir, '.remote-index.jsonl'),
+        '.remote-index.jsonl',
+    );
     assert.ok(existsSync(indexPath), `Expected ${indexPath} to exist`);
     const count = countJsonlLines(indexPath);
     assert.ok(count >= minCount,

@@ -23,6 +23,7 @@ import {
     assertTreesMatch, assertSiteMirror,
     fsRootDir, assertPullPipelineComplete,
     compareDatabases, createMysqlConnection, getDbName,
+    getRemoteStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -88,9 +89,12 @@ describe('Import: Pull Abort and Resume', { timeout: 300000 }, () => {
         assert.equal(state.pull_pipeline.last_completed_stage, null,
             'Expected pull_pipeline.last_completed_stage to be null after abort');
 
-        // Local index should be preserved (for delta sync)
-        assert.ok(existsSync(join(tempDir, '.import-index.jsonl')),
-            'Expected local index to be preserved after abort');
+        // The target-observed index should be preserved for the delta sync.
+        assert.ok(existsSync(join(
+            getRemoteStateDirectory(tempDir, '.remote-index.jsonl'),
+            '.remote-index.jsonl',
+        )),
+            'Expected target-observed index to be preserved after abort');
     });
 
     it('re-pull after abort performs delta sync', () => {

@@ -268,6 +268,10 @@ class SymlinkBundleTest extends TestCase
         // fs-root/opt/data; it must be repointed to the bundle placement.
         $c = $this->newClient();
         $rc = new \ReflectionClass($c);
+        $rc->getMethod('configure_remote_state_directory')->invoke(
+            $c,
+            $this->root
+        );
         $rc->getProperty('symlink_bundle_directory')->setValue($c, $this->root . '/.symlinks-bundle');
         $rc->getProperty('pull_only_files_with_path_prefixes')->setValue($c, ['/src/wp-content']);
         $rc->getProperty('follow_symlinks')->setValue($c, true);
@@ -279,7 +283,10 @@ class SymlinkBundleTest extends TestCase
             'type' => 'link',
             'intermediate' => true,
         ]);
-        file_put_contents($this->stateDir . '/.import-remote-index.jsonl', $entry . "\n");
+        file_put_contents(
+            $c->remote_state_directory . '/.remote-index.next.jsonl',
+            $entry . "\n"
+        );
 
         $rc->getMethod('recreate_intermediate_symlinks')->invoke($c);
 

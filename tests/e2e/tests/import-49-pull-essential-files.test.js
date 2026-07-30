@@ -14,6 +14,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     fsRootDir, assertPullPipelineComplete, compareDatabases, createMysqlConnection, getDbName,
+    getRemoteStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -93,7 +94,10 @@ describe('Import: Pull essential-files', { timeout: 180000 }, () => {
     });
 
     it('skipped download list remains on disk', () => {
-        const skippedList = join(tempDir, '.import-download-list-skipped.jsonl');
+        const skippedList = join(
+            getRemoteStateDirectory(tempDir, 'pull-plan.skipped.jsonl'),
+            'pull-plan.skipped.jsonl',
+        );
         assert.ok(existsSync(skippedList), 'Expected skipped download list to exist');
         assert.ok(readFileSync(skippedList, 'utf-8').trim().length > 0,
             'Expected skipped download list to be non-empty');

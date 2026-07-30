@@ -24,6 +24,7 @@ final class IndexUpdateWalTest extends TestCase
         $this->fileRoot = $this->root . '/files';
         mkdir($this->stateDirectory, 0700, true);
         mkdir($this->fileRoot, 0700, true);
+        mkdir($this->fileRoot . '/site');
     }
 
     protected function tearDown(): void
@@ -33,7 +34,6 @@ final class IndexUpdateWalTest extends TestCase
 
     public function testOneWalRecordUpdatesBothIndexes(): void
     {
-        mkdir($this->fileRoot . '/site');
         file_put_contents($this->fileRoot . '/site/file.txt', 'hello');
 
         $client = $this->client();
@@ -46,6 +46,7 @@ final class IndexUpdateWalTest extends TestCase
                 ],
             ],
         ];
+        $client->prepare_files_pull_options([]);
         $reflection = new \ReflectionClass(\ImportClient::class);
         $reflection->getMethod('record_pulled_path')->invoke(
             $client,
@@ -60,7 +61,7 @@ final class IndexUpdateWalTest extends TestCase
         $this->assertIsResource($walHandle);
         $this->assertTrue(fflush($walHandle));
         $walLines = file(
-            $this->stateDirectory . '/.import-index-updates.wal',
+            $this->remoteStateDirectory() . '/pull-index-updates.wal',
             FILE_IGNORE_NEW_LINES
         );
         $this->assertIsArray($walLines);
@@ -73,7 +74,7 @@ final class IndexUpdateWalTest extends TestCase
         );
         $this->assertSame(
             '/site/file.txt',
-            base64_decode($walRecord['path'])
+            base64_decode($walRecord['remote_path_b64'])
         );
         $this->assertSame(
             'file.txt',
@@ -82,18 +83,16 @@ final class IndexUpdateWalTest extends TestCase
 
         $reflection->getMethod('apply_index_update_wal')->invoke($client);
 
-        $walPath = $this->stateDirectory . '/.import-index-updates.wal';
+        $walPath =
+            $this->remoteStateDirectory() . '/pull-index-updates.wal';
         $this->assertFileExists($walPath);
         $this->assertSame('', file_get_contents($walPath));
         $this->assertSame('/site/file.txt', $this->firstIndexPath());
-        $localIndexPaths = glob(
-            $this->stateDirectory . '/local-index/*.jsonl'
-        );
-        $this->assertIsArray($localIndexPaths);
-        $this->assertCount(1, $localIndexPaths);
         $this->assertSame(
             'file.txt',
-            $this->firstIndexPath($localIndexPaths[0])
+            $this->firstIndexPath(
+                $this->remoteStateDirectory() . '/.local-index.jsonl'
+            )
         );
 
         $reflection->getMethod('remove_index_update_wal')->invoke($client);
@@ -104,17 +103,27 @@ final class IndexUpdateWalTest extends TestCase
     {
         $completeRecord = json_encode([
             'op' => 'F',
-            'path' => base64_encode('/site/complete.txt'),
-            'ctime' => 42,
-            'size' => 5,
-            'type' => 'file',
+            'remote_path_b64' => base64_encode('/site/complete.txt'),
+            'remote_ctime' => 42,
+            'remote_size' => 5,
+            'remote_type' => 'file',
         ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+        $remoteStateDirectory = $this->remoteStateDirectory();
+        mkdir($remoteStateDirectory);
         file_put_contents(
-            $this->stateDirectory . '/.import-index-updates.wal',
-            $completeRecord . '{"op":"F","path":"'
+            $remoteStateDirectory . '/pull-index-updates.wal',
+            $completeRecord . '{"op":"F","remote_path_b64":"'
         );
 
         $client = $this->client();
+        $client->get_import_state()->preflight = [
+            'data' => [
+                'runtime' => [
+                    'document_root' => '/site',
+                ],
+            ],
+        ];
+        $client->prepare_files_pull_options([]);
         $reflection = new \ReflectionClass(\ImportClient::class);
         $reflection->getMethod('apply_index_update_wal')->invoke($client);
 
@@ -122,7 +131,7 @@ final class IndexUpdateWalTest extends TestCase
         $this->assertSame(
             '',
             file_get_contents(
-                $this->stateDirectory . '/.import-index-updates.wal'
+                $remoteStateDirectory . '/pull-index-updates.wal'
             )
         );
     }
@@ -132,21 +141,28 @@ final class IndexUpdateWalTest extends TestCase
      */
     public function testAbortReplaysAndRemovesTheWal(string $command): void
     {
+        $remoteStateDirectory = $this->remoteStateDirectory();
+        mkdir($remoteStateDirectory);
         file_put_contents(
-            $this->stateDirectory . '/.import-index-updates.wal',
+            $remoteStateDirectory . '/pull-index-updates.wal',
             json_encode([
                 'op' => 'F',
-                'path' => base64_encode('/site/aborted.txt'),
-                'ctime' => 42,
-                'size' => 5,
-                'type' => 'file',
+                'remote_path_b64' => base64_encode('/site/aborted.txt'),
+                'remote_ctime' => 42,
+                'remote_size' => 5,
+                'remote_type' => 'file',
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
         );
         file_put_contents(
             $this->stateDirectory . '/.import-state.json',
             json_encode([
                 'preflight' => [
-                    'data' => ['ok' => true],
+                    'data' => [
+                        'ok' => true,
+                        'runtime' => [
+                            'document_root' => '/site',
+                        ],
+                    ],
                     'http_code' => 200,
                 ],
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)
@@ -159,7 +175,127 @@ final class IndexUpdateWalTest extends TestCase
 
         $this->assertSame('/site/aborted.txt', $this->firstIndexPath());
         $this->assertFileDoesNotExist(
-            $this->stateDirectory . '/.import-index-updates.wal'
+            $remoteStateDirectory . '/pull-index-updates.wal'
+        );
+    }
+
+    /**
+     * @dataProvider retainedWalBoundaryProvider
+     */
+    public function testRetainedWalReplaysAfterIndexReplacement(
+        bool $localIndexWasReplaced
+    ): void {
+        file_put_contents($this->fileRoot . '/site/file.txt', 'hello');
+        $client = $this->client();
+        $client->get_import_state()->preflight = [
+            'data' => [
+                'runtime' => [
+                    'document_root' => '/site',
+                ],
+            ],
+        ];
+        $client->prepare_files_pull_options([]);
+        $remoteStateDirectory = $client->remote_state_directory;
+        $remoteIndexLine = $this->indexLine(
+            '/site/file.txt',
+            42,
+            5,
+            'file'
+        );
+        $localIndexLine = $this->indexLine(
+            'file.txt',
+            52,
+            5,
+            'file'
+        );
+        file_put_contents(
+            $remoteStateDirectory . '/.remote-index.jsonl',
+            $remoteIndexLine
+        );
+        if ($localIndexWasReplaced) {
+            file_put_contents(
+                $remoteStateDirectory . '/.local-index.jsonl',
+                $localIndexLine
+            );
+        }
+        file_put_contents(
+            $remoteStateDirectory . '/pull-index-updates.wal',
+            json_encode([
+                'op' => 'F',
+                'remote_path_b64' => base64_encode('/site/file.txt'),
+                'remote_ctime' => 42,
+                'remote_size' => 5,
+                'remote_type' => 'file',
+                'local_path_b64' => base64_encode('file.txt'),
+                'local_ctime' => 52,
+                'local_size' => 5,
+                'local_type' => 'file',
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
+        );
+
+        (new \ReflectionClass(\ImportClient::class))
+            ->getMethod('apply_index_update_wal')
+            ->invoke($client);
+
+        $this->assertSame(
+            $remoteIndexLine,
+            file_get_contents(
+                $remoteStateDirectory . '/.remote-index.jsonl'
+            )
+        );
+        $this->assertSame(
+            $localIndexLine,
+            file_get_contents(
+                $remoteStateDirectory . '/.local-index.jsonl'
+            )
+        );
+        $this->assertSame(
+            '',
+            file_get_contents(
+                $remoteStateDirectory . '/pull-index-updates.wal'
+            )
+        );
+    }
+
+    /** @return array<string,array{bool}> */
+    public static function retainedWalBoundaryProvider(): array
+    {
+        return [
+            'remote index replaced' => [false],
+            'both indexes replaced' => [true],
+        ];
+    }
+
+    public function testTargetsKeepSeparateRemoteStateDirectories(): void
+    {
+        $firstClient = $this->client();
+        $secondClient = new \ImportClient(
+            'https://other.example/?site-export-api',
+            $this->stateDirectory,
+            $this->fileRoot
+        );
+        foreach ([$firstClient, $secondClient] as $client) {
+            $client->get_import_state()->preflight = [
+                'data' => [
+                    'runtime' => [
+                        'document_root' => '/site',
+                    ],
+                ],
+            ];
+            $client->prepare_files_pull_options([]);
+        }
+
+        $this->assertNotSame(
+            $firstClient->remote_state_directory,
+            $secondClient->remote_state_directory
+        );
+        $this->assertStringStartsWith(
+            realpath($this->stateDirectory) . '/remote-',
+            $firstClient->remote_state_directory
+        );
+        $this->assertStringStartsWith(
+            realpath($this->stateDirectory) . '/remote-',
+            $secondClient->remote_state_directory
         );
     }
 
@@ -181,10 +317,22 @@ final class IndexUpdateWalTest extends TestCase
         );
     }
 
+    private function remoteStateDirectory(): string
+    {
+        $context = \ImportClient::prepare_files_command_context(
+            'https://example.com/?site-export-api',
+            $this->stateDirectory,
+            $this->fileRoot . '/site',
+            'files-diff'
+        );
+        return $context['remote_state_directory'];
+    }
+
     private function firstIndexPath(?string $indexPath = null): string
     {
         $lines = file(
-            $indexPath ?? $this->stateDirectory . '/.import-index.jsonl',
+            $indexPath
+                ?? $this->remoteStateDirectory() . '/.remote-index.jsonl',
             FILE_IGNORE_NEW_LINES
         );
         $this->assertIsArray($lines);
@@ -195,6 +343,20 @@ final class IndexUpdateWalTest extends TestCase
         $path = base64_decode($encodedPath);
         $this->assertIsString($path);
         return $path;
+    }
+
+    private function indexLine(
+        string $path,
+        int $ctime,
+        int $size,
+        string $type
+    ): string {
+        return json_encode([
+            'path' => base64_encode($path),
+            'ctime' => $ctime,
+            'size' => $size,
+            'type' => $type,
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
     }
 
     private function removeTree(string $path): void

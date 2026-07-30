@@ -17,7 +17,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, readAuditLog,
-    fsRootDir,
+    fsRootDir, getRemoteStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -105,7 +105,10 @@ describe('Import: --filter', () => {
         });
 
         it('skipped download list remains on disk', () => {
-            assert.ok(existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
+            assert.ok(existsSync(join(
+                getRemoteStateDirectory(tempDir, 'pull-plan.skipped.jsonl'),
+                'pull-plan.skipped.jsonl',
+            )),
                 'Expected skipped download list to remain on disk');
         });
 
@@ -134,7 +137,10 @@ describe('Import: --filter', () => {
         });
 
         it('skipped download list was cleaned up', () => {
-            assert.ok(!existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
+            assert.ok(!existsSync(join(
+                getRemoteStateDirectory(tempDir, '.remote-index.jsonl'),
+                'pull-plan.skipped.jsonl',
+            )),
                 'Expected skipped download list to be cleaned up');
         });
 
@@ -206,7 +212,10 @@ describe('Import: --filter', () => {
         });
 
         it('skipped list remains on disk', () => {
-            assert.ok(existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
+            assert.ok(existsSync(join(
+                getRemoteStateDirectory(tempDir, 'pull-plan.skipped.jsonl'),
+                'pull-plan.skipped.jsonl',
+            )),
                 'Expected skipped download list to remain');
         });
     });
@@ -234,7 +243,10 @@ describe('Import: --filter', () => {
         });
 
         it('no skipped download list was created', () => {
-            assert.ok(!existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
+            assert.ok(!existsSync(join(
+                getRemoteStateDirectory(tempDir, '.remote-index.jsonl'),
+                'pull-plan.skipped.jsonl',
+            )),
                 'Expected no skipped download list without --filter');
         });
 

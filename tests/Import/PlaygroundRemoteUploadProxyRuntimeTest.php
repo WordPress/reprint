@@ -29,7 +29,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
         $this->stateFile = $stateDir . '/.import-state.json';
-        $this->skippedFile = $stateDir . '/.import-download-list-skipped.jsonl';
+        $this->skippedFile = $stateDir . '/pull-plan.skipped.jsonl';
         file_put_contents($this->stateFile, "{\"command\":\"files-pull\",\"status\":\"partial\"}\n");
         file_put_contents($this->skippedFile, "{\"path\":\"/wp-content/uploads/test.jpg\"}\n");
     }
@@ -95,7 +95,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
             $runtime,
         );
         $this->assertStringContainsString(
-            "/tmp/reprint/.import-download-list-skipped.jsonl",
+            "/tmp/reprint/pull-plan.skipped.jsonl",
             $runtime,
         );
         $this->assertStringNotContainsString($this->stateFile, $runtime);
@@ -104,7 +104,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
             $startSh,
         );
         $this->assertStringContainsString(
-            "--mount='" . $this->skippedFile . ":/tmp/reprint/.import-download-list-skipped.jsonl'",
+            "--mount='" . $this->skippedFile . ":/tmp/reprint/pull-plan.skipped.jsonl'",
             $startSh,
         );
 
@@ -117,6 +117,6 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $this->assertContains($this->stateFile, $mount_sources);
         $this->assertContains($this->skippedFile, $mount_sources);
         $this->assertContains('/tmp/reprint/.import-state.json', $mount_targets);
-        $this->assertContains('/tmp/reprint/.import-download-list-skipped.jsonl', $mount_targets);
+        $this->assertContains('/tmp/reprint/pull-plan.skipped.jsonl', $mount_targets);
     }
 }

@@ -11,7 +11,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
     assertFileCount, assertSiteMirror,
-    fsRootDir,
+    fsRootDir, getRemoteStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -56,9 +56,12 @@ describe('Import: Basic File Sync', () => {
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
-    it('.import-index.jsonl has entries', () => {
-        const indexFile = join(tempDir, '.import-index.jsonl');
-        assert.ok(existsSync(indexFile), 'Expected .import-index.jsonl to exist');
+    it('.remote-index.jsonl has entries', () => {
+        const indexFile = join(
+            getRemoteStateDirectory(tempDir, '.remote-index.jsonl'),
+            '.remote-index.jsonl',
+        );
+        assert.ok(existsSync(indexFile), 'Expected .remote-index.jsonl to exist');
         const lines = readFileSync(indexFile, 'utf-8').trim().split('\n').filter(l => l);
         assert.ok(lines.length > 0, 'Expected at least one index entry');
     });
@@ -92,13 +95,16 @@ describe('Import: Basic File Sync', () => {
         });
         assert.equal(restart.exitCode, 0, `Expected restart exit 0, got ${restart.exitCode}\nstderr: ${restart.stderr}\nstdout: ${restart.stdout}`);
 
-        // Local index should still exist (restart preserves it)
-        const indexFile = join(tempDir, '.import-index.jsonl');
-        assert.ok(existsSync(indexFile), 'Expected local index to be preserved after --abort');
+        const remoteStateDirectory =
+            getRemoteStateDirectory(tempDir, '.remote-index.jsonl');
+
+        // The target-observed index should still exist (restart preserves it)
+        const indexFile = join(remoteStateDirectory, '.remote-index.jsonl');
+        assert.ok(existsSync(indexFile), 'Expected target-observed index to be preserved after --abort');
 
         // Transient files should be cleaned up
-        assert.ok(!existsSync(join(tempDir, '.import-remote-index.jsonl')), 'Expected remote index to be deleted');
-        assert.ok(!existsSync(join(tempDir, '.import-download-list.jsonl')), 'Expected download list to be deleted');
+        assert.ok(!existsSync(join(remoteStateDirectory, '.remote-index.next.jsonl')), 'Expected next target index to be deleted');
+        assert.ok(!existsSync(join(remoteStateDirectory, 'pull-plan.jsonl')), 'Expected pull plan to be deleted');
     });
 
     it('running after --abort performs a delta sync', () => {
