@@ -22,7 +22,7 @@ class CommandAliasTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/.reprint/pull', 0755, true);
+        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -66,7 +66,7 @@ class CommandAliasTest extends TestCase
 
         // Write a preflight so commands that require it don't bail early.
         file_put_contents(
-            $this->stateDir . '/.reprint/pull/state.json',
+            $this->stateDir . '/pull/state.json',
             json_encode([
                 "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             ]),
@@ -102,7 +102,7 @@ class CommandAliasTest extends TestCase
     public function testRetiredStateShapeIsRejected(): void
     {
         file_put_contents(
-            $this->stateDir . '/.reprint/pull/state.json',
+            $this->stateDir . '/pull/state.json',
             json_encode([
                 "command" => "files-pull",
                 "status" => "in_progress",

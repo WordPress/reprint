@@ -25,11 +25,11 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 
         mkdir($this->fsRoot, 0755, true);
         mkdir($this->outputDir, 0755, true);
-        mkdir($stateDir . '/.reprint/pull', 0755, true);
+        mkdir($stateDir . '/pull', 0755, true);
 
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
-        $this->pullStateFile = $stateDir . '/.reprint/pull/state.json';
-        $this->skippedFetchListFile = $stateDir . '/.reprint/pull/skipped-fetch-list.jsonl';
+        $this->pullStateFile = $stateDir . '/pull/state.json';
+        $this->skippedFetchListFile = $stateDir . '/pull/skipped-fetch-list.jsonl';
         file_put_contents($this->pullStateFile, "{\"command\":\"files-pull\",\"status\":\"partial\"}\n");
         file_put_contents($this->skippedFetchListFile, "{\"path\":\"/wp-content/uploads/test.jpg\"}\n");
     }
@@ -68,11 +68,11 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
     public function testPlaygroundMountsProxyStateFilesIntoVfs(): void
     {
         $manifest = new \RuntimeManifest('other');
-        $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL'] =
+        $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL'] =
             'https://source.example/wp-content/uploads';
-        $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE'] =
+        $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE'] =
             $this->pullStateFile;
-        $manifest->constants['STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'] =
+        $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'] =
             $this->skippedFetchListFile;
         $manifest->routes[] = [
             'handler' => 'remote-upload-proxy',

@@ -23,7 +23,7 @@ class SqliteRuntimeConfigTest extends TestCase
         $this->outputDir = $this->tempDir . '/runtime';
 
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/.reprint/pull', 0755, true);
+        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot . '/wp-content/database', 0755, true);
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
     }

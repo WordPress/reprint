@@ -114,8 +114,8 @@ class NewSiteUrlSqliteTest extends TestCase
      */
     private function querySqlite(string $dbPath, string $sql, string $dbName): array
     {
-        $polyfills = resolve_sqlite_integration_path("/php-polyfills.php");
-        $driver = resolve_sqlite_integration_path("/wp-pdo-mysql-on-sqlite.php");
+        $polyfills = resolve_sqlite_integration_path("/packages/mysql-on-sqlite/src/php-polyfills.php");
+        $driver = resolve_sqlite_integration_path("/packages/mysql-on-sqlite/src/load.php");
         require_once $polyfills;
         require_once $driver;
 
@@ -404,7 +404,7 @@ class NewSiteUrlSqliteTest extends TestCase
             'target_db' => 'wp_test',
         ]);
 
-        $state = json_decode(file_get_contents($this->tempDir . '/.reprint/pull/state.json'), true);
+        $state = json_decode(file_get_contents($this->tempDir . '/pull/state.json'), true);
         $this->assertSame('complete', $state['active_resumable_command']['completion_state']);
         $this->assertSame(3, $state['apply']['statements_executed']);
         $this->assertSame(strlen($sql), $state['apply']['bytes_read']);

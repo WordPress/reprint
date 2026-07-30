@@ -41,15 +41,9 @@ require_once __DIR__ . '/lib/wp-stubs.php';
 
 // Streaming protocol parsers.
 require_once __DIR__ . '/lib/protocol/class-multipart-stream-parser.php';
-if (!class_exists('MultipartStreamParser', false)) {
-    class_alias(\Reprint\Importer\Protocol\MultipartStreamParser::class, 'MultipartStreamParser');
-}
 
 // Adaptive request sizing and pacing.
 require_once __DIR__ . '/lib/tuning/class-adaptive-tuner.php';
-if (!class_exists('AdaptiveTuner', false)) {
-    class_alias(\Reprint\Importer\Tuning\AdaptiveTuner::class, 'AdaptiveTuner');
-}
 
 // Load URL rewriting components
 require_once __DIR__ . '/lib/url-rewrite/load.php';
@@ -176,21 +170,10 @@ register_shutdown_function(function () {
 
 function resolve_sqlite_integration_path(string $suffix = ''): string
 {
-    $suffixes = [$suffix];
-    $moved_paths = [
-        '/php-polyfills.php' => '/packages/mysql-on-sqlite/src/php-polyfills.php',
-        '/version.php' => '/packages/mysql-on-sqlite/src/version.php',
-    ];
-    if (isset($moved_paths[$suffix])) {
-        $suffixes[] = $moved_paths[$suffix];
-    }
-
     foreach ([dirname(__DIR__, 3), dirname(__DIR__, 4)] as $project_root) {
-        foreach ($suffixes as $candidate_suffix) {
-            $candidate = $project_root . '/lib/sqlite-database-integration' . $candidate_suffix;
-            if (file_exists($candidate)) {
-                return $candidate;
-            }
+        $candidate = $project_root . '/lib/sqlite-database-integration' . $suffix;
+        if (file_exists($candidate)) {
+            return $candidate;
         }
     }
 
@@ -207,9 +190,6 @@ function resolve_sqlite_integration_plugin_path(): string
         if (is_dir($package)) {
             return $package;
         }
-        if (is_dir($root . '/wp-includes/sqlite')) {
-            return $root;
-        }
     }
 
     throw new RuntimeException(
@@ -218,9 +198,9 @@ function resolve_sqlite_integration_plugin_path(): string
 }
 
 /**
- * Register a user-defined SQL function on a SQLite PDO. Routes to
- * Pdo\Sqlite::createFunction() on 8.4+; the legacy
- * PDO::sqliteCreateFunction() alias is deprecated in 8.5.
+ * Register a user-defined SQL function on a SQLite PDO. PHP 8.4 introduced
+ * Pdo\Sqlite::createFunction(); PDO::sqliteCreateFunction() serves earlier
+ * supported PHP versions and is deprecated in 8.5.
  */
 function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $fn, int $num_args = 1): void
 {
@@ -252,10 +232,7 @@ class ImportClient
     /** @var string Caller-selected state directory for this filesystem root. */
     public $state_dir;
 
-    /** @var string Local Reprint state directory at <state-dir>/.reprint. */
-    private $reprint_state_directory;
-
-    /** @var string Pull state directory at <state-dir>/.reprint/pull. */
+    /** @var string Pull state directory at <state-dir>/pull. */
     public $pull_state_directory;
 
     /** @var string Filesystem root where the remote filesystem is reconstructed. */
@@ -274,13 +251,13 @@ class ImportClient
     private $progress_throttle = 1.0;
 
     /**
-     * @var string Local index file .reprint/pull/local-index.jsonl. It tracks each accounted
+     * @var string Local index file pull/local-index.jsonl. It tracks each accounted
      * path's ctime, size, and type for the next remote-index comparison.
      */
     private $local_index_file;
 
     /**
-     * @var string Path to .reprint/pull/local-index.wal — the append-only write-ahead
+     * @var string Path to pull/local-index.wal — the append-only write-ahead
      * log for the current files-pull. Applied batches are cleared, but the file
      * remains until the lifecycle completes or is aborted.
      */
@@ -313,30 +290,30 @@ class ImportClient
     private $last_local_index_wal_type = null;
 
     /**
-     * @var string Remote index file .reprint/pull/remote-index.jsonl, including
+     * @var string Remote index file pull/remote-index.jsonl, including
      * directory `empty` fields when available.
      */
     private $remote_index_file;
 
-    /** @var string Path to .reprint/pull/fetch-list.jsonl — files to download, computed by diffing remote vs local index. */
+    /** @var string Path to pull/fetch-list.jsonl — files to download, computed by diffing remote vs local index. */
     private $fetch_list_file;
 
-    /** @var string Path to .reprint/pull/skipped-fetch-list.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
+    /** @var string Path to pull/skipped-fetch-list.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
     private $skipped_fetch_list_file;
 
-    /** @var string Path to .reprint/audit.log — append-only log of every operation for debugging. */
+    /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
 
-    /** @var string Path to .reprint/pull/volatile-files.json — files the server marks as frequently-changing. */
+    /** @var string Path to pull/volatile-files.json — files the server marks as frequently-changing. */
     private $volatile_files_file;
 
-    /** @var string Path to .reprint/pull/domains.json — domains discovered in the SQL dump. */
+    /** @var string Path to pull/domains.json — domains discovered in the SQL dump. */
     private $domains_file;
 
-    /** @var string Path to .reprint/pull/sql-stats.json — SQL statement count for progress reporting. */
+    /** @var string Path to pull/sql-stats.json — SQL statement count for progress reporting. */
     private $sql_stats_file;
 
-    /** @var string Path to .reprint/pull/sql-buffer — partial SQL retained across process crashes. */
+    /** @var string Path to pull/sql-buffer — partial SQL retained across process crashes. */
     private $sql_buffer_file;
 
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
@@ -494,7 +471,7 @@ class ImportClient
     /** @var int|null Total number of pipeline steps. Set via --steps. */
     private $pipeline_steps = null;
 
-    /** @var string Path to .reprint/status.json — machine-readable status for external progress readers. */
+    /** @var string Path to status.json — machine-readable status for external progress readers. */
     private $status_file;
 
     /** @var string SQL output mode: 'file' (default), 'stdout', or 'mysql'. */
@@ -551,8 +528,7 @@ class ImportClient
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->filesystem_root = rtrim($filesystem_root, "/");
-        $this->reprint_state_directory = $this->state_dir . "/.reprint";
-        $this->pull_state_directory = $this->reprint_state_directory . "/pull";
+        $this->pull_state_directory = $this->state_dir . "/pull";
         $this->pull_state_file = $this->pull_state_directory . "/state.json";
         $this->local_index_file = $this->pull_state_directory . "/local-index.jsonl";
         $this->local_index_wal_path =
@@ -563,12 +539,12 @@ class ImportClient
             $this->pull_state_directory . "/fetch-list.jsonl";
         $this->skipped_fetch_list_file =
             $this->pull_state_directory . "/skipped-fetch-list.jsonl";
-        $this->audit_log_file = $this->reprint_state_directory . "/audit.log";
+        $this->audit_log_file = $this->state_dir . "/audit.log";
         $this->volatile_files_file = $this->pull_state_directory . "/volatile-files.json";
         $this->domains_file = $this->pull_state_directory . "/domains.json";
         $this->sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
         $this->sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
-        $this->status_file = $this->reprint_state_directory . "/status.json";
+        $this->status_file = $this->state_dir . "/status.json";
 
         // Detect TTY for progress display. In stdout mode this is re-evaluated
         // against STDERR in run() once we know the output mode.
@@ -968,7 +944,7 @@ class ImportClient
         }
 
         // files-diff and files-push use local push state and must not load
-        // or write the pull command's .reprint/pull/state.json file.
+        // or write the pull command's pull/state.json file.
         if ($command === "files-diff") {
             $this->run_files_diff($options);
             return;
@@ -1867,8 +1843,7 @@ class ImportClient
         $remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
         $pair = hash('sha256', $remote_reprint_api_url . "\0" . $resolved_local_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
-        $reprint_state_directory = rtrim($state_dir, '/') . '/.reprint';
-        $push_state_directory = $reprint_state_directory . '/push/' . $pair;
+        $push_state_directory = rtrim($state_dir, '/') . '/push/' . $pair;
         if (strpos($push_state_directory, '/') !== 0) {
             $working_directory = getcwd();
             if ($working_directory === false) {
@@ -3882,8 +3857,8 @@ class ImportClient
      * Print file index statistics: total indexed files and their size,
      * plus pending downloads and their size.
      *
-     * Reads .reprint/pull/remote-index.jsonl for all indexed files and
-     * .reprint/pull/fetch-list.jsonl for files not yet downloaded.
+     * Reads pull/remote-index.jsonl for all indexed files and
+     * pull/fetch-list.jsonl for files not yet downloaded.
      */
     private function run_files_stats(): void
     {
@@ -4360,12 +4335,12 @@ class ImportClient
             return;
         }
 
-        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL"] = $base_url;
+        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
         $pull_state_directory =
             realpath($this->pull_state_directory) ?: $this->pull_state_directory;
-        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
+        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
             rtrim($pull_state_directory, "/") . "/state.json";
-        $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
+        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
             rtrim($pull_state_directory, "/") . "/skipped-fetch-list.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
@@ -5081,7 +5056,7 @@ class ImportClient
         // a fatal "name already in use". Skip the loader entirely when the
         // host's copy is already in memory — both trees expose the same
         // public class names, so the existing instance is fine.
-        $driver_loader = resolve_sqlite_integration_path("/wp-pdo-mysql-on-sqlite.php");
+        $driver_loader = resolve_sqlite_integration_path("/packages/mysql-on-sqlite/src/load.php");
         if (
             class_exists("WP_PDO_MySQL_On_SQLite", false) &&
             class_exists("WP_Parser_Grammar", false)
@@ -6158,7 +6133,7 @@ class ImportClient
              * early would make resume skip the missing suffix.
              *
              * On the closing callback, flush the file and local index WAL
-             * before storing the cursor in .reprint/pull/state.json. If the response
+             * before storing the cursor in pull/state.json. If the response
              * stops first, state retains the preceding cursor; resume truncates
              * the later bytes and requests the multipart part again.
              */
@@ -6872,7 +6847,7 @@ class ImportClient
     /**
      * Builds a JSON batch file listing the next set of paths to download.
      *
-     * Reads from the fetch list (.reprint/pull/fetch-list.jsonl) starting at
+     * Reads from the fetch list (pull/fetch-list.jsonl) starting at
      * $offset, accumulating paths into a JSON array until the batch approaches
      * 80% of the server's max request size.  Always includes at least one path,
      * even if it alone exceeds the limit.
@@ -7634,7 +7609,7 @@ class ImportClient
             if (file_exists($sql_buffer_file)) {
                 $sql_buffer = file_get_contents($sql_buffer_file);
                 $this->audit_log(
-                    sprintf("CRASH RECOVERY | Restored %d bytes from .reprint/pull/sql-buffer", strlen($sql_buffer)),
+                    sprintf("CRASH RECOVERY | Restored %d bytes from pull/sql-buffer", strlen($sql_buffer)),
                     true,
                 );
             }
@@ -7658,7 +7633,7 @@ class ImportClient
         $sql_statements_counted = (int) ($this->import_state()->sql_statements_counted ?? 0);
 
         // Auto-detect the source site domain from the export URL so it
-        // always appears in .reprint/pull/domains.json even if the SQL dump
+        // always appears in pull/domains.json even if the SQL dump
         // hasn't been fully scanned yet.
         if ($domain_collector) {
             $parsed_url = parse_url($this->remote_reprint_api_url);
@@ -7953,7 +7928,7 @@ class ImportClient
                     );
                     $this->audit_log(
                         sprintf(
-                            "DOMAINS DISCOVERED | %d unique domains saved to .reprint/pull/domains.json",
+                            "DOMAINS DISCOVERED | %d unique domains saved to pull/domains.json",
                             count($domains),
                         ),
                         false,
@@ -8001,7 +7976,7 @@ class ImportClient
                         // An exception is already in flight (e.g. curl error,
                         // MySQL error). Don't mask it by throwing about the
                         // buffer — the buffer data is safely persisted in
-                        // .reprint/pull/sql-buffer and will be recovered on the next run.
+                        // pull/sql-buffer and will be recovered on the next run.
                         $this->audit_log(
                             "BUFFER NOT FLUSHED | " . strlen($pending) .
                             " bytes in SQL buffer during exception unwind" .
@@ -8535,7 +8510,7 @@ class ImportClient
 
     /**
      * Checks whether the remote index contains a remote absolute path or one
-     * of its descendants. Runs a memoized O(N) scan of .reprint/pull/remote-index.jsonl.
+     * of its descendants. Runs a memoized O(N) scan of pull/remote-index.jsonl.
      */
     private function remote_index_contains_remote_absolute_path_prefix(
         string $remote_absolute_path
@@ -12605,12 +12580,12 @@ if (
                 "\n" .
                 "Output files:\n" .
                 "  (filesystem root)/                       Downloaded files\n" .
-                "  .reprint/pull/local-index.jsonl          Local index\n" .
-                "  .reprint/pull/remote-index.jsonl         Remote index\n" .
-                "  .reprint/pull/fetch-list.jsonl           Files pending download\n" .
-                "  .reprint/pull/skipped-fetch-list.jsonl   Files skipped by --filter=essential-files\n" .
-                "  .reprint/pull/state.json                 Resumable pull state\n" .
-                "  .reprint/audit.log                       Audit log\n",
+                "  pull/local-index.jsonl          Local index\n" .
+                "  pull/remote-index.jsonl         Remote index\n" .
+                "  pull/fetch-list.jsonl           Files pending download\n" .
+                "  pull/skipped-fetch-list.jsonl   Files skipped by --filter=essential-files\n" .
+                "  pull/state.json                 Resumable pull state\n" .
+                "  audit.log                       Audit log\n",
         ],
         "files-diff" => [
             "level" => "low",
@@ -12659,7 +12634,7 @@ if (
             "description" =>
                 "Streams the full remote directory tree over HTTP and writes each\n" .
                 "entry (path, size, ctime, type, and directory emptiness) to\n" .
-                ".reprint/pull/remote-index.jsonl.\n" .
+                "pull/remote-index.jsonl.\n" .
                 "\n" .
                 "On the first run, builds the complete index. On subsequent runs,\n" .
                 "re-indexes and diffs against the prior snapshot to produce a\n" .
@@ -12715,7 +12690,7 @@ if (
             "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
                 "\n" .
-                "If .reprint/pull/domains.json exists (cached by db-pull), it is read\n" .
+                "If pull/domains.json exists (cached by db-pull), it is read\n" .
                 "directly. Otherwise, db.sql is scanned and the result is cached\n" .
                 "for future calls. No network calls.\n" .
                 "\n" .
@@ -12728,7 +12703,7 @@ if (
             "short" => "Print local pull lifecycle metadata as JSON",
             "usage" => "reprint import-metadata --state-dir=DIR",
             "description" =>
-                "Reads --state-dir/.reprint/pull/state.json and prints metadata for\n" .
+                "Reads --state-dir/pull/state.json and prints metadata for\n" .
                 "host integrations. No network calls are made.\n",
             "extra" =>
                 "Example:\n" .

@@ -22,7 +22,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $this->outputDir = $this->tempDir . '/runtime';
 
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/.reprint/pull', 0755, true);
+        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
     }
@@ -150,7 +150,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             'filter' => 'essential-files',
         ]);
         file_put_contents(
-            $this->stateDir . '/.reprint/pull/skipped-fetch-list.jsonl',
+            $this->stateDir . '/pull/skipped-fetch-list.jsonl',
             json_encode(['path' => '/wp-content/uploads/2024/01/photo.jpg']) . "\n",
         );
 
@@ -159,15 +159,15 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $runtime = $this->runApplyRuntime($client);
 
         $this->assertStringContainsString(
-            "STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL",
+            "REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL",
             $runtime,
         );
         $this->assertStringContainsString(
-            "STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE",
+            "REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE",
             $runtime,
         );
         $this->assertStringContainsString(
-            "STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE",
+            "REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE",
             $runtime,
         );
         $this->assertStringContainsString(
@@ -195,11 +195,11 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $runtime = $this->runApplyRuntime($client);
 
         $this->assertStringContainsString(
-            "STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL",
+            "REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL",
             $runtime,
         );
         $this->assertStringContainsString(
-            "STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE",
+            "REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE",
             $runtime,
         );
         $this->assertStringContainsString(
@@ -223,11 +223,11 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $runtime = $this->runApplyRuntime($client);
 
         $this->assertStringNotContainsString(
-            "STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL",
+            "REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL",
             $runtime,
         );
         $this->assertStringNotContainsString(
-            "STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE",
+            "REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE",
             $runtime,
         );
         $this->assertStringNotContainsString(

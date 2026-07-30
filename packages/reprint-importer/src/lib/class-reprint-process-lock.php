@@ -8,7 +8,7 @@
  * Serializes local Reprint commands which share one state directory.
  *
  * Construction acquires the non-blocking exclusive lock at
- * `<state-dir>/.reprint/process.lock`. The caller retains this object for the
+ * `<state-dir>/process.lock`. The caller retains this object for the
  * complete command and calls close() when the command ends.
  */
 final class ReprintProcessLock
@@ -19,9 +19,8 @@ final class ReprintProcessLock
     /**
      * Acquires the state directory's Reprint process lock.
      *
-     * The local Reprint state directory is created when absent. Lock
-     * acquisition is non-blocking, so construction fails while another
-     * process owns it.
+     * The state directory is created when absent. Lock acquisition is
+     * non-blocking, so construction fails while another process owns it.
      *
      * @param string $state_dir Caller-selected state directory.
      *
@@ -30,19 +29,18 @@ final class ReprintProcessLock
      */
     public function __construct(string $state_dir)
     {
-        $reprint_state_directory =
-            rtrim($state_dir, '/') . '/.reprint';
+        $state_dir = rtrim($state_dir, '/') ?: '/';
         if (
-            !is_dir($reprint_state_directory)
-            && !mkdir($reprint_state_directory, 0755, true)
-            && !is_dir($reprint_state_directory)
+            !is_dir($state_dir)
+            && !mkdir($state_dir, 0755, true)
+            && !is_dir($state_dir)
         ) {
             throw new RuntimeException(
-                'Failed to create the Reprint state directory: '
-                . $reprint_state_directory . '.'
+                'Failed to create the state directory: '
+                . $state_dir . '.'
             );
         }
-        $process_lock_path = $reprint_state_directory . '/process.lock';
+        $process_lock_path = rtrim($state_dir, '/') . '/process.lock';
         $this->handle = fopen($process_lock_path, 'c+b');
         if (!is_resource($this->handle)) {
             throw new RuntimeException(

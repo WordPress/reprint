@@ -396,7 +396,7 @@ final class FilesDiffCommandTest extends TestCase
         $resolvedLocalDocumentRoot = realpath($this->localTree);
         $this->assertIsString($resolvedLocalDocumentRoot);
         $pair = hash('sha256', rtrim($this->targetUrl, '?&') . "\0" . $resolvedLocalDocumentRoot);
-        return realpath($this->stateDirectory) . '/.reprint/push/' . $pair;
+        return realpath($this->stateDirectory) . '/push/' . $pair;
     }
 
     /** @param list<string> $extraArguments

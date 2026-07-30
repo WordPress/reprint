@@ -158,14 +158,15 @@ development. There are no compatibility aliases or migration paths.
 
 ## Local Reprint state layout
 
-The **Reprint state directory** is `<state-dir>/.reprint`; use
-`$reprint_state_directory`. The **pull state directory** is
-`<state-dir>/.reprint/pull`; use `$pull_state_directory`. Shared and pull
-filenames inside `.reprint` do not begin with a dot or repeat the `reprint` or
-`pull` scope supplied by their parent directories.
+The **state directory** is the caller-supplied `<state-dir>`; use `$state_dir`.
+Reprint uses it exactly as supplied and does not append `.reprint`. A consumer
+may choose `.reprint` or any other private directory name. The **pull state
+directory** is `<state-dir>/pull`; use `$pull_state_directory`. Shared and pull
+filenames inside the state directory do not begin with a dot or repeat the
+scope supplied by their parent directories.
 
 ```text
-<state-dir>/.reprint/
+<state-dir>/
 ├── process.lock
 ├── status.json
 ├── audit.log
@@ -188,7 +189,7 @@ Use these path names:
 
 | Surface | Name |
 | --- | --- |
-| Reprint state directory | `$reprint_state_directory` |
+| State directory | `$state_dir` |
 | Pull state directory | `$pull_state_directory` |
 | Pull state file | `$pull_state_file` |
 | Local index file | `$local_index_file` |
@@ -210,7 +211,7 @@ files, and database files remain directly under the state directory.
 ## Local Reprint process lock
 
 Every local Reprint command workflow runs under the **Reprint process lock** at
-`<state-dir>/.reprint/process.lock`. Use `.reprint/process.lock`,
+`<state-dir>/process.lock`. Use `process.lock`,
 `$process_lock_path`, and `$process_lock`. The lock is non-blocking and
 state-directory-wide: pull, push, diff, and other local Reprint processes
 cannot run concurrently against the same state directory, even when their
@@ -227,7 +228,7 @@ lock is separate from the receiver's push-session and commit locks.
 ## Pull local index WAL
 
 Call the single pull-side write-ahead log the **local index WAL**. It lives at
-`<state-dir>/.reprint/pull/local-index.wal`; use `.reprint/pull/local-index.wal`,
+`<state-dir>/pull/local-index.wal`; use `pull/local-index.wal`,
 `$local_index_wal_path`, and `$local_index_wal_handle`.
 Applied batch records are cleared, but the empty WAL remains as a marker until
 files-pull completes. A retained WAL is consumed only while resuming or
@@ -237,7 +238,7 @@ command; unrelated commands do not consume it.
 ## Local push state
 
 The local machine keeps planning and active state outside the receiver push
-directory. Under `<state-dir>/.reprint/push/<pair-key>/`, use these names verbatim:
+directory. Under `<state-dir>/push/<pair-key>/`, use these names verbatim:
 
 | Surface | Name |
 | --- | --- |
@@ -350,11 +351,11 @@ The `pair key` identifies exactly one remote Reprint API URL and resolved filesy
 sha256(rtrim(<remote-reprint-api-url>, "?&") + "\0" + <resolved-filesystem-root>)
 ```
 
-The `local push state directory` is `<state-dir>/.reprint/push/<pair-key>/`. `files-push`
+The `local push state directory` is `<state-dir>/push/<pair-key>/`. `files-push`
 chooses `start` or `resume` only from whether `sender.json` exists there. The
 receiver-confirmed upload positions remain receiver-owned; they are not a
-files-push cursor and are not copied into `.reprint/pull/state.json` or
-`.reprint/status.json`.
+files-push cursor and are not copied into `pull/state.json` or
+`status.json`.
 
 Files-push lifecycle lines use these command-first names verbatim: `START
 files-push`, `RESUME files-push`, `PHASE files-push`, `PARTIAL files-push`,

@@ -83,7 +83,7 @@ describe('Import: Delta Sync with Deletions', () => {
     });
 
     it('fetch list includes deleted files', () => {
-        const dlPath = join(tempDir, '.reprint/pull/fetch-list.jsonl');
+        const dlPath = join(tempDir, 'pull/fetch-list.jsonl');
         if (existsSync(dlPath)) {
             const content = readFileSync(dlPath, 'utf-8');
             // The fetch list should reference the deleted files
@@ -94,7 +94,7 @@ describe('Import: Delta Sync with Deletions', () => {
     });
 
     it('state shows complete after delta', () => {
-        const stateFile = join(tempDir, '.reprint/pull/state.json');
+        const stateFile = join(tempDir, 'pull/state.json');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete');
     });

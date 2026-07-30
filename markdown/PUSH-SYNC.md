@@ -84,8 +84,8 @@ previous local index and the previously pushed rows.
 The local machine keeps these files **per remote Reprint API URL and resolved
 filesystem root**, overwritten after each successful commit:
 
-    <state-dir>/.reprint/push/<pair-key>/previous_local_index.jsonl
-    <state-dir>/.reprint/push/<pair-key>/previously_pushed_rows.jsonl   (phase two)
+    <state-dir>/push/<pair-key>/previous_local_index.jsonl
+    <state-dir>/push/<pair-key>/previously_pushed_rows.jsonl   (phase two)
 
 The previous local index records the local path type, size, and ctime as the
 completing push observed them. Besides planning the next push, it feeds the
@@ -273,7 +273,7 @@ configuration; request parameters cannot select any of them.
 ## Local files sender
 
 `PushFilesSender` joins the durable `PushPlan` to the receiver's push session.
-Every local Reprint command workflow runs under `<state-dir>/.reprint/process.lock`.
+Every local Reprint command workflow runs under `<state-dir>/process.lock`.
 The production CLI acquires this non-blocking lock before it prepares pair
 context, constructs `ImportClient`, or writes the command audit entry. It
 passes the open lock to `ImportClient::run()` and releases it after the command.
@@ -282,7 +282,7 @@ none. The one state-directory-wide Reprint process lock prevents concurrent
 pull, push, diff, and other local Reprint processes from using that site state,
 regardless of their remote Reprint API URL or filesystem-root pair.
 
-An active push keeps these files under `<state-dir>/.reprint/push/<pair-key>/`:
+An active push keeps these files under `<state-dir>/push/<pair-key>/`:
 
 ```text
 previous_local_index.jsonl          index saved after the previous commit
@@ -410,7 +410,7 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 `PushFilesSender`. It sends only the resolved filesystem root named by `--fs-root`.
 It requires `--state-dir`, `--fs-root`, and `--secret`; HTTPS is required unless
 the operator passes `--force-http`. It does not run pull preflight, read or
-write `.reprint/pull/state.json`, show a plan, ask for confirmation, transfer a
+write `pull/state.json`, show a plan, ask for confirmation, transfer a
 database, retry a failed request, or start a replacement sender after a
 `restart` outcome.
 
@@ -420,7 +420,7 @@ The command derives one pair key without general URL normalization:
 sha256(rtrim(<remote-reprint-api-url>, "?&") + "\0" + <resolved-filesystem-root>)
 ```
 
-Its sender state lives at `<state-dir>/.reprint/push/<pair-key>/`. A different
+Its sender state lives at `<state-dir>/push/<pair-key>/`. A different
 remote Reprint API URL query or resolved filesystem root therefore selects a
 different retained local index. Fragments, URL user-info, and `SECRET_KEY`
 target parameters are rejected. The local push state directory must be outside

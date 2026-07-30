@@ -91,7 +91,7 @@ describe('Import: Adversarial database pull', { timeout: 300000 }, () => {
                 `${result.stdout.slice(-4000)}`,
         );
         const importState = JSON.parse(
-            readFileSync(join(tempDir, '.reprint/pull/state.json'), 'utf-8'),
+            readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'),
         );
         assertPullPipelineComplete(importState, 'pull-db');
 

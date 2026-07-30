@@ -26,7 +26,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/.reprint/pull', 0755, true);
+        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -85,7 +85,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
     private function readLocalIndexPaths(): array
     {
-        $file = $this->stateDir . '/.reprint/pull/local-index.jsonl';
+        $file = $this->stateDir . '/pull/local-index.jsonl';
         if (!file_exists($file)) {
             return [];
         }
@@ -132,12 +132,12 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         // and a selected orphan absent from the --only remote index. The
         // delete drains must reconcile only within the --only file prefixes, so the local index
         // accumulates as a union across files-pull --only runs.
-        $this->writeIndex('.reprint/pull/local-index.jsonl',
+        $this->writeIndex('pull/local-index.jsonl',
             $this->indexLine('/wp-config.php', 1000, 10)               // unselected
             . $this->indexLine('/wp-content/keep.txt', 1000, 10)       // matched
             . $this->indexLine('/wp-content/old/orphan.txt', 1000, 10) // selected orphan
         );
-        $this->writeIndex('.reprint/pull/remote-index.jsonl',
+        $this->writeIndex('pull/remote-index.jsonl',
             $this->indexLine('/wp-content/keep.txt', 1000, 10)
         );
 
@@ -164,12 +164,12 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         // delete them: that would recursively remove the very directories
         // the user asked to pull, while the matched children keep the
         // fetch list empty — silent data loss.
-        $this->writeIndex('.reprint/pull/local-index.jsonl',
+        $this->writeIndex('pull/local-index.jsonl',
             $this->indexLine('/wp-content/themes', 1000, 0, 'dir')
             . $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
             . $this->indexLine('/wp-content/themes/old/orphan.css', 1000, 10)
         );
-        $this->writeIndex('.reprint/pull/remote-index.jsonl',
+        $this->writeIndex('pull/remote-index.jsonl',
             $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
         );
 

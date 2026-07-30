@@ -266,7 +266,7 @@ export function runImporter(url, outputDir, command, options = {}) {
     // Non-preflight commands require a prior preflight run.
     // Automatically run one if the state file doesn't already have preflight data.
     if (command !== 'preflight' && command !== 'preflight-assert' && options.skipPreflight !== true) {
-        const stateFile = join(outputDir, '.reprint/pull/state.json');
+        const stateFile = join(outputDir, 'pull/state.json');
         let needsPreflight = true;
         try {
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
@@ -445,7 +445,7 @@ export async function createMysqlConnection(dbName = null) {
  */
 export function queryMysqlOnSqlite(sqlitePath, sql, dbName = 'sqlite_database') {
     const script = `
-require_once $argv[1] . '/lib/sqlite-database-integration/wp-pdo-mysql-on-sqlite.php';
+require_once $argv[1] . '/lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php';
 $pdo = new WP_PDO_MySQL_On_SQLite(
     'mysql-on-sqlite:path=' . str_replace(';', ';;', $argv[2]) . ';dbname=' . str_replace(';', ';;', $argv[3]),
     null,
@@ -671,17 +671,17 @@ export function countJsonlLines(filePath) {
  * Read the audit log as a string.
  */
 export function readAuditLog(outputDir) {
-    const logPath = join(outputDir, '.reprint/audit.log');
+    const logPath = join(outputDir, 'audit.log');
     if (!existsSync(logPath)) return '';
     return readFileSync(logPath, 'utf-8');
 }
 
 /**
  * Assert that the import indexed at least minCount files.
- * Checks .reprint/pull/local-index.jsonl line count.
+ * Checks pull/local-index.jsonl line count.
  */
 export function assertFileCount(outputDir, minCount = 3000) {
-    const indexPath = join(outputDir, '.reprint/pull/local-index.jsonl');
+    const indexPath = join(outputDir, 'pull/local-index.jsonl');
     assert.ok(existsSync(indexPath), `Expected ${indexPath} to exist`);
     const count = countJsonlLines(indexPath);
     assert.ok(count >= minCount,

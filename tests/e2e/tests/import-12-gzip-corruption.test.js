@@ -87,7 +87,7 @@ describe('Import: Gzip Corruption', () => {
             // Same as above: must not hang. Either succeeds (partial data OK)
             // or fails with a clear error.
             if (result.exitCode === 0) {
-                const stateFile = join(tempDir, '.reprint/pull/state.json');
+                const stateFile = join(tempDir, 'pull/state.json');
                 if (existsSync(stateFile)) {
                     const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
                     assert.ok(
