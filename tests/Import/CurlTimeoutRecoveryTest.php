@@ -7,10 +7,10 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Verify recovery from cURL timeouts during streaming downloads.
+ * Verify recovery from cURL timeouts during streaming fetches.
  *
- * Each download method (download_sql, download_file_fetch, download_remote_index,
- * download_db_index) is tested by injecting a CurlTimeoutException. SQL retries
+ * Each fetch method (fetch_sql, fetch_file_batch, fetch_remote_index,
+ * fetch_database_index) is tested by injecting a CurlTimeoutException. SQL retries
  * in the same invocation; the other phases save partial state for a later run.
  *
  * Also verifies the no-progress safety net: after repeated interrupted
@@ -20,16 +20,16 @@ class CurlTimeoutRecoveryTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
-    private $fs_root;
+    private $filesystem_root;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/curl-timeout-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $this->fs_root = $this->tempDir . '/fs-root';
+        $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->fs_root, 0755, true);
+        mkdir($this->filesystem_root, 0755, true);
     }
 
     protected function tearDown(): void
@@ -125,7 +125,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         $client = new $clientClass(
             'http://fake.url',
             $this->stateDir,
-            $this->fs_root,
+            $this->filesystem_root,
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
 
@@ -140,7 +140,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // download_sql: timeout retries in the same invocation
+    // fetch_sql: timeout retries in the same invocation
     // ---------------------------------------------------------------
 
     public function testSqlDownloadRetriesTimeoutUntilNoProgressLimit()
@@ -163,9 +163,9 @@ class CurlTimeoutRecoveryTest extends TestCase
         $modeProp = $reflection->getProperty('sql_output_mode');
         $modeProp->setValue($client, 'file');
 
-        $downloadSql = $reflection->getMethod('download_sql');
+        $fetchSql = $reflection->getMethod('fetch_sql');
         try {
-            $downloadSql->invoke($client);
+            $fetchSql->invoke($client);
             $this->fail("Expected the no-progress limit to stop SQL retries");
         } catch (\RuntimeException $e) {
             $this->assertStringContainsString(
@@ -177,12 +177,12 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->assertSame(
             3,
             $client->streaming_requests,
-            "download_sql should retry timeouts until the no-progress limit",
+            "fetch_sql should retry timeouts until the no-progress limit",
         );
     }
 
     // ---------------------------------------------------------------
-    // download_file_fetch: timeout saves state and returns false
+    // fetch_file_batch: timeout saves state and returns false
     // ---------------------------------------------------------------
 
     public function testFileFetchTimeoutSavesPartialState()
@@ -203,8 +203,8 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $downloadFilesFetch = $reflection->getMethod('download_file_fetch');
-        $result = $downloadFilesFetch->invoke(
+        $fetchFileBatch = $reflection->getMethod('fetch_file_batch');
+        $result = $fetchFileBatch->invoke(
             $client,
             null,
             base64_encode('{"path":"/photo.jpg","offset":4096}'),
@@ -213,7 +213,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         $this->assertFalse(
             $result,
-            "download_file_fetch should return false (not complete) on timeout"
+            "fetch_file_batch should return false (not complete) on timeout"
         );
 
         $state = $this->readState();
@@ -226,7 +226,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
     public function testFileFetchHardCrashCheckpointDoesNotPutCursorBehindBytes()
     {
-        $trackedPath = $this->fs_root . '/uploads/large.bin';
+        $trackedPath = $this->filesystem_root . '/uploads/large.bin';
         mkdir(dirname($trackedPath), 0755, true);
         file_put_contents($trackedPath, str_repeat('a', 256));
 
@@ -250,10 +250,10 @@ class CurlTimeoutRecoveryTest extends TestCase
             InterruptedAfterStreamedPartCloseClient::class,
         );
 
-        $downloadFilesFetch = $reflection->getMethod('download_file_fetch');
+        $fetchFileBatch = $reflection->getMethod('fetch_file_batch');
 
         try {
-            $downloadFilesFetch->invoke(
+            $fetchFileBatch->invoke(
                 $client,
                 null,
                 self::fileCursorForBytes(256),
@@ -287,7 +287,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // download_remote_index: timeout saves state and returns false
+    // fetch_remote_index: timeout saves state and returns false
     // ---------------------------------------------------------------
 
     public function testRemoteIndexTimeoutSavesPartialState()
@@ -316,12 +316,12 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $downloadIndex = $reflection->getMethod('download_remote_index');
-        $result = $downloadIndex->invoke($client);
+        $fetchRemoteIndex = $reflection->getMethod('fetch_remote_index');
+        $result = $fetchRemoteIndex->invoke($client);
 
         $this->assertFalse(
             $result,
-            "download_remote_index should return false on timeout"
+            "fetch_remote_index should return false on timeout"
         );
 
         $state = $this->readState();
@@ -337,7 +337,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // download_db_index: timeout saves state as "partial"
+    // fetch_database_index: timeout saves state as "partial"
     // ---------------------------------------------------------------
 
     public function testDbIndexTimeoutSavesPartialState()
@@ -360,8 +360,8 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $downloadDbIndex = $reflection->getMethod('download_db_index');
-        $downloadDbIndex->invoke($client);
+        $fetchDatabaseIndex = $reflection->getMethod('fetch_database_index');
+        $fetchDatabaseIndex->invoke($client);
 
         $state = $this->readState();
         $this->assertEquals(
@@ -498,7 +498,7 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     /**
-     * End-to-end: download_sql with counter already at MAX-1 and no
+     * End-to-end: fetch_sql with counter already at MAX-1 and no
      * cursor progress should throw RuntimeException.
      */
     public function testSqlDownloadGivesUpAfterMaxConsecutiveTimeouts()
@@ -525,8 +525,8 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('consecutive');
 
-        $downloadSql = $reflection->getMethod('download_sql');
-        $downloadSql->invoke($client);
+        $fetchSql = $reflection->getMethod('fetch_sql');
+        $fetchSql->invoke($client);
     }
 
     public function testSuccessfulRequestResetsCounter()
@@ -558,8 +558,8 @@ class CurlTimeoutRecoveryTest extends TestCase
             SuccessTestClient::class,
         );
 
-        $downloadIndex = $reflection->getMethod('download_remote_index');
-        $downloadIndex->invoke($client);
+        $fetchRemoteIndex = $reflection->getMethod('fetch_remote_index');
+        $fetchRemoteIndex->invoke($client);
 
         $state = $this->readState();
         $this->assertEquals(
@@ -596,7 +596,7 @@ class TimeoutTestClient extends \ImportClient
 
 /**
  * Test double that simulates a process dying immediately after a streamed
- * file part-complete checkpoint. This is a hard crash, so download_file_fetch()
+ * file part-complete checkpoint. This is a hard crash, so fetch_file_batch()
  * must not get a chance to do its normal final save.
  */
 class InterruptedAfterStreamedPartCloseClient extends \ImportClient

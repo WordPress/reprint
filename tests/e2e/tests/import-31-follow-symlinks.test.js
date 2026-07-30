@@ -284,7 +284,7 @@ describe('Import: Follow Symlinks', () => {
 
     // ─── Intermediate symlinks ─────────────────────────────────
 
-    it('intermediate symlink /srv/e2e-via is recreated pointing at the local mirror', () => {
+    it('intermediate symlink /srv/e2e-via is recreated pointing at the local filesystem copy', () => {
         // Its target (/srv/e2e-external) was followed and mirrored locally, so
         // the link is repointed within fs-root — same treatment as regular
         // symlink chunks. Unindexed escaping targets are still blocked.

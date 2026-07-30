@@ -125,9 +125,9 @@ class RemoteFileIndexCursorState
     }
 }
 
-class DownloadListFetchProgressState
+class FetchListProgressState
 {
-    /** @var int Current byte offset into the download-list file. */
+    /** @var int Current byte offset into the fetch-list file. */
     public int $offset = 0;
 
     /** @var int Next byte offset after the current batch. */
@@ -351,21 +351,22 @@ class ImportState
     /** @var string|null Webhost detected during preflight. */
     public ?string $webhost = null;
     public bool $follow_symlinks = true;
-    /** @var string|null Fingerprint of the --follow-symlinks bundle directory; guards resume. */
-    public ?string $symlink_bundle_directory_fingerprint = null;
+    /** @var string|null Fingerprint of the local followed symlinks root; guards resume. */
+    public ?string $local_followed_symlinks_root_fingerprint = null;
     public string $fs_root_nonempty_behavior = 'error';
     public string $filter = 'none';
     /** @var string|null User-Agent that worked during preflight. */
     public ?string $user_agent = null;
     public ?int $max_allowed_packet = null;
-    public ?string $files_remap_fingerprint = null;
+    /** @var string|null Fingerprint of resolved path mappings; guards files-pull reuse. */
+    public ?string $resolved_path_mappings_fingerprint = null;
     public ?string $files_pull_only_fingerprint = null;
     public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
     public RemoteFileIndexCursorState $index;
-    public DownloadListFetchProgressState $fetch;
-    public DownloadListFetchProgressState $fetch_skipped;
+    public FetchListProgressState $fetch;
+    public FetchListProgressState $fetch_skipped;
     /** @var string|null Path to the file being written for crash recovery. */
     public ?string $current_file = null;
     /** @var int|null Expected bytes written to the current file. */
@@ -402,8 +403,8 @@ class ImportState
         $this->db_index = new DatabaseTableIndexState();
         $this->diff = new FileDiffProgressState();
         $this->index = new RemoteFileIndexCursorState();
-        $this->fetch = new DownloadListFetchProgressState();
-        $this->fetch_skipped = new DownloadListFetchProgressState();
+        $this->fetch = new FetchListProgressState();
+        $this->fetch_skipped = new FetchListProgressState();
         $this->files_pull_summary = new FilesPullSummaryState();
         $this->apply = new DatabaseApplyCommandState();
         $this->tuning = new AdaptiveTuningState();
@@ -420,19 +421,19 @@ class ImportState
         $state->version = isset($data['version']) ? (string) $data['version'] : null;
         $state->webhost = isset($data['webhost']) ? (string) $data['webhost'] : null;
         $state->follow_symlinks = (bool) ($data['follow_symlinks'] ?? true);
-        $state->symlink_bundle_directory_fingerprint = isset($data['symlink_bundle_directory_fingerprint']) ? (string) $data['symlink_bundle_directory_fingerprint'] : null;
+        $state->local_followed_symlinks_root_fingerprint = isset($data['local_followed_symlinks_root_fingerprint']) ? (string) $data['local_followed_symlinks_root_fingerprint'] : null;
         $state->fs_root_nonempty_behavior = isset($data['fs_root_nonempty_behavior']) ? (string) $data['fs_root_nonempty_behavior'] : 'error';
         $state->filter = isset($data['filter']) ? (string) $data['filter'] : 'none';
         $state->user_agent = isset($data['user_agent']) ? (string) $data['user_agent'] : null;
         $state->max_allowed_packet = isset($data['max_allowed_packet']) ? (int) $data['max_allowed_packet'] : null;
-        $state->files_remap_fingerprint = isset($data['files_remap_fingerprint']) ? (string) $data['files_remap_fingerprint'] : null;
+        $state->resolved_path_mappings_fingerprint = isset($data['resolved_path_mappings_fingerprint']) ? (string) $data['resolved_path_mappings_fingerprint'] : null;
         $state->files_pull_only_fingerprint = isset($data['files_pull_only_fingerprint']) ? (string) $data['files_pull_only_fingerprint'] : null;
         $state->files_pull_summary = self::files_pull_summary_from($data['files_pull_summary'] ?? []);
         $state->db_index = self::database_table_index_from($data['db_index'] ?? []);
         $state->diff = self::file_diff_progress_from($data['diff'] ?? []);
         $state->index = self::remote_file_index_cursor_from($data['index'] ?? []);
-        $state->fetch = self::download_list_fetch_progress_from($data['fetch'] ?? []);
-        $state->fetch_skipped = self::download_list_fetch_progress_from($data['fetch_skipped'] ?? []);
+        $state->fetch = self::fetch_list_progress_from($data['fetch'] ?? []);
+        $state->fetch_skipped = self::fetch_list_progress_from($data['fetch_skipped'] ?? []);
         $state->current_file = isset($data['current_file']) ? (string) $data['current_file'] : null;
         $state->current_file_bytes = isset($data['current_file_bytes']) ? (int) $data['current_file_bytes'] : null;
         $state->sql_bytes = isset($data['sql_bytes']) ? (int) $data['sql_bytes'] : null;
@@ -462,12 +463,12 @@ class ImportState
             'version' => $this->version,
             'webhost' => $this->webhost,
             'follow_symlinks' => $this->follow_symlinks,
-            'symlink_bundle_directory_fingerprint' => $this->symlink_bundle_directory_fingerprint,
+            'local_followed_symlinks_root_fingerprint' => $this->local_followed_symlinks_root_fingerprint,
             'fs_root_nonempty_behavior' => $this->fs_root_nonempty_behavior,
             'filter' => $this->filter,
             'user_agent' => $this->user_agent,
             'max_allowed_packet' => $this->max_allowed_packet,
-            'files_remap_fingerprint' => $this->files_remap_fingerprint,
+            'resolved_path_mappings_fingerprint' => $this->resolved_path_mappings_fingerprint,
             'files_pull_only_fingerprint' => $this->files_pull_only_fingerprint,
             'files_pull_summary' => $this->files_pull_summary->to_array(),
             'db_index' => $this->db_index->to_array(),
@@ -516,9 +517,9 @@ class ImportState
         return $value instanceof RemoteFileIndexCursorState ? $value : RemoteFileIndexCursorState::from_array(is_array($value) ? $value : []);
     }
 
-    private static function download_list_fetch_progress_from($value): DownloadListFetchProgressState
+    private static function fetch_list_progress_from($value): FetchListProgressState
     {
-        return $value instanceof DownloadListFetchProgressState ? $value : DownloadListFetchProgressState::from_array(is_array($value) ? $value : []);
+        return $value instanceof FetchListProgressState ? $value : FetchListProgressState::from_array(is_array($value) ? $value : []);
     }
 
     private static function database_apply_command_from($value): DatabaseApplyCommandState

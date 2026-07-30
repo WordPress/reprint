@@ -82,14 +82,14 @@ describe('Import: Delta Sync with Deletions', () => {
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
 
-    it('download list includes deleted files', () => {
-        const dlPath = join(tempDir, '.import-download-list.jsonl');
+    it('fetch list includes deleted files', () => {
+        const dlPath = join(tempDir, '.import-fetch-list.jsonl');
         if (existsSync(dlPath)) {
             const content = readFileSync(dlPath, 'utf-8');
-            // The download list should reference the deleted files
+            // The fetch list should reference the deleted files
             // (either as "deleted" entries or as files to re-sync)
             const lines = content.split('\n').filter(l => l.trim());
-            assert.ok(lines.length >= 0, 'Download list exists');
+            assert.ok(lines.length >= 0, 'Fetch list exists');
         }
     });
 

@@ -18,7 +18,7 @@ class PullFailureReportedException extends RuntimeException
  * subset, and `pull-db` runs the database subset.
  *
  * The class holds a reference to ImportClient because each stage
- * delegates to an ImportClient method (run_preflight, run_files_sync,
+ * delegates to an ImportClient method (run_preflight, run_files_pull,
  * etc.). The orchestration logic (pipeline state, retry loop, stage
  * framing) lives here; the actual transfer logic stays in ImportClient.
  */
@@ -292,15 +292,15 @@ class Pull
                 $state->current_file_bytes = null;
                 $state->diff = new FileDiffProgressState();
                 $state->index = new RemoteFileIndexCursorState();
-                $state->fetch = new DownloadListFetchProgressState();
-                $state->fetch_skipped = new DownloadListFetchProgressState();
+                $state->fetch = new FetchListProgressState();
+                $state->fetch_skipped = new FetchListProgressState();
                 $state->files_pull_summary = new FilesPullSummaryState();
                 $state->files_pull_only_fingerprint = null;
                 $this->client->save_import_state();
                 foreach ([
                     "{$state_dir}/.import-remote-index.jsonl",
-                    "{$state_dir}/.import-download-list.jsonl",
-                    "{$state_dir}/.import-download-list-skipped.jsonl",
+                    "{$state_dir}/.import-fetch-list.jsonl",
+                    "{$state_dir}/.import-fetch-list-skipped.jsonl",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -338,7 +338,7 @@ class Pull
             }
         }
 
-        $host = parse_url($this->client->remote_url, PHP_URL_HOST) ?? $this->client->remote_url;
+        $host = parse_url($this->client->remote_reprint_api_url, PHP_URL_HOST) ?? $this->client->remote_reprint_api_url;
         $bold = "\033[1m";
         $r = "\033[0m";
         $this->progress->print_line("\n{$bold}{$title} {$host}{$r}\n");
@@ -435,7 +435,7 @@ class Pull
             case 'files-pull':
                 $this->client->prepare_files_pull_options($options);
                 $this->run_until_complete('files-pull', function () {
-                    $this->client->run_files_sync();
+                    $this->client->run_files_pull();
                 });
                 $skipped_pending =
                     $options['filter'] === 'essential-files' &&
@@ -750,10 +750,10 @@ class Pull
      */
     private function normalize_url(): void
     {
-        $url = $this->client->remote_url;
+        $url = $this->client->remote_reprint_api_url;
         if (strpos($url, 'site-export-api') === false) {
             $separator = strpos($url, '?') === false ? '?' : '&';
-            $this->client->remote_url = $url . $separator . 'site-export-api';
+            $this->client->remote_reprint_api_url = $url . $separator . 'site-export-api';
         }
     }
 
@@ -808,8 +808,8 @@ class Pull
             $state->current_file = null;
             $state->current_file_bytes = null;
             $state->diff = new FileDiffProgressState();
-            $state->fetch = new DownloadListFetchProgressState();
-            $state->fetch_skipped = new DownloadListFetchProgressState();
+            $state->fetch = new FetchListProgressState();
+            $state->fetch_skipped = new FetchListProgressState();
             $state->files_pull_summary = new FilesPullSummaryState();
         }
         if ($reset_file_selection_state) {
@@ -827,8 +827,8 @@ class Pull
         $paths = [];
         if ($reset_file_transfer_state) {
             $paths[] = $state_dir . "/.import-remote-index.jsonl";
-            $paths[] = $state_dir . "/.import-download-list.jsonl";
-            $paths[] = $state_dir . "/.import-download-list-skipped.jsonl";
+            $paths[] = $state_dir . "/.import-fetch-list.jsonl";
+            $paths[] = $state_dir . "/.import-fetch-list-skipped.jsonl";
         }
         if ($reset_db_state) {
             $paths[] = $state_dir . "/db.sql";
@@ -972,13 +972,13 @@ class Pull
         $bold = "\033[1m";
         $dim = "\033[2m";
         $r = "\033[0m";
-        $fs_root = $this->client->fs_root;
+        $filesystem_root = $this->client->filesystem_root;
         $this->progress->print_line(
-            "\n{$green}{$bold}Done.{$r} {$dim}Files in {$fs_root}{$r}\n"
+            "\n{$green}{$bold}Done.{$r} {$dim}Files in {$filesystem_root}{$r}\n"
         );
         if ($this->client->get_import_state()->pull_pipeline->skipped_pending) {
             $this->progress->print_line(
-                "{$dim}Deferred files remain. The skipped download list was preserved on disk for a follow-up sync.{$r}\n"
+                "{$dim}Deferred files remain. The skipped fetch list was preserved on disk for a follow-up sync.{$r}\n"
             );
         }
     }

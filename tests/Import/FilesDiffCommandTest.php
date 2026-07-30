@@ -12,7 +12,7 @@ require_once __DIR__ . '/../../importer/import.php';
 /**
  * The files-diff user contract.
  *
- * files-diff compares the local tree with the pair's previous local index —
+ * files-diff compares the filesystem root with the pair's previous local index —
  * the index a completed files-push publishes — without contacting the target,
  * and reports the complete diff on every run. These tests pin that contract:
  * local-only operation, correct change records, arbitrary path bytes, the
@@ -228,7 +228,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertCanonicalSingleJsonLine($result['stderr']);
         $this->assertStringContainsString('completed files-push', $result['output']);
         $this->assertStringContainsString(
-            'same target URL, state directory, and local tree',
+            'same remote Reprint API URL, state directory, and filesystem root',
             $result['output']
         );
     }
@@ -244,7 +244,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertCanonicalSingleJsonLine($result['stderr']);
         $this->assertStringContainsString('completed files-push', $result['output']);
         $this->assertStringContainsString(
-            'same target URL, state directory, and local tree',
+            'same remote Reprint API URL, state directory, and filesystem root',
             $result['output']
         );
     }
@@ -393,9 +393,9 @@ final class FilesDiffCommandTest extends TestCase
 
     private function pushStateDirectory(): string
     {
-        $canonicalLocalTree = realpath($this->localTree);
-        $this->assertIsString($canonicalLocalTree);
-        $pair = hash('sha256', rtrim($this->targetUrl, '?&') . "\0" . $canonicalLocalTree);
+        $resolvedLocalDocumentRoot = realpath($this->localTree);
+        $this->assertIsString($resolvedLocalDocumentRoot);
+        $pair = hash('sha256', rtrim($this->targetUrl, '?&') . "\0" . $resolvedLocalDocumentRoot);
         return realpath($this->stateDirectory) . '/push/' . $pair;
     }
 

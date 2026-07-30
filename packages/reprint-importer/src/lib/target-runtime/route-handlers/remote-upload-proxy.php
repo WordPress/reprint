@@ -66,10 +66,10 @@ function remote_upload_proxy_code(): string
 	$local_path = $content_dir . '/uploads/' . ltrim($matches[1], '/');
 	if (file_exists($local_path)) return;
 
-	$remote_url = rtrim(STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL, '/') . '/' . ltrim($matches[1], '/');
+	$target_url = rtrim(STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL, '/') . '/' . ltrim($matches[1], '/');
 	$query = parse_url($uri, PHP_URL_QUERY);
 	if (is_string($query) && $query !== '') {
-		$remote_url .= '?' . $query;
+		$target_url .= '?' . $query;
 	}
 
 	$request_headers = ['Accept-Encoding: identity'];
@@ -107,7 +107,7 @@ function remote_upload_proxy_code(): string
 		}
 	};
 
-	$curl = curl_init($remote_url);
+	$curl = curl_init($target_url);
 	if ($curl === false) {
 		return;
 	}

@@ -43,7 +43,7 @@ class PhpBuiltinRuntimeRoutingTest extends TestCase
         $manifest = new \RuntimeManifest('other');
         $applier = new \PhpBuiltinApplier();
         $applier->apply($manifest, $this->docRoot, $this->outputDir, [
-            'wordpress_index' => $this->coreRoot . '/index.php',
+            'wordpress_index_php' => $this->coreRoot . '/index.php',
         ]);
     }
 

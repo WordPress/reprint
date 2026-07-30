@@ -22,16 +22,16 @@ class RuntimeFilesTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
-    private $fs_root;
+    private $filesystem_root;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/runtime-files-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $this->fs_root = $this->tempDir . '/fs-root';
+        $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->fs_root, 0755, true);
+        mkdir($this->filesystem_root, 0755, true);
     }
 
     protected function tearDown(): void
@@ -63,7 +63,7 @@ class RuntimeFilesTest extends TestCase
 
     private function makeClient(): \ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
+        return new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);
     }
 
     private function writeState(array $state): void
@@ -132,13 +132,13 @@ class RuntimeFilesTest extends TestCase
 
         $client = $this->makeClient();
         $this->loadClientState($client);
-        $this->callPrivate($client, 'download_runtime_files');
+        $this->callPrivate($client, 'fetch_runtime_files');
 
         $this->assertDirectoryDoesNotExist($this->stateDir . '/runtime_files');
     }
 
     /**
-     * download_runtime_files() wipes the existing runtime_files/ directory
+     * fetch_runtime_files() wipes the existing runtime_files/ directory
      * on re-run.
      */
     public function testRuntimeFilesDirWipedOnRerun()
@@ -164,14 +164,14 @@ class RuntimeFilesTest extends TestCase
 
         $client = $this->makeClient();
         $this->loadClientState($client);
-        $this->callPrivate($client, 'download_runtime_files');
+        $this->callPrivate($client, 'fetch_runtime_files');
 
         // The old stale file should be gone because the directory was wiped.
         $this->assertFileDoesNotExist($runtimeDir . '/old/stale.php');
     }
 
     /**
-     * download_runtime_files() tolerates fetch failures without throwing.
+     * fetch_runtime_files() tolerates fetch failures without throwing.
      */
     public function testDownloadToleratesFetchFailure()
     {
@@ -194,7 +194,7 @@ class RuntimeFilesTest extends TestCase
         $this->loadClientState($client);
 
         // This must not throw — failures are caught internally.
-        $this->callPrivate($client, 'download_runtime_files');
+        $this->callPrivate($client, 'fetch_runtime_files');
 
         // The directory should exist even though no files were downloaded.
         $this->assertDirectoryExists($this->stateDir . '/runtime_files');

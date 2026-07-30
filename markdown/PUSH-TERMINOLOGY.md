@@ -1,8 +1,79 @@
-# Push terminology
+# Reprint terminology
 
-This is the vocabulary contract for every push surface. Read it before
-changing push code, tests, documentation, plans, review replies, commit
-messages, or pull-request descriptions.
+This is the vocabulary contract for every Reprint surface. Read it before
+changing pull or push code, tests, documentation, plans, review replies,
+commit messages, or pull-request descriptions.
+
+## Coordinate systems and relationship state
+
+Every path name states the machine whose coordinates it uses and whether it
+is absolute or relative to a named root.
+
+- A **state directory** is the caller-selected local directory containing
+  Reprint state for one filesystem root. Use `$state_dir`.
+- The **filesystem root** is the local directory under which a pulled remote
+  filesystem is reconstructed and whose contents are compared, pulled, and
+  pushed. Use `$filesystem_root`.
+- The **remote Reprint API URL** is the configured URL used for Reprint
+  requests. Use `$remote_reprint_api_url`.
+- The **push root** is the remote root selected by the receiving push session.
+  Use `$push_root`.
+
+The domain path terms are:
+
+| Term | Meaning | Preferred name |
+| --- | --- | --- |
+| Remote absolute path | Absolute path on the remote machine. | `$remote_absolute_path` |
+| Local absolute path | Absolute path on the local machine. | `$local_absolute_path` |
+| Local relative path | Path relative to the filesystem root. | `$local_relative_path` |
+| Push-root-relative path | Path relative to the push root. | `$push_root_relative_path` |
+
+An **absolute path** begins at `/`. A **relative path** has no leading slash.
+A **normalized path** has repeated separators and `.` or `..` segments removed
+lexically; it does not inspect the filesystem. A **resolved absolute path** is
+an absolute path whose existing symlinks `realpath()` resolved. An
+**uncreated suffix** is the final sequence of segments that does not yet
+exist. A **base64 path** describes transport encoding, not coordinates.
+
+Use `resolve_absolute_path_with_uncreated_suffix()` for a path resolver that
+retains a missing suffix. Do not call this a canonical path. Do not use a bare
+`$path`, `$local_path`, or `$remote_path` when more than one coordinate system
+is present.
+
+The pull conversion flow is remote absolute path → local absolute path →
+local relative path. Push applies the reverse mapping from a
+local relative path to a push-root-relative path.
+
+## Indexes and mappings
+
+- A **remote index** is the last remote filesystem state accepted by pull.
+  Its entries use remote absolute paths and remote-observed metadata. Use
+  `$remote_index_file`.
+- A **local index** is the locally accounted pull baseline. Its entries use
+  remote absolute paths as the merge key and locally observed metadata. Use
+  `$local_index_file`.
+- A **fresh local index** is the current filesystem-root scan created while
+  planning a push. Use `$fresh_local_index_file`.
+- An **index entry** records one path, type, size, and ctime. Use
+  `$index_entry`.
+- The **local index WAL** records completed pull mutations awaiting application
+  to the local index.
+- A **pull plan** lists remote absolute paths still scheduled for download or
+  deletion. A **push plan** pairs local relative paths with push-root-relative
+  paths.
+
+A **resolved path mapping** is an immutable mapping between remote absolute
+prefixes and local absolute prefixes. A **pull mapping** converts a remote
+absolute path to a local absolute path. A **push mapping** converts a
+local relative path to a push-root-relative path. An **addressable mapping**
+maps every relevant local relative path to exactly one push-root-relative path below the
+push root; an **ambiguous mapping** has more than one push-root-relative path,
+and an **unaddressable mapping** has none. An **identity mapping** leaves local
+and push-root-relative paths identical. `path-mapping.json` stores the resolved
+path mapping.
+
+A state directory belongs to one filesystem root. Reusing its mapping state
+with another filesystem root is rejected.
 
 ## Core nouns
 
@@ -90,7 +161,7 @@ Every local Reprint command workflow runs under the **Reprint process lock** at
 `<state-dir>/.reprint.lock`. Use `.reprint.lock` and `$process_lock`. The lock
 is non-blocking and state-directory-wide: pull, push, diff, and other local
 Reprint processes cannot run concurrently against the same state directory,
-even when their target or local-tree pairs differ.
+even when their remote Reprint API URL or filesystem-root pairs differ.
 
 The production CLI acquires the Reprint process lock before it prepares pair
 context, constructs `ImportClient`, or writes the command audit entry. It
@@ -100,11 +171,11 @@ none. `PushFilesSender::start()` and `PushFilesSender::resume()` receive that
 open lock from the caller; sender `close()` does not release it. This local
 lock is separate from the receiver's push-session and commit locks.
 
-## Pull index-update WAL
+## Pull local index WAL
 
-Call the single pull-side write-ahead log the **index-update WAL**. It lives at
-`<state-dir>/.import-index-updates.wal`; use `.import-index-updates.wal`,
-`$index_update_wal_path`, and `$index_update_wal_handle`.
+Call the single pull-side write-ahead log the **local index WAL**. It lives at
+`<state-dir>/.import-local-index.wal`; use `.import-local-index.wal`,
+`$local_index_wal_path`, and `$local_index_wal_handle`.
 Applied batch records are cleared, but the empty WAL remains as a marker until
 files-pull completes. A retained WAL is consumed only while resuming or
 aborting the interrupted files-pull, including through a high-level pull
@@ -138,14 +209,14 @@ sender-owned exclusions to `plan/excluded_paths.json` when it starts.
 `fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
 `local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
 
-The **previous local index** describes the local tree as the pair's last
+The **previous local index** describes the filesystem root as the pair's last
 completed push observed it. The sender saves it after a successful commit, and
 `files-diff` reads it. PushPlan diffs its fresh local index against the copy
 its caller supplies. `byte_offset_in_previous_local_index` is the position
 from which its current lookahead entry is read again after resume.
 
 The PushPlan cursor is stored in `sender.json`. It contains the plan
-directory, local tree root, previous local index, and current
+directory, filesystem root, previous local index, and current
 planning position. During `indexing`, that position contains the
 FileIndexProcessor cursor and the committed byte offset in
 `fresh_local_index.jsonl`. During `diffing`, it contains the index offsets,
@@ -159,7 +230,7 @@ paths. `sender.json` phases are `creating`, `starting_plan`,
 path-list cursor, receiver part limit, and request-sizing state. The index diff
 completes before local paths are sent. The index copy after a successful commit
 has no separate copy cursor and is repeated after interruption. After the index
-is saved or the target confirms removal, the sender clears the PushPlan
+is saved or the remote confirms removal, the sender clears the PushPlan
 cursor, then removes the entire plan directory and its exclusions file. It
 does not ask PushPlan to manage terminal cleanup; PushPlan only closes its open
 handles.
@@ -170,7 +241,7 @@ an explicit `request_too_large` failure lowers future request sizes.
 
 When a local path to push changes, the sender reports `local_path_changed` and
 moves to `removing`. After removal a new sender builds a fresh local index. The
-sender trusts the completed deletion plan without checking the live local tree;
+sender trusts the completed deletion plan without checking the live filesystem root;
 changes after planning belong to the next push.
 
 Receiver-confirmed file and work-delete cursors remain receiver state. A newly
@@ -193,7 +264,7 @@ reports `complete`, `restart`, or `failed`.
 
 ## Files-diff CLI names
 
-The local-only command is `files-diff`. Its `target URL`, `local tree`, `pair
+The local-only command is `files-diff`. Its `remote Reprint API URL`, `filesystem root`, `pair
 key`, and `local push state directory` have the same meanings and pair-key
 formula as `files-push`. It reads the pair's `previous_local_index.jsonl`,
 which a completed files-push publishes, and never changes it.
@@ -201,7 +272,7 @@ which a completed files-push publishes, and never changes it.
 Each JSONL change record has `command: "files-diff"`, an `action` of `push` or
 `delete`, and `path_b64`. A push record also has the local path `type`, `size`,
 and `ctime`; its type is `file`, `dir`, or `link`. These records form a local
-minimized push operation plan before target exclusions: descendants represent
+minimized push operation plan before remote exclusions: descendants represent
 a new non-empty directory, one deleted subtree root covers its descendants,
 and metadata-only changes to non-empty directories select no operation. The
 final record has `status: "complete"`, `local_paths_to_push`, and
@@ -215,15 +286,15 @@ running the command again prints the complete report.
 
 ## Files-push CLI names
 
-The low-level, files-only command is `files-push`. Its `target URL` is the
-exporter API URL, and its `local tree` is the canonical directory supplied by
+The low-level, files-only command is `files-push`. Its `remote Reprint API URL` is the
+exporter API URL, and its `filesystem root` is the resolved absolute directory supplied by
 `--fs-root`. It requires `--secret=TOKEN`; `--force-http` is the explicit
 plain-HTTP opt-in.
 
-The `pair key` identifies exactly one target URL and canonical local tree:
+The `pair key` identifies exactly one remote Reprint API URL and resolved filesystem root:
 
 ```text
-sha256(rtrim(<target-url>, "?&") + "\0" + <canonical-local-tree-path>)
+sha256(rtrim(<remote-reprint-api-url>, "?&") + "\0" + <resolved-filesystem-root>)
 ```
 
 The `local push state directory` is `<state-dir>/push/<pair-key>/`. `files-push`
@@ -291,7 +362,7 @@ Use these names verbatim inside `PushPlan`:
 | Meaning | Name |
 | --- | --- |
 | Active plan directory | `$plan_directory` |
-| Local tree root | `$local_tree_root`, `set_local_tree_root()` |
+| Filesystem root | `$filesystem_root`, `set_filesystem_root()` |
 | Previous local index | `$previous_local_index` |
 | Open previous local index | `$previous_local_index_handle` |
 | Previous local index lookahead entry | `$previous_local_index_lookahead_entry`, `$previous_local_index_lookahead_entry_loaded` |

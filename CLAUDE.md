@@ -170,7 +170,7 @@ When the export server crashes mid-SQL-stream (`--sql-output=mysql` mode), the i
 
 ### Progress Tracking
 
-During the file fetch phase, progress and heartbeat records include `files_done` (cumulative across restarts, derived from download list byte offset + current batch count) and `files_total` (total download list entries, fixed after the diff phase). Both are emitted together only when the download list exists. The `files_imported` field is still emitted for backward compatibility.
+During the file fetch phase, progress and heartbeat records include `files_done` (cumulative across restarts, derived from fetch list byte offset + current batch count) and `files_total` (total fetch list entries, fixed after the diff phase). Both are emitted together only when the fetch list exists. The `files_imported` field is still emitted for backward compatibility.
 
 ## File Organization
 
@@ -243,7 +243,7 @@ Progress is computed client-side by reading state files (all in `--state-dir`):
 - `.import-state.json`: Current command, status, cursor, stage
 - `.import-index.jsonl`: Local file index (line count = files indexed)
 - `.import-remote-index.jsonl`: Remote file index (for delta comparison)
-- `.import-download-list.jsonl`: Files pending download
+- `.import-fetch-list.jsonl`: Files pending download
 - `db.sql`: SQL dump file size
 
 And from `--fs-root`:

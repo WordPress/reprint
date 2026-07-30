@@ -79,7 +79,7 @@ class RemapResolveTest extends TestCase
 
     private function assertRemapConsistent($c): void
     {
-        $this->call($c, 'assert_files_remap_consistent');
+        $this->call($c, 'assert_resolved_path_mappings_consistent');
     }
 
     private function writeLocalIndex(): void
@@ -210,12 +210,12 @@ class RemapResolveTest extends TestCase
     public function testRejectsChangedRemapRulesForSameState(): void
     {
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
-        $this->set($c, 'remap_rules', array(
+        $this->set($c, 'resolved_path_mappings', array(
             '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
         $this->assertRemapConsistent($c);
 
-        $this->set($c, 'remap_rules', array(
+        $this->set($c, 'resolved_path_mappings', array(
             '/var/www/html/wp-content' => $this->root . '/content',
         ));
         $this->expectException(\RuntimeException::class);
@@ -227,7 +227,7 @@ class RemapResolveTest extends TestCase
     {
         $this->writeLocalIndex();
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
-        $this->set($c, 'remap_rules', array(
+        $this->set($c, 'resolved_path_mappings', array(
             '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
 

@@ -16,7 +16,7 @@
  */
 class PhpBuiltinApplier implements RuntimeApplier
 {
-    public function apply(RuntimeManifest $manifest, string $fs_root, string $output_dir, array $options = []): array
+    public function apply(RuntimeManifest $manifest, string $filesystem_root, string $output_dir, array $options = []): array
     {
         $host = $options['host'] ?? 'localhost';
         $port = (int) ($options['port'] ?? 8881);
@@ -25,14 +25,14 @@ class PhpBuiltinApplier implements RuntimeApplier
 
         // 1. Write runtime.php (base layers + CLI-server routing)
         $runtime_path = $output_dir . '/runtime.php';
-        $runtime = generate_runtime_php($manifest, $fs_root);
+        $runtime = generate_runtime_php($manifest, $filesystem_root);
         $runtime .= $this->generate_cli_server_routing($options);
         write_runtime_file($runtime_path, $runtime);
         $summary[] = "Wrote {$runtime_path}";
 
         // 2. Write start.sh
         $start_path = $output_dir . '/start.sh';
-        $start_script = $this->generate_start_script($manifest, $fs_root, $runtime_path, $host, $port);
+        $start_script = $this->generate_start_script($manifest, $filesystem_root, $runtime_path, $host, $port);
         write_runtime_file($start_path, $start_script);
         chmod($start_path, 0755);
         $summary[] = "Wrote {$start_path}";
@@ -56,13 +56,13 @@ class PhpBuiltinApplier implements RuntimeApplier
      */
     private function generate_cli_server_routing(array $options): string
     {
-        $wp_index = $options['wordpress_index'] ?? '';
+        $wordpress_index_php = $options['wordpress_index_php'] ?? '';
         $wp_core_dir = '';
-        if ($wp_index !== '') {
-            $real_wp_index = realpath($wp_index);
-            $wp_core_dir = dirname($real_wp_index !== false ? $real_wp_index : $wp_index);
+        if ($wordpress_index_php !== '') {
+            $real_wp_index = realpath($wordpress_index_php);
+            $wp_core_dir = dirname($real_wp_index !== false ? $real_wp_index : $wordpress_index_php);
         }
-        $escaped_wp_index = addslashes($wp_index);
+        $escaped_wp_index = addslashes($wordpress_index_php);
         $escaped_wp_core_dir = addslashes($wp_core_dir);
 
         $lines = [];
@@ -227,7 +227,7 @@ class PhpBuiltinApplier implements RuntimeApplier
      */
     private function generate_start_script(
         RuntimeManifest $manifest,
-        string $fs_root,
+        string $filesystem_root,
         string $runtime_path,
         string $host,
         int $port
@@ -250,7 +250,7 @@ class PhpBuiltinApplier implements RuntimeApplier
         }
 
         $php_args[] = '-S ' . $host . ':' . $port;
-        $php_args[] = '-t ' . escapeshellarg($fs_root);
+        $php_args[] = '-t ' . escapeshellarg($filesystem_root);
         $php_args[] = escapeshellarg($runtime_path);
 
         $lines[] = 'echo "Starting PHP built-in server..."';

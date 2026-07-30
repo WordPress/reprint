@@ -61,8 +61,8 @@ class MultipartPushStreamClient
     /** Maximum JSON response bytes retained from the target. */
     private const MAX_RESPONSE_BYTES = 1024 * 1024;
 
-    /** @var string Exporter API URL used as the base of every signed request target. */
-    private string $base_url;
+    /** @var string Remote Reprint API URL used for every signed request target. */
+    private string $remote_reprint_api_url;
 
     /** @var Site_Export_HMAC_Client Signs the exact method and URL before transfer. */
     private Site_Export_HMAC_Client $hmac_client;
@@ -164,11 +164,11 @@ class MultipartPushStreamClient
      * @param array<string,mixed> $options {
      *     Transport, authentication, and limit options.
      *
-     *     @type string $base_url Required exporter API URL. Must use HTTPS
+     *     @type string $remote_reprint_api_url Required remote Reprint API URL. Must use HTTPS
      *         unless `allow_http` is true.
      *     @type Site_Export_HMAC_Client $hmac_client Required signer for the
      *         exact method and request URL.
-     *     @type bool $allow_http Whether to permit an explicit HTTP base URL.
+     *     @type bool $allow_http Whether to permit an explicit HTTP remote Reprint API URL.
      *         Default false.
      *     @type PushRequestSizer $request_sizer Request-body sizing state to
      *         reuse. Defaults to a new sizer.
@@ -196,22 +196,22 @@ class MultipartPushStreamClient
                 . 'which older PHP curl bindings interpret as end-of-body. See https://github.com/WordPress/reprint/issues/327.'
             );
         }
-        $base_url = $options['base_url'] ?? null;
-        if (!is_string($base_url) || $base_url === '') {
-            throw new InvalidArgumentException('MultipartPushStreamClient requires a non-empty base_url option.');
+        $remote_reprint_api_url = $options['remote_reprint_api_url'] ?? null;
+        if (!is_string($remote_reprint_api_url) || $remote_reprint_api_url === '') {
+            throw new InvalidArgumentException('MultipartPushStreamClient requires a non-empty remote_reprint_api_url option.');
         }
-        $scheme = strtolower((string) parse_url($base_url, PHP_URL_SCHEME));
+        $scheme = strtolower((string) parse_url($remote_reprint_api_url, PHP_URL_SCHEME));
         $allow_http = $options['allow_http'] ?? false;
         if (!is_bool($allow_http) || ($scheme !== 'https' && $scheme !== 'http') || ($scheme === 'http' && !$allow_http)) {
             throw new InvalidArgumentException(
-                'Push base_url must be https://, unless allow_http is true for an explicit http:// target.'
+                'Push remote Reprint API URL must be https://, unless allow_http is true for an explicit http:// remote Reprint API URL.'
             );
         }
         $hmac_client = $options['hmac_client'] ?? null;
         if (!$hmac_client instanceof Site_Export_HMAC_Client) {
             throw new InvalidArgumentException('MultipartPushStreamClient requires a Site_Export_HMAC_Client.');
         }
-        $this->base_url = rtrim($base_url, '?&');
+        $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
         $this->hmac_client = $hmac_client;
         $this->request_sizer = $options['request_sizer'] ?? new PushRequestSizer();
         if (!$this->request_sizer instanceof PushRequestSizer) {
@@ -663,8 +663,8 @@ class MultipartPushStreamClient
                 'status' => 'failed',
                 'reason' => 'redirected',
                 'detail' => $redirect_url === ''
-                    ? 'The target redirected the upload. Use its final URL as the push base_url.'
-                    : 'The target redirected to ' . $redirect_url . '. Use that address as the push base_url.',
+                    ? 'The remote redirected the upload. Use its final URL as the remote Reprint API URL.'
+                    : 'The remote redirected to ' . $redirect_url . '. Use that address as the remote Reprint API URL.',
                 'response' => null,
                 'parts_sent' => $this->parts_sent,
                 'body_bytes_sent' => $this->body_bytes_sent,
@@ -860,7 +860,7 @@ class MultipartPushStreamClient
             return [
                 'status' => 'failed',
                 'reason' => 'redirected',
-                'detail' => 'The target redirected to ' . ($redirect_url === '' ? 'another address' : $redirect_url) . '. Use that address as the push base_url.',
+                'detail' => 'The remote redirected to ' . ($redirect_url === '' ? 'another address' : $redirect_url) . '. Use that address as the remote Reprint API URL.',
                 'response' => null,
                 'parts_sent' => 0,
                 'body_bytes_sent' => 0,
@@ -1109,7 +1109,7 @@ class MultipartPushStreamClient
     private function endpoint_url(string $endpoint, array $parameters): string
     {
         $parameters = array_merge(['endpoint' => $endpoint], $parameters);
-        return $this->base_url . (strpos($this->base_url, '?') === false ? '?' : '&') . http_build_query($parameters, '', '&', PHP_QUERY_RFC3986);
+        return $this->remote_reprint_api_url . (strpos($this->remote_reprint_api_url, '?') === false ? '?' : '&') . http_build_query($parameters, '', '&', PHP_QUERY_RFC3986);
     }
 
     /**

@@ -14,7 +14,7 @@
  */
 class NginxFpmApplier implements RuntimeApplier
 {
-    public function apply(RuntimeManifest $manifest, string $fs_root, string $output_dir, array $options = []): array
+    public function apply(RuntimeManifest $manifest, string $filesystem_root, string $output_dir, array $options = []): array
     {
         $host = $options['host'] ?? 'localhost';
         $port = (int) ($options['port'] ?? 80);
@@ -23,13 +23,13 @@ class NginxFpmApplier implements RuntimeApplier
 
         // 1. Write runtime.php
         $runtime_path = $output_dir . '/runtime.php';
-        $runtime = generate_runtime_php($manifest, $fs_root);
+        $runtime = generate_runtime_php($manifest, $filesystem_root);
         write_runtime_file($runtime_path, $runtime);
         $summary[] = "Wrote {$runtime_path}";
 
         // 2. Write nginx.conf (includes auto_prepend_file + INI directives)
         $nginx_conf_path = $output_dir . '/nginx.conf';
-        $nginx_conf = $this->generate_nginx_conf($manifest, $fs_root, $runtime_path, $host, $port);
+        $nginx_conf = $this->generate_nginx_conf($manifest, $filesystem_root, $runtime_path, $host, $port);
         write_runtime_file($nginx_conf_path, $nginx_conf);
         $summary[] = "Wrote {$nginx_conf_path}";
 
@@ -51,7 +51,7 @@ class NginxFpmApplier implements RuntimeApplier
      */
     private function generate_nginx_conf(
         RuntimeManifest $manifest,
-        string $fs_root,
+        string $filesystem_root,
         string $runtime_path,
         string $host,
         int $port
@@ -63,7 +63,7 @@ class NginxFpmApplier implements RuntimeApplier
         $lines[] = 'server {';
         $lines[] = "    listen {$port};";
         $lines[] = "    server_name {$host};";
-        $lines[] = "    root {$fs_root};";
+        $lines[] = "    root {$filesystem_root};";
         $lines[] = '    index index.php index.html;';
         $lines[] = '';
         $lines[] = '    # Static files served directly by nginx — no PHP involved.';

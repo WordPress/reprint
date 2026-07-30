@@ -57,17 +57,17 @@ class TypeSwapTest extends TestCase
     }
 
     /**
-     * ensure_directory_path should remove a symlink that blocks directory creation.
+     * create_directory_if_missing should remove a symlink that blocks directory creation.
      */
     public function testEnsureDirectoryPathRemovesBlockingSymlink()
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('ensure_directory_path');
+        $method = $reflection->getMethod('create_directory_if_missing');
 
         // Resolve the fs-root path so it matches the realpath() check
-        // inside ensure_directory_path (on macOS, /var -> /private/var).
+        // inside create_directory_if_missing (on macOS, /var -> /private/var).
         $fsRoot = realpath($this->tempDir . '/fs-root');
 
         // Create a symlink at a path where we want a real directory
@@ -77,7 +77,7 @@ class TypeSwapTest extends TestCase
         symlink($targetDir, $symlinkPath);
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
-        // ensure_directory_path for a child should replace the symlink with a real dir
+        // create_directory_if_missing for a child should replace the symlink with a real dir
         $method->invoke($client, $fsRoot . '/some-dir/child');
 
         $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');
@@ -218,7 +218,7 @@ class TypeSwapTest extends TestCase
     }
 
     /**
-     * ensure_directory_path should replace a symlink with a full real directory
+     * create_directory_if_missing should replace a symlink with a full real directory
      * hierarchy when creating deeply nested paths.
      */
     public function testNestedFileUnderExistingSymlinkViaEnsureDirectory()
@@ -226,7 +226,7 @@ class TypeSwapTest extends TestCase
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         // Resolve the fs-root path so it matches the realpath() check
-        // inside ensure_directory_path (on macOS, /var -> /private/var).
+        // inside create_directory_if_missing (on macOS, /var -> /private/var).
         $fsRoot = realpath($this->tempDir . '/fs-root');
 
         // Create a symlink at the top-level path component
@@ -236,9 +236,9 @@ class TypeSwapTest extends TestCase
         symlink($targetDir, $symlinkPath);
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
-        // Call ensure_directory_path for a deeply nested path
+        // Call create_directory_if_missing for a deeply nested path
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('ensure_directory_path');
+        $method = $reflection->getMethod('create_directory_if_missing');
         $method->invoke($client, $fsRoot . '/top/sub/deep');
 
         $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');

@@ -17,16 +17,16 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
-    private $fs_root;
+    private $filesystem_root;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/only-diff-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $this->fs_root = $this->tempDir . '/fs-root';
+        $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->fs_root, 0755, true);
+        mkdir($this->filesystem_root, 0755, true);
     }
 
     protected function tearDown(): void
@@ -69,7 +69,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
     /** Create a local file under fs_root for a (source-absolute) index path. */
     private function seedLocalFile(string $path, string $contents = "x"): string
     {
-        $full = $this->fs_root . $path;
+        $full = $this->filesystem_root . $path;
         if (!is_dir(dirname($full))) {
             mkdir(dirname($full), 0755, true);
         }
@@ -98,7 +98,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         return $paths;
     }
 
-    /** Mirror FilesSyncStateTest: load state + preserve-local, then set the --only file path prefixes. */
+    /** Mirror FilesPullStateTest: load state + preserve-local, then set the --only file path prefixes. */
     private function prepareClient(array $pull_only_files_with_path_prefixes): array
     {
         $defaults = [
@@ -116,7 +116,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             json_encode($defaults, JSON_PRETTY_PRINT),
         );
 
-        $client = new \ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
+        $client = new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);
         $r = new \ReflectionClass($client);
         $r->getProperty('state')->setValue($client, $r->getMethod('load_state')->invoke($client));
         $r->getProperty('is_tty')->setValue($client, false);
@@ -162,7 +162,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         // always look deleted-on-remote to the diff. The drains must not
         // delete them: that would recursively remove the very directories
         // the user asked to pull, while the matched children keep the
-        // download list empty — silent data loss.
+        // fetch list empty — silent data loss.
         $this->writeIndex('.import-index.jsonl',
             $this->indexLine('/wp-content/themes', 1000, 0, 'dir')
             . $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
@@ -179,7 +179,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $r->getMethod('diff_indexes_and_build_fetch_list')->invoke($client);
 
         // The selected root, its matched contents, and its index entry survive…
-        $this->assertDirectoryExists($this->fs_root . '/wp-content/themes');
+        $this->assertDirectoryExists($this->filesystem_root . '/wp-content/themes');
         $this->assertFileExists($kept);
         $this->assertContains('/wp-content/themes', $this->readLocalIndexPaths());
         // …while a genuine orphan inside it is still drained.

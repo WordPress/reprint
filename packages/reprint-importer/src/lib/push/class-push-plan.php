@@ -66,8 +66,8 @@
  */
 class PushPlan
 {
-    /** @var string Canonical local tree root inspected while building the fresh local index. */
-    private string $local_tree_root;
+    /** @var string Resolved filesystem root inspected while building the fresh local index. */
+    private string $filesystem_root;
 
     /** @var string Caller-owned active plan directory. */
     private string $plan_directory;
@@ -136,18 +136,18 @@ class PushPlan
      * an interrupted start is repeated and overwrites these initial plan files.
      *
      * @param string $plan_directory              Caller-owned active plan directory.
-     * @param string $local_tree_root              Canonical local tree root.
+     * @param string $filesystem_root              Resolved filesystem root.
      * @param string $previous_local_index Previous local index this plan diffs against.
      * @param string $excluded_paths_path          Caller-owned target exclusions file.
      * @return self Open plan positioned at the initial indexing cursor.
      */
     public static function start(
         string $plan_directory,
-        string $local_tree_root,
+        string $filesystem_root,
         string $previous_local_index,
         string $excluded_paths_path
     ): self {
-        $plan = new self($plan_directory, $local_tree_root, $previous_local_index);
+        $plan = new self($plan_directory, $filesystem_root, $previous_local_index);
         if (!@copy($excluded_paths_path, $plan->excluded_paths_file)) {
             throw new RuntimeException("Failed to copy excluded paths into the push plan: {$excluded_paths_path}");
         }
@@ -157,15 +157,15 @@ class PushPlan
             throw new RuntimeException("Failed to open the fresh local index: {$plan->fresh_local_index}");
         }
         $plan->file_index_processor = FileIndexProcessor::start(
-            [$plan->local_tree_root],
-            $plan->local_tree_root,
+            [$plan->filesystem_root],
+            $plan->filesystem_root,
             false,
             false,
             $plan->plan_directory
         );
         $plan->cursor = [
             "plan_directory" => $plan->plan_directory,
-            "local_tree_root" => $plan->local_tree_root,
+            "local_tree_root" => $plan->filesystem_root,
             "previous_local_index" => $plan->previous_local_index,
             "position" => [
                 "phase" => "indexing",
@@ -243,12 +243,12 @@ class PushPlan
      * Initializes paths in the caller-owned active plan directory.
      *
      * @param string $plan_directory              Caller-owned active plan directory.
-     * @param string $local_tree_root              Canonical local tree root.
+     * @param string $filesystem_root              Resolved filesystem root.
      * @param string $previous_local_index Previous local index this plan diffs against.
      */
     private function __construct(
         string $plan_directory,
-        string $local_tree_root,
+        string $filesystem_root,
         string $previous_local_index
     ) {
         $plan_directory = rtrim($plan_directory, "/");
@@ -256,7 +256,7 @@ class PushPlan
             throw new LogicException("Cannot open a push plan without its directory: {$plan_directory}");
         }
         $this->plan_directory = $plan_directory;
-        $this->set_local_tree_root($local_tree_root);
+        $this->set_filesystem_root($filesystem_root);
         $this->previous_local_index = $previous_local_index;
         $this->local_paths_to_push = $plan_directory . "/local_paths_to_push.jsonl";
         $this->local_paths_to_delete = $plan_directory . "/local_paths_to_delete";
@@ -266,18 +266,18 @@ class PushPlan
     }
 
     /**
-     * Stores the canonical root of the local tree represented by this plan.
+     * Stores the resolved filesystem root represented by this plan.
      *
-     * @param string $local_tree_root Local tree root selected by the caller.
+     * @param string $filesystem_root Filesystem root selected by the caller.
      */
-    private function set_local_tree_root(string $local_tree_root): void
+    private function set_filesystem_root(string $filesystem_root): void
     {
-        clearstatcache(true, $local_tree_root);
-        $canonical_local_tree_root = realpath($local_tree_root);
-        if ($canonical_local_tree_root === false || !is_dir($canonical_local_tree_root) || is_link($local_tree_root)) {
-            throw new InvalidArgumentException("PushPlan requires the local tree root to be a real directory.");
+        clearstatcache(true, $filesystem_root);
+        $resolved_local_filesystem_root = realpath($filesystem_root);
+        if ($resolved_local_filesystem_root === false || !is_dir($resolved_local_filesystem_root) || is_link($filesystem_root)) {
+            throw new InvalidArgumentException("PushPlan requires the filesystem root to be a real directory.");
         }
-        $this->local_tree_root = rtrim($canonical_local_tree_root, "/");
+        $this->filesystem_root = rtrim($resolved_local_filesystem_root, "/");
     }
 
     /**
@@ -301,7 +301,7 @@ class PushPlan
             throw new RuntimeException("Failed to seek to the fresh local index byte offset.");
         }
         $this->file_index_processor = FileIndexProcessor::resume(
-            [$this->local_tree_root],
+            [$this->filesystem_root],
             json_encode($cursor["file_index_cursor"], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
             false,
             false,
@@ -484,7 +484,7 @@ class PushPlan
             );
         }
 
-        $local_path = substr($index_entry["path"], strlen($this->local_tree_root) + 1);
+        $local_path = substr($index_entry["path"], strlen($this->filesystem_root) + 1);
         $fresh_local_index_entry = [
             "path" => base64_encode($local_path),
             "ctime" => $index_entry["ctime"],

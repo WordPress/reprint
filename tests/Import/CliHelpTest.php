@@ -39,14 +39,14 @@ class CliHelpTest extends TestCase
     {
         $output = $this->runHelp('files-push');
 
-        $this->assertStringContainsString('Usage: reprint files-push <target-url>', $output);
+        $this->assertStringContainsString('Usage: reprint files-push <remote-reprint-api-url>', $output);
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('--secret=TOKEN', $output);
         $this->assertStringContainsString('--force-http', $output);
         $this->assertStringContainsString('--verbose, -v', $output);
         $this->assertStringContainsString('low-level, files-only command', $output);
-        $this->assertStringContainsString('existing local tree at --fs-root', $output);
+        $this->assertStringContainsString('existing filesystem root at --fs-root', $output);
         $this->assertStringContainsString('read or modify', $output);
         $this->assertStringNotContainsString('--abort', $output);
         $this->assertStringNotContainsString('--filter', $output);
@@ -58,7 +58,7 @@ class CliHelpTest extends TestCase
     {
         $output = $this->runHelp('files-diff');
 
-        $this->assertStringContainsString('Usage: reprint files-diff <target-url>', $output);
+        $this->assertStringContainsString('Usage: reprint files-diff <remote-reprint-api-url>', $output);
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('previous local index', $output);

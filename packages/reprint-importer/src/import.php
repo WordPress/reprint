@@ -259,14 +259,14 @@ class ImportClient
      */
     private const MAX_CONSECUTIVE_INTERRUPTED_RESPONSES = 3;
 
-    /** @var string Export server URL. */
-    public $remote_url;
+    /** @var string Remote Reprint API URL. */
+    public $remote_reprint_api_url;
 
-    /** @var string Directory for import state files (.import-state.json, db.sql, etc.). */
+    /** @var string State directory for this filesystem root (.import-state.json, db.sql, etc.). */
     public $state_dir;
 
-    /** @var string Directory where downloaded site files are written (no filesystem-root/ wrapper). */
-    public $fs_root;
+    /** @var string Filesystem root where the remote filesystem is reconstructed. */
+    public $filesystem_root;
 
     /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
     private $state_file;
@@ -281,56 +281,55 @@ class ImportClient
     private $progress_throttle = 1.0;
 
     /**
-     * @var string Path to .import-index.jsonl — sorted JSON-lines file tracking every
-     * imported file's path, ctime, size, and type. Used for delta detection: on the next
-     * sync we compare this against the remote index to decide what to download or delete.
+     * @var string Local index file .import-index.jsonl. It tracks each accounted
+     * path's ctime, size, and type for the next remote-index comparison.
      */
-    private $index_file;
+    private $local_index_file;
 
     /**
-     * @var string Path to .import-index-updates.wal — the append-only write-ahead
+     * @var string Path to .import-local-index.wal — the append-only write-ahead
      * log for the current files-pull. Applied batches are cleared, but the file
      * remains until the lifecycle completes or is aborted.
      */
-    private $index_update_wal_path;
+    private $local_index_wal_path;
 
-    /** @var resource|null Open file handle for $index_update_wal_path while writing. */
-    private $index_update_wal_handle;
+    /** @var resource|null Open file handle for $local_index_wal_path while writing. */
+    private $local_index_wal_handle;
 
-    /** @var int Number of entries written to the open WAL batch. */
-    private $index_update_wal_record_count = 0;
+    /** @var int Number of entries written to the open local index WAL batch. */
+    private $local_index_wal_record_count = 0;
 
     /**
-     * Deduplication state for index updates. Consecutive upsert_index_entry() or
-     * delete_index_entry() calls for the same path are collapsed into one WAL write.
+     * Deduplication state for local index WAL records. Consecutive upsert_index_entry() or
+     * delete_index_entry() calls for the same path are collapsed into one local index WAL write.
      *
-     * @var string|null Last path written to the index-update WAL.
+     * @var string|null Last path written to the local index WAL.
      */
-    private $last_update_path = null;
+    private $last_local_index_wal_path = null;
 
-    /** @var bool|null Whether the last index update was a deletion (true) or upsert (false). */
-    private $last_update_delete = null;
+    /** @var bool|null Whether the last local index WAL record was a deletion (true) or upsert (false). */
+    private $last_local_index_wal_deletion = null;
 
-    /** @var int|null ctime of the last upserted index entry. */
-    private $last_update_ctime = null;
+    /** @var int|null ctime of the last local index WAL file record. */
+    private $last_local_index_wal_ctime = null;
 
     /** @var int|null Size in bytes of the last upserted index entry. */
-    private $last_update_size = null;
+    private $last_local_index_wal_size = null;
 
     /** @var string|null Type ("file", "link", "dir") of the last upserted index entry. */
-    private $last_update_type = null;
+    private $last_local_index_wal_type = null;
 
     /**
-     * @var string Path to .import-remote-index.jsonl — latest file index received
-     * from the server, including directory `empty` fields when available.
+     * @var string Remote index file .import-remote-index.jsonl, including
+     * directory `empty` fields when available.
      */
     private $remote_index_file;
 
-    /** @var string Path to .import-download-list.jsonl — files to download, computed by diffing remote vs local index. */
-    private $download_list_file;
+    /** @var string Path to .import-fetch-list.jsonl — files to download, computed by diffing remote vs local index. */
+    private $fetch_list_file;
 
-    /** @var string Path to .import-download-list-skipped.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
-    private $skipped_download_list_file;
+    /** @var string Path to .import-fetch-list-skipped.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
+    private $skipped_fetch_list_file;
 
     /** @var string Path to .import-audit.log — append-only log of every operation for debugging. */
     private $audit_log;
@@ -347,15 +346,15 @@ class ImportClient
     /** @var int Running count of files imported in the current invocation. */
     private $files_imported = 0;
 
-    /** @var int|null Total entries in the current download list.  Set once
-     *  at the start of download_files_from_list() by counting newlines. */
-    private $download_list_total = null;
+    /** @var int|null Total entries in the current fetch list.  Set once
+     *  at the start of fetch_files_from_list() by counting newlines. */
+    private $fetch_list_total = null;
 
     /** @var int|null Entries already processed (before the current offset)
-     *  in the download list.  Computed at list start and incremented after
+     *  in the fetch list.  Computed at list start and incremented after
      *  each batch completes.  This is the cumulative, restart-safe counter
      *  that consumers should display as "files done". */
-    private $download_list_done = null;
+    private $fetch_list_done = null;
 
     /**
      * @var ImportState Persistent import state loaded from / saved to $state_file.
@@ -380,13 +379,13 @@ class ImportClient
     private $follow_symlinks = true;
 
     /**
-     * @var string|null Destination directory for escaping (out-of-scope) symlink targets,
-     * nested by the source path. null keeps the default: each symlink target is
-     * mirrored at its own source path underneath --fs-root.
+     * @var string|null Local root for content reached through escaping symlinks,
+     * nested by the source path. null keeps the default: each followed path is
+     * placed at its source path underneath --fs-root.
      *
      * Usage: --follow-symlinks=<dir>
      */
-    private $symlink_bundle_directory = null;
+    private $local_followed_symlinks_root = null;
 
     /** @var array|null Cached result of get_export_directories(). */
     private $export_directories_cache = null;
@@ -405,14 +404,14 @@ class ImportClient
     private $include_caches = false;
 
     /**
-     * @var string Controls behavior when the fs root is non-empty at import start.
+     * @var string Controls behavior when the filesystem root is non-empty at import start.
      *
-     * 'error' (default): throw an error if the fs root is non-empty.
+     * 'error' (default): throw an error if the filesystem root is non-empty.
      * 'preserve-local': preserve existing files, symlinks, and directories in the
-     * fs root instead of overwriting them; non-writable directories are skipped
+     * filesystem root instead of overwriting them; non-writable directories are skipped
      * gracefully and logged to the audit log.
      *
-     * On the first sync, existing fs root content is left untouched — any file,
+     * On the first sync, existing filesystem root content is left untouched — any file,
      * symlink, or directory that already exists at a path the remote tries to write
      * is skipped and never added to the local index.
      *
@@ -441,11 +440,11 @@ class ImportClient
     private $extra_directory = null;
 
     /**
-     * @var array<string,string> Resolved remap rules: full source path => its
-     * full local target path (both absolute). Empty = no remapping (files land
-     * nested based on their source).
+     * @var array<string,string> Resolved path mappings from remote absolute
+     * paths to local absolute paths. Both sides are absolute. Empty means
+     * the identity mapping beneath the filesystem root.
      */
-    private $remap_rules = [];
+    private $resolved_path_mappings = [];
 
     /**
      * @var array<int,string> Resolved `--only` file paths: a list of real source
@@ -529,9 +528,9 @@ class ImportClient
     public $exit_code = 0;
 
     public function __construct(
-        string $remote_url,
+        string $remote_reprint_api_url,
         string $state_dir,
-        string $fs_root,
+        string $filesystem_root,
         ?string $signal_handling_command = null
     )
     {
@@ -552,19 +551,19 @@ class ImportClient
             }
         }
 
-        $this->remote_url = rtrim($remote_url, "?&");
+        $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
-        $this->fs_root = rtrim($fs_root, "/");
+        $this->filesystem_root = rtrim($filesystem_root, "/");
         $this->state_file = $this->state_dir . "/.import-state.json";
-        $this->index_file = $this->state_dir . "/.import-index.jsonl";
-        $this->index_update_wal_path =
-            $this->state_dir . "/.import-index-updates.wal";
+        $this->local_index_file = $this->state_dir . "/.import-index.jsonl";
+        $this->local_index_wal_path =
+            $this->state_dir . "/.import-local-index.wal";
         $this->remote_index_file =
             $this->state_dir . "/.import-remote-index.jsonl";
-        $this->download_list_file =
-            $this->state_dir . "/.import-download-list.jsonl";
-        $this->skipped_download_list_file =
-            $this->state_dir . "/.import-download-list-skipped.jsonl";
+        $this->fetch_list_file =
+            $this->state_dir . "/.import-fetch-list.jsonl";
+        $this->skipped_fetch_list_file =
+            $this->state_dir . "/.import-fetch-list-skipped.jsonl";
         $this->audit_log = $this->state_dir . "/.import-audit.log";
         $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
         $this->status_file = $this->state_dir . "/.import-status.json";
@@ -582,9 +581,9 @@ class ImportClient
                 throw new RuntimeException("Failed to create directory: {$this->state_dir}");
             }
         }
-        if (!is_dir($this->fs_root)) {
-            if (!mkdir($this->fs_root, 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->fs_root}");
+        if (!is_dir($this->filesystem_root)) {
+            if (!mkdir($this->filesystem_root, 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->filesystem_root}");
             }
         }
 
@@ -596,10 +595,10 @@ class ImportClient
      */
     public function index_count(): int
     {
-        if (!is_file($this->index_file)) {
+        if (!is_file($this->local_index_file)) {
             return 0;
         }
-        $handle = fopen($this->index_file, "r");
+        $handle = fopen($this->local_index_file, "r");
         if (!$handle) {
             return 0;
         }
@@ -620,7 +619,7 @@ class ImportClient
         int $size,
         string $type
     ): void {
-        $this->record_index_update_file($path, $ctime, $size, $type);
+        $this->record_local_index_wal_file($path, $ctime, $size, $type);
     }
 
     /**
@@ -628,14 +627,14 @@ class ImportClient
      */
     private function delete_index_entry(string $path): void
     {
-        $this->record_index_update_deletion($path);
+        $this->record_local_index_wal_deletion($path);
     }
 
-    /** Replays a WAL left by an interrupted batch. */
-    private function replay_index_update_wal(): void
+    /** Replays a local index WAL left by an interrupted batch. */
+    private function replay_local_index_wal(): void
     {
-        if (is_file($this->index_update_wal_path)) {
-            $this->apply_index_update_wal();
+        if (is_file($this->local_index_wal_path)) {
+            $this->apply_local_index_wal();
         }
     }
 
@@ -706,7 +705,7 @@ class ImportClient
     {
         $remap_raw = $options["remap"] ?? [];
         if (!empty($remap_raw)) {
-            $this->remap_rules = $this->resolve_remap($remap_raw);
+            $this->resolved_path_mappings = $this->resolve_remap($remap_raw);
         }
 
         $only_raw = $options["only"] ?? [];
@@ -718,16 +717,16 @@ class ImportClient
         }
 
         if ($assert_remap) {
-            $this->assert_files_remap_consistent();
+            $this->assert_resolved_path_mappings_consistent();
         }
     }
 
-    /** True when the skipped-download list exists and still has entries. */
+    /** True when the skipped-fetch list exists and still has entries. */
     public function has_skipped_files_pending(): bool
     {
         return
-            file_exists($this->skipped_download_list_file) &&
-            filesize($this->skipped_download_list_file) > 0;
+            file_exists($this->skipped_fetch_list_file) &&
+            filesize($this->skipped_fetch_list_file) > 0;
     }
 
     /**
@@ -735,7 +734,7 @@ class ImportClient
      * Called from the CLI entry point before run() so the invocation
      * is captured even if run() throws early.
      *
-     * @param string       $command Canonical CLI command name.
+     * @param string       $command Normalized CLI command name.
      * @param list<string> $argv    Raw command arguments.
      * @param string|null  $pair    Files-diff or files-push pair key, when available.
      */
@@ -746,7 +745,7 @@ class ImportClient
         if (isset($masked[2]) && $command !== 'apply-runtime') {
             $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
             if ($command === 'files-push') {
-                $masked[2] = self::mask_files_push_url_user_info($masked[2]);
+                $masked[2] = self::mask_url_credentials($masked[2]);
             }
         }
         foreach ($masked as $argument_index => $argument) {
@@ -994,8 +993,8 @@ class ImportClient
             $this->follow_symlinks = $this->import_state()->follow_symlinks;
         }
 
-        if (isset($options["symlink_bundle_directory"])) {
-            $this->symlink_bundle_directory = $this->resolve_symlink_bundle_directory($options["symlink_bundle_directory"]);
+        if (isset($options["local_followed_symlinks_root"])) {
+            $this->local_followed_symlinks_root = $this->resolve_local_followed_symlinks_root($options["local_followed_symlinks_root"]);
             $this->follow_symlinks = true;
             $this->import_state()->follow_symlinks = true;
             $this->save_state($this->state);
@@ -1269,7 +1268,7 @@ class ImportClient
                     return;
 
                 case "files-pull":
-                    $this->run_files_sync();
+                    $this->run_files_pull();
                     break;
 
                 case "files-index":
@@ -1324,9 +1323,9 @@ class ImportClient
     private function run_files_diff(array $options): void
     {
         $context = $options['files_diff_context'] ?? self::prepare_files_pair_context(
-            $this->remote_url,
+            $this->remote_reprint_api_url,
             $this->state_dir,
-            $this->fs_root,
+            $this->filesystem_root,
             'files-diff'
         );
         if (!is_array($context)) {
@@ -1337,7 +1336,7 @@ class ImportClient
         $previous_local_index = $push_state_directory . '/previous_local_index.jsonl';
         $missing_previous_local_index_message =
             'files-diff requires the pair\'s previous local index, which a completed files-push publishes '
-            . 'for the same target URL, state directory, and local tree.';
+            . 'for the same remote Reprint API URL, state directory, and filesystem root.';
         if (!is_dir($push_state_directory)) {
             throw new RuntimeException($missing_previous_local_index_message);
         }
@@ -1360,7 +1359,7 @@ class ImportClient
             }
             $plan = PushPlan::start(
                 $plan_directory,
-                $context['local_tree'],
+                $context['filesystem_root'],
                 $previous_local_index,
                 $excluded_paths_path
             );
@@ -1542,9 +1541,9 @@ class ImportClient
     {
         $started_at = hrtime(true) / 1000000000;
         $context = $options['files_push_context'] ?? self::prepare_files_push_context(
-            $this->remote_url,
+            $this->remote_reprint_api_url,
             $this->state_dir,
-            $this->fs_root,
+            $this->filesystem_root,
             $options
         );
         if (!is_array($context)) {
@@ -1566,9 +1565,9 @@ class ImportClient
             ? -1
             : parse_size($memory_limit_value);
         $sender_options = [
-            'docroot' => $context['local_tree'],
+            'filesystem_root' => $context['filesystem_root'],
             'push_state_directory' => $context['push_state_directory'],
-            'base_url' => $context['target_url'],
+            'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['force_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,
@@ -1761,42 +1760,43 @@ class ImportClient
      * @return array {
      *     Validated files-push command context.
      *
-     *     @type string $target_url           Target exporter API URL.
-     *     @type string $local_tree           Canonical local tree being sent.
-     *     @type string $pair                 Target/local-tree pair key.
+     *     @type string $remote_reprint_api_url Remote Reprint API URL.
+     *     @type string $filesystem_root  Resolved filesystem root being sent.
+     *     @type string $pair                 Target/filesystem-root pair key.
      *     @type string $push_state_directory Local push state directory.
      * }
-     * @phpstan-return array{target_url:string,local_tree:string,pair:string,push_state_directory:string}
+     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
      */
     public static function prepare_files_push_context(
-        string $target_url,
-        string $state_directory,
-        string $local_tree,
+        string $remote_reprint_api_url,
+        string $state_dir,
+        string $filesystem_root,
         array $options
     ): array {
         $secret = $options['secret'] ?? null;
         if (!is_string($secret) || $secret === '') {
             throw new InvalidArgumentException('files-push requires --secret=TOKEN.');
         }
-        if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $target_url) === 1) {
+        if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $remote_reprint_api_url) === 1) {
             throw new InvalidArgumentException(
-                'files-push does not accept SECRET_KEY in the target URL; pass --secret=TOKEN.'
+                'files-push does not accept SECRET_KEY in the remote Reprint API URL; pass --secret=TOKEN.'
             );
         }
 
         $context = self::prepare_files_pair_context(
-            $target_url,
-            $state_directory,
-            $local_tree,
+            $remote_reprint_api_url,
+            $state_dir,
+            $filesystem_root,
             'files-push'
         );
-        $masked_target_url = self::mask_files_push_url_user_info($target_url);
+        $masked_remote_reprint_api_url =
+            self::mask_url_credentials($remote_reprint_api_url);
         $force_http = $options['force_http'] ?? false;
-        $scheme = strtolower( (string) parse_url($target_url, PHP_URL_SCHEME) );
+        $scheme = strtolower( (string) parse_url($remote_reprint_api_url, PHP_URL_SCHEME) );
         if ($scheme !== 'https' && !( $scheme === 'http' && $force_http === true )) {
             throw new InvalidArgumentException(
-                'The files-push target must use HTTPS: ' . $masked_target_url
-                . '. Pass --force-http only for a target you trust.'
+                'The files-push remote Reprint API URL must use HTTPS: ' . $masked_remote_reprint_api_url
+                . '. Pass --force-http only for a remote Reprint API URL you trust.'
             );
         }
         return $context;
@@ -1812,51 +1812,52 @@ class ImportClient
      * @return array {
      *     Validated pair context.
      *
-     *     @type string $target_url           Target exporter API URL.
-     *     @type string $local_tree           Canonical local tree.
-     *     @type string $pair                 Target/local-tree pair key.
+     *     @type string $remote_reprint_api_url Remote Reprint API URL.
+     *     @type string $filesystem_root  Resolved filesystem root.
+     *     @type string $pair                 Target/filesystem-root pair key.
      *     @type string $push_state_directory Local push state directory.
      * }
-     * @phpstan-return array{target_url:string,local_tree:string,pair:string,push_state_directory:string}
+     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
      */
     public static function prepare_files_pair_context(
-        string $target_url,
-        string $state_directory,
-        string $local_tree,
+        string $remote_reprint_api_url,
+        string $state_dir,
+        string $filesystem_root,
         string $command
     ): array {
-        $masked_target_url = self::mask_files_push_url_user_info($target_url);
-        if (strpos($target_url, '#') !== false) {
+        $masked_remote_reprint_api_url =
+            self::mask_url_credentials($remote_reprint_api_url);
+        if (strpos($remote_reprint_api_url, '#') !== false) {
             throw new InvalidArgumentException(
-                'The ' . $command . ' target URL must not contain a fragment: ' . $masked_target_url . '.'
+                'The ' . $command . ' remote Reprint API URL must not contain a fragment: ' . $masked_remote_reprint_api_url . '.'
             );
         }
-        $target_url_user = parse_url($target_url, PHP_URL_USER);
-        $target_url_password = parse_url($target_url, PHP_URL_PASS);
-        if (is_string($target_url_user) || is_string($target_url_password)) {
+        $remote_reprint_api_url_user = parse_url($remote_reprint_api_url, PHP_URL_USER);
+        $remote_reprint_api_url_password = parse_url($remote_reprint_api_url, PHP_URL_PASS);
+        if (is_string($remote_reprint_api_url_user) || is_string($remote_reprint_api_url_password)) {
             throw new InvalidArgumentException(
-                'The ' . $command . ' target URL must not contain URL user-info: ' . $masked_target_url . '.'
+                'The ' . $command . ' remote Reprint API URL must not contain URL user-info: ' . $masked_remote_reprint_api_url . '.'
             );
         }
-        if (is_link($local_tree)) {
-            throw new InvalidArgumentException('The local tree must not be a symlink: ' . $local_tree . '.');
+        if (is_link($filesystem_root)) {
+            throw new InvalidArgumentException('The filesystem root must not be a symlink: ' . $filesystem_root . '.');
         }
-        if (!is_dir($local_tree)) {
+        if (!is_dir($filesystem_root)) {
             throw new InvalidArgumentException(
-                'The local tree does not exist or is not a directory: ' . $local_tree . '.'
+                'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
             );
         }
-        $canonical_local_tree = realpath($local_tree);
-        if ($canonical_local_tree === false) {
+        $resolved_local_filesystem_root = realpath($filesystem_root);
+        if ($resolved_local_filesystem_root === false) {
             throw new InvalidArgumentException(
-                'The local tree does not exist or is not a directory: ' . $local_tree . '.'
+                'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
             );
         }
-        $canonical_local_tree = rtrim($canonical_local_tree, '/') ?: '/';
-        $target_url = rtrim($target_url, '?&');
-        $pair = hash('sha256', $target_url . "\0" . $canonical_local_tree);
+        $resolved_local_filesystem_root = rtrim($resolved_local_filesystem_root, '/') ?: '/';
+        $remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
+        $pair = hash('sha256', $remote_reprint_api_url . "\0" . $resolved_local_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
-        $push_state_directory = $state_directory . '/push/' . $pair;
+        $push_state_directory = $state_dir . '/push/' . $pair;
         if (strpos($push_state_directory, '/') !== 0) {
             $working_directory = getcwd();
             if ($working_directory === false) {
@@ -1875,28 +1876,28 @@ class ImportClient
             array_unshift($missing_state_components, basename($existing_state_path));
             $existing_state_path = dirname($existing_state_path);
         }
-        $canonical_existing_state_path = realpath($existing_state_path);
-        if ($canonical_existing_state_path !== false) {
+        $resolved_existing_state_path = realpath($existing_state_path);
+        if ($resolved_existing_state_path !== false) {
             $push_state_directory = normalize_path(
-                $canonical_existing_state_path
+                $resolved_existing_state_path
                     . ( $missing_state_components === []
                         ? ''
                         : '/' . implode('/', $missing_state_components) )
             );
         }
         if (
-            $canonical_local_tree === '/'
-            || path_is_within_root($push_state_directory, $canonical_local_tree)
+            $resolved_local_filesystem_root === '/'
+            || path_is_within_root($push_state_directory, $resolved_local_filesystem_root)
         ) {
             throw new InvalidArgumentException(
                 'The local push state directory ' . $push_state_directory
-                . ' must be outside the local tree ' . $canonical_local_tree . '.'
+                . ' must be outside the filesystem root ' . $resolved_local_filesystem_root . '.'
             );
         }
 
         return [
-            'target_url' => $target_url,
-            'local_tree' => $canonical_local_tree,
+            'remote_reprint_api_url' => $remote_reprint_api_url,
+            'filesystem_root' => $resolved_local_filesystem_root,
             'pair' => $pair,
             'push_state_directory' => $push_state_directory,
         ];
@@ -1950,7 +1951,7 @@ class ImportClient
     }
 
     /** Masks URL authority credentials without changing the pair-key input. */
-    private static function mask_files_push_url_user_info(string $url): string
+    private static function mask_url_credentials(string $url): string
     {
         $masked = preg_replace(
             '~^([a-z][a-z0-9+.-]*://)[^/?#]*@~i',
@@ -2065,32 +2066,32 @@ class ImportClient
             "RESTART | Clearing files-pull progress (keeping local index and files)",
             true,
         );
-        // Replay the WAL before clearing the cursor which made its records durable.
-        $this->replay_index_update_wal();
-        $this->remove_index_update_wal();
+        // Replay the local index WAL before clearing the cursor which made its records durable.
+        $this->replay_local_index_wal();
+        $this->remove_local_index_wal();
         $this->reset_state();
-        $this->index_update_wal_handle = null;
-        $this->index_update_wal_record_count = 0;
+        $this->local_index_wal_handle = null;
+        $this->local_index_wal_record_count = 0;
 
         if (file_exists($this->remote_index_file)) {
             @unlink($this->remote_index_file);
             $this->audit_log("FILE DELETE | {$this->remote_index_file}");
         }
-        if (file_exists($this->download_list_file)) {
-            @unlink($this->download_list_file);
-            $this->audit_log("FILE DELETE | {$this->download_list_file}");
+        if (file_exists($this->fetch_list_file)) {
+            @unlink($this->fetch_list_file);
+            $this->audit_log("FILE DELETE | {$this->fetch_list_file}");
         }
-        if (file_exists($this->skipped_download_list_file)) {
-            @unlink($this->skipped_download_list_file);
-            $this->audit_log("FILE DELETE | {$this->skipped_download_list_file}");
+        if (file_exists($this->skipped_fetch_list_file)) {
+            @unlink($this->skipped_fetch_list_file);
+            $this->audit_log("FILE DELETE | {$this->skipped_fetch_list_file}");
         }
         if (file_exists($this->volatile_files_file)) {
             @unlink($this->volatile_files_file);
             $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
         }
         $this->import_state()->index = new RemoteFileIndexCursorState();
-        $this->import_state()->fetch = new DownloadListFetchProgressState();
-        $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
+        $this->import_state()->fetch = new FetchListProgressState();
+        $this->import_state()->fetch_skipped = new FetchListProgressState();
 
         $this->save_state($this->state);
     }
@@ -2171,10 +2172,10 @@ class ImportClient
 
         // Detect webhost environment from preflight data.
         // The host analyzers score based on preflight signals. We also
-        // check the local fs root for a __wp__ symlink as a fallback
+        // check the filesystem root for a __wp__ symlink as a fallback
         // when the remote preflight didn't report enough filesystem data.
         $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
-        if ($detected_webhost === 'other' && is_link($this->fs_root . '/__wp__')) {
+        if ($detected_webhost === 'other' && is_link($this->filesystem_root . '/__wp__')) {
             $detected_webhost = 'wpcloud';
         }
         $this->import_state()->webhost = $detected_webhost;
@@ -2218,7 +2219,7 @@ class ImportClient
             }
         }
 
-        $this->download_runtime_files();
+        $this->fetch_runtime_files();
     }
 
     /**
@@ -2230,7 +2231,7 @@ class ImportClient
      * failures are tolerated since the scripts may live on paths not
      * accessible to the web server process.
      */
-    private function download_runtime_files(): void
+    private function fetch_runtime_files(): void
     {
         $runtime_dir = $this->state_dir . "/runtime_files";
 
@@ -2267,7 +2268,7 @@ class ImportClient
     }
 
     /**
-     * Download a list of absolute remote paths into $target_dir,
+     * Download a list of remote absolute paths into $path,
      * preserving their directory structure.
      *
      * Issues one file_fetch request per parent directory so that an
@@ -2276,7 +2277,7 @@ class ImportClient
      *
      * @return int Number of files successfully downloaded.
      */
-    private function fetch_files_into(string $target_dir, array $files): int
+    private function fetch_files_into(string $path, array $files): int
     {
         $by_dir = [];
         foreach ($files as $f) {
@@ -2305,31 +2306,31 @@ class ImportClient
             $context->file_path = null;
             $context->file_ctime = null;
 
-            $context->on_chunk = function ($chunk) use ($target_dir, $context, &$downloaded) {
+            $context->on_chunk = function ($chunk) use ($path, $context, &$downloaded) {
                 $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
                 if ($chunk_type === "file") {
                     $raw = $chunk["headers"]["x-file-path"] ?? "";
-                    $path = base64_decode($raw, true);
-                    if ($path === false || $path === "") {
+                    $remote_absolute_path = base64_decode($raw, true);
+                    if ($remote_absolute_path === false || $remote_absolute_path === "") {
                         return;
                     }
 
                     $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
                     $is_last = ($chunk["headers"]["x-last-chunk"] ?? "0") === "1";
-                    $local_path = $target_dir . $path;
+                    $local_absolute_path = wp_join_unix_paths($path, $remote_absolute_path);
 
                     if ($is_first) {
                         if ($context->file_handle) {
                             fclose($context->file_handle);
                             $context->file_handle = null;
                         }
-                        $dir = dirname($local_path);
+                        $dir = dirname($local_absolute_path);
                         if (!is_dir($dir)) {
                             @mkdir($dir, 0755, true);
                         }
-                        $context->file_handle = @fopen($local_path, "wb");
-                        $context->file_path = $local_path;
+                        $context->file_handle = @fopen($local_absolute_path, "wb");
+                        $context->file_path = $local_absolute_path;
                     }
 
                     if ($context->file_handle && isset($chunk["body"])) {
@@ -2340,7 +2341,7 @@ class ImportClient
                         fclose($context->file_handle);
                         $context->file_handle = null;
                         $downloaded++;
-                        $this->audit_log("Saved {$path} → {$local_path}");
+                        $this->audit_log("Saved {$remote_absolute_path} → {$local_absolute_path}");
                     }
                 } elseif ($chunk_type === "error") {
                     $body = json_decode($chunk["body"] ?? "{}", true);
@@ -2698,7 +2699,7 @@ class ImportClient
      *
      * Both modes share the same pipeline: index → diff → fetch.
      */
-    public function run_files_sync(): void
+    public function run_files_pull(): void
     {
         $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
 
@@ -2730,16 +2731,16 @@ class ImportClient
             $current_status !== null &&
             $current_status !== "complete";
 
-        $this->replay_index_update_wal();
+        $this->replay_local_index_wal();
         $this->assert_files_pull_only_unchanged_while_resuming($has_progress);
-        $this->assert_symlink_bundle_directory_unchanged();
+        $this->assert_local_followed_symlinks_root_unchanged();
 
         // Already completed.
         if ($current_status === "complete") {
-            $this->remove_index_update_wal();
+            $this->remove_local_index_wal();
             $has_skipped =
-                file_exists($this->skipped_download_list_file) &&
-                filesize($this->skipped_download_list_file) > 0;
+                file_exists($this->skipped_fetch_list_file) &&
+                filesize($this->skipped_fetch_list_file) > 0;
 
             // --filter=skipped-earlier: download only the files that a prior
             // --filter=essential-files run skipped.  This is the only way to
@@ -2768,8 +2769,8 @@ class ImportClient
                 $this->import_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
                 $this->import_state()->files_pull_summary = new FilesPullSummaryState();
                 $this->save_state($this->state);
-                $this->open_index_update_wal();
-                $this->run_files_sync_pipeline();
+                $this->open_local_index_wal();
+                $this->run_files_pull_pipeline();
                 // The deferred tail reopens a completed files-pull. Once the
                 // tail finishes, restore the completed status so later filter
                 // changes are judged against the actual lifecycle state.
@@ -2778,7 +2779,7 @@ class ImportClient
                 }
                 $this->import_state()->active_resumable_command->completion_state = "complete";
                 $this->save_state($this->state);
-                $this->remove_index_update_wal();
+                $this->remove_local_index_wal();
                 return;
             }
 
@@ -2829,22 +2830,22 @@ class ImportClient
         // Filter out "." and ".." explicitly: standard PHP scandir() returns them,
         // but WASM PHP (WordPress Playground) does not, so a `count <= 2` shortcut
         // would mis-classify directories with one or two real entries as empty.
-        $is_empty = !is_dir($this->fs_root) || count(array_diff(
-            scandir($this->fs_root) ?: [],
+        $is_empty = !is_dir($this->filesystem_root) || count(array_diff(
+            scandir($this->filesystem_root) ?: [],
             [".", ".."]
         )) === 0;
 
         // A local index from a prior completed sync means the next run is a
         // delta: re-index the remote, diff against local, fetch only changes.
         $is_delta =
-            file_exists($this->index_file) &&
-            filesize($this->index_file) > 0;
+            file_exists($this->local_index_file) &&
+            filesize($this->local_index_file) > 0;
 
         // Resuming an in-progress sync
         if ($has_progress) {
             // Don't reset files_imported here — it counts files within
             // the current batch and is only reset when a batch completes
-            // (in download_files_from_list). Resetting it on entry would
+            // (in fetch_files_from_list). Resetting it on entry would
             // cause the progress counter to dip between pull retries.
             $index_size = $this->index_count();
 
@@ -2871,13 +2872,13 @@ class ImportClient
                 "message" => "Resuming files-pull (stage: {$stage}, indexed: {$index_size} files)",
             ], true);
         } else {
-            // Starting fresh — validate that target directory is empty.
-            // A delta sync ($is_delta) naturally has a non-empty fs root
+            // Starting fresh — validate that the filesystem root is empty.
+            // A delta sync ($is_delta) naturally has a non-empty filesystem root
             // because we put those files there during the initial sync.
             if (!$is_empty && !$is_delta && $this->fs_root_nonempty_behavior === 'error') {
                 throw new RuntimeException(
-                    "Target directory is not empty and no cursor found. " .
-                        "Either clear the target directory, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
+                    "Filesystem root is not empty and no cursor found. " .
+                        "Either clear the filesystem root, use --abort flag, or use --on-fs-root-nonempty=preserve-local to sync while preserving the existing content.",
                 );
             }
 
@@ -2887,8 +2888,8 @@ class ImportClient
             $this->import_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
             $this->import_state()->diff = new FileDiffProgressState();
             $this->import_state()->index = new RemoteFileIndexCursorState();
-            $this->import_state()->fetch = new DownloadListFetchProgressState();
-            $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
+            $this->import_state()->fetch = new FetchListProgressState();
+            $this->import_state()->fetch_skipped = new FetchListProgressState();
             $this->import_state()->files_pull_summary = new FilesPullSummaryState();
             $this->save_state($this->state);
 
@@ -2932,8 +2933,8 @@ class ImportClient
         $this->import_state()->active_resumable_command->completion_state = "in_progress";
         $this->save_state($this->state);
 
-        $this->open_index_update_wal();
-        $this->run_files_sync_pipeline();
+        $this->open_local_index_wal();
+        $this->run_files_pull_pipeline();
 
         // Pipeline returns early with partial status if interrupted
         if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
@@ -2942,7 +2943,7 @@ class ImportClient
 
         $this->import_state()->active_resumable_command->completion_state = "complete";
         $this->save_state($this->state);
-        $this->remove_index_update_wal();
+        $this->remove_local_index_wal();
 
         $this->progress->clear_progress_line();
         $index_size = $this->index_count();
@@ -2974,12 +2975,12 @@ class ImportClient
      * Reads the current stage from state and runs each stage in sequence.
      * Returns early (with partial status) if any stage doesn't complete.
      */
-    private function run_files_sync_pipeline(): void
+    private function run_files_pull_pipeline(): void
     {
         $stage = $this->import_state()->active_resumable_command->current_stage ?? "index";
 
         if ($stage === "index") {
-            $complete = $this->download_remote_index();
+            $complete = $this->fetch_remote_index();
             if (!$complete) {
                 $this->import_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state($this->state);
@@ -2996,16 +2997,16 @@ class ImportClient
             $this->sort_index_file($this->remote_index_file);
             $this->import_state()->active_resumable_command->current_stage = "diff";
             $this->import_state()->diff = new FileDiffProgressState();
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
+            if (file_exists($this->fetch_list_file)) {
+                @unlink($this->fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | clearing before diff stage",
+                    "FILE DELETE | {$this->fetch_list_file} | clearing before diff stage",
                 );
             }
-            if (file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
+            if (file_exists($this->skipped_fetch_list_file)) {
+                @unlink($this->skipped_fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | clearing before diff stage",
+                    "FILE DELETE | {$this->skipped_fetch_list_file} | clearing before diff stage",
                 );
             }
             $this->save_state($this->state);
@@ -3020,15 +3021,15 @@ class ImportClient
                 return;
             }
 
-            $has_downloads =
-                file_exists($this->download_list_file) &&
-                filesize($this->download_list_file) > 0;
+            $has_files_to_fetch =
+                file_exists($this->fetch_list_file) &&
+                filesize($this->fetch_list_file) > 0;
             $has_skipped =
-                file_exists($this->skipped_download_list_file) &&
-                filesize($this->skipped_download_list_file) > 0;
+                file_exists($this->skipped_fetch_list_file) &&
+                filesize($this->skipped_fetch_list_file) > 0;
 
             // Determine the first fetch stage to run.
-            if ($has_downloads) {
+            if ($has_files_to_fetch) {
                 $stage = "fetch";
             } elseif ($has_skipped) {
                 $stage = "fetch-skipped";
@@ -3040,14 +3041,14 @@ class ImportClient
 
             // In pull mode, finalize the scanning line with a checkmark
             // and start the download progress on a fresh line.
-            if ($has_downloads && $this->progress->is_mode('pipeline')) {
+            if ($has_files_to_fetch && $this->progress->is_mode('pipeline')) {
                 $green = "\033[32m";
                 $dim = "\033[2m";
                 $r = "\033[0m";
                 $scanned = number_format($this->index_entries_counted);
                 $this->progress->clear_progress_line();
                 $this->progress->print_line("  {$green}✓{$r} Scanned {$dim}— {$scanned} entries{$r}\n");
-                $total = $this->count_newlines($this->download_list_file);
+                $total = $this->count_newlines($this->fetch_list_file);
                 $this->progress->set_active_label(null);
                 $this->progress->show_progress_line(
                     "Downloading — 0 / " . number_format($total) . " files",
@@ -3055,23 +3056,23 @@ class ImportClient
                 );
             }
 
-            if (!$has_downloads && file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
+            if (!$has_files_to_fetch && file_exists($this->fetch_list_file)) {
+                @unlink($this->fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | no files to fetch",
+                    "FILE DELETE | {$this->fetch_list_file} | no files to fetch",
                 );
             }
-            if (!$has_skipped && file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
+            if (!$has_skipped && file_exists($this->skipped_fetch_list_file)) {
+                @unlink($this->skipped_fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | no skipped files to fetch",
+                    "FILE DELETE | {$this->skipped_fetch_list_file} | no skipped files to fetch",
                 );
             }
         }
 
         if ($stage === "fetch") {
-            $complete = $this->download_files_from_list(
-                $this->download_list_file,
+            $complete = $this->fetch_files_from_list(
+                $this->fetch_list_file,
                 "fetch",
             );
             if (!$complete) {
@@ -3079,18 +3080,18 @@ class ImportClient
                 $this->save_state($this->state);
                 return;
             }
-            $this->import_state()->fetch = new DownloadListFetchProgressState();
+            $this->import_state()->fetch = new FetchListProgressState();
 
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
+            if (file_exists($this->fetch_list_file)) {
+                @unlink($this->fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | fetch complete",
+                    "FILE DELETE | {$this->fetch_list_file} | fetch complete",
                 );
             }
 
             $has_skipped =
-                file_exists($this->skipped_download_list_file) &&
-                filesize($this->skipped_download_list_file) > 0;
+                file_exists($this->skipped_fetch_list_file) &&
+                filesize($this->skipped_fetch_list_file) > 0;
 
             if ($has_skipped && $this->filter === "essential-files") {
                 // Essential files are done — mark the sync as complete.
@@ -3099,7 +3100,7 @@ class ImportClient
                 $this->import_state()->active_resumable_command->current_stage = null;
                 $this->save_state($this->state);
                 $this->audit_log(
-                    "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_download_list_file} — run with --filter=skipped-earlier to download them",
+                    "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_fetch_list_file} — run with --filter=skipped-earlier to download them",
                     true,
                 );
                 $stage = null;
@@ -3121,8 +3122,8 @@ class ImportClient
         }
 
         if ($stage === "fetch-skipped") {
-            $complete = $this->download_files_from_list(
-                $this->skipped_download_list_file,
+            $complete = $this->fetch_files_from_list(
+                $this->skipped_fetch_list_file,
                 "fetch_skipped",
             );
             if (!$complete) {
@@ -3131,16 +3132,16 @@ class ImportClient
                 return;
             }
             $this->import_state()->active_resumable_command->current_stage = null;
-            $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
+            $this->import_state()->fetch_skipped = new FetchListProgressState();
             // Tail fully fetched; clear the flag so a later skipped-earlier run
             // doesn't treat the now-empty tail as pending.
             $this->import_state()->pull_pipeline->skipped_pending = false;
             $this->save_state($this->state);
 
-            if (file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
+            if (file_exists($this->skipped_fetch_list_file)) {
+                @unlink($this->skipped_fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | skipped files fetch complete",
+                    "FILE DELETE | {$this->skipped_fetch_list_file} | skipped files fetch complete",
                 );
             }
         }
@@ -3212,7 +3213,7 @@ class ImportClient
         $attempts = 0;
         $last_cursor = $this->import_state()->index->cursor ?? null;
         while (true) {
-            $complete = $this->download_remote_index();
+            $complete = $this->fetch_remote_index();
             if ($complete) {
                 break;
             }
@@ -3327,7 +3328,7 @@ class ImportClient
             $visited[$dir] = true;
 
             $this->audit_log(
-                "FOLLOW SYMLINK | indexing target directory: {$dir}",
+                "FOLLOW SYMLINK | indexing remote directory: {$dir}",
                 true,
             );
             $this->progress->show_lifecycle_line("Following symlink target: {$dir}\n");
@@ -3337,7 +3338,7 @@ class ImportClient
                 "message" => "Following symlink target: {$dir}",
             ], true);
 
-            // Reset the index cursor so download_remote_index starts fresh
+            // Reset the index cursor so fetch_remote_index starts fresh
             // for this directory, but appends to the existing index file.
             // Note we are not losing the previous cursor position. This code
             // runs only after the previous directory was fully indexed so
@@ -3349,7 +3350,7 @@ class ImportClient
             $last_cursor = null;
             while (true) {
                 try {
-                    $complete = $this->download_remote_index($dir);
+                $complete = $this->fetch_remote_index($dir);
                 } catch (RuntimeException $e) {
                     // We won't be able to follow every symlink. If
                     // the response seems like the remote server rejecting
@@ -3424,14 +3425,14 @@ class ImportClient
      */
     private function extract_symlink_dirs_from_index(array $visited): array
     {
-        $targets = [];
+        $symlink_targets = [];
         if (!file_exists($this->remote_index_file)) {
-            return $targets;
+            return $symlink_targets;
         }
 
         $handle = fopen($this->remote_index_file, "r");
         if (!$handle) {
-            return $targets;
+            return $symlink_targets;
         }
 
         while (($line = fgets($handle)) !== false) {
@@ -3445,25 +3446,25 @@ class ImportClient
             if (!empty($entry["intermediate"])) {
                 continue;
             }
-            $target_encoded = $entry["target"] ?? null;
-            if (!is_string($target_encoded) || $target_encoded === "") {
+            $symlink_target_encoded = $entry["target"] ?? null;
+            if (!is_string($symlink_target_encoded) || $symlink_target_encoded === "") {
                 continue;
             }
-            $target = base64_decode($target_encoded);
-            if ($target === false || $target === "") {
+            $symlink_target = base64_decode($symlink_target_encoded);
+            if ($symlink_target === false || $symlink_target === "") {
                 continue;
             }
 
-            // If we've seen this target already, we can move on
+            // If we've seen this symlink target already, we can move on
             // to the next one.
-            if (isset($visited[$target])) {
+            if (isset($visited[$symlink_target])) {
                 continue;
             }
 
             // Check containment: skip if already under a visited root
             $contained = false;
             foreach ($visited as $root => $_) {
-                if (str_starts_with($target, $root . "/")) {
+                if (str_starts_with($symlink_target, $root . "/")) {
                     $contained = true;
                     break;
                 }
@@ -3472,11 +3473,11 @@ class ImportClient
                 continue;
             }
 
-            $targets[] = $target;
+            $symlink_targets[] = $symlink_target;
         }
         fclose($handle);
 
-        return array_values(array_unique($targets));
+        return array_values(array_unique($symlink_targets));
     }
 
     /**
@@ -3490,9 +3491,9 @@ class ImportClient
      * type=link, intermediate=true.
      *
      * Since the server indexes everything under realpath()-resolved paths,
-     * the files are already downloaded to the target location (e.g.
-     * fs-root/wordpress/...).  We just need to create the symlink
-     * (e.g. fs-root/srv/wordpress -> /wordpress) so the directory
+     * the files are already downloaded to the local location (e.g.
+     * filesystem root/wordpress/...).  We just need to create the symlink
+     * (e.g. filesystem root/srv/wordpress -> /wordpress) so the directory
      * layout matches the server.
      */
     private function recreate_intermediate_symlinks(): void
@@ -3518,8 +3519,8 @@ class ImportClient
             if (empty($entry["intermediate"])) {
                 continue;
             }
-            $target_encoded = $entry["target"] ?? null;
-            if (!is_string($target_encoded) || $target_encoded === "") {
+            $symlink_target_encoded = $entry["target"] ?? null;
+            if (!is_string($symlink_target_encoded) || $symlink_target_encoded === "") {
                 continue;
             }
             $path_encoded = $entry["path"] ?? null;
@@ -3533,40 +3534,46 @@ class ImportClient
              *
              * @see https://www.php.net/base64_decode
              */
-            $path = base64_decode($path_encoded, true);
-            $target = base64_decode($target_encoded, true);
-            if ($path === false || $path === "" || $target === false || $target === "") {
+            $remote_absolute_path = base64_decode($path_encoded, true);
+            $symlink_target = base64_decode($symlink_target_encoded, true);
+            if ($remote_absolute_path === false || $remote_absolute_path === "" || $symlink_target === false || $symlink_target === "") {
                 continue;
             }
 
             try {
-                $local_path = $this->remote_path_to_local_path_within_import_root($path);
+                $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
+                    $remote_absolute_path
+                );
             } catch (RuntimeException $e) {
                 $this->audit_log(
-                    "INTERMEDIATE SYMLINK SKIP: invalid path {$path}: " . $e->getMessage(),
+                    "INTERMEDIATE SYMLINK SKIP: invalid path {$remote_absolute_path}: " . $e->getMessage(),
                     true,
                 );
                 continue;
             }
 
             // Repoint through the same seam regular symlink chunks use, so the
-            // link targets wherever the content actually landed (fs-root,
-            // remapped, or bundled) instead of the raw source spelling.
-            $target = $this->map_symlink_target_for_local_mirror($path, $local_path, $target);
+            // link targets wherever the content actually landed (filesystem root,
+            // remapped, or placed under the local followed symlinks root) instead of the raw source spelling.
+            $symlink_target = $this->rewrite_symlink_target_for_local_filesystem(
+                $remote_absolute_path,
+                $local_absolute_path,
+                $symlink_target
+            );
 
             // Already correct — skip
-            if (is_link($local_path) && readlink($local_path) === $target) {
+            if (is_link($local_absolute_path) && readlink($local_absolute_path) === $symlink_target) {
                 continue;
             }
 
             // Create parent directory
-            $parent = dirname($local_path);
+            $parent = dirname($local_absolute_path);
             if (!is_dir($parent)) {
                 try {
-                    $this->ensure_directory_path($parent);
+                    $this->create_directory_if_missing($parent);
                 } catch (RuntimeException $e) {
                     $this->audit_log(
-                        "INTERMEDIATE SYMLINK SKIP: failed to prepare parent for {$path}: " .
+                        "INTERMEDIATE SYMLINK SKIP: failed to prepare parent for {$remote_absolute_path}: " .
                             $e->getMessage(),
                         true,
                     );
@@ -3575,16 +3582,16 @@ class ImportClient
             }
 
             // Remove stale symlink if present
-            if (is_link($local_path)) {
-                @unlink($local_path);
+            if (is_link($local_absolute_path)) {
+                @unlink($local_absolute_path);
             }
 
             // Don't overwrite a real directory — that shouldn't exist for
             // an intermediate symlink path, and if it does something else
             // is wrong.
-            if (file_exists($local_path)) {
+            if (file_exists($local_absolute_path)) {
                 $this->audit_log(
-                    "INTERMEDIATE SYMLINK SKIP: {$path} already exists as a real file/dir",
+                    "INTERMEDIATE SYMLINK SKIP: {$remote_absolute_path} already exists as a real file/dir",
                     true,
                 );
                 continue;
@@ -3594,8 +3601,8 @@ class ImportClient
             $root = $this->get_filesystem_root_path();
             try {
                 $this->assert_symlink_target_within_root(
-                    dirname($local_path),
-                    $target,
+                    dirname($local_absolute_path),
+                    $symlink_target,
                     $root
                 );
             } catch (RuntimeException $e) {
@@ -3606,15 +3613,15 @@ class ImportClient
                 continue;
             }
 
-            if (@symlink($target, $local_path)) {
+            if (@symlink($symlink_target, $local_absolute_path)) {
                 $created++;
                 $this->audit_log(
-                    "INTERMEDIATE SYMLINK: {$path} -> {$target}",
+                    "INTERMEDIATE SYMLINK: {$remote_absolute_path} -> {$symlink_target}",
                     false,
                 );
             } else {
                 $this->audit_log(
-                    "Failed to create intermediate symlink: {$path} -> {$target}",
+                    "Failed to create intermediate symlink: {$remote_absolute_path} -> {$symlink_target}",
                     true,
                 );
             }
@@ -3725,7 +3732,7 @@ class ImportClient
                 "message" => "Downloading table metadata",
             ]);
 
-            $this->download_db_index();
+            $this->fetch_database_index();
 
             // Interrupted response during db-index — state already saved, exit partial.
             if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
@@ -3750,7 +3757,7 @@ class ImportClient
             "message" => "Downloading SQL dump",
         ]);
 
-        $this->download_sql();
+        $this->fetch_sql();
 
         // Interrupted response during SQL download — state already saved, exit partial.
         if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
@@ -3867,12 +3874,12 @@ class ImportClient
      * plus pending downloads and their size.
      *
      * Reads .import-remote-index.jsonl for all indexed files and
-     * .import-download-list.jsonl for files not yet downloaded.
+     * .import-fetch-list.jsonl for files not yet downloaded.
      */
     private function run_files_stats(): void
     {
         $remote_index = $this->remote_index_file;
-        $download_list = $this->download_list_file;
+        $fetch_list = $this->fetch_list_file;
 
         // Single pass over the remote index to build a path→size map.
         // Duplicates (from overlapping symlink targets) are collapsed
@@ -3897,7 +3904,7 @@ class ImportClient
         $indexed_count = count($size_by_path);
         $indexed_bytes = array_sum($size_by_path);
 
-        // Walk the download list(s) to count pending files. The download
+        // Walk the fetch list(s) to count pending files. The download
         // list only stores paths, so look up sizes from the map above.
         // Files before the fetch byte offset have already been downloaded.
         $pending_count = 0;
@@ -3905,10 +3912,10 @@ class ImportClient
         $skipped_pending_count = 0;
         $skipped_pending_bytes = 0;
 
-        // Count pending in the main download list
+        // Count pending in the main fetch list
         $fetch_offset = $this->import_state()->fetch->offset ?? 0;
-        if (is_file($download_list)) {
-            $handle = fopen($download_list, "r");
+        if (is_file($fetch_list)) {
+            $handle = fopen($fetch_list, "r");
             if ($handle) {
                 // Seek past already-downloaded entries. The fetch offset
                 // is the byte position where the next batch starts, so
@@ -3937,9 +3944,9 @@ class ImportClient
             }
         }
 
-        // Count pending in the skipped download list (uploads filtered out by --filter=essential-files)
+        // Count pending in the skipped fetch list (uploads filtered out by --filter=essential-files)
         $skipped_offset = $this->import_state()->fetch_skipped->offset ?? 0;
-        $skipped_list = $this->skipped_download_list_file;
+        $skipped_list = $this->skipped_fetch_list_file;
         if (is_file($skipped_list)) {
             $handle = fopen($skipped_list, "r");
             if ($handle) {
@@ -4050,9 +4057,9 @@ class ImportClient
      * the applier writes the files the target server needs to fulfill those
      * requirements.
      *
-     * The effective fs root is --fs-root + the remote site's document_root
+     * The local document root is --fs-root + the remote site's document_root
      * prefix (from preflight). For example, if the remote document_root is
-     * /srv/htdocs and --fs-root is ./files, the effective fs root is
+     * /srv/htdocs and --fs-root is ./files, the local document root is
      * ./files/srv/htdocs. If the site was flattened with flat-docroot,
      * pass the flattened directory as --fs-root directly and the prefix
      * is not applied.
@@ -4085,19 +4092,19 @@ class ImportClient
         $preflight_data = $entry["data"];
         $webhost = $this->import_state()->webhost ?? "other";
 
-        // Resolve the effective fs root from either --flat-document-root
+        // Resolve the local document root from either --flat-document-root
         // (used as-is) or --fs-root (prefixed with the remote document_root).
         // Mutual exclusion is already enforced at the CLI level.
         $flat_document_root = $options["flat_document_root"] ?? null;
 
         if (!empty($flat_document_root)) {
             // --flat-document-root: used directly as the web root.
-            $effective_fs_root = rtrim($flat_document_root, "/");
+            $raw_local_document_root = rtrim($flat_document_root, "/");
         } else {
             // --fs-root: the raw download directory. The remote site's
             // document_root tells us where the web root lived on the
             // source server. Files are downloaded preserving the full
-            // remote path, so the effective fs root is --fs-root +
+            // remote absolute path, so the local document root is --fs-root +
             // document_root.
             $remote_doc_root = $preflight_data["runtime"]["document_root"] ?? "";
             if (is_string($remote_doc_root)) {
@@ -4107,14 +4114,14 @@ class ImportClient
             }
 
             if ($remote_doc_root !== "") {
-                $effective_fs_root = $this->fs_root . $remote_doc_root;
+                $raw_local_document_root = $this->filesystem_root . $remote_doc_root;
             } else {
-                $effective_fs_root = $this->fs_root;
+                $raw_local_document_root = $this->filesystem_root;
             }
 
-            if (!is_dir($effective_fs_root)) {
+            if (!is_dir($raw_local_document_root)) {
                 throw new RuntimeException(
-                    "Effective fs root does not exist: {$effective_fs_root}\n" .
+                    "Local document root does not exist: {$raw_local_document_root}\n" .
                     "The remote document_root was: {$remote_doc_root}\n" .
                     "If you used flat-docroot, pass the flattened directory " .
                     "with --flat-document-root instead of --fs-root."
@@ -4124,7 +4131,7 @@ class ImportClient
 
         // Resolve to absolute paths so generated files work from any cwd.
         $abs_output_dir = realpath($output_dir) ?: $output_dir;
-        $abs_fs_root = realpath($effective_fs_root) ?: $effective_fs_root;
+        $local_document_root = realpath($raw_local_document_root) ?: $raw_local_document_root;
 
         if (!is_dir($abs_output_dir)) {
             if (!mkdir($abs_output_dir, 0755, true)) {
@@ -4205,27 +4212,27 @@ class ImportClient
         }
 
         // Resolve the path to WordPress's index.php. On standard hosts it
-        // lives in the fs root. On WPCloud the ABSPATH is a different
+        // lives in the filesystem root. On WPCloud the ABSPATH is a different
         // directory (e.g. /wordpress/core/X.Y.Z) which maps to
-        // download_root + abspath when using --fs-root.
+        // filesystem root + ABSPATH when using --fs-root.
         $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
         $abspath = rtrim($paths_urls["abspath"] ?? "", "/");
         if (!empty($flat_document_root)) {
             // Flattened layout: index.php is at the top level.
-            $wordpress_index = $abs_fs_root . '/index.php';
+            $wordpress_index_php = $local_document_root . '/index.php';
         } elseif ($abspath !== "") {
             // Raw download: ABSPATH is relative to the download root,
-            // not the effective fs root (which is download_root + document_root).
-            $wordpress_index = realpath($this->fs_root . $abspath . '/index.php') ?: '';
+            // not the local document root (which is filesystem root + document root).
+            $wordpress_index_php = realpath($this->filesystem_root . $abspath . '/index.php') ?: '';
         } else {
-            $wordpress_index = $abs_fs_root . '/index.php';
+            $wordpress_index_php = $local_document_root . '/index.php';
         }
 
         // Step 2: Runtime applier writes server-specific config files.
         $applier = runtime_applier_for($runtime);
         $applier_options = [];
-        if ($wordpress_index !== '') {
-            $applier_options['wordpress_index'] = $wordpress_index;
+        if ($wordpress_index_php !== '') {
+            $applier_options['wordpress_index_php'] = $wordpress_index_php;
         }
         if ($host !== null) {
             $applier_options['host'] = $host;
@@ -4247,11 +4254,11 @@ class ImportClient
             // Resolve {fs-root} in db_dir now that we have the real path.
             $manifest->sqlite['db_dir'] = resolve_runtime_placeholders(
                 $manifest->sqlite['db_dir'],
-                $abs_fs_root,
+                $local_document_root,
             );
         }
 
-        $summary = $applier->apply($manifest, $abs_fs_root, $abs_output_dir, $applier_options);
+        $summary = $applier->apply($manifest, $local_document_root, $abs_output_dir, $applier_options);
 
         if ($manifest->sqlite !== null) {
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
@@ -4262,7 +4269,7 @@ class ImportClient
         // depend on infrastructure (Memcached servers, multisite APIs)
         // not available outside the original hosting environment.
         foreach ($manifest->paths_to_remove as $rel_path) {
-            $full_path = $abs_fs_root . '/' . ltrim($rel_path, '/');
+            $full_path = $local_document_root . '/' . ltrim($rel_path, '/');
             if (!file_exists($full_path) && !is_link($full_path)) {
                 continue;
             }
@@ -4349,7 +4356,7 @@ class ImportClient
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
             rtrim($state_dir, "/") . "/.import-state.json";
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
-            rtrim($state_dir, "/") . "/.import-download-list-skipped.jsonl";
+            rtrim($state_dir, "/") . "/.import-fetch-list-skipped.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
@@ -4371,8 +4378,8 @@ class ImportClient
     private function should_enable_remote_upload_proxy(): bool
     {
         if (
-            file_exists($this->skipped_download_list_file) &&
-            filesize($this->skipped_download_list_file) > 0
+            file_exists($this->skipped_fetch_list_file) &&
+            filesize($this->skipped_fetch_list_file) > 0
         ) {
             return true;
         }
@@ -4416,9 +4423,9 @@ class ImportClient
      *
      * Creates a directory at the specified --flatten-to path that mirrors
      * a vanilla WordPress installation layout by symlinking entries from
-     * the import fs root. Uses preflight data (paths_urls) to determine
+     * the filesystem root. Uses preflight data (paths_urls) to determine
      * where each WordPress component actually lives, rather than blindly
-     * scanning fs root top-level entries.
+     * scanning filesystem root top-level entries.
      *
      * This is essential when the source site uses a non-standard layout
      * (e.g. WP Cloud with ABSPATH=/srv/htdocs and WP_CONTENT_DIR=/tmp/__wp__/wp-content)
@@ -4441,10 +4448,10 @@ class ImportClient
         $flatten_to = rtrim($flatten_to, "/");
         $force = $options["force"] ?? false;
 
-        // Ensure the fs root exists
-        if (!is_dir($this->fs_root)) {
+        // Ensure the filesystem root exists
+        if (!is_dir($this->filesystem_root)) {
             throw new RuntimeException(
-                "Fs root does not exist: {$this->fs_root}",
+                "Fs root does not exist: {$this->filesystem_root}",
             );
         }
 
@@ -4489,32 +4496,32 @@ class ImportClient
             );
         }
 
-        // Map remote paths to local paths within fs root
-        $local_abspath = $this->fs_root . $abspath;
+        // Map remote absolute paths to local absolute paths within filesystem root
+        $local_abspath = $this->filesystem_root . $abspath;
         if (!is_dir($local_abspath)) {
             throw new RuntimeException(
-                "WordPress ABSPATH directory not found in fs root: {$local_abspath} " .
+                "WordPress ABSPATH directory not found in filesystem root: {$local_abspath} " .
                     "(remote ABSPATH: {$abspath}). Has the file sync completed?",
             );
         }
 
         $local_wp_admin = $wp_admin_path !== null
-            ? $this->fs_root . $wp_admin_path
+            ? $this->filesystem_root . $wp_admin_path
             : null;
         $local_wp_includes = $wp_includes_path !== null
-            ? $this->fs_root . $wp_includes_path
+            ? $this->filesystem_root . $wp_includes_path
             : null;
         $local_content_dir = $content_dir !== null
-            ? $this->fs_root . $content_dir
+            ? $this->filesystem_root . $content_dir
             : null;
         $local_plugins_dir = $plugins_dir !== null
-            ? $this->fs_root . $plugins_dir
+            ? $this->filesystem_root . $plugins_dir
             : null;
         $local_mu_plugins_dir = $mu_plugins_dir !== null
-            ? $this->fs_root . $mu_plugins_dir
+            ? $this->filesystem_root . $mu_plugins_dir
             : null;
         $local_uploads_basedir = $uploads_basedir !== null
-            ? $this->fs_root . $uploads_basedir
+            ? $this->filesystem_root . $uploads_basedir
             : null;
 
         // Determine which components are "detached" — located outside
@@ -4654,7 +4661,7 @@ class ImportClient
         $wp_config_in_flatten = $flatten_to . "/wp-config.php";
         if (!file_exists($wp_config_in_flatten)) {
             $parent_of_abspath = dirname($abspath);
-            $local_parent_wp_config = $this->fs_root . $parent_of_abspath . "/wp-config.php";
+            $local_parent_wp_config = $this->filesystem_root . $parent_of_abspath . "/wp-config.php";
             if (file_exists($local_parent_wp_config)) {
                 $this->flatten_place_symlink(
                     $local_parent_wp_config,
@@ -4767,7 +4774,7 @@ class ImportClient
                 );
             } else {
                 $this->audit_log(
-                    "FLAT-DOCUMENT-ROOT | Warning: content_dir not found in fs root: " .
+                    "FLAT-DOCUMENT-ROOT | Warning: content_dir not found in filesystem root: " .
                         "{$local_content_dir} (remote: {$content_dir})",
                     true,
                 );
@@ -4787,7 +4794,7 @@ class ImportClient
         $result = [
             "status" => "complete",
             "flatten_to" => $flatten_to,
-            "fs_root" => $this->fs_root,
+            "fs_root" => $this->filesystem_root,
             "abspath" => $abspath,
             "wp_admin_path" => $wp_admin_path,
             "wp_includes_path" => $wp_includes_path,
@@ -5020,7 +5027,7 @@ class ImportClient
             return;
         }
 
-        $parsed_url = parse_url($this->remote_url);
+        $parsed_url = parse_url($this->remote_reprint_api_url);
         if (!$parsed_url || !isset($parsed_url['scheme'], $parsed_url['host'])) {
             throw new InvalidArgumentException(
                 "--new-site-url requires a valid export URL to derive the source site origin.",
@@ -5928,7 +5935,7 @@ class ImportClient
         $this->import_state()->active_resumable_command->command_name = "db-index";
         $this->save_state($this->state);
 
-        $this->download_db_index();
+        $this->fetch_database_index();
         if (
             $this->import_state()->active_resumable_command->completion_state ===
             "partial"
@@ -5965,12 +5972,12 @@ class ImportClient
      * @param array|null $post_data Optional POST data
      * @param string|null $cursor Cursor for resumption within the current batch
      */
-    private function download_file_fetch(
+    private function fetch_file_batch(
         ?array $post_data,
         ?string $cursor,
         string $state_key = "fetch"
     ): bool {
-        $fetch_state = $this->get_download_list_fetch_state($state_key);
+        $fetch_state = $this->get_fetch_list_progress_state($state_key);
         $cursor = $cursor ?? $fetch_state->cursor;
         $complete = false;
         $chunks_since_save = 0;
@@ -6001,7 +6008,7 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
-        // Always send directory[] – see comment in download_remote_index().
+        // Always send directory[] – see comment in fetch_remote_index().
         $export_dirs = $this->get_export_directories();
         if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
@@ -6141,7 +6148,7 @@ class ImportClient
              * chunk. The part cursor points past the complete chunk, so saving it
              * early would make resume skip the missing suffix.
              *
-             * On the closing callback, flush the file and index-update WAL
+             * On the closing callback, flush the file and local index WAL
              * before storing the cursor in .import-state.json. If the response
              * stops first, state retains the preceding cursor; resume truncates
              * the later bytes and requests the multipart part again.
@@ -6173,12 +6180,12 @@ class ImportClient
                         $this->import_state()->current_file_bytes = null;
                     }
                     if (
-                        $this->index_update_wal_handle
-                        && !fflush($this->index_update_wal_handle)
+                        $this->local_index_wal_handle
+                        && !fflush($this->local_index_wal_handle)
                     ) {
-                        throw new RuntimeException('Failed to flush the index-update WAL.');
+                        throw new RuntimeException('Failed to flush the local index WAL.');
                     }
-                    $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
+                    $this->get_fetch_list_progress_state($state_key)->cursor = $cursor;
                     $this->save_state($this->state);
                     $chunks_since_save = 0;
                 }
@@ -6201,7 +6208,7 @@ class ImportClient
             // the last complete part; the next invocation truncates any later
             // bytes before resuming.
             $durable_cursor =
-                $this->get_download_list_fetch_state($state_key)->cursor;
+                $this->get_fetch_list_progress_state($state_key)->cursor;
             $this->assert_can_resume_after_interrupted_response(
                 "file_fetch",
                 $cursor_before,
@@ -6213,7 +6220,7 @@ class ImportClient
                 fclose($context->file_handle);
                 $context->file_handle = null;
             }
-            $this->apply_index_update_wal();
+            $this->apply_local_index_wal();
             $this->import_state()->active_resumable_command->completion_state = "partial";
             $this->save_state($this->state);
             return false;
@@ -6226,8 +6233,8 @@ class ImportClient
             $wall_time,
             $context->response_stats ?? [],
         );
-        $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
-        $this->apply_index_update_wal();
+        $this->get_fetch_list_progress_state($state_key)->cursor = $cursor;
+        $this->apply_local_index_wal();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
             if (!fflush($context->file_handle)) {
@@ -6249,7 +6256,7 @@ class ImportClient
     /**
      * Download the remote index stream and write to disk.
      */
-    private function download_remote_index(?string $list_dir_override = null): bool
+    private function fetch_remote_index(?string $list_dir_override = null): bool
     {
         $cursor = $this->import_state()->index->cursor;
 
@@ -6491,7 +6498,7 @@ class ImportClient
     }
 
     /**
-     * Diff local index against remote index and build download list.
+     * Diff local index against remote index and build fetch list.
      */
     private function diff_indexes_and_build_fetch_list(): bool
     {
@@ -6501,20 +6508,20 @@ class ImportClient
 
         $diff = $this->import_state()->diff;
         $remote_offset = $diff->remote_offset;
-        $local_after = $diff->local_after;
-        $download_mode = $remote_offset > 0 ? "a" : "w";
-        if ($download_mode === "w") {
+        $last_local_index_entry_path = $diff->local_after;
+        $fetch_list_mode = $remote_offset > 0 ? "a" : "w";
+        if ($fetch_list_mode === "w") {
             $this->audit_log(
-                "FILE CREATE | {$this->download_list_file} | building download list",
+                "FILE CREATE | {$this->fetch_list_file} | building fetch list",
             );
         } else {
             $this->audit_log(
-                "FILE APPEND | {$this->download_list_file} | resuming download list build",
+                "FILE APPEND | {$this->fetch_list_file} | resuming fetch list build",
             );
         }
-        $download_handle = fopen($this->download_list_file, $download_mode);
-        if (!$download_handle) {
-            throw new RuntimeException("Failed to open download list file");
+        $fetch_list_handle = fopen($this->fetch_list_file, $fetch_list_mode);
+        if (!$fetch_list_handle) {
+            throw new RuntimeException("Failed to open fetch list file");
         }
 
         // When --filter=essential-files is active, uploads go to a separate
@@ -6522,19 +6529,19 @@ class ImportClient
         $skipped_handle = null;
         $uploads_basedir = null;
         if ($this->filter === "essential-files") {
-            if ($download_mode === "w") {
+            if ($fetch_list_mode === "w") {
                 $this->audit_log(
-                    "FILE CREATE | {$this->skipped_download_list_file} | building skipped download list (uploads)",
+                    "FILE CREATE | {$this->skipped_fetch_list_file} | building skipped fetch list (uploads)",
                 );
             } else {
                 $this->audit_log(
-                    "FILE APPEND | {$this->skipped_download_list_file} | resuming skipped download list build",
+                    "FILE APPEND | {$this->skipped_fetch_list_file} | resuming skipped fetch list build",
                 );
             }
-            $skipped_handle = fopen($this->skipped_download_list_file, $download_mode);
+            $skipped_handle = fopen($this->skipped_fetch_list_file, $fetch_list_mode);
             if (!$skipped_handle) {
-                fclose($download_handle);
-                throw new RuntimeException("Failed to open skipped download list file");
+                fclose($fetch_list_handle);
+                throw new RuntimeException("Failed to open skipped fetch list file");
             }
             $uploads_basedir = $this->get_uploads_basedir();
             $this->audit_log(
@@ -6542,31 +6549,32 @@ class ImportClient
             );
         }
 
-        $remote_handle = fopen($this->remote_index_file, "r");
-        if (!$remote_handle) {
-            fclose($download_handle);
+        $remote_index_handle = fopen($this->remote_index_file, "r");
+        if (!$remote_index_handle) {
+            fclose($fetch_list_handle);
             throw new RuntimeException("Failed to open remote index file");
         }
         if ($remote_offset > 0) {
-            fseek($remote_handle, $remote_offset);
+            fseek($remote_index_handle, $remote_offset);
         }
 
-        $local_handle = file_exists($this->index_file)
-            ? fopen($this->index_file, "r")
+        $local_index_handle = file_exists($this->local_index_file)
+            ? fopen($this->local_index_file, "r")
             : null;
-        $local = $this->read_index_line($local_handle);
-        if ($local_after) {
+        // Local index entries retain remote absolute paths as the merge key.
+        $local_index_entry = $this->read_index_line($local_index_handle);
+        if ($last_local_index_entry_path) {
             while (
-                $local !== null &&
-                strcmp($local["path"], $local_after) <= 0
+                $local_index_entry !== null &&
+                strcmp($local_index_entry["path"], $last_local_index_entry_path) <= 0
             ) {
-                $local = $this->read_index_line($local_handle);
+                $local_index_entry = $this->read_index_line($local_index_handle);
             }
         }
-        $this->open_index_update_wal();
+        $this->open_local_index_wal();
         $processed = 0;
 
-        while (($line = fgets($remote_handle)) !== false) {
+        while (($line = fgets($remote_index_handle)) !== false) {
             if ($this->shutdown_requested) {
                 break;
             }
@@ -6575,98 +6583,125 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $remote_offset = ftell($remote_handle);
-            $remote = $this->parse_index_line($line);
-            if (!$remote) {
+            $remote_offset = ftell($remote_index_handle);
+            $remote_index_entry = $this->parse_index_line($line);
+            if (!$remote_index_entry) {
                 continue;
             }
 
             while (
-                $local !== null &&
-                strcmp($local["path"], $remote["path"]) < 0
+                $local_index_entry !== null &&
+                strcmp($local_index_entry["path"], $remote_index_entry["path"]) < 0
             ) {
-                // When --only file prefixes are active, only delete local files that fall under those prefixes.
                 // The local files index ends up being a union across files-pull --only runs.
-                if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                    $this->delete_local_file_path($local["path"]);
-                    $this->delete_index_entry($local["path"]);
+                if ($this->is_selected_for_pulling($local_index_entry["path"])) {
+                    $remote_absolute_path = $local_index_entry["path"];
+                    $this->apply_remote_deletion_locally($remote_absolute_path);
+                    $this->delete_index_entry($remote_absolute_path);
                 }
-                $local_after = $local["path"];
-                $local = $this->read_index_line($local_handle);
+                $last_local_index_entry_path = $local_index_entry["path"];
+                $local_index_entry = $this->read_index_line($local_index_handle);
             }
 
-            if ($local !== null && $local["path"] === $remote["path"]) {
+            if ($local_index_entry !== null && $local_index_entry["path"] === $remote_index_entry["path"]) {
                 if (
-                    $local["ctime"] !== $remote["ctime"] ||
-                    $local["size"] !== $remote["size"] ||
-                    $local["type"] !== $remote["type"]
+                    $local_index_entry["ctime"] !== $remote_index_entry["ctime"] ||
+                    $local_index_entry["size"] !== $remote_index_entry["size"] ||
+                    $local_index_entry["type"] !== $remote_index_entry["type"]
                 ) {
                     // File is in both indexes but changed on the remote.
                     // Always re-download — this file is in our local index,
                     // meaning we synced it before; preserve-local does not
                     // protect files we own.
-                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
+                    $selected_fetch_list_handle = (
+                        $skipped_handle !== null &&
+                        (
+                            $uploads_basedir !== null
+                                ? path_is_within_root(
+                                    $remote_index_entry["path"],
+                                    $uploads_basedir
+                                )
+                                : strpos(
+                                    $remote_index_entry["path"],
+                                    "wp-content/uploads/"
+                                ) !== false
+                        )
+                    )
                         ? $skipped_handle
-                        : $download_handle;
-                    $this->append_download_list(
-                        $remote["path"],
-                        $target_handle,
+                        : $fetch_list_handle;
+                    $this->append_to_fetch_list(
+                        $remote_index_entry["path"],
+                        $selected_fetch_list_handle,
                     );
                 }
-                $local_after = $local["path"];
-                $local = $this->read_index_line($local_handle);
+                $last_local_index_entry_path = $local_index_entry["path"];
+                $local_index_entry = $this->read_index_line($local_index_handle);
             } elseif (
-                $local === null ||
-                strcmp($local["path"], $remote["path"]) > 0
+                $local_index_entry === null ||
+                strcmp($local_index_entry["path"], $remote_index_entry["path"]) > 0
             ) {
-                $skip_reason = $this->should_skip_for_preserve_local($remote["path"]);
+                $skip_reason = $this->should_skip_for_preserve_local($remote_index_entry["path"]);
                 if ($skip_reason) {
                     $this->audit_log($skip_reason, true);
-                    $this->emit_skip_progress($remote["path"]);
+                    $this->emit_skip_progress($remote_index_entry["path"]);
                 } else {
-                    $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
+                    $selected_fetch_list_handle = (
+                        $skipped_handle !== null &&
+                        (
+                            $uploads_basedir !== null
+                                ? path_is_within_root(
+                                    $remote_index_entry["path"],
+                                    $uploads_basedir
+                                )
+                                : strpos(
+                                    $remote_index_entry["path"],
+                                    "wp-content/uploads/"
+                                ) !== false
+                        )
+                    )
                         ? $skipped_handle
-                        : $download_handle;
-                    $this->append_download_list($remote["path"], $target_handle);
+                        : $fetch_list_handle;
+                    $this->append_to_fetch_list($remote_index_entry["path"], $selected_fetch_list_handle);
                 }
             }
 
             $processed++;
             if ($processed % 200 === 0) {
                 $this->import_state()->diff->remote_offset = $remote_offset;
-                $this->import_state()->diff->local_after = $local_after;
+                $this->import_state()->diff->local_after = $last_local_index_entry_path;
                 if (
-                    $this->index_update_wal_handle
-                    && !fflush($this->index_update_wal_handle)
+                    $this->local_index_wal_handle
+                    && !fflush($this->local_index_wal_handle)
                 ) {
-                    throw new RuntimeException('Failed to flush the index-update WAL.');
+                    throw new RuntimeException('Failed to flush the local index WAL.');
                 }
                 $this->save_state($this->state);
                 $this->progress->tick_spinner();
             }
         }
 
-        while ($local !== null) {
-            if ($this->is_file_path_selected_by_pull_only_files($local["path"])) {
-                $this->delete_local_file_path($local["path"]);
-                $this->delete_index_entry($local["path"]);
+        while ($local_index_entry !== null) {
+            if ($this->is_selected_for_pulling($local_index_entry["path"])) {
+                $remote_absolute_path = $local_index_entry["path"];
+                $this->apply_remote_deletion_locally($remote_absolute_path);
+                $this->delete_index_entry($remote_absolute_path);
             }
-            $local_after = $local["path"];
-            $local = $this->read_index_line($local_handle);
+            $last_local_index_entry_path = $local_index_entry["path"];
+            $local_index_entry = $this->read_index_line($local_index_handle);
         }
 
-        if ($local_handle) {
-            fclose($local_handle);
+        if ($local_index_handle) {
+            fclose($local_index_handle);
         }
-        fclose($remote_handle);
-        fclose($download_handle);
+        fclose($remote_index_handle);
+        fclose($fetch_list_handle);
         if ($skipped_handle !== null) {
             fclose($skipped_handle);
         }
 
         $this->import_state()->diff->remote_offset = $remote_offset;
-        $this->import_state()->diff->local_after = $local_after;
-        $this->apply_index_update_wal();
+        $this->import_state()->diff->local_after = $last_local_index_entry_path;
+        $this->apply_local_index_wal();
         $this->save_state($this->state);
 
         return !$this->shutdown_requested;
@@ -6675,7 +6710,7 @@ class ImportClient
     /**
      * Download files from a prepared list.
      *
-     * @param string $list_file   Path to the JSONL download list to process.
+     * @param string $list_file   Path to the JSONL fetch list to process.
      * @param string $state_key   Key in $this->state that holds fetch progress
      *                            (e.g. "fetch" or "fetch_skipped").
      */
@@ -6711,7 +6746,7 @@ class ImportClient
         return $count;
     }
 
-    private function download_files_from_list(
+    private function fetch_files_from_list(
         string $list_file,
         string $state_key
     ): bool {
@@ -6723,17 +6758,17 @@ class ImportClient
             return true;
         }
 
-        // Compute download list counters once at the start of each list.
+        // Compute fetch list counters once at the start of each list.
         // These survive across batches within one invocation and are
         // recomputed on restart from the state file's byte offset.
-        if ($this->download_list_total === null) {
-            $offset = $this->get_download_list_fetch_state($state_key)->offset;
-            $this->download_list_total = $this->count_newlines($list_file);
-            $this->download_list_done = $offset > 0
+        if ($this->fetch_list_total === null) {
+            $offset = $this->get_fetch_list_progress_state($state_key)->offset;
+            $this->fetch_list_total = $this->count_newlines($list_file);
+            $this->fetch_list_done = $offset > 0
                 ? $this->count_newlines($list_file, $offset)
                 : 0;
         }
-        $fetch_state = $this->get_download_list_fetch_state($state_key);
+        $fetch_state = $this->get_fetch_list_progress_state($state_key);
         $batch_file = $fetch_state->batch_file;
         $batch_offset = $fetch_state->offset;
         $next_offset = $fetch_state->next_offset;
@@ -6751,7 +6786,7 @@ class ImportClient
             $next_offset = $batch["next_offset"];
             $batch_entries = $batch["entries"];
             $cursor = null;
-            $this->set_download_list_fetch_state($state_key, DownloadListFetchProgressState::from_array([
+            $this->set_fetch_list_progress_state($state_key, FetchListProgressState::from_array([
                 "offset" => $batch_offset,
                 "next_offset" => $next_offset,
                 "batch_file" => $batch_file,
@@ -6769,7 +6804,7 @@ class ImportClient
             ),
         ];
 
-        $complete = $this->download_file_fetch($post_data, $cursor, $state_key);
+        $complete = $this->fetch_file_batch($post_data, $cursor, $state_key);
         if (!$complete) {
             return false;
         }
@@ -6782,14 +6817,14 @@ class ImportClient
         // Advance the done counter by the known batch size and reset
         // the per-batch file counter. files_imported counted files within
         // this batch; now that the batch is complete, those files are
-        // accounted for in download_list_done.
-        if ($this->download_list_done !== null) {
-            $this->download_list_done += $batch_entries;
+        // accounted for in fetch_list_done.
+        if ($this->fetch_list_done !== null) {
+            $this->fetch_list_done += $batch_entries;
         }
         $this->import_state()->files_pull_summary->files_pulled += $batch_entries;
         $this->files_imported = 0;
 
-        $this->set_download_list_fetch_state($state_key, DownloadListFetchProgressState::from_array([
+        $this->set_fetch_list_progress_state($state_key, FetchListProgressState::from_array([
             "offset" => $next_offset,
             "next_offset" => $next_offset,
             "batch_file" => null,
@@ -6800,7 +6835,7 @@ class ImportClient
         return $next_offset >= filesize($list_file);
     }
 
-    private function get_download_list_fetch_state(string $state_key): DownloadListFetchProgressState
+    private function get_fetch_list_progress_state(string $state_key): FetchListProgressState
     {
         if ($state_key === "fetch") {
             return $this->import_state()->fetch;
@@ -6811,7 +6846,7 @@ class ImportClient
         throw new InvalidArgumentException("Unknown fetch state key: {$state_key}");
     }
 
-    private function set_download_list_fetch_state(string $state_key, DownloadListFetchProgressState $state): void
+    private function set_fetch_list_progress_state(string $state_key, FetchListProgressState $state): void
     {
         if ($state_key === "fetch") {
             $this->import_state()->fetch = $state;
@@ -6827,7 +6862,7 @@ class ImportClient
     /**
      * Builds a JSON batch file listing the next set of paths to download.
      *
-     * Reads from the download list (.import-download-list.jsonl) starting at
+     * Reads from the fetch list (.import-fetch-list.jsonl) starting at
      * $offset, accumulating paths into a JSON array until the batch approaches
      * 80% of the server's max request size.  Always includes at least one path,
      * even if it alone exceeds the limit.
@@ -6835,8 +6870,8 @@ class ImportClient
      * The batch file is written to a temp file and intended to be uploaded as
      * the request body for the file_fetch endpoint.
      *
-     * @param string $list_file Path to the JSONL download list.
-     * @param int    $offset    Byte offset into the download list file.
+     * @param string $list_file Path to the JSONL fetch list.
+     * @param int    $offset    Byte offset into the fetch list file.
      * @return array|null {
      *     Prepared fetch batch, or null if no paths remain.
      *
@@ -6855,10 +6890,10 @@ class ImportClient
         $max_request = $this->get_max_request_bytes();
         $limit = (int) max(256 * 1024, $max_request * 0.8);
 
-        // Open the download list and seek to where the previous batch left off.
+        // Open the fetch list and seek to where the previous batch left off.
         $handle = fopen($list_file, "r");
         if (!$handle) {
-            throw new RuntimeException("Failed to open download list file");
+            throw new RuntimeException("Failed to open fetch list file");
         }
 
         if ($offset > 0) {
@@ -6880,9 +6915,9 @@ class ImportClient
             throw new RuntimeException("Failed to open fetch batch file");
         }
 
-        // Read lines from the download list (one JSON entry per line) and
+        // Read lines from the fetch list (one JSON entry per line) and
         // accumulate them into the JSON array until we approach the size limit.
-        // The download list supports two formats:
+        // The fetch list supports two formats:
         //   - A bare JSON string:   "/path/to/file"
         //   - A JSON object:        {"path": "<base64-encoded path>"}
         $bytes = 0;
@@ -6956,7 +6991,7 @@ class ImportClient
         fclose($handle);
         fclose($out);
 
-        // An empty batch (just "[]") means we've exhausted the download list.
+        // An empty batch (just "[]") means we've exhausted the fetch list.
         if ($bytes <= 2) {
             @unlink($tmp);
             return null;
@@ -6991,8 +7026,6 @@ class ImportClient
     /**
      * Return the uploads basedir from preflight data (e.g. "/wp-content/uploads").
      *
-     * Falls back to a heuristic pattern match if the preflight doesn't contain
-     * explicit uploads path information.
      */
     private function get_uploads_basedir(): ?string
     {
@@ -7004,28 +7037,13 @@ class ImportClient
         if (!is_string($basedir) || $basedir === "") {
             return null;
         }
-        return rtrim($basedir, "/") . "/";
+        return rtrim($basedir, "/");
     }
 
     /**
-     * Check whether a remote path belongs to the uploads directory.
-     *
-     * Uses the preflight-reported uploads basedir when available, otherwise
-     * falls back to matching "wp-content/uploads/" anywhere in the path.
+     * Append a path to the fetch list file.
      */
-    private function is_uploads_path(string $path, ?string $uploads_basedir): bool
-    {
-        if ($uploads_basedir !== null) {
-            return strpos($path, $uploads_basedir) !== false;
-        }
-        // Fallback: match the conventional WordPress uploads path
-        return strpos($path, "wp-content/uploads/") !== false;
-    }
-
-    /**
-     * Append a path to the download list file.
-     */
-    private function append_download_list(string $path, $handle): void
+    private function append_to_fetch_list(string $path, $handle): void
     {
         $line = json_encode(
             ["path" => base64_encode($path)],
@@ -7034,57 +7052,59 @@ class ImportClient
         if ($line !== false) {
             fwrite($handle, $line . "\n");
         }
-        $this->audit_log("Added to the download list: {$path}", false);
+        $this->audit_log("Added to the fetch list: {$path}", false);
     }
 
     /**
-     * Delete a local file path safely under the fs root.
+     * Remove the local filesystem entry for a deletion reported by the remote index.
      */
-    private function delete_local_file_path(string $path): void
+    private function apply_remote_deletion_locally(string $remote_absolute_path): void
     {
-        if ($path === "") {
+        if ($remote_absolute_path === "") {
             return;
         }
         try {
-            $local_path = $this->remote_path_to_local_path_within_import_root($path);
+            $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
+                $remote_absolute_path
+            );
         } catch (RuntimeException $e) {
             $this->audit_log(
-                "Security: refusing to delete invalid path '{$path}': " . $e->getMessage(),
+                "Security: refusing to delete invalid path '{$remote_absolute_path}': " . $e->getMessage(),
                 true,
             );
             return;
         }
-        if (!file_exists($local_path) && !is_link($local_path)) {
+        if (!file_exists($local_absolute_path) && !is_link($local_absolute_path)) {
             return;
         }
 
-        if ($this->remove_local_path_without_following_symlinks($local_path)) {
-            $this->audit_log("Deleted: {$path}", false);
+        if ($this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)) {
+            $this->audit_log("Deleted: {$remote_absolute_path}", false);
             return;
         }
 
-        $this->audit_log("Failed to delete: {$path}", true);
+        $this->audit_log("Failed to delete: {$remote_absolute_path}", true);
     }
 
     /**
-     * Remove a local path recursively without traversing symlink targets.
+     * Remove a local absolute path recursively without traversing symlink targets.
      *
      * Symlinks are always unlinked as links. Directories are traversed
      * depth-first.
      */
-    private function remove_local_path_without_following_symlinks(
-        string $local_path
+    private function remove_local_absolute_path_without_following_symlinks(
+        string $local_absolute_path
     ): bool {
-        if (!file_exists($local_path) && !is_link($local_path)) {
+        if (!file_exists($local_absolute_path) && !is_link($local_absolute_path)) {
             return true;
         }
 
-        if (is_link($local_path) || is_file($local_path)) {
-            return true === @unlink($local_path);
+        if (is_link($local_absolute_path) || is_file($local_absolute_path)) {
+            return true === @unlink($local_absolute_path);
         }
 
-        if (is_dir($local_path)) {
-            $entries = @scandir($local_path);
+        if (is_dir($local_absolute_path)) {
+            $entries = @scandir($local_absolute_path);
             if ($entries === false) {
                 return false;
             }
@@ -7093,17 +7113,17 @@ class ImportClient
                     continue;
                 }
                 if (
-                    !$this->remove_local_path_without_following_symlinks(
-                        $local_path . "/" . $entry
+                    !$this->remove_local_absolute_path_without_following_symlinks(
+                        $local_absolute_path . "/" . $entry
                     )
                 ) {
                     return false;
                 }
             }
-            return true === @rmdir($local_path);
+            return true === @rmdir($local_absolute_path);
         }
 
-        return true === @unlink($local_path);
+        return true === @unlink($local_absolute_path);
     }
 
     /**
@@ -7136,48 +7156,48 @@ class ImportClient
         ];
     }
 
-    /** Opens the current index-update WAL for append. */
-    private function open_index_update_wal(): void
+    /** Opens the current local index WAL for append. */
+    private function open_local_index_wal(): void
     {
-        if ($this->index_update_wal_handle) {
+        if ($this->local_index_wal_handle) {
             return;
         }
-        $is_new = !is_file($this->index_update_wal_path);
-        $this->index_update_wal_handle = fopen($this->index_update_wal_path, "a");
-        if (!$this->index_update_wal_handle) {
-            throw new RuntimeException("Failed to open the index-update WAL.");
+        $is_new = !is_file($this->local_index_wal_path);
+        $this->local_index_wal_handle = fopen($this->local_index_wal_path, "a");
+        if (!$this->local_index_wal_handle) {
+            throw new RuntimeException("Failed to open the local index WAL.");
         }
         if ($is_new) {
             $this->audit_log(
-                "FILE CREATE | {$this->index_update_wal_path} | index-update WAL",
+                "FILE CREATE | {$this->local_index_wal_path} | local index WAL",
             );
         }
-        $this->index_update_wal_record_count = 0;
-        $this->last_update_path = null;
-        $this->last_update_delete = null;
-        $this->last_update_ctime = null;
-        $this->last_update_size = null;
-        $this->last_update_type = null;
+        $this->local_index_wal_record_count = 0;
+        $this->last_local_index_wal_path = null;
+        $this->last_local_index_wal_deletion = null;
+        $this->last_local_index_wal_ctime = null;
+        $this->last_local_index_wal_size = null;
+        $this->last_local_index_wal_type = null;
     }
 
     /**
-     * Record a file upsert in the index-update WAL.
+     * Record a file upsert in the local index WAL.
      */
-    private function record_index_update_file(
+    private function record_local_index_wal_file(
         string $path,
         int $ctime,
         int $size,
         string $type
     ): void {
-        if (!$this->index_update_wal_handle) {
-            $this->open_index_update_wal();
+        if (!$this->local_index_wal_handle) {
+            $this->open_local_index_wal();
         }
         if (
-            $this->last_update_path === $path &&
-            $this->last_update_delete === false &&
-            $this->last_update_ctime === $ctime &&
-            $this->last_update_size === $size &&
-            $this->last_update_type === $type
+            $this->last_local_index_wal_path === $path &&
+            $this->last_local_index_wal_deletion === false &&
+            $this->last_local_index_wal_ctime === $ctime &&
+            $this->last_local_index_wal_size === $size &&
+            $this->last_local_index_wal_type === $type
         ) {
             return;
         }
@@ -7193,30 +7213,30 @@ class ImportClient
         );
         if ($line !== false) {
             $line .= "\n";
-            $bytes = fwrite($this->index_update_wal_handle, $line);
+            $bytes = fwrite($this->local_index_wal_handle, $line);
             if ($bytes !== strlen($line)) {
-                throw new RuntimeException("Failed to write to the index-update WAL (disk full?).");
+                throw new RuntimeException("Failed to write to the local index WAL (disk full?).");
             }
         }
-        $this->index_update_wal_record_count++;
-        $this->last_update_path = $path;
-        $this->last_update_delete = false;
-        $this->last_update_ctime = $ctime;
-        $this->last_update_size = $size;
-        $this->last_update_type = $type;
+        $this->local_index_wal_record_count++;
+        $this->last_local_index_wal_path = $path;
+        $this->last_local_index_wal_deletion = false;
+        $this->last_local_index_wal_ctime = $ctime;
+        $this->last_local_index_wal_size = $size;
+        $this->last_local_index_wal_type = $type;
     }
 
     /**
-     * Record a deletion in the index-update WAL.
+     * Record a deletion in the local index WAL.
      */
-    private function record_index_update_deletion(string $path): void
+    private function record_local_index_wal_deletion(string $path): void
     {
-        if (!$this->index_update_wal_handle) {
-            $this->open_index_update_wal();
+        if (!$this->local_index_wal_handle) {
+            $this->open_local_index_wal();
         }
         if (
-            $this->last_update_path === $path &&
-            $this->last_update_delete === true
+            $this->last_local_index_wal_path === $path &&
+            $this->last_local_index_wal_deletion === true
         ) {
             return;
         }
@@ -7229,59 +7249,59 @@ class ImportClient
         );
         if ($line !== false) {
             $line .= "\n";
-            $bytes = fwrite($this->index_update_wal_handle, $line);
+            $bytes = fwrite($this->local_index_wal_handle, $line);
             if ($bytes !== strlen($line)) {
-                throw new RuntimeException("Failed to write to the index-update WAL (disk full?).");
+                throw new RuntimeException("Failed to write to the local index WAL (disk full?).");
             }
         }
-        $this->index_update_wal_record_count++;
-        $this->last_update_path = $path;
-        $this->last_update_delete = true;
-        $this->last_update_ctime = null;
-        $this->last_update_size = null;
-        $this->last_update_type = null;
+        $this->local_index_wal_record_count++;
+        $this->last_local_index_wal_path = $path;
+        $this->last_local_index_wal_deletion = true;
+        $this->last_local_index_wal_ctime = null;
+        $this->last_local_index_wal_size = null;
+        $this->last_local_index_wal_type = null;
     }
 
-    /** Applies the current WAL to the import index. */
-    private function apply_index_update_wal(): void
+    /** Applies the current local index WAL to the local index. */
+    private function apply_local_index_wal(): void
     {
-        if ($this->index_update_wal_handle) {
-            $closed = fclose($this->index_update_wal_handle);
-            $this->index_update_wal_handle = null;
+        if ($this->local_index_wal_handle) {
+            $closed = fclose($this->local_index_wal_handle);
+            $this->local_index_wal_handle = null;
             if (!$closed) {
-                throw new RuntimeException("Failed to flush the index-update WAL.");
+                throw new RuntimeException("Failed to flush the local index WAL.");
             }
         }
-        $this->last_update_path = null;
-        $this->last_update_delete = null;
-        $this->last_update_ctime = null;
-        $this->last_update_size = null;
-        $this->last_update_type = null;
+        $this->last_local_index_wal_path = null;
+        $this->last_local_index_wal_deletion = null;
+        $this->last_local_index_wal_ctime = null;
+        $this->last_local_index_wal_size = null;
+        $this->last_local_index_wal_type = null;
 
-        $has_updates =
-            $this->index_update_wal_record_count > 0 ||
-            (is_file($this->index_update_wal_path) &&
-                filesize($this->index_update_wal_path) > 0);
+        $has_local_index_wal_records =
+            $this->local_index_wal_record_count > 0 ||
+            (is_file($this->local_index_wal_path) &&
+                filesize($this->local_index_wal_path) > 0);
 
-        if (!$has_updates) {
-            $this->index_update_wal_record_count = 0;
+        if (!$has_local_index_wal_records) {
+            $this->local_index_wal_record_count = 0;
             return;
         }
 
-        $new_index = $this->index_file . ".new";
+        $new_index = $this->local_index_file . ".new";
 
         $this->audit_log(
-            "INDEX MERGE START | merging updates into {$this->index_file}",
+            "INDEX MERGE START | merging local index WAL into {$this->local_index_file}",
         );
 
-        $old_handle = file_exists($this->index_file)
-            ? fopen($this->index_file, "r")
+        $old_handle = file_exists($this->local_index_file)
+            ? fopen($this->local_index_file, "r")
             : null;
-        $upd_handle = fopen($this->index_update_wal_path, "r");
+        $local_index_wal_read_handle = fopen($this->local_index_wal_path, "r");
         $new_handle = fopen($new_index, "w");
 
-        if (!$upd_handle || !$new_handle) {
-            throw new RuntimeException("Failed to merge index updates");
+        if (!$local_index_wal_read_handle || !$new_handle) {
+            throw new RuntimeException("Failed to merge local index WAL records");
         }
 
         $write_line = function ($handle, array $entry): void {
@@ -7300,12 +7320,15 @@ class ImportClient
         };
 
         $old = $this->read_index_line($old_handle);
-        $carry = null;
-        $upd = $this->read_update_line($upd_handle, $carry);
+        $local_index_wal_lookahead_entry = null;
+        $local_index_wal_entry = $this->read_local_index_wal_line(
+            $local_index_wal_read_handle,
+            $local_index_wal_lookahead_entry
+        );
         $last_written_path = null;
 
-        while ($old !== null || $upd !== null) {
-            if ($upd === null) {
+        while ($old !== null || $local_index_wal_entry !== null) {
+            if ($local_index_wal_entry === null) {
                 if ($last_written_path !== $old["path"]) {
                     $write_line($new_handle, $old);
                     $last_written_path = $old["path"];
@@ -7315,22 +7338,34 @@ class ImportClient
             }
 
             if ($old === null) {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
+                if (
+                    !$local_index_wal_entry["delete"] &&
+                    $last_written_path !== $local_index_wal_entry["path"]
+                ) {
+                    $write_line($new_handle, $local_index_wal_entry);
+                    $last_written_path = $local_index_wal_entry["path"];
                 }
-                $upd = $this->read_update_line($upd_handle, $carry);
+                $local_index_wal_entry = $this->read_local_index_wal_line(
+                    $local_index_wal_read_handle,
+                    $local_index_wal_lookahead_entry
+                );
                 continue;
             }
 
-            $cmp = strcmp($old["path"], $upd["path"]);
+            $cmp = strcmp($old["path"], $local_index_wal_entry["path"]);
             if ($cmp === 0) {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
+                if (
+                    !$local_index_wal_entry["delete"] &&
+                    $last_written_path !== $local_index_wal_entry["path"]
+                ) {
+                    $write_line($new_handle, $local_index_wal_entry);
+                    $last_written_path = $local_index_wal_entry["path"];
                 }
                 $old = $this->read_index_line($old_handle);
-                $upd = $this->read_update_line($upd_handle, $carry);
+                $local_index_wal_entry = $this->read_local_index_wal_line(
+                    $local_index_wal_read_handle,
+                    $local_index_wal_lookahead_entry
+                );
             } elseif ($cmp < 0) {
                 if ($last_written_path !== $old["path"]) {
                     $write_line($new_handle, $old);
@@ -7338,57 +7373,63 @@ class ImportClient
                 }
                 $old = $this->read_index_line($old_handle);
             } else {
-                if (!$upd["delete"] && $last_written_path !== $upd["path"]) {
-                    $write_line($new_handle, $upd);
-                    $last_written_path = $upd["path"];
+                if (
+                    !$local_index_wal_entry["delete"] &&
+                    $last_written_path !== $local_index_wal_entry["path"]
+                ) {
+                    $write_line($new_handle, $local_index_wal_entry);
+                    $last_written_path = $local_index_wal_entry["path"];
                 }
-                $upd = $this->read_update_line($upd_handle, $carry);
+                $local_index_wal_entry = $this->read_local_index_wal_line(
+                    $local_index_wal_read_handle,
+                    $local_index_wal_lookahead_entry
+                );
             }
         }
 
         if ($old_handle) {
             fclose($old_handle);
         }
-        fclose($upd_handle);
+        fclose($local_index_wal_read_handle);
         fclose($new_handle);
 
-        if (!rename($new_index, $this->index_file)) {
+        if (!rename($new_index, $this->local_index_file)) {
             throw new RuntimeException("Failed to replace index file");
         }
-        $this->audit_log("INDEX MERGE COMPLETE | {$this->index_file} updated");
+        $this->audit_log("INDEX MERGE COMPLETE | {$this->local_index_file} updated");
 
-        if (file_put_contents($this->index_update_wal_path, '') === false) {
-            throw new RuntimeException("Failed to clear the applied index-update WAL.");
+        if (file_put_contents($this->local_index_wal_path, '') === false) {
+            throw new RuntimeException("Failed to clear the applied local index WAL.");
         }
         $this->audit_log(
-            "FILE TRUNCATE | {$this->index_update_wal_path} | WAL batch applied"
+            "FILE TRUNCATE | {$this->local_index_wal_path} | local index WAL batch applied"
         );
-        $this->index_update_wal_record_count = 0;
+        $this->local_index_wal_record_count = 0;
     }
 
-    /** Removes the WAL marker after files-pull completes or is aborted. */
-    private function remove_index_update_wal(): void
+    /** Removes the local index WAL marker after files-pull completes or is aborted. */
+    private function remove_local_index_wal(): void
     {
-        if (is_resource($this->index_update_wal_handle)) {
-            if (!fclose($this->index_update_wal_handle)) {
-                throw new RuntimeException("Failed to flush the index-update WAL.");
+        if (is_resource($this->local_index_wal_handle)) {
+            if (!fclose($this->local_index_wal_handle)) {
+                throw new RuntimeException("Failed to flush the local index WAL.");
             }
-            $this->index_update_wal_handle = null;
+            $this->local_index_wal_handle = null;
         }
-        clearstatcache(true, $this->index_update_wal_path);
+        clearstatcache(true, $this->local_index_wal_path);
         if (
-            is_file($this->index_update_wal_path)
-            && filesize($this->index_update_wal_path) > 0
+            is_file($this->local_index_wal_path)
+            && filesize($this->local_index_wal_path) > 0
         ) {
-            throw new RuntimeException("Cannot remove an unapplied index-update WAL.");
+            throw new RuntimeException("Cannot remove an unapplied local index WAL.");
         }
         if (
-            is_file($this->index_update_wal_path)
-            && !unlink($this->index_update_wal_path)
+            is_file($this->local_index_wal_path)
+            && !unlink($this->local_index_wal_path)
         ) {
-            throw new RuntimeException("Failed to remove the index-update WAL.");
+            throw new RuntimeException("Failed to remove the local index WAL.");
         }
-        $this->index_update_wal_record_count = 0;
+        $this->local_index_wal_record_count = 0;
     }
 
     /**
@@ -7409,9 +7450,9 @@ class ImportClient
     }
 
     /**
-     * Read one raw update record (F/D) from the updates file.
+     * Read one raw local index WAL record (F/D).
      */
-    private function read_update_line_raw($handle): ?array
+    private function read_local_index_wal_line_raw($handle): ?array
     {
         if (!$handle) {
             return null;
@@ -7426,16 +7467,16 @@ class ImportClient
             }
             $data = json_decode($line, true);
             if (!is_array($data)) {
-                throw new RuntimeException("Invalid index update line format");
+                throw new RuntimeException("Invalid local index WAL line format");
             }
             $op = $data["op"] ?? null;
             $path_encoded = $data["path"] ?? null;
             if (!is_string($path_encoded) || $path_encoded === "") {
-                throw new RuntimeException("Invalid index update path");
+                throw new RuntimeException("Invalid local index WAL path");
             }
             $path = base64_decode($path_encoded);
             if ($path === false || $path === "") {
-                throw new RuntimeException("Invalid index update path (base64 decode failed)");
+                throw new RuntimeException("Invalid local index WAL path (base64 decode failed)");
             }
             if ($op === "D") {
                 return [
@@ -7460,24 +7501,24 @@ class ImportClient
     }
 
     /**
-     * Read one update record, coalescing consecutive updates to the same path.
+     * Read one local index WAL record, coalescing consecutive records for the same path.
      *
-     * @param mixed $handle Update file handle
-     * @param array|null $carry Read-ahead buffer for the next record
+     * @param mixed $handle Local index WAL file handle
+     * @param array|null $carry Local index WAL lookahead entry
      */
-    private function read_update_line($handle, ?array &$carry = null): ?array
+    private function read_local_index_wal_line($handle, ?array &$carry = null): ?array
     {
         if (!$handle) {
             return null;
         }
-        $current = $carry ?? $this->read_update_line_raw($handle);
+        $current = $carry ?? $this->read_local_index_wal_line_raw($handle);
         $carry = null;
         if ($current === null) {
             return null;
         }
 
         while (true) {
-            $next = $this->read_update_line_raw($handle);
+            $next = $this->read_local_index_wal_line_raw($handle);
             if ($next === null) {
                 return $current;
             }
@@ -7485,14 +7526,14 @@ class ImportClient
                 $carry = $next;
                 return $current;
             }
-            // Same path: keep the latest update.
+            // Same path: keep the latest local index WAL record.
             $current = $next;
         }
     }
     /**
      * Download SQL from remote.
      */
-    private function download_sql(): void
+    private function fetch_sql(): void
     {
         $cursor = $this->import_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
@@ -7610,7 +7651,7 @@ class ImportClient
         // always appears in .import-domains.json even if the SQL dump
         // hasn't been fully scanned yet.
         if ($domain_collector) {
-            $parsed_url = parse_url($this->remote_url);
+            $parsed_url = parse_url($this->remote_reprint_api_url);
             if ($parsed_url && isset($parsed_url['scheme'], $parsed_url['host'])) {
                 $source_origin = $parsed_url['scheme'] . '://' . $parsed_url['host'];
                 if (!empty($parsed_url['port'])) {
@@ -8198,7 +8239,7 @@ class ImportClient
     /**
      * Download table stats from the db_index endpoint.
      */
-    private function download_db_index(): void
+    private function fetch_database_index(): void
     {
         $cursor = $this->import_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
@@ -8412,7 +8453,7 @@ class ImportClient
     }
 
     /**
-     * Map a remote symlink target to the local fs-root mirror when possible.
+     * Rewrite a remote symlink target for the local filesystem when possible.
      *
      * Handles both absolute and relative targets (relative ones are resolved
      * against the symlink's source directory). In-scope and non-followed targets
@@ -8433,7 +8474,7 @@ class ImportClient
      *
      * Local import state:
      *
-     *   <state-dir>/fs-root/
+     *   <state-dir>/filesystem root/
      *   |-- tmp/e2e-shared-themes/pub/indice/
      *   |   |-- style.css
      *   |   `-- index.php
@@ -8443,71 +8484,74 @@ class ImportClient
      * Without this mapping, the symlink would point at /tmp/e2e-shared-themes/pub/indice
      * (which does not exist on the local machine, or worse, exists with unrelated content).
      * With this mapping, the symlink is rewritten to a relative path that resolves to the
-     * mirrored local copy under fs-root.
+     * local copy under filesystem root.
      */
-    private function map_symlink_target_for_local_mirror(
-        string $path,
-        string $local_path,
+    private function rewrite_symlink_target_for_local_filesystem(
+        string $remote_absolute_path,
+        string $local_absolute_path,
         string $target
     ): string {
-        // Resolve to an absolute source path (relative targets against the
-        // symlink's source dir) so both spellings are handled the same way.
-        $source_target = str_starts_with($target, "/")
+        // Resolve to a remote absolute path (relative targets are based on
+        // the source symlink's remote directory).
+        $remote_absolute_target = str_starts_with($target, "/")
             ? normalize_path($target)
-            : normalize_path(dirname($path) . "/" . $target);
+            : normalize_path(dirname($remote_absolute_path) . "/" . $target);
 
         // Only rewrite a target whose subtree was actually followed and indexed;
         // everything else keeps its original (portable) spelling.
         if (
             !$this->follow_symlinks ||
-            !$this->remote_index_contains_path_prefix($source_target)
+            !$this->remote_index_contains_remote_absolute_path_prefix($remote_absolute_target)
         ) {
             return $target;
         }
 
-        // Repoint to wherever the target's content is actually placed,
-        // the same seam file chunks use, so that the link never dangles.
-        $mapped_absolute = $this->remote_path_to_local_path_within_import_root($source_target);
-        $mapped_relative = self::compute_relative_path(
-            dirname($local_path),
-            $mapped_absolute
+        // Repoint to where the target's content is placed by the same pull
+        // mapping used for file chunks, so the symlink does not dangle.
+        $local_absolute_target = $this->map_remote_absolute_path_to_local_absolute_path(
+            $remote_absolute_target
+        );
+        $local_relative_target = self::compute_relative_path(
+            dirname($local_absolute_path),
+            $local_absolute_target
         );
 
         $this->audit_log(
-            "SYMLINK TARGET REMAP | {$path}: {$target} -> {$mapped_relative}",
+            "SYMLINK TARGET REMAP | {$remote_absolute_path}: {$target} -> {$local_relative_target}",
             false,
         );
 
-        return $mapped_relative;
+        return $local_relative_target;
     }
 
     /**
-     * Checks if the remote index contains $path or any descendant under it.
-     * Runs a memoized O(N) scan of .import-remote-index.jsonl.
+     * Checks whether the remote index contains a remote absolute path or one
+     * of its descendants. Runs a memoized O(N) scan of .import-remote-index.jsonl.
      */
-    private function remote_index_contains_path_prefix(string $path): bool
-    {
-        $path = rtrim(normalize_path($path), "/");
-        if ($path === "") {
+    private function remote_index_contains_remote_absolute_path_prefix(
+        string $remote_absolute_path
+    ): bool {
+        $remote_absolute_path = rtrim(normalize_path($remote_absolute_path), "/");
+        if ($remote_absolute_path === "") {
             return false;
         }
 
-        if (isset($this->remote_index_prefix_cache[$path])) {
-            return $this->remote_index_prefix_cache[$path];
+        if (isset($this->remote_index_prefix_cache[$remote_absolute_path])) {
+            return $this->remote_index_prefix_cache[$remote_absolute_path];
         }
 
         if (!file_exists($this->remote_index_file)) {
-            $this->remote_index_prefix_cache[$path] = false;
+            $this->remote_index_prefix_cache[$remote_absolute_path] = false;
             return false;
         }
 
         $h = fopen($this->remote_index_file, "r");
         if (!$h) {
-            $this->remote_index_prefix_cache[$path] = false;
+            $this->remote_index_prefix_cache[$remote_absolute_path] = false;
             return false;
         }
 
-        $prefix = $path . "/";
+        $prefix = $remote_absolute_path . "/";
         $found = false;
         while (($line = fgets($h)) !== false) {
             try {
@@ -8519,34 +8563,34 @@ class ImportClient
                 continue;
             }
             $entry_path = $entry["path"];
-            if ($entry_path === $path || str_starts_with($entry_path, $prefix)) {
+            if ($entry_path === $remote_absolute_path || str_starts_with($entry_path, $prefix)) {
                 $found = true;
                 break;
             }
         }
         fclose($h);
 
-        $this->remote_index_prefix_cache[$path] = $found;
+        $this->remote_index_prefix_cache[$remote_absolute_path] = $found;
         return $found;
     }
 
     /**
-     * Return canonical fs root path, creating it if it doesn't exist.
+     * Return the resolved absolute filesystem root, creating it if it doesn't exist.
      */
     private function get_filesystem_root_path(): string
     {
-        if (!is_dir($this->fs_root)) {
-            if (!mkdir($this->fs_root, 0755, true) && !is_dir($this->fs_root)) {
+        if (!is_dir($this->filesystem_root)) {
+            if (!mkdir($this->filesystem_root, 0755, true) && !is_dir($this->filesystem_root)) {
                 throw new RuntimeException(
-                    "Failed to create fs root directory: {$this->fs_root}",
+                    "Failed to create filesystem root directory: {$this->filesystem_root}",
                 );
             }
         }
 
-        $real = realpath($this->fs_root);
+        $real = realpath($this->filesystem_root);
         if ($real === false) {
             throw new RuntimeException(
-                "Failed to resolve fs root path: {$this->fs_root}",
+                "Failed to resolve filesystem root path: {$this->filesystem_root}",
             );
         }
 
@@ -8556,17 +8600,17 @@ class ImportClient
     /**
      * Refuse to reuse a files index with different --remap rules.
      *
-     * The files index stores remote paths. Local writes/deletes derive their
-     * targets from the current remap rules, so changing those rules while the
+     * The files index stores remote absolute paths. Local writes/deletes derive their
+     * local absolute paths from the current remap rules, so changing those rules while the
      * same index is still in use can point future updates at the wrong path.
      */
-    private function assert_files_remap_consistent(): void
+    private function assert_resolved_path_mappings_consistent(): void
     {
-        $fingerprint = $this->files_remap_fingerprint();
-        $previous = $this->import_state()->files_remap_fingerprint ?? null;
+        $fingerprint = $this->resolved_path_mappings_fingerprint();
+        $previous = $this->import_state()->resolved_path_mappings_fingerprint ?? null;
 
-        $has_existing_index = file_exists($this->index_file) && filesize($this->index_file) > 0;
-        if ($previous === null && $has_existing_index && !empty($this->remap_rules)) {
+        $has_existing_index = file_exists($this->local_index_file) && filesize($this->local_index_file) > 0;
+        if ($previous === null && $has_existing_index && !empty($this->resolved_path_mappings)) {
             throw new RuntimeException(
                 "Cannot use --remap with an existing files index that was created before remap tracking. " .
                     "Use a new --state-dir or clear the existing files index first.",
@@ -8581,20 +8625,20 @@ class ImportClient
         }
 
         if ($previous === null) {
-            $this->import_state()->files_remap_fingerprint = $fingerprint;
+            $this->import_state()->resolved_path_mappings_fingerprint = $fingerprint;
             $this->save_state($this->state);
         }
     }
 
     /**
-     * Stable fingerprint for the resolved remap rule set.
+     * Stable fingerprint for the resolved path mappings.
      *
      * Rule order does not matter: remap matching chooses the deepest source
      * path, not the first matching rule.
      */
-    private function files_remap_fingerprint(): string
+    private function resolved_path_mappings_fingerprint(): string
     {
-        $rules = $this->remap_rules;
+        $rules = $this->resolved_path_mappings;
         ksort($rules, SORT_STRING);
         return hash("sha256", json_encode($rules, JSON_UNESCAPED_SLASHES));
     }
@@ -8647,54 +8691,54 @@ class ImportClient
     }
 
     /**
-     * Refuse to run files-pull after the --follow-symlinks bundle directory
-     * changed. Placement of followed content is bound to it, so changing it
+     * Refuse to run files-pull after the local followed symlinks root changed.
+     * Placement of followed content is bound to it, so changing it
      * mid-state would split content across two layouts. Recorded on the first
      * run, compared on every run after; --abort resets it.
      */
-    private function assert_symlink_bundle_directory_unchanged(): void
+    private function assert_local_followed_symlinks_root_unchanged(): void
     {
-        $fingerprint = $this->symlink_bundle_directory_fingerprint();
-        $previous = $this->import_state()->symlink_bundle_directory_fingerprint ?? null;
+        $fingerprint = $this->local_followed_symlinks_root_fingerprint();
+        $previous = $this->import_state()->local_followed_symlinks_root_fingerprint ?? null;
 
         if ($previous !== null && $previous !== $fingerprint) {
             throw new RuntimeException(
-                "Cannot change the --follow-symlinks bundle directory for an existing files-pull. " .
+                "Cannot change the local followed symlinks root for an existing files-pull. " .
                     "Use the original value, or use --abort to start a new files-pull.",
             );
         }
 
         if ($previous === null) {
-            $this->import_state()->symlink_bundle_directory_fingerprint = $fingerprint;
+            $this->import_state()->local_followed_symlinks_root_fingerprint = $fingerprint;
             $this->save_state($this->state);
         }
     }
 
     /**
-     * Fingerprint of the effective bundle placement root. No bundle directory
-     * (and bare --follow-symlinks) fingerprints as fs-root, which is the
+     * Fingerprint of the effective local followed symlinks root. No explicit root
+     * (and bare --follow-symlinks) fingerprints as filesystem root, which is the
      * equivalent placement — so switching between those spellings is allowed.
      */
-    private function symlink_bundle_directory_fingerprint(): string
+    private function local_followed_symlinks_root_fingerprint(): string
     {
-        $effective = $this->symlink_bundle_directory ?? rtrim($this->get_filesystem_root_path(), "/");
+        $effective = $this->local_followed_symlinks_root ?? rtrim($this->get_filesystem_root_path(), "/");
         return hash("sha256", $effective);
     }
 
     /**
-     * Resolve the --follow-symlinks=<dir> bundle destination.
+     * Resolve the --follow-symlinks=<dir> local followed symlinks root.
      *
      * Uses the same target grammar as --remap targets: a :fs-root: path or a raw
      * absolute path, which must resolve within --fs-root.
      */
-    private function resolve_symlink_bundle_directory(string $raw): string
+    private function resolve_local_followed_symlinks_root(string $raw): string
     {
-        $fs_root = rtrim($this->get_filesystem_root_path(), "/");
-        $directory = $this->resolve_token_path($raw, ["fs-root" => $fs_root]);
+        $filesystem_root = rtrim($this->get_filesystem_root_path(), "/");
+        $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root]);
 
-        if (!path_is_within_root($directory, $fs_root)) {
+        if (!path_is_within_root($directory, $filesystem_root)) {
             throw new InvalidArgumentException(
-                "--follow-symlinks bundle directory \"{$directory}\" resolves outside --fs-root ({$fs_root}); " .
+                "--follow-symlinks local followed symlinks root \"{$directory}\" resolves outside --fs-root ({$filesystem_root}); " .
                     "it must stay within the destination root",
             );
         }
@@ -8715,10 +8759,10 @@ class ImportClient
      */
     private function resolve_remap(array $remap_raw): array
     {
-        $fs_root = rtrim($this->get_filesystem_root_path(), "/");
+        $filesystem_root = rtrim($this->get_filesystem_root_path(), "/");
 
         $source_tokens = $this->wp_source_path_tokens();
-        $target_tokens = ["fs-root" => $fs_root];
+        $target_tokens = ["fs-root" => $filesystem_root];
 
         $rules = [];
         $wp_content_target = null;
@@ -8726,9 +8770,9 @@ class ImportClient
             $source = $this->resolve_token_path($source_raw, $source_tokens);
             $target = $this->resolve_token_path($target_raw, $target_tokens);
 
-            if (!path_is_within_root($target, $fs_root)) {
+            if (!path_is_within_root($target, $filesystem_root)) {
                 throw new InvalidArgumentException(
-                    "--remap target \"{$target}\" resolves outside --fs-root ({$fs_root}); " .
+                    "--remap target \"{$target}\" resolves outside --fs-root ({$filesystem_root}); " .
                         "targets must stay within the destination root",
                 );
             }
@@ -8839,27 +8883,23 @@ class ImportClient
     }
 
     /**
-     * Whether $path is selected by the active --only file path prefixes. With no
-     * --only flag, every file path is selected (returns true) — this keeps
-     * the diff's delete drains at their default behavior. When --only is set,
-     * true only when $path falls under one of those file path prefixes IF it is
-     * NOT the directory itself (when the path remainder is an empty string): an
-     * --only remote index lists what is inside each selected directory, never
-     * the directory itself, so to the diff the selected directories always
-     * appear deleted-on-remote even though they exist.
+     * Whether a remote absolute path is selected by the active --only file path
+     * prefixes. With no --only flag, every path is selected. A selected root is
+     * excluded because a filtered remote index lists its contents, not the root.
      */
-    private function is_file_path_selected_by_pull_only_files(string $path): bool
+    private function is_selected_for_pulling(string $remote_absolute_path): bool
     {
         if (empty($this->pull_only_files_with_path_prefixes)) {
             return true;
         }
 
-        foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
-            $remainder = self::path_remainder_under($path, $prefix);
-            if ($remainder === "") {
+        $remote_absolute_path = rtrim($remote_absolute_path, "/");
+        foreach ($this->pull_only_files_with_path_prefixes as $pull_only_files_prefix) {
+            $pull_only_files_prefix = rtrim($pull_only_files_prefix, "/");
+            if ($remote_absolute_path === $pull_only_files_prefix) {
                 return false;
             }
-            if ($remainder !== null) {
+            if (path_is_within_root($remote_absolute_path, $pull_only_files_prefix)) {
                 return true;
             }
         }
@@ -8955,62 +8995,38 @@ class ImportClient
     }
 
     /**
-     * Map a source absolute path to its absolute local target via the remap
-     * rules (most specific source wins), or null when no rule applies.
+     * Map a remote absolute path to a local absolute path under the filesystem
+     * root. Symlink traversal checks prevent writes outside the filesystem root.
      *
-     * Any rules that match the same path are nested (each is a path-prefix of
-     * it, and prefixes of one string are ordered by length), so the longest
-     * matching source is the deepest — i.e. the most specific — match. Ranking
-     * by source, not target: a rule applies based purely on its source side.
+     * With --remap active, a matched remote absolute path is routed to its
+     * mapped local absolute path. An unmatched path remains nested beneath
+     * --fs-root, as in an identity pull mapping.
      */
-    private function remap_source_path_to_target(string $source_path): ?string
-    {
-        $best = null;
-        $best_source_length = -1;
-
-        foreach ($this->remap_rules as $source => $target) {
-            $rest = self::path_remainder_under($source_path, $source);
-            if ($rest !== null && strlen($source) > $best_source_length) {
-                $best = wp_join_unix_paths($target, $rest);
-                $best_source_length = strlen($source);
+    private function map_remote_absolute_path_to_local_absolute_path(
+        string $remote_absolute_path
+    ): string {
+        assert_valid_path($remote_absolute_path, "remote absolute path");
+        $local_absolute_path = null;
+        $longest_remote_prefix_length = -1;
+        foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
+            $remainder = self::path_remainder_under($remote_absolute_path, $remote_prefix);
+            if ($remainder !== null && strlen($remote_prefix) > $longest_remote_prefix_length) {
+                $local_absolute_path = wp_join_unix_paths($local_prefix, $remainder);
+                $longest_remote_prefix_length = strlen($remote_prefix);
             }
         }
-
-        return $best;
-    }
-
-    /**
-     * Resolve a remote absolute path into a local path under the fs root.
-     *
-     * Maps a remote absolute path (e.g. "/wp-content/uploads/photo.jpg") to a
-     * local path under the import fs root. Performs symlink traversal security
-     * checks to prevent directory traversal attacks that could write files
-     * outside the import root.
-     *
-     * With --remap active, a source path matched by a remap rule is first routed to its
-     * target (e.g. "/var/www/html/wp-content/x" -> "<docroot>/wp-content/x");
-     * paths under no remap rule are still written under --fs-root using their
-     * remote absolute path, exactly as a plain pull.
-     */
-    private function remote_path_to_local_path_within_import_root(
-        string $path
-    ): string {
-        assert_valid_path($path, "remote path");
-        if (!empty($this->remap_rules)) {
-            $target = $this->remap_source_path_to_target($path);
-            if ($target !== null) {
-                return $target;
-            }
+        if ($local_absolute_path !== null) {
+            return $local_absolute_path;
         }
 
         // Following symlinks is currently the only way paths outside the original export scope reach this mapper.
-        // Use the same bundle mapping for copied content and rewritten symlink targets so the links do not dangle.
-        if ($this->symlink_bundle_directory !== null
-            && !$this->path_is_within_original_export_scope($path)) {
-            return $this->symlink_bundle_directory . $path;
+        // Use the same local followed symlinks root for copied content and rewritten symlink targets so the links do not dangle.
+        if ($this->local_followed_symlinks_root !== null
+            && !$this->path_is_within_original_export_scope($remote_absolute_path)) {
+            return $this->local_followed_symlinks_root . $remote_absolute_path;
         }
 
-        return $this->get_filesystem_root_path() . $path;
+        return $this->get_filesystem_root_path() . $remote_absolute_path;
     }
 
 
@@ -9075,7 +9091,7 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path($path);
 
         // Open file on first chunk
         if ($is_first) {
@@ -9083,12 +9099,12 @@ class ImportClient
             $context->skip_current_file = false;
 
             if (
-                (file_exists($local_path) || is_link($local_path)) &&
-                (!is_file($local_path) || is_link($local_path))
+                (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&
+                (!is_file($local_absolute_path) || is_link($local_absolute_path))
             ) {
                 if (
-                    !$this->remove_local_path_without_following_symlinks(
-                        $local_path
+                    !$this->remove_local_absolute_path_without_following_symlinks(
+                        $local_absolute_path
                     )
                 ) {
                     throw new RuntimeException(
@@ -9098,8 +9114,8 @@ class ImportClient
             }
 
             // Check if file exists locally
-            $exists_locally = file_exists($local_path);
-            $local_size = $exists_locally ? filesize($local_path) : 0;
+            $exists_locally = file_exists($local_absolute_path);
+            $local_size = $exists_locally ? filesize($local_absolute_path) : 0;
             $file_size = (int) ($headers["x-file-size"] ?? 0);
 
             // Log file import with useful context
@@ -9115,8 +9131,8 @@ class ImportClient
                 false,
             );
 
-            $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
-            $files_total = $this->download_list_total;
+            $files_done = ($this->fetch_list_done ?? 0) + $this->files_imported;
+            $files_total = $this->fetch_list_total;
             $file_fraction = ($files_total !== null && $files_total > 0)
                 ? $files_done / $files_total
                 : null;
@@ -9131,8 +9147,8 @@ class ImportClient
                 "size" => $file_size,
                 "message" => $file_progress_message,
             ];
-            if ($this->download_list_total !== null) {
-                $progress_record["files_total"] = $this->download_list_total;
+            if ($this->fetch_list_total !== null) {
+                $progress_record["files_total"] = $this->fetch_list_total;
             }
             $this->output_progress($progress_record);
         }
@@ -9153,11 +9169,11 @@ class ImportClient
             }
 
             // Create parent directory if needed
-            $dir = dirname($local_path);
+            $dir = dirname($local_absolute_path);
             if (!is_dir($dir)) {
                 // Check if any component of the path exists as a file and remove it
                 try {
-                    $this->ensure_directory_path($dir);
+                    $this->create_directory_if_missing($dir);
                 } catch (PreserveLocalSkipException $e) {
                     $context->skip_current_file = true;
                     $this->audit_log($e->getMessage(), true);
@@ -9167,11 +9183,11 @@ class ImportClient
             }
 
             // Open new file
-            $context->file_handle = fopen($local_path, "wb");
+            $context->file_handle = fopen($local_absolute_path, "wb");
             if (!$context->file_handle) {
                 $error = error_get_last();
                 throw new RuntimeException(
-                    "Failed to open file for writing: {$local_path}\n" .
+                    "Failed to open file for writing: {$local_absolute_path}\n" .
                         "Parent directory: {$dir}\n" .
                         "Directory exists: " .
                         (is_dir($dir) ? "yes" : "no") .
@@ -9180,7 +9196,7 @@ class ImportClient
                         ($error["message"] ?? "unknown"),
                 );
             }
-            $context->file_path = $local_path;
+            $context->file_path = $local_absolute_path;
             $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
             $context->file_bytes_written = 0;  // Reset byte counter for new file
         }
@@ -9264,36 +9280,38 @@ class ImportClient
 
     /**
      * Check whether any component of the path (between the filesystem root
-     * and the target) is a symlink.  In preserve-local mode this is used
+     * and the remote absolute path) is a symlink. In preserve-local mode this is used
      * to prevent creating new content through symlinked directories — their
      * contents belong to shared hosting infrastructure and must not be
      * modified.
      */
-    private function should_skip_for_preserve_local(string $path): ?string
+    private function should_skip_for_preserve_local(string $remote_absolute_path): ?string
     {
         if ($this->fs_root_nonempty_behavior !== 'preserve-local') {
             return null;
         }
 
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
+            $remote_absolute_path
+        );
 
         // Skip if anything already exists at this path — regular file, symlink
         // (even to a file), or directory.  This preserves hosting symlinks like
         // wp-load.php -> __wp__/wp-load.php and drop-in symlinks like
         // object-cache.php -> ../../wordpress/drop-ins/...
-        if (file_exists($local_path) || is_link($local_path)) {
-            return "PRESERVE-LOCAL skip file (exists): {$path}";
+        if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+            return "PRESERVE-LOCAL skip file (exists): {$remote_absolute_path}";
         }
 
         // Skip if parent directory is not writable or if any directory component
         // in the path is a symlink.  We never create new files through symlinks —
         // the symlink and its target contents are shared hosting infrastructure.
-        $dir = dirname($local_path);
+        $dir = dirname($local_absolute_path);
         if (is_dir($dir) && !is_writable($dir)) {
-            return "PRESERVE-LOCAL skip file (dir not writable): {$path}";
+            return "PRESERVE-LOCAL skip file (dir not writable): {$remote_absolute_path}";
         }
         if ($this->path_traverses_symlink($dir)) {
-            return "PRESERVE-LOCAL skip file (symlink in path): {$path}";
+            return "PRESERVE-LOCAL skip file (symlink in path): {$remote_absolute_path}";
         }
 
         return null;
@@ -9324,14 +9342,14 @@ class ImportClient
     }
 
     /**
-     * Ensure a directory path exists, removing any files that block it.
+     * Create a directory path when missing, removing blockers.
      *
-     * @param string $dir Directory path to ensure
+     * @param string $dir Directory path to create
      * @throws RuntimeException if directory cannot be created or is outside allowed path
      */
-    private function ensure_directory_path(string $dir): void
+    private function create_directory_if_missing(string $dir): void
     {
-        // Security: Ensure path is under the fs root
+        // Security: Ensure path is under the filesystem root
         $real_filesystem_root = $this->get_filesystem_root_path();
 
         // Resolve the target path (or what it would be)
@@ -9351,16 +9369,16 @@ class ImportClient
                 !path_is_within_root($real_check, $real_filesystem_root)
             ) {
                 // In preserve-local mode, a path that resolves outside the
-                // fs root is expected when a directory like wp-content/plugins
+                // filesystem root is expected when a directory like wp-content/plugins
                 // is symlinked to a shared hosting location.  Skip gracefully
                 // instead of treating it as a security violation.
                 if ($this->fs_root_nonempty_behavior === 'preserve-local') {
                     throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: path resolves outside fs root via symlink: {$dir}",
+                        "PRESERVE-LOCAL: path resolves outside filesystem root via symlink: {$dir}",
                     );
                 }
                 throw new RuntimeException(
-                    "Security: Refusing to create directory outside fs root: {$dir}",
+                    "Security: Refusing to create directory outside filesystem root: {$dir}",
                 );
             }
         }
@@ -9379,7 +9397,7 @@ class ImportClient
             !str_starts_with($dir, $real_filesystem_root . "/")
         ) {
             throw new RuntimeException(
-                "Security: Refusing to create directory outside fs root: {$dir}",
+                "Security: Refusing to create directory outside filesystem root: {$dir}",
             );
         }
 
@@ -9454,7 +9472,7 @@ class ImportClient
             $resolved = realpath($current);
             if ($resolved === false || !path_is_within_root($resolved, $real_filesystem_root)) {
                 throw new RuntimeException(
-                    "Security: Refusing to create directory outside fs root: {$current}",
+                    "Security: Refusing to create directory outside filesystem root: {$current}",
                 );
             }
         }
@@ -9467,10 +9485,10 @@ class ImportClient
     {
         $headers = $chunk["headers"];
         $raw_header = $headers["x-directory-path"] ?? "";
-        $path = base64_decode($raw_header, true);
+        $remote_absolute_path = base64_decode($raw_header, true);
         $ctime = (int) ($headers["x-directory-ctime"] ?? 0);
 
-        if ($path === false || $path === "") {
+        if ($remote_absolute_path === false || $remote_absolute_path === "") {
             if ($raw_header !== "") {
                 $this->audit_log(
                     "Warning: base64_decode failed for x-directory-path header: " .
@@ -9481,57 +9499,59 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
+        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
+            $remote_absolute_path
+        );
 
         // In preserve-local mode, if the directory already exists (as a real
         // directory or via a symlink to a directory), keep it as-is.
         // Also skip if any parent component is a symlink — we never create
         // new directories through symlinked paths.
         if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (is_dir($local_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$path}", true);
-                $this->emit_skip_progress($path);
+            if (is_dir($local_absolute_path)) {
+                $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$remote_absolute_path}", true);
+                $this->emit_skip_progress($remote_absolute_path);
                 if ($ctime > 0) {
-                    $this->upsert_index_entry($path, $ctime, 0, "dir");
+                    $this->upsert_index_entry($remote_absolute_path, $ctime, 0, "dir");
                 }
                 return;
             }
-            if ($this->path_traverses_symlink($local_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$path}", true);
-                $this->emit_skip_progress($path);
+            if ($this->path_traverses_symlink($local_absolute_path)) {
+                $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$remote_absolute_path}", true);
+                $this->emit_skip_progress($remote_absolute_path);
                 if ($ctime > 0) {
-                    $this->upsert_index_entry($path, $ctime, 0, "dir");
+                    $this->upsert_index_entry($remote_absolute_path, $ctime, 0, "dir");
                 }
                 return;
             }
         }
 
         if (
-            (file_exists($local_path) || is_link($local_path)) &&
-            (!is_dir($local_path) || is_link($local_path))
+            (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&
+            (!is_dir($local_absolute_path) || is_link($local_absolute_path))
         ) {
             if (
-                !$this->remove_local_path_without_following_symlinks($local_path)
+                !$this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)
             ) {
                 throw new RuntimeException(
-                    "Failed to replace path with directory: {$path}",
+                    "Failed to replace path with directory: {$remote_absolute_path}",
                 );
             }
         }
 
         // Create directory, removing any files that block the path
         try {
-            $this->ensure_directory_path($local_path);
+            $this->create_directory_if_missing($local_absolute_path);
         } catch (PreserveLocalSkipException $e) {
             $this->audit_log($e->getMessage(), true);
-            $this->emit_skip_progress($path);
+            $this->emit_skip_progress($remote_absolute_path);
             return;
         }
 
-        $this->audit_log("Directory: {$path}", false);
+        $this->audit_log("Directory: {$remote_absolute_path}", false);
 
         if ($ctime > 0) {
-            $this->upsert_index_entry($path, $ctime, 0, "dir");
+            $this->upsert_index_entry($remote_absolute_path, $ctime, 0, "dir");
         }
     }
 
@@ -9567,10 +9587,10 @@ class ImportClient
             return;
         }
 
-        $local_path = $this->remote_path_to_local_path_within_import_root($path);
-        $target_for_local = $this->map_symlink_target_for_local_mirror(
+        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path($path);
+        $target_for_local = $this->rewrite_symlink_target_for_local_filesystem(
             $path,
-            $local_path,
+            $local_absolute_path,
             $target,
         );
 
@@ -9579,12 +9599,12 @@ class ImportClient
         // Also skip if any parent component is a symlink — we never create
         // new content through symlinked directories.
         if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (file_exists($local_path) || is_link($local_path)) {
+            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
                 $this->emit_skip_progress($path);
                 return;
             }
-            if ($this->path_traverses_symlink(dirname($local_path))) {
+            if ($this->path_traverses_symlink(dirname($local_absolute_path))) {
                 $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
                 $this->emit_skip_progress($path);
                 return;
@@ -9595,7 +9615,7 @@ class ImportClient
         $root = $this->get_filesystem_root_path();
         try {
             $this->assert_symlink_target_within_root(
-                dirname($local_path),
+                dirname($local_absolute_path),
                 $target_for_local,
                 $root
             );
@@ -9612,12 +9632,12 @@ class ImportClient
         }
 
         // Remove existing file/symlink if present
-        if (file_exists($local_path) || is_link($local_path)) {
+        if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
             if (
-                !$this->remove_local_path_without_following_symlinks($local_path)
+                !$this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)
             ) {
                 $this->audit_log(
-                    "Failed to remove existing path for symlink: {$local_path}",
+                    "Failed to remove existing path for symlink: {$local_absolute_path}",
                     true,
                 );
                 $this->output_progress([
@@ -9632,10 +9652,10 @@ class ImportClient
         }
 
         // Create parent directory
-        $dir = dirname($local_path);
+        $dir = dirname($local_absolute_path);
         if (!is_dir($dir)) {
             try {
-                $this->ensure_directory_path($dir);
+                $this->create_directory_if_missing($dir);
             } catch (PreserveLocalSkipException $e) {
                 $this->audit_log($e->getMessage(), true);
                 $this->emit_skip_progress($path);
@@ -9658,11 +9678,11 @@ class ImportClient
         }
 
         // Create symlink
-        $symlink_result = symlink($target_for_local, $local_path);
-        if (true !== $symlink_result || !is_link($local_path)) {
+        $symlink_result = symlink($target_for_local, $local_absolute_path);
+        if (true !== $symlink_result || !is_link($local_absolute_path)) {
             // Log error and skip this symlink
             $this->audit_log(
-                "Failed to create symlink: {$local_path} -> {$target_for_local}",
+                "Failed to create symlink: {$local_absolute_path} -> {$target_for_local}",
                 true,
             );
             $this->output_progress([
@@ -9677,7 +9697,7 @@ class ImportClient
 
         // Try to set the ctime (may not work on all systems)
         if ($ctime > 0) {
-            @touch($local_path, $ctime);
+            @touch($local_absolute_path, $ctime);
         }
 
         $this->audit_log("Symlink: {$path} -> {$target_for_local}", false);
@@ -9728,8 +9748,8 @@ class ImportClient
             true,
         );
         if ($path !== "" && $is_file_error) {
-            $local_path = $this->fs_root . $path;
-            if ($context->file_handle && $context->file_path === $local_path) {
+            $local_absolute_path = $this->filesystem_root . $path;
+            if ($context->file_handle && $context->file_path === $local_absolute_path) {
                 fclose($context->file_handle);
                 $context->file_handle = null;
                 $context->file_path = null;
@@ -9737,8 +9757,8 @@ class ImportClient
                 $context->file_bytes_written = 0;
             }
 
-            if (file_exists($local_path)) {
-                @unlink($local_path);
+            if (file_exists($local_absolute_path)) {
+                @unlink($local_absolute_path);
             }
             $this->delete_index_entry($path);
 
@@ -9784,7 +9804,7 @@ class ImportClient
         ?string $cursor,
         array $params = []
     ): string {
-        $url = $this->remote_url;
+        $url = $this->remote_reprint_api_url;
         $separator = strpos($url, "?") === false ? "?" : "&";
 
         $params["endpoint"] = $endpoint;
@@ -9888,7 +9908,7 @@ class ImportClient
         // uploads directories that live outside the WordPress roots and so
         // wouldn't be discovered by traversal alone.
         $remap_index = 0;
-        foreach (array_keys($this->remap_rules) as $source) {
+        foreach (array_keys($this->resolved_path_mappings) as $source) {
             $extra_paths["remap_source_{$remap_index}"] = $source;
             $remap_index++;
         }
@@ -10895,14 +10915,14 @@ class ImportClient
                             "heartbeat" => true,
                             "bytes_received" => $bytes_received,
                         ];
-                        // Only emit file counters when the download list has
+                        // Only emit file counters when the fetch list has
                         // been counted (fetch phase).  During indexing the
                         // list doesn't exist yet and emitting files_done:0
                         // without files_total confuses consumers.
-                        if ($this->download_list_total !== null) {
+                        if ($this->fetch_list_total !== null) {
                             $heartbeat["files_done"] =
-                                ($this->download_list_done ?? 0) + $this->files_imported;
-                            $heartbeat["files_total"] = $this->download_list_total;
+                                ($this->fetch_list_done ?? 0) + $this->files_imported;
+                            $heartbeat["files_total"] = $this->fetch_list_total;
                         }
                         fwrite($this->progress_fd, json_encode($heartbeat) . "\n");
                     }
@@ -11007,7 +11027,7 @@ class ImportClient
         $follow = $this->import_state()->follow_symlinks ?? false;
         $nonempty = $this->import_state()->fs_root_nonempty_behavior ?? "error";
         $max_packet = $this->import_state()->max_allowed_packet ?? null;
-        $files_remap_fingerprint = $this->import_state()->files_remap_fingerprint ?? null;
+        $resolved_path_mappings_fingerprint = $this->import_state()->resolved_path_mappings_fingerprint ?? null;
         $pull = $this->import_state()->pull_pipeline ?? null;
         $this->state = new ImportState();
         $this->import_state()->preflight = $preflight;
@@ -11016,7 +11036,7 @@ class ImportClient
         $this->import_state()->follow_symlinks = $follow;
         $this->import_state()->fs_root_nonempty_behavior = $nonempty;
         $this->import_state()->max_allowed_packet = $max_packet;
-        $this->import_state()->files_remap_fingerprint = $files_remap_fingerprint;
+        $this->import_state()->resolved_path_mappings_fingerprint = $resolved_path_mappings_fingerprint;
         if ($pull !== null) {
             $this->import_state()->pull_pipeline = $pull;
         }
@@ -11424,12 +11444,12 @@ class ImportClient
         $this->shutdown_requested = true;
         $this->progress->clear_progress_line();
 
-        if (is_resource($this->index_update_wal_handle)) {
+        if (is_resource($this->local_index_wal_handle)) {
             try {
-                $this->apply_index_update_wal();
+                $this->apply_local_index_wal();
             } catch (Exception $e) {
                 $this->audit_log(
-                    "Failed to apply the index-update WAL on shutdown: " .
+                    "Failed to apply the local index WAL on shutdown: " .
                         $e->getMessage(),
                     true,
                 );
@@ -11553,7 +11573,7 @@ class StreamingContext
 }
 
 /**
- * Thrown by ensure_directory_path() in preserve-local mode when a directory
+ * Thrown by create_directory_if_missing() in preserve-local mode when a directory
  * component is not writable or a symlink blocks directory creation.
  * Callers catch this to skip the current file/directory/symlink gracefully.
  */
@@ -11635,7 +11655,7 @@ if (
     //                  'value-or-next' --name=VAL or --name VAL
     //                  'pair'          --name A B (repeatable, takes 2 args)
     //   target         Where to store the parsed value:
-    //                  'state_dir' | 'fs_root' → special local variables
+    //                  'state_dir' | 'filesystem_root' → special local variables
     //                  'key'                   → $options['key']
     //                  'tuning_config.key'     → $options['tuning_config']['key']
     //   help           Description for --help output (null = hidden)
@@ -11665,7 +11685,7 @@ if (
         [
             'name' => 'fs-root',
             'type' => 'value',
-            'target' => 'fs_root',
+            'target' => 'filesystem_root',
             'placeholder' => 'DIR',
             'help' => 'Local directory read from or written to for site files',
             'help_section' => 'required',
@@ -11727,7 +11747,7 @@ if (
         [
             'name' => 'follow-symlinks',
             'type' => 'value',
-            'target' => 'symlink_bundle_directory',
+            'target' => 'local_followed_symlinks_root',
             'placeholder' => 'DIR',
             'help' => 'Follow symlinks, consolidating escaping (out-of-scope) targets into DIR ' .
                 '(a :fs-root: path or an absolute path within --fs-root), nested by source path. ' .
@@ -11739,7 +11759,7 @@ if (
             'type' => 'value',
             'target' => 'fs_root_nonempty_behavior',
             'placeholder' => 'MODE',
-            'help' => 'What to do when fs root is non-empty (error|preserve-local)',
+            'help' => 'What to do when filesystem root is non-empty (error|preserve-local)',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'files-pull'],
             'aliases' => ['on-docroot-nonempty'],
@@ -12087,7 +12107,7 @@ if (
     function _cli_parse_options(array $argv, int $argc, int $start, array $option_defs): array
     {
         $state_dir = null;
-        $fs_root = null;
+        $filesystem_root = null;
         $options = [
             "abort" => false,
             "verbose" => false,
@@ -12116,7 +12136,7 @@ if (
                                     fwrite(STDERR, "Invalid --{$def['name']} value: {$raw}. Valid values: " . implode(", ", $def['valid_values']) . "\n");
                                     exit(1);
                                 }
-                                _cli_store($def, $value, $state_dir, $fs_root, $options);
+                                _cli_store($def, $value, $state_dir, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
                             }
@@ -12124,7 +12144,7 @@ if (
 
                         case 'flag':
                             if ($arg === "--{$cli_name}" || (isset($def['short']) && $arg === "-{$def['short']}")) {
-                                _cli_store($def, $def['flag_value'] ?? true, $state_dir, $fs_root, $options);
+                                _cli_store($def, $def['flag_value'] ?? true, $state_dir, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
                             }
@@ -12134,7 +12154,7 @@ if (
                             $prefix = "--{$cli_name}=";
                             if (strpos($arg, $prefix) === 0) {
                                 $raw = substr($arg, strlen($prefix));
-                                _cli_store($def, $raw, $state_dir, $fs_root, $options);
+                                _cli_store($def, $raw, $state_dir, $filesystem_root, $options);
                                 $matched = true;
                                 break 3;
                             }
@@ -12143,7 +12163,7 @@ if (
                                     fwrite(STDERR, "--{$def['name']} requires one argument: " . ($def['placeholder'] ?? 'VALUE') . "\n");
                                     exit(1);
                                 }
-                                _cli_store($def, $argv[$i + 1], $state_dir, $fs_root, $options);
+                                _cli_store($def, $argv[$i + 1], $state_dir, $filesystem_root, $options);
                                 $i += 1;
                                 $matched = true;
                                 break 3;
@@ -12176,7 +12196,7 @@ if (
             }
         }
 
-        return [$state_dir, $fs_root, $options];
+        return [$state_dir, $filesystem_root, $options];
     }
 
     /** @internal */
@@ -12191,11 +12211,11 @@ if (
     }
 
     /** @internal */
-    function _cli_store(array $def, $value, ?string &$state_dir, ?string &$fs_root, array &$options): void
+    function _cli_store(array $def, $value, ?string &$state_dir, ?string &$filesystem_root, array &$options): void
     {
         $target = $def['target'];
         if ($target === 'state_dir') { $state_dir = $value; return; }
-        if ($target === 'fs_root')   { $fs_root = $value;   return; }
+        if ($target === 'filesystem_root')      { $filesystem_root = $value; return; }
         if (strpos($target, 'tuning_config.') === 0) {
             $options['tuning_config'][substr($target, strlen('tuning_config.'))] = $value;
             return;
@@ -12227,7 +12247,7 @@ if (
         echo "Mirror any WordPress site over HTTP.\n";
         echo "Version " . get_importer_version() . "\n";
         echo "\n";
-        echo "Usage: reprint <command> <remote-url> [options]\n";
+        echo "Usage: reprint <command> <remote-reprint-api-url> [options]\n";
         echo "\n";
 
         $high = array_filter($command_info, fn($i) => ($i['level'] ?? 'low') === 'high');
@@ -12285,7 +12305,7 @@ if (
         }
 
         $info = $command_info[$command];
-        $usage = $info["usage"] ?? "reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]";
+        $usage = $info["usage"] ?? "reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]";
         echo "Usage: {$usage}\n";
         echo "\n";
         echo $info["description"];
@@ -12611,23 +12631,23 @@ if (
                 "  skipped-earlier   Pull only files skipped by a prior essential-files run.\n" .
                 "\n" .
                 "Output files:\n" .
-                "  (fs-root)/                              Downloaded files\n" .
+                "  (filesystem root)/                              Downloaded files\n" .
                 "  .import-index.jsonl                     Local file index\n" .
                 "  .import-remote-index.jsonl              Remote index snapshot\n" .
-                "  .import-download-list.jsonl             Files pending download\n" .
-                "  .import-download-list-skipped.jsonl     Skipped files (when --filter=essential-files)\n" .
+                "  .import-fetch-list.jsonl             Files pending download\n" .
+                "  .import-fetch-list-skipped.jsonl     Skipped files (when --filter=essential-files)\n" .
                 "  .import-state.json                      Resumable state\n" .
                 "  .import-audit.log                       Audit log\n",
         ],
         "files-diff" => [
             "level" => "low",
             "short" => "Show local file changes since the last push",
-            "usage" => "reprint files-diff <target-url> --state-dir=DIR --fs-root=DIR",
+            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR",
             "description" =>
                 "Shows which local paths a files-push would send or delete, comparing\n" .
-                "the local tree at --fs-root with the pair's previous local index —\n" .
-                "the index a completed files-push publishes for the same target URL,\n" .
-                "state directory, and local tree.\n" .
+                "the filesystem root at --fs-root with the pair's previous local index —\n" .
+                "the index a completed files-push publishes for the same remote Reprint API URL,\n" .
+                "state directory, and filesystem root.\n" .
                 "The output is a local minimized push operation plan before target\n" .
                 "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
                 "default-skipped paths include generated wp-content caches, version-\n" .
@@ -12643,9 +12663,9 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <target-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
             "description" =>
-                "Sends the existing local tree at --fs-root to the target exporter API.\n" .
+                "Sends the existing filesystem root at --fs-root to the remote Reprint API.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
                 "It does not require pull preflight.\n" .
@@ -12670,7 +12690,7 @@ if (
                 "\n" .
                 "On the first run, builds the complete index. On subsequent runs,\n" .
                 "re-indexes and diffs against the prior snapshot to produce a\n" .
-                "download list of changed files.\n" .
+                "fetch list of changed files.\n" .
                 "\n" .
                 "When symlink-following is enabled, recursively discovers and indexes\n" .
                 "additional directories outside the primary roots.\n" .
@@ -12806,7 +12826,7 @@ if (
                 "  DB_USER, and DB_PASSWORD. For SQLite targets, the sqlite-database-\n" .
                 "  integration plugin is copied into the output directory and a lazy-\n" .
                 "  loading \$wpdb proxy is generated in runtime.php (Playground-style,\n" .
-                "  no files placed in the fs-root).\n" .
+                "  no files placed in the filesystem root).\n" .
                 "\n" .
                 "Output files (nginx-fpm):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
@@ -12855,7 +12875,7 @@ if (
         $command = $command_aliases[$command];
     }
 
-    // install-exporter is a standalone guide — no URL, state-dir, or fs-root needed.
+    // install-exporter is a standalone guide — no URL, state-dir, or filesystem root needed.
     // Handle it before per-command --help so it always shows the full guide.
     if ($command === "install-exporter") {
         _cli_render_install_exporter();
@@ -12875,19 +12895,19 @@ if (
     $is_local_only = in_array($command, $local_only_commands, true);
 
     if ($is_local_only) {
-        $remote_url = "-";
+        $remote_reprint_api_url = "-";
         $option_start_index = 2; // options start right after the command
     } else {
-        $remote_url = $argv[2] ?? null;
-        if (!$remote_url) {
-            fwrite(STDERR, "Error: <remote-url> is required\n");
-            fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        $remote_reprint_api_url = $argv[2] ?? null;
+        if (!$remote_reprint_api_url) {
+            fwrite(STDERR, "Error: <remote-reprint-api-url> is required\n");
+            fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
             exit(1);
         }
         $option_start_index = 3;
     }
 
-    [$state_dir, $fs_root, $options] = _cli_parse_options(
+    [$state_dir, $filesystem_root, $options] = _cli_parse_options(
         $argv, $argc, $option_start_index, $option_defs
     );
     $options["command"] = $command;
@@ -12927,29 +12947,29 @@ if (
 
     if (!$state_dir) {
         fwrite(STDERR, "Error: --state-dir=DIR is required\n");
-        fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
 
     // apply-runtime accepts --flat-document-root as an alternative to --fs-root.
     $flat_document_root = $options["flat_document_root"] ?? null;
-    if ($fs_root && $flat_document_root) {
+    if ($filesystem_root && $flat_document_root) {
         fwrite(STDERR, "Error: --fs-root and --flat-document-root are mutually exclusive.\n");
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$fs_root && !$flat_document_root && $command !== "import-metadata") {
+    if (!$filesystem_root && !$flat_document_root && $command !== "import-metadata") {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
-        fwrite(STDERR, "Usage: reprint {$command} <remote-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
     }
-    if (!$fs_root) {
-        // For commands that need an fs root in the constructor, use the
-        // flattened fs root. run_apply_runtime will resolve it properly.
+    if (!$filesystem_root) {
+        // For commands that need a filesystem root in the constructor, use the
+        // flattened filesystem root. run_apply_runtime will resolve it properly.
         // import-metadata reads only state, but ImportClient still expects
-        // an fs root path. Point it at state-dir rather than requiring an
+        // a filesystem root path. Point it at state-dir rather than requiring an
         // otherwise-unused CLI option.
-        $fs_root = $flat_document_root ?: $state_dir;
+        $filesystem_root = $flat_document_root ?: $state_dir;
     }
 
     try {
@@ -12960,20 +12980,20 @@ if (
         $reprint_files_diff_context = null;
         if ($command === 'files-push') {
             $reprint_files_push_context = ImportClient::prepare_files_push_context(
-                $remote_url,
+                $remote_reprint_api_url,
                 $state_dir,
-                $fs_root,
+                $filesystem_root,
                 $options
             );
         } elseif ($command === 'files-diff') {
             $reprint_files_diff_context = ImportClient::prepare_files_pair_context(
-                $remote_url,
+                $remote_reprint_api_url,
                 $state_dir,
-                $fs_root,
+                $filesystem_root,
                 'files-diff'
             );
         }
-        $client = new ImportClient($remote_url, $state_dir, $fs_root, $command);
+        $client = new ImportClient($remote_reprint_api_url, $state_dir, $filesystem_root, $command);
         $reprint_files_pair = $reprint_files_push_context['pair'] ?? ( $reprint_files_diff_context['pair'] ?? null );
         $client->audit_log_argv($command, $argv, $reprint_files_pair);
         $client->run(
