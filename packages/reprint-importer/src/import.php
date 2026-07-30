@@ -745,7 +745,7 @@ class ImportClient
         if (isset($masked[2]) && $command !== 'apply-runtime') {
             $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
             if ($command === 'files-push') {
-                $masked[2] = self::mask_url_user_info($masked[2]);
+                $masked[2] = self::mask_url_credentials($masked[2]);
             }
         }
         foreach ($masked as $argument_index => $argument) {
@@ -1790,7 +1790,7 @@ class ImportClient
             'files-push'
         );
         $masked_remote_reprint_api_url =
-            self::mask_url_user_info($remote_reprint_api_url);
+            self::mask_url_credentials($remote_reprint_api_url);
         $force_http = $options['force_http'] ?? false;
         $scheme = strtolower( (string) parse_url($remote_reprint_api_url, PHP_URL_SCHEME) );
         if ($scheme !== 'https' && !( $scheme === 'http' && $force_http === true )) {
@@ -1826,7 +1826,7 @@ class ImportClient
         string $command
     ): array {
         $masked_remote_reprint_api_url =
-            self::mask_url_user_info($remote_reprint_api_url);
+            self::mask_url_credentials($remote_reprint_api_url);
         if (strpos($remote_reprint_api_url, '#') !== false) {
             throw new InvalidArgumentException(
                 'The ' . $command . ' remote Reprint API URL must not contain a fragment: ' . $masked_remote_reprint_api_url . '.'
@@ -1951,7 +1951,7 @@ class ImportClient
     }
 
     /** Masks URL authority credentials without changing the pair-key input. */
-    private static function mask_url_user_info(string $url): string
+    private static function mask_url_credentials(string $url): string
     {
         $masked = preg_replace(
             '~^([a-z][a-z0-9+.-]*://)[^/?#]*@~i',
