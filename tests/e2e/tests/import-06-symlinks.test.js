@@ -46,7 +46,7 @@ describe('Import: Symlinks', () => {
         }
 
         it('file sync completes', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -98,7 +98,7 @@ describe('Import: Symlinks', () => {
         }
 
         it('file sync completes within timeout (no infinite loop)', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 timeout: 60000,
             });

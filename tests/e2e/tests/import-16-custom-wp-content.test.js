@@ -39,8 +39,8 @@ describe('Import: Custom WP Content', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('files-sync completes', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull completes', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -61,10 +61,10 @@ describe('Import: Custom WP Content', () => {
         assertSiteMirror(join(fsRootDir(tempDir), getSiteDir(site)));
     });
 
-    it('db-sync completes with valid dump', () => {
+    it('db-pull completes with valid dump', () => {
         const sqlDir = createTempDir('e2e-import-custom-wp-sql');
         try {
-            const result = runImporter(importUrl(), sqlDir, 'db-sync', {
+            const result = runImporter(importUrl(), sqlDir, 'db-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}`);

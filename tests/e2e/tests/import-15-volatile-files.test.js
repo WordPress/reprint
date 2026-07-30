@@ -63,7 +63,7 @@ describe('Import: Volatile Files', () => {
 
         it('file sync completes', () => {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
-            const result = runImporter(url, tempDir, 'files-sync', {
+            const result = runImporter(url, tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 timeout: 120000,
             });
@@ -149,7 +149,7 @@ describe('Import: Volatile Files', () => {
 
         it('file sync completes', () => {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
-            const result = runImporter(url, tempDir, 'files-sync', {
+            const result = runImporter(url, tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);

@@ -3,7 +3,7 @@
  *
  * Tests the full round-trip:
  * 1. Create site with known content containing source URLs in various formats
- * 2. Run db-sync → verify .import-domains.json contains the source domain
+ * 2. Run db-pull → verify .import-domains.json contains the source domain
  * 3. Run db-apply with --rewrite-url to apply SQL to target database
  * 4. Verify URLs are rewritten in all value types, including serialized PHP
  */
@@ -87,8 +87,8 @@ describe('Import: URL Rewriting', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('db-sync completes and produces db.sql', () => {
-        const result = runImporter(importUrl(), tempDir, 'db-sync', {
+    it('db-pull completes and produces db.sql', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0,

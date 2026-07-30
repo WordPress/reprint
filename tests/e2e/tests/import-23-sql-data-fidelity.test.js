@@ -85,8 +85,8 @@ CREATE TABLE wp_edge_cases (
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('db-sync completes', () => {
-        const result = runImporter(importUrl(), tempDir, 'db-sync', {
+    it('db-pull completes', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-pull', {
             secret: getSiteSecret(site),
             // SQL streaming over WASM PHP needs extra time per invocation —
             // the curl pipeline is slower and the boot overhead adds ~12s on top.

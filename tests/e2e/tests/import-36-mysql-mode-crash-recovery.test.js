@@ -64,7 +64,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
         it('completes via multiple resume cycles and database matches source', async () => {
             // Use --max-exec=1 to force the server to pause frequently,
             // creating many resume cycles. auto-resume handles exit code 2.
-            const result = runImporter(importUrl(), tempDir, 'db-sync', {
+            const result = runImporter(importUrl(), tempDir, 'db-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: [...mysqlArgs(importDb), '--max-exec=1'],
                 maxResumeAttempts: 200,
@@ -110,19 +110,19 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
         });
 
         it('loads .sql-buffer from disk and logs recovery', { timeout: 300000 }, () => {
-            // Run preflight so db-sync can proceed
+            // Run preflight so db-pull can proceed
             runImporter(importUrl(), tempDir, 'preflight', {
                 secret: getSiteSecret(site),
             });
 
-            // Seed a .sql-buffer file before running db-sync.
+            // Seed a .sql-buffer file before running db-pull.
             // The content is a harmless SQL comment that won't affect execution
             // — the point is to verify the importer reads it and logs recovery.
             const bufferFile = join(tempDir, '.sql-buffer');
             writeFileSync(bufferFile, '-- pre-seeded buffer\n');
 
-            // Run a fresh db-sync — the importer should detect the buffer file
-            const result = runImporter(importUrl(), tempDir, 'db-sync', {
+            // Run a fresh db-pull — the importer should detect the buffer file
+            const result = runImporter(importUrl(), tempDir, 'db-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: mysqlArgs(importDb),
                 skipPreflight: true,

@@ -84,7 +84,7 @@ describe('Import: Concurrent Errors', { timeout: 180000 }, () => {
 
     it('file sync completes despite multiple concurrent errors', () => {
         const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
-        const result = runImporter(url, tempDir, 'files-sync', {
+        const result = runImporter(url, tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             timeout: 180000,
         });

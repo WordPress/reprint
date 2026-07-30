@@ -6,7 +6,7 @@
  * local followed symlinks root (nested by source path, deduped), in-scope paths are left in place.
  * (Escaping *file* symlinks are a known limitation — not covered here.)
  *
- * Run: files-sync --only :wp-content: --remap :wp-content: :fs-root:/wp-content
+ * Run: files-pull --only :wp-content: --remap :wp-content: :fs-root:/wp-content
  *                 --follow-symlinks=:fs-root:/.followed-symlinks-root
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -86,8 +86,8 @@ describe('Import: local followed symlinks root (--follow-symlinks=<dir>) places 
     const fsRoot = () => fsRootDir(tempDir);
     const fsRoot2 = () => fsRootDir(tempDir2);
 
-    it('files-sync completes with --follow-symlinks=<dir>', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull completes with --follow-symlinks=<dir>', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: [
                 '--only', ':wp-content:',
@@ -144,8 +144,8 @@ describe('Import: local followed symlinks root (--follow-symlinks=<dir>) places 
     // themes is OUTSIDE --only :wp-content:/plugins but INSIDE the remapped
     // wp-content, so remap (checked before followed-symlink placement) must place it
     // at wp-content/themes for both relative and absolute spellings.
-    it('narrow --only :wp-content:/plugins files-sync completes', () => {
-        const result = runImporter(importUrl(), tempDir2, 'files-sync', {
+    it('narrow --only :wp-content:/plugins files-pull completes', () => {
+        const result = runImporter(importUrl(), tempDir2, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: [
                 '--only', ':wp-content:/plugins',

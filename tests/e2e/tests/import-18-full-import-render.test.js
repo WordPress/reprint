@@ -46,9 +46,9 @@ describe('Import: Full Round-Trip', () => {
         }
     });
 
-    it('files-sync completes', () => {
+    it('files-pull completes', () => {
         const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
-        const result = runImporter(url, tempDir, 'files-sync', {
+        const result = runImporter(url, tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -58,9 +58,9 @@ describe('Import: Full Round-Trip', () => {
         assert.equal(state.active_resumable_command.completion_state, 'complete');
     });
 
-    it('db-sync completes', () => {
+    it('db-pull completes', () => {
         const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
-        const result = runImporter(url, tempDir, 'db-sync', {
+        const result = runImporter(url, tempDir, 'db-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);

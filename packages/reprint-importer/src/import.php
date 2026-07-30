@@ -894,7 +894,7 @@ class ImportClient
         }
         $command = $options["command"] ?? null;
 
-        // Apply legacy command aliases so callers using old names still work.
+        // Map accepted command aliases to the canonical command names.
         static $command_aliases = [
             "files-sync" => "files-pull",
             "db-sync" => "db-pull",
@@ -12818,7 +12818,7 @@ if (
 
     $command = $argv[1];
 
-    // Legacy command names that still work on the CLI.
+    // Map accepted command aliases to the canonical command names.
     $command_aliases = [
         "files-sync" => "files-pull",
         "db-sync" => "db-pull",

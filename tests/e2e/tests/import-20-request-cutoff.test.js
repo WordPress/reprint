@@ -55,7 +55,7 @@ describe('Import: Request Cutoff', () => {
 
     it('first importer run exits partial after cutoff', () => {
         const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
-        const result = runImporter(url, tempDir, 'files-sync', {
+        const result = runImporter(url, tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--max-exec=10'],
             autoResume: false,
@@ -92,7 +92,7 @@ describe('Import: Request Cutoff', () => {
 
         const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         // Run the importer again — it should resume from saved state
-        const result = runImporter(url, tempDir, 'files-sync', {
+        const result = runImporter(url, tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--max-exec=10'],
         });

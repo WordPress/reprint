@@ -17,7 +17,7 @@
  * The source exits before it writes the boundary which would confirm the
  * first part. The importer must leave its cursor at the preceding boundary,
  * replay the unconfirmed bytes, and replace rather than append them. After
- * removing the hook, files-sync resumes and completes. Final assertion:
+ * removing the hook, files-pull resumes and completes. Final assertion:
  * SHA-256 of the imported file equals the source.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -117,7 +117,7 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
             "}",
         ].join('\n'));
 
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: [
                 '--file-chunk-start=262144',
@@ -156,7 +156,7 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
     it('resume completes after removing the hook', () => {
         removeTestHooks(site);
 
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: [
                 '--file-chunk-start=262144',

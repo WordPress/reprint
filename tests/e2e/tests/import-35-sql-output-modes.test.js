@@ -1,6 +1,6 @@
 /**
  * Test 35: SQL Output Modes
- * Tests --sql-output=stdout and --sql-output=mysql for db-sync.
+ * Tests --sql-output=stdout and --sql-output=mysql for db-pull.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -39,13 +39,13 @@ describe('Import: SQL Output Modes', () => {
             );
             assert.equal(pfResult.exitCode, 0, `Preflight failed: ${pfResult.stderr}`);
 
-            // Run db-sync in stdout mode. We can't use runImporter's auto-resume
+            // Run db-pull in stdout mode. We can't use runImporter's auto-resume
             // because stdout output is accumulated — instead we run php directly
             // and let the importer's own resume mechanism (exit code 2) handle
             // partial runs. The runImporter helper already handles this.
             const result = runImporter(
                 `${getSiteUrl(site)}&directory=${getSiteDir(site)}`,
-                tempDir, 'db-sync', {
+                tempDir, 'db-pull', {
                     secret: getSiteSecret(site),
                     extraArgs: ['--sql-output=stdout'],
                     skipPreflight: true,
@@ -88,7 +88,7 @@ describe('Import: SQL Output Modes', () => {
         it('streams SQL directly into MySQL and matches source', async () => {
             const result = runImporter(
                 `${getSiteUrl(site)}&directory=${getSiteDir(site)}`,
-                tempDir, 'db-sync', {
+                tempDir, 'db-pull', {
                     secret: getSiteSecret(site),
                     extraArgs: [
                         '--sql-output=mysql',

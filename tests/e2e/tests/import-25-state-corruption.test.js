@@ -41,7 +41,7 @@ describe('Import: State Corruption', () => {
 
         it('importer recovers from corrupted state and completes', () => {
             // The importer detects corrupt JSON, renames the file, and starts fresh
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0 (graceful recovery)\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -93,7 +93,7 @@ describe('Import: State Corruption', () => {
 
         it('running a different command starts fresh (ignores mismatched state)', () => {
             // The importer sees command mismatch and treats it as a fresh start
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -127,7 +127,7 @@ describe('Import: State Corruption', () => {
         });
 
         it('--abort clears state and exits', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--abort'],
             });
@@ -140,7 +140,7 @@ describe('Import: State Corruption', () => {
         });
 
         it('running after --abort completes fresh sync', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);

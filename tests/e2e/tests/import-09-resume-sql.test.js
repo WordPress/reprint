@@ -1,6 +1,6 @@
 /**
  * Test 09: SQL Resume via import.php
- * Tests that db-sync resumes correctly when using short max_execution_time.
+ * Tests that db-pull resumes correctly when using short max_execution_time.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -38,10 +38,10 @@ describe('Import: Resume SQL', { timeout: 120000 }, () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('db-sync completes via multiple resumable requests', () => {
+    it('db-pull completes via multiple resumable requests', () => {
         // Use --max-exec=1 to force short server execution times.
         // The SQL dump spans multiple requests, each resuming from cursor.
-        const result = runImporter(importUrl(), tempDir, 'db-sync', {
+        const result = runImporter(importUrl(), tempDir, 'db-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--max-exec=1'],
         });
