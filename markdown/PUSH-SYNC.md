@@ -445,7 +445,7 @@ The stable CLI mapping is `complete`/0, `partial`/2, `interrupted`/2,
 `restart`/2, `failed`/1, and `error`/1. Exit 2 asks the operator to run the
 same command again. After `restart`, that next run builds a fresh plan. The
 shared audit log records opening mode, phase changes, planned pauses, handled
-interruptions, and terminal outcomes with the pair key. The flat status file
+interruptions, and terminal outcomes with the pair key. The flat progress file
 records only the command, pair, outcome, phase, reason, detail, and timestamp;
 neither file copies receiver cursors or tentative upload positions.
 

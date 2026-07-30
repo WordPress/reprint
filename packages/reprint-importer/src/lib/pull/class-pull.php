@@ -1006,7 +1006,7 @@ class Pull
             "error" => $e->getMessage(),
             "message" => $message,
         ]);
-        $this->client->write_status_file($message);
+        $this->client->write_progress_file($message);
 
         $red = "\033[31m";
         $dim = "\033[2m";

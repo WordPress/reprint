@@ -2643,20 +2643,20 @@ final class PushEndpointsTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
         $this->assertFileDoesNotExist($state_directory . '/pull/state.json');
 
-        $status = json_decode(
-            (string) file_get_contents($state_directory . '/status.json'),
+        $progress = json_decode(
+            (string) file_get_contents($state_directory . '/progress.json'),
             true,
             512,
             JSON_THROW_ON_ERROR
         );
         $this->assertSame(
             ['command', 'pair', 'status', 'phase', 'reason', 'detail', 'ts'],
-            array_keys($status)
+            array_keys($progress)
         );
-        $this->assertSame('complete', $status['status']);
+        $this->assertSame('complete', $progress['status']);
         $audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringNotContainsString(self::SECRET, $audit . $initial['output']);
-        $this->assertStringNotContainsString('cursor', $audit . json_encode($status));
+        $this->assertStringNotContainsString('cursor', $audit . json_encode($progress));
         $files_push_lines = array_values(array_filter(
             preg_split('/\R/', trim($audit)) ?: [],
             static function (string $line): bool {

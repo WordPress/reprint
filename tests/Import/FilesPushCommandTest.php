@@ -276,17 +276,17 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringContainsString('without its directory', $finalLine['detail'] ?? '');
         $this->assertSame('', $result['stderr']);
 
-        $status = json_decode(
-            (string) file_get_contents($this->stateDirectory . '/status.json'),
+        $progress = json_decode(
+            (string) file_get_contents($this->stateDirectory . '/progress.json'),
             true,
             512,
             JSON_THROW_ON_ERROR
         );
         $this->assertSame(
             ['command', 'pair', 'status', 'phase', 'reason', 'detail', 'ts'],
-            array_keys($status)
+            array_keys($progress)
         );
-        $this->assertSame('error', $status['status']);
+        $this->assertSame('error', $progress['status']);
         $audit = (string) file_get_contents($this->stateDirectory . '/audit.log');
         $this->assertSame(1, substr_count($audit, 'ERROR files-push'));
         $this->assertStringContainsString('pair=' . $context['pair'], $audit);

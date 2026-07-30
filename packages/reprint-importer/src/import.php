@@ -471,8 +471,8 @@ class ImportClient
     /** @var int|null Total number of pipeline steps. Set via --steps. */
     private $pipeline_steps = null;
 
-    /** @var string Path to status.json — machine-readable status for external progress readers. */
-    private $status_file;
+    /** @var string Path to progress.json — machine-readable progress for external readers. */
+    private $progress_file;
 
     /** @var string SQL output mode: 'file' (default), 'stdout', or 'mysql'. */
     private $sql_output_mode = 'file';
@@ -544,7 +544,7 @@ class ImportClient
         $this->domains_file = $this->pull_state_directory . "/domains.json";
         $this->sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
         $this->sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
-        $this->status_file = $this->state_dir . "/status.json";
+        $this->progress_file = $this->state_dir . "/progress.json";
 
         // Detect TTY for progress display. In stdout mode this is re-evaluated
         // against STDERR in run() once we know the output mode.
@@ -1171,7 +1171,7 @@ class ImportClient
                     "error" => $e->getMessage(),
                     "message" => "Error: " . $e->getMessage(),
                 ]);
-                $this->write_status_file($e->getMessage());
+                $this->write_progress_file($e->getMessage());
                 throw $e;
             }
             return;
@@ -1221,7 +1221,7 @@ class ImportClient
                     "error_code" => $this->last_error_code,
                     "message" => "Error: " . $e->getMessage(),
                 ]);
-                $this->write_status_file($e->getMessage());
+                $this->write_progress_file($e->getMessage());
                 throw $e;
             }
             return;
@@ -1282,7 +1282,7 @@ class ImportClient
                 "error_code" => $this->last_error_code,
                 "message" => "Error: " . $e->getMessage(),
             ]);
-            $this->write_status_file($e->getMessage());
+            $this->write_progress_file($e->getMessage());
             throw $e;
         }
     }
@@ -1696,8 +1696,8 @@ class ImportClient
         if ($detail !== null) {
             $result['detail'] = $detail;
         }
-        // Write the flat run status without consulting import state.
-        $status_payload = [
+        // Write the flat progress snapshot without consulting import state.
+        $progress_payload = [
             'command' => 'files-push',
             'pair' => $context['pair'],
             'status' => $status,
@@ -1706,14 +1706,14 @@ class ImportClient
             'detail' => $detail,
             'ts' => microtime(true),
         ];
-        $status_json = json_encode(
-            $status_payload,
+        $progress_json = json_encode(
+            $progress_payload,
             JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE
         );
-        if ($status_json !== false) {
-            $temporary_status_path = $this->status_file . '.tmp';
-            if (file_put_contents($temporary_status_path, $status_json) !== false) {
-                rename($temporary_status_path, $this->status_file);
+        if ($progress_json !== false) {
+            $temporary_progress_path = $this->progress_file . '.tmp';
+            if (file_put_contents($temporary_progress_path, $progress_json) !== false) {
+                rename($temporary_progress_path, $this->progress_file);
             }
         }
 
@@ -2414,7 +2414,7 @@ class ImportClient
         // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
         echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
         $ok = ($entry["http_code"] ?? 0) === 200 && !empty($entry["data"]["ok"]);
-        $this->write_status_file($ok ? null : "Preflight failed");
+        $this->write_progress_file($ok ? null : "Preflight failed");
         exit($ok ? 0 : 1);
     }
 
@@ -2522,11 +2522,11 @@ class ImportClient
         echo "\n";
         if ($all_pass) {
             echo "Migration looks feasible.\n";
-            $this->write_status_file();
+            $this->write_progress_file();
             exit(0);
         } else {
             echo "Migration may not be feasible. Review the failures above.\n";
-            $this->write_status_file("Preflight assertions failed");
+            $this->write_progress_file("Preflight assertions failed");
             exit(1);
         }
     }
@@ -3097,7 +3097,7 @@ class ImportClient
                     "ESSENTIAL FILES COMPLETE | transitioning to skipped files",
                     true,
                 );
-                $this->write_status_file();
+                $this->write_progress_file();
             } else {
                 $this->import_state()->active_resumable_command->current_stage = null;
                 $this->save_state($this->state);
@@ -10528,7 +10528,7 @@ class ImportClient
     /**
      * Format a diagnosed error as a single string for display.
      * Also stores the error code on the instance for output_progress
-     * and write_status_file to pick up.
+     * and write_progress_file to pick up.
      */
     private function format_diagnosed_error(array $diagnosis): string
     {
@@ -11334,17 +11334,17 @@ class ImportClient
             false,
         );
 
-        $this->write_status_file();
+        $this->write_progress_file();
     }
 
     /**
-     * Write a flat status file for external consumers (e.g. web UI polling).
+     * Write a flat progress file for external consumers (e.g. web UI polling).
      *
      * Derives a simple JSON object from the current state and pipeline
      * position. Written atomically via temp file + rename so readers
      * never see a partial write.
      */
-    public function write_status_file(?string $error = null): void
+    public function write_progress_file(?string $error = null): void
     {
         $state = $this->state;
         $command = $state->active_resumable_command->command_name;
@@ -11366,11 +11366,11 @@ class ImportClient
 
         $json = json_encode($payload, JSON_PRETTY_PRINT);
         if ($json === false) {
-            return; // Best-effort — don't crash the import over a status file
+            return; // Best-effort — don't crash the import over a progress file
         }
-        $tmp = $this->status_file . ".tmp";
+        $tmp = $this->progress_file . ".tmp";
         if (file_put_contents($tmp, $json) !== false) {
-            rename($tmp, $this->status_file);
+            rename($tmp, $this->progress_file);
         }
     }
 
@@ -11745,7 +11745,7 @@ if (
             'target' => 'pipeline_step',
             'placeholder' => 'N',
             'cast' => 'int',
-            'help' => 'Current pipeline step (1-indexed, for status file)',
+            'help' => 'Current pipeline step (1-indexed, for progress file)',
             'help_section' => 'global',
             'commands' => [],
         ],
@@ -11755,7 +11755,7 @@ if (
             'target' => 'pipeline_steps',
             'placeholder' => 'N',
             'cast' => 'int',
-            'help' => 'Total pipeline steps (for status file)',
+            'help' => 'Total pipeline steps (for progress file)',
             'help_section' => 'global',
             'commands' => [],
         ],

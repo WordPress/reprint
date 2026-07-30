@@ -213,7 +213,7 @@ php reprint.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --fs-root="$FS
 
 For hosting platform-specific checks, such as database version compatibility or
 php version compatibility, you might need your own custom logic. See the 
-[Status files](#status-files) section for more details.
+[State and progress files](#state-and-progress-files) section for more details.
 
 #### Step 2 — Download files.
 
@@ -511,32 +511,32 @@ If you used `--sql-output=mysql`, the SQL was already executed — there's
 no `db.sql` to import. For `--sql-output=stdout`, the SQL was piped to
 whatever tool was reading stdout (typically `mysql` CLI).
 
-### Status files
+### State and progress files
 
 Reprint uses `$STATE_DIR` exactly as supplied. Consumers that want the state
 hidden can choose a directory named `.reprint`; Reprint does not append that
-name itself. Shared command status and the audit log live directly in the
+name itself. Shared command progress and the audit log live directly in the
 state directory. Pull-owned state lives in `pull/`, while pair-specific push
 state lives in `push/<pair-key>/`. Shared and pull filenames do not begin with
 a dot or repeat the scope supplied by their parent directory.
 
-`pull/state.json` and `status.json` are written atomically:
+`pull/state.json` and `progress.json` are written atomically:
 a `.tmp` file is written first and then renamed to its final name so readers
 never see partially written state.
 
 While there's many of these files, most of them are for internal use only.
 The two that might be particularly useful for integrators are:
 
-* `status.json` – the current progress
+* `progress.json` – the current progress
 * `pull/state.json` – the pull state store
 
-#### `status.json` – the current progress
+#### `progress.json` – the current progress
 
 When an external process (e.g. a web UI) needs to poll migration progress, it can read
-`$STATE_DIR/status.json`.
+`$STATE_DIR/progress.json`.
 
 Pass `--step=N` and `--steps=N` to your `import.php` calls to embed the pipeline position in
-the status file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
+the progress file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
 preflight, `--step=2 --steps=4` for db-index, and so on.
 
 The file contains a flat JSON object:

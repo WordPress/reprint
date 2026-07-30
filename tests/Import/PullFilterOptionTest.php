@@ -15,7 +15,7 @@ class PullFilterFakeClient extends \ImportClient
     public int $db_sync_runs = 0;
     public int $db_apply_runs = 0;
     public array $progress_events = [];
-    public array $status_errors = [];
+    public array $progress_file_errors = [];
 
     /** @var resource|null */
     private $terminal_progress_stream = null;
@@ -35,9 +35,9 @@ class PullFilterFakeClient extends \ImportClient
         $this->progress_events[] = $data;
     }
 
-    public function write_status_file(?string $error = null): void
+    public function write_progress_file(?string $error = null): void
     {
-        $this->status_errors[] = $error;
+        $this->progress_file_errors[] = $error;
     }
 
     public function captureTerminalProgress(): void
@@ -294,11 +294,11 @@ class PullFilterOptionTest extends TestCase
         $this->assertCount(1, $error_events);
         $this->assertSame("preflight", $error_events[0]["failed_stage"]);
         $this->assertSame("Exporter unavailable", $error_events[0]["message"]);
-        $status_errors = array_values(array_filter(
-            $client->status_errors,
+        $progress_file_errors = array_values(array_filter(
+            $client->progress_file_errors,
             static fn ($error): bool => $error !== null,
         ));
-        $this->assertSame(["Exporter unavailable"], $status_errors);
+        $this->assertSame(["Exporter unavailable"], $progress_file_errors);
     }
 
     public function testPullResumesAfterFilesPullCompletedBeforePipelineStageWasMarked(): void

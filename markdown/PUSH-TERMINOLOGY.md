@@ -168,7 +168,7 @@ scope supplied by their parent directories.
 ```text
 <state-dir>/
 ├── process.lock
-├── status.json
+├── progress.json
 ├── audit.log
 ├── pull/
 │   ├── state.json
@@ -202,7 +202,7 @@ Use these path names:
 | SQL statistics file | `$sql_stats_file` |
 | SQL buffer file | `$sql_buffer_file` |
 | Audit log file | `$audit_log_file` |
-| Status file | `$status_file` |
+| Progress file | `$progress_file` |
 | Reprint process lock path | `$process_lock_path` |
 
 Caller-facing outputs such as `db.sql`, `db-tables.jsonl`, generated runtime
@@ -355,7 +355,7 @@ The `local push state directory` is `<state-dir>/push/<pair-key>/`. `files-push`
 chooses `start` or `resume` only from whether `sender.json` exists there. The
 receiver-confirmed upload positions remain receiver-owned; they are not a
 files-push cursor and are not copied into `pull/state.json` or
-`status.json`.
+`progress.json`.
 
 Files-push lifecycle lines use these command-first names verbatim: `START
 files-push`, `RESUME files-push`, `PHASE files-push`, `PARTIAL files-push`,

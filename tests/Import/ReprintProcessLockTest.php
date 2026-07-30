@@ -54,7 +54,7 @@ final class ReprintProcessLockTest extends TestCase
             'sql_stats_file' => $this->root . '/state/pull/sql-stats.json',
             'sql_buffer_file' => $this->root . '/state/pull/sql-buffer',
             'audit_log_file' => $this->root . '/state/audit.log',
-            'status_file' => $this->root . '/state/status.json',
+            'progress_file' => $this->root . '/state/progress.json',
         ];
         foreach ($expected_paths as $property_name => $expected_path) {
             $property = $reflection->getProperty($property_name);
