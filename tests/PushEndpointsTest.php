@@ -2641,22 +2641,22 @@ final class PushEndpointsTest extends TestCase {
         $this->assertFileExists($push_state_directory . '/previous_local_index.jsonl');
         $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
-        $this->assertFileDoesNotExist($state_directory . '/.import-state.json');
+        $this->assertFileDoesNotExist($state_directory . '/pull/state.json');
 
-        $status = json_decode(
-            (string) file_get_contents($state_directory . '/.import-status.json'),
+        $progress = json_decode(
+            (string) file_get_contents($state_directory . '/progress.json'),
             true,
             512,
             JSON_THROW_ON_ERROR
         );
         $this->assertSame(
             ['command', 'pair', 'status', 'phase', 'reason', 'detail', 'ts'],
-            array_keys($status)
+            array_keys($progress)
         );
-        $this->assertSame('complete', $status['status']);
-        $audit = (string) file_get_contents($state_directory . '/.import-audit.log');
+        $this->assertSame('complete', $progress['status']);
+        $audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringNotContainsString(self::SECRET, $audit . $initial['output']);
-        $this->assertStringNotContainsString('cursor', $audit . json_encode($status));
+        $this->assertStringNotContainsString('cursor', $audit . json_encode($progress));
         $files_push_lines = array_values(array_filter(
             preg_split('/\R/', trim($audit)) ?: [],
             static function (string $line): bool {
@@ -2721,7 +2721,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('starting_plan', $partial_result['phase'] ?? null);
         $this->assertSame($push_create_requests + 1, $this->countEndpointRequests('push_create'));
         $this->assertSame(0, $this->countEndpointRequests('push_upload'));
-        $partial_audit = (string) file_get_contents($state_directory . '/.import-audit.log');
+        $partial_audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringContainsString(
             'PARTIAL files-push | pair=' . $partial_result['pair']
                 . ' | phase=starting_plan | cause=time_limit',
@@ -2764,7 +2764,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('interrupted', $interrupted_result['status'] ?? null);
         $this->assertSame('signal', $interrupted_result['reason'] ?? null);
         $this->assertSame('starting_plan', $interrupted_result['phase'] ?? null);
-        $interrupted_audit = (string) file_get_contents($state_directory . '/.import-audit.log');
+        $interrupted_audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringContainsString(
             'INTERRUPTED files-push | pair=' . $interrupted_result['pair']
                 . ' | phase=starting_plan | signal=' . SIGTERM,
@@ -2870,7 +2870,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('lock_acquisition_failure', $failed_result['reason'] ?? null);
         $this->assertSame($status_requests + 1, $this->countEndpointRequests('push_status'));
         $this->assertFileExists($push_state_directory . '/sender.json');
-        $failed_audit = (string) file_get_contents($state_directory . '/.import-audit.log');
+        $failed_audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringContainsString(
             'FAILED files-push | pair=' . $failed_result['pair'],
             $failed_audit
@@ -2911,7 +2911,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame($push_create_requests, $this->countEndpointRequests('push_create'));
         $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
-        $restart_audit = (string) file_get_contents($state_directory . '/.import-audit.log');
+        $restart_audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringContainsString(
             'RESTART files-push | pair=' . $restart_result['pair'],
             $restart_audit

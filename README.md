@@ -200,7 +200,7 @@ First, we'll make sure the server is reachable and the environment is in a good 
 php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `.import-state.json` under the `preflight` key.
+The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/pull/state.json` under the `preflight` key.
 
 All other commands check that a preflight has been completed and refuse to start without one.
 
@@ -213,7 +213,7 @@ php reprint.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --fs-root="$FS
 
 For hosting platform-specific checks, such as database version compatibility or
 php version compatibility, you might need your own custom logic. See the 
-[Status files](#status-files) section for more details.
+[State and progress files](#state-and-progress-files) section for more details.
 
 #### Step 2 — Download files.
 
@@ -253,7 +253,7 @@ php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 
 The pipeline proceeds as usual through indexing and diffing, but skips uploads. When the essential
 files are done, the sync marks itself **complete**. The skipped file list stays on disk at
-`.import-fetch-list-skipped.jsonl`. At this point you can apply the database and bring the site online.
+`$STATE_DIR/pull/skipped-fetch-list.jsonl`. At this point you can apply the database and bring the site online.
 
 ```bash
 # Step 2: download the uploads
@@ -346,7 +346,7 @@ All three modes recover from server crashes mid-stream (PHP fatal errors,
 OOM kills, `max_execution_time` expiry). When the server dies before sending
 a completion chunk, the importer detects the transport failure, saves its
 cursor, and exits with code 2 for automatic retry. Accumulated SQL is
-persisted in a `.sql-buffer` file so the next run reloads it and continues.
+persisted in `$STATE_DIR/pull/sql-buffer` so the next run reloads it and continues.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
@@ -511,26 +511,32 @@ If you used `--sql-output=mysql`, the SQL was already executed — there's
 no `db.sql` to import. For `--sql-output=stdout`, the SQL was piped to
 whatever tool was reading stdout (typically `mysql` CLI).
 
-### Status files
+### State and progress files
 
-These files live directly in `$DIR` and are updated by the `import.php`
-script with the latest migration details. They're written atomically,
-such that a `.tmp` files is written first and then renamed to its final
-name – this ensures readers never see a partially written state.
+Reprint uses `$STATE_DIR` exactly as supplied. Consumers that want the state
+hidden can choose a directory named `.reprint`; Reprint does not append that
+name itself. Shared command progress and the audit log live directly in the
+state directory. Pull-owned state lives in `pull/`, while pair-specific push
+state lives in `push/<pair-key>/`. Shared and pull filenames do not begin with
+a dot or repeat the scope supplied by their parent directory.
+
+`pull/state.json` and `progress.json` are written atomically:
+a `.tmp` file is written first and then renamed to its final name so readers
+never see partially written state.
 
 While there's many of these files, most of them are for internal use only.
 The two that might be particularly useful for integrators are:
 
-* `.import-status.json` – the current progress
-* `.import-state.json` – the migration state store
+* `progress.json` – the current progress
+* `pull/state.json` – the pull state store
 
-#### `.import-status.json` – the current progress
+#### `progress.json` – the current progress
 
 When an external process (e.g. a web UI) needs to poll migration progress, it can read
-`.import-status.json` in the output directory.
+`$STATE_DIR/progress.json`.
 
 Pass `--step=N` and `--steps=N` to your `import.php` calls to embed the pipeline position in
-the status file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
+the progress file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
 preflight, `--step=2 --steps=4` for db-index, and so on.
 
 The file contains a flat JSON object:
@@ -569,16 +575,16 @@ Both fields are emitted together only when the fetch list exists — they
 are absent during the index and diff phases. `files_done` grows monotonically
 up to `files_total` and survives exit-code-2 restarts.
 
-#### `.import-state.json` — the migration state store
+#### `pull/state.json` — the pull state store
 
-This is the importer's brain. Every command reads it on startup and writes it
+This is the pull state store. Pull commands read it on startup and write it
 back periodically and on shutdown. It stores everything needed to resume after
 a crash or interruption: the current command, cursor position, AIMD tuning
 state, and per-phase bookmarks.
 
 Written atomically (temp file + rename) so a crash mid-write never corrupts it.
 If the JSON is invalid on load, the importer renames it to
-`.import-state.json.corrupt.<timestamp>` and starts fresh.
+`pull/state.json.corrupt.<timestamp>` and starts fresh.
 
 ```jsonc
 {
@@ -640,18 +646,18 @@ tell you where the pipeline is. The `stage` field gives finer granularity
 (e.g., `"scanning"`, `"sorting"`, `"streaming"` for file sync).
 
 For pull-level lifecycle checks, prefer `import-metadata` over reading
-`.import-state.json` directly. It exposes Reprint-owned pull state as a small,
+`pull/state.json` directly. It exposes Reprint-owned pull state as a small,
 stable JSON contract for host integrations:
 
 ```bash
 php reprint.phar import-metadata --state-dir="$STATE_DIR" | jq '.hasCompletedOnce'
 ```
 
-#### `.import-volatile-files.json` — files that changed during sync
+#### `pull/volatile-files.json` — files that changed during sync
 
 During `files-pull`, a file on the source may be modified while the importer is
 streaming it. When that happens, the server returns a different content hash than
-expected and the importer records the file in `.import-volatile-files.json`
+expected and the importer records the file in `pull/volatile-files.json`
 instead of failing.
 
 The file is a flat JSON object mapping paths to the number of times each file
@@ -669,9 +675,9 @@ the caller can decide what to do — re-run the sync, ignore them, or ask the us
 Files that are subsequently downloaded successfully are automatically removed
 from the tracker. The file is deleted entirely once all entries are cleared.
 
-#### `.import-audit.log` — append-only event log
+#### `audit.log` — append-only event log
 
-Every significant event during import is recorded in `.import-audit.log` as a
+Every significant event during import is recorded in `audit.log` as a
 timestamped line. This includes file downloads, deletions, volatile file
 detections, errors, and state transitions. The log is append-only — it's never
 truncated or rotated, so it provides a complete history of the migration.
@@ -679,7 +685,7 @@ truncated or rotated, so it provides a complete history of the migration.
 ```
 [2025-01-15 10:30:01] VOLATILE | path=/srv/htdocs/wp-content/debug.log | count=1
 [2025-01-15 10:30:05] VOLATILE CLEARED | path=/srv/htdocs/wp-content/debug.log
-[2025-01-15 10:31:12] FILE DELETE | .import-index-updates.jsonl
+[2025-01-15 10:31:12] FILE DELETE | pull/local-index.wal
 ```
 
 Pass `--verbose` to also print audit log entries to the console as they happen.
@@ -701,7 +707,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
-* `db-domains` — Lists domains discovered in the SQL dump. Reads `.import-domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
+* `db-domains` — Lists domains discovered in the SQL dump. Reads `pull/domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 * `import-metadata` — Prints local pull lifecycle metadata as JSON, including `hasCompletedOnce`. Requires only `--state-dir`; no network calls are made.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).

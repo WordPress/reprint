@@ -25,6 +25,42 @@ final class ReprintProcessLockTest extends TestCase
         $this->removeTree($this->root);
     }
 
+    public function testLocalStateLayoutUsesMatchingDirectoriesAndFileNames(): void
+    {
+        $process_lock = new \ReprintProcessLock($this->root . '/state');
+        $client = new \ImportClient(
+            'https://example.com/?site-export-api',
+            $this->root . '/state',
+            $this->root . '/files'
+        );
+
+        $this->assertFileExists($this->root . '/state/process.lock');
+        $this->assertDirectoryExists($this->root . '/state/pull');
+        $this->assertDirectoryDoesNotExist($this->root . '/state/.reprint');
+        $this->assertFileDoesNotExist($this->root . '/state/.reprint.lock');
+
+        $reflection = new \ReflectionClass($client);
+        $expected_paths = [
+            'state_dir' => $this->root . '/state',
+            'pull_state_file' => $this->root . '/state/pull/state.json',
+            'local_index_file' => $this->root . '/state/pull/local-index.jsonl',
+            'local_index_wal_path' => $this->root . '/state/pull/local-index.wal',
+            'remote_index_file' => $this->root . '/state/pull/remote-index.jsonl',
+            'fetch_list_file' => $this->root . '/state/pull/fetch-list.jsonl',
+            'skipped_fetch_list_file' => $this->root . '/state/pull/skipped-fetch-list.jsonl',
+            'volatile_files_file' => $this->root . '/state/pull/volatile-files.json',
+            'audit_log_file' => $this->root . '/state/audit.log',
+            'progress_file' => $this->root . '/state/progress.json',
+        ];
+        foreach ($expected_paths as $property_name => $expected_path) {
+            $property = $reflection->getProperty($property_name);
+            $property->setAccessible(true);
+            $this->assertSame($expected_path, $property->getValue($client), $property_name);
+        }
+
+        $process_lock->close();
+    }
+
     public function testImportClientRejectsAConcurrentCommand(): void
     {
         $process_lock = new \ReprintProcessLock($this->root . '/state');

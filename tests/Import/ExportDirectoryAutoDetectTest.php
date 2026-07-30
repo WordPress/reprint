@@ -25,6 +25,7 @@ class ExportDirectoryAutoDetectTest extends TestCase
         $this->fsRoot = $this->tempDir . '/fs-root';
 
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
     }
 

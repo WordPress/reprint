@@ -298,9 +298,9 @@ class Pull
                 $state->files_pull_only_fingerprint = null;
                 $this->client->save_import_state();
                 foreach ([
-                    "{$state_dir}/.import-remote-index.jsonl",
-                    "{$state_dir}/.import-fetch-list.jsonl",
-                    "{$state_dir}/.import-fetch-list-skipped.jsonl",
+                    "{$state_dir}/pull/remote-index.jsonl",
+                    "{$state_dir}/pull/fetch-list.jsonl",
+                    "{$state_dir}/pull/skipped-fetch-list.jsonl",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -320,7 +320,7 @@ class Pull
                 foreach ([
                     "{$state_dir}/db.sql",
                     "{$state_dir}/db-tables.jsonl",
-                    "{$state_dir}/.import-domains.json",
+                    "{$state_dir}/pull/domains.json",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -826,14 +826,14 @@ class Pull
 
         $paths = [];
         if ($reset_file_transfer_state) {
-            $paths[] = $state_dir . "/.import-remote-index.jsonl";
-            $paths[] = $state_dir . "/.import-fetch-list.jsonl";
-            $paths[] = $state_dir . "/.import-fetch-list-skipped.jsonl";
+            $paths[] = $state_dir . "/pull/remote-index.jsonl";
+            $paths[] = $state_dir . "/pull/fetch-list.jsonl";
+            $paths[] = $state_dir . "/pull/skipped-fetch-list.jsonl";
         }
         if ($reset_db_state) {
             $paths[] = $state_dir . "/db.sql";
             $paths[] = $state_dir . "/db-tables.jsonl";
-            $paths[] = $state_dir . "/.import-domains.json";
+            $paths[] = $state_dir . "/pull/domains.json";
         }
 
         foreach ($paths as $path) {
@@ -1004,7 +1004,7 @@ class Pull
             "error" => $e->getMessage(),
             "message" => $message,
         ]);
-        $this->client->write_status_file($message);
+        $this->client->write_progress_file($message);
 
         $red = "\033[31m";
         $dim = "\033[2m";

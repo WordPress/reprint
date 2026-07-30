@@ -219,7 +219,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringContainsString( (string) realpath($this->localTree), $nestedStateError['error'] ?? '' );
 
         $this->assertNoSenderState($this->stateDirectory);
-        $this->assertFileDoesNotExist($this->stateDirectory . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDirectory . '/pull/state.json');
     }
 
     public function testFilesPushMasksTheSharedSecretInOutputAndStateFiles(): void
@@ -236,7 +236,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame('files-push', $finalLine['command'] ?? null);
         $this->assertSame('failed', $finalLine['status'] ?? null);
         $this->assertSame(1, $result['exit']);
-        $this->assertFileDoesNotExist($this->stateDirectory . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDirectory . '/pull/state.json');
     }
 
     public function testCorruptSenderStateUsesTheStructuredWorkflowErrorResult(): void
@@ -276,18 +276,18 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringContainsString('without its directory', $finalLine['detail'] ?? '');
         $this->assertSame('', $result['stderr']);
 
-        $status = json_decode(
-            (string) file_get_contents($this->stateDirectory . '/.import-status.json'),
+        $progress = json_decode(
+            (string) file_get_contents($this->stateDirectory . '/progress.json'),
             true,
             512,
             JSON_THROW_ON_ERROR
         );
         $this->assertSame(
             ['command', 'pair', 'status', 'phase', 'reason', 'detail', 'ts'],
-            array_keys($status)
+            array_keys($progress)
         );
-        $this->assertSame('error', $status['status']);
-        $audit = (string) file_get_contents($this->stateDirectory . '/.import-audit.log');
+        $this->assertSame('error', $progress['status']);
+        $audit = (string) file_get_contents($this->stateDirectory . '/audit.log');
         $this->assertSame(1, substr_count($audit, 'ERROR files-push'));
         $this->assertStringContainsString('pair=' . $context['pair'], $audit);
     }

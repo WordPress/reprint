@@ -40,8 +40,8 @@ describe('Import: Basic File Sync', () => {
     });
 
     it('state file shows complete', () => {
-        const stateFile = join(tempDir, '.import-state.json');
-        assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
+        const stateFile = join(tempDir, 'pull/state.json');
+        assert.ok(existsSync(stateFile), 'Expected pull/state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.equal(state.active_resumable_command.command_name, 'files-pull');
         assert.equal(state.active_resumable_command.completion_state, 'complete');
@@ -56,9 +56,9 @@ describe('Import: Basic File Sync', () => {
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
-    it('.import-index.jsonl has entries', () => {
-        const indexFile = join(tempDir, '.import-index.jsonl');
-        assert.ok(existsSync(indexFile), 'Expected .import-index.jsonl to exist');
+    it('pull/local-index.jsonl has entries', () => {
+        const indexFile = join(tempDir, 'pull/local-index.jsonl');
+        assert.ok(existsSync(indexFile), 'Expected pull/local-index.jsonl to exist');
         const lines = readFileSync(indexFile, 'utf-8').trim().split('\n').filter(l => l);
         assert.ok(lines.length > 0, 'Expected at least one index entry');
     });
@@ -93,12 +93,12 @@ describe('Import: Basic File Sync', () => {
         assert.equal(restart.exitCode, 0, `Expected restart exit 0, got ${restart.exitCode}\nstderr: ${restart.stderr}\nstdout: ${restart.stdout}`);
 
         // Local index should still exist (restart preserves it)
-        const indexFile = join(tempDir, '.import-index.jsonl');
+        const indexFile = join(tempDir, 'pull/local-index.jsonl');
         assert.ok(existsSync(indexFile), 'Expected local index to be preserved after --abort');
 
         // Transient files should be cleaned up
-        assert.ok(!existsSync(join(tempDir, '.import-remote-index.jsonl')), 'Expected remote index to be deleted');
-        assert.ok(!existsSync(join(tempDir, '.import-fetch-list.jsonl')), 'Expected fetch list to be deleted');
+        assert.ok(!existsSync(join(tempDir, 'pull/remote-index.jsonl')), 'Expected remote index to be deleted');
+        assert.ok(!existsSync(join(tempDir, 'pull/fetch-list.jsonl')), 'Expected fetch list to be deleted');
     });
 
     it('running after --abort performs a delta sync', () => {
@@ -107,7 +107,7 @@ describe('Import: Basic File Sync', () => {
         });
         assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const stateFile = join(tempDir, '.import-state.json');
+        const stateFile = join(tempDir, 'pull/state.json');
         const state = JSON.parse(readFileSync(stateFile, 'utf8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete');
     });

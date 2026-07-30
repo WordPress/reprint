@@ -111,7 +111,7 @@ describe('Import: SiteGround plugin stripping', () => {
         });
         assert.equal(result.exitCode, 0, `preflight failed:\n${result.stderr}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
         assert.equal(state.webhost, 'siteground',
             `Expected webhost 'siteground', got '${state.webhost}'`);
     });
@@ -182,7 +182,7 @@ describe('Import: SiteGround plugin stripping', () => {
         });
 
         it('audit log records the deactivations', () => {
-            const auditLog = readFileSync(join(tempDir, '.import-audit.log'), 'utf-8');
+            const auditLog = readFileSync(join(tempDir, 'audit.log'), 'utf-8');
             assert.ok(
                 auditLog.includes('deactivated plugin') && auditLog.includes('sg-cachepress'),
                 'audit log should record sg-cachepress deactivation',

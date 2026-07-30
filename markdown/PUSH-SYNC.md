@@ -273,7 +273,7 @@ configuration; request parameters cannot select any of them.
 ## Local files sender
 
 `PushFilesSender` joins the durable `PushPlan` to the receiver's push session.
-Every local Reprint command workflow runs under `<state-dir>/.reprint.lock`.
+Every local Reprint command workflow runs under `<state-dir>/process.lock`.
 The production CLI acquires this non-blocking lock before it prepares pair
 context, constructs `ImportClient`, or writes the command audit entry. It
 passes the open lock to `ImportClient::run()` and releases it after the command.
@@ -410,7 +410,7 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 `PushFilesSender`. It sends only the resolved filesystem root named by `--fs-root`.
 It requires `--state-dir`, `--fs-root`, and `--secret`; HTTPS is required unless
 the operator passes `--force-http`. It does not run pull preflight, read or
-write `.import-state.json`, show a plan, ask for confirmation, transfer a
+write `pull/state.json`, show a plan, ask for confirmation, transfer a
 database, retry a failed request, or start a replacement sender after a
 `restart` outcome.
 
@@ -445,7 +445,7 @@ The stable CLI mapping is `complete`/0, `partial`/2, `interrupted`/2,
 `restart`/2, `failed`/1, and `error`/1. Exit 2 asks the operator to run the
 same command again. After `restart`, that next run builds a fresh plan. The
 shared audit log records opening mode, phase changes, planned pauses, handled
-interruptions, and terminal outcomes with the pair key. The flat status file
+interruptions, and terminal outcomes with the pair key. The flat progress file
 records only the command, pair, outcome, phase, reason, detail, and timestamp;
 neither file copies receiver cursors or tentative upload positions.
 

@@ -3,7 +3,7 @@
  *
  * Tests the full round-trip:
  * 1. Create site with known content containing source URLs in various formats
- * 2. Run db-pull → verify .import-domains.json contains the source domain
+ * 2. Run db-pull → verify pull/domains.json contains the source domain
  * 3. Run db-apply with --rewrite-url to apply SQL to target database
  * 4. Verify URLs are rewritten in all value types, including serialized PHP
  */
@@ -98,9 +98,9 @@ describe('Import: URL Rewriting', () => {
         assert.ok(existsSync(sqlFile), 'Expected db.sql to exist');
     });
 
-    it('domain discovery produces .import-domains.json', () => {
-        const domainsFile = join(tempDir, '.import-domains.json');
-        assert.ok(existsSync(domainsFile), 'Expected .import-domains.json to exist');
+    it('domain discovery produces pull/domains.json', () => {
+        const domainsFile = join(tempDir, 'pull/domains.json');
+        assert.ok(existsSync(domainsFile), 'Expected pull/domains.json to exist');
 
         const domains = JSON.parse(readFileSync(domainsFile, 'utf-8'));
         assert.ok(Array.isArray(domains), 'Expected domains to be an array');

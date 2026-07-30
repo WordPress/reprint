@@ -12,8 +12,8 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
     private $tempDir;
     private $fsRoot;
     private $outputDir;
-    private $stateFile;
-    private $skippedFile;
+    private $pullStateFile;
+    private $skippedFetchListFile;
 
     protected function setUp(): void
     {
@@ -25,13 +25,13 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 
         mkdir($this->fsRoot, 0755, true);
         mkdir($this->outputDir, 0755, true);
-        mkdir($stateDir, 0755, true);
+        mkdir($stateDir . '/pull', 0755, true);
 
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
-        $this->stateFile = $stateDir . '/.import-state.json';
-        $this->skippedFile = $stateDir . '/.import-fetch-list-skipped.jsonl';
-        file_put_contents($this->stateFile, "{\"command\":\"files-pull\",\"status\":\"partial\"}\n");
-        file_put_contents($this->skippedFile, "{\"path\":\"/wp-content/uploads/test.jpg\"}\n");
+        $this->pullStateFile = $stateDir . '/pull/state.json';
+        $this->skippedFetchListFile = $stateDir . '/pull/skipped-fetch-list.jsonl';
+        file_put_contents($this->pullStateFile, "{\"command\":\"files-pull\",\"status\":\"partial\"}\n");
+        file_put_contents($this->skippedFetchListFile, "{\"path\":\"/wp-content/uploads/test.jpg\"}\n");
     }
 
     protected function tearDown(): void
@@ -71,9 +71,9 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL'] =
             'https://source.example/wp-content/uploads';
         $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE'] =
-            $this->stateFile;
+            $this->pullStateFile;
         $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'] =
-            $this->skippedFile;
+            $this->skippedFetchListFile;
         $manifest->routes[] = [
             'handler' => 'remote-upload-proxy',
             'path_pattern' => '/wp-content/uploads/.*',
@@ -91,20 +91,20 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $startSh = file_get_contents($this->outputDir . '/start.sh');
 
         $this->assertStringContainsString(
-            "/tmp/reprint/.import-state.json",
+            "/tmp/reprint/state.json",
             $runtime,
         );
         $this->assertStringContainsString(
-            "/tmp/reprint/.import-fetch-list-skipped.jsonl",
+            "/tmp/reprint/skipped-fetch-list.jsonl",
             $runtime,
         );
-        $this->assertStringNotContainsString($this->stateFile, $runtime);
+        $this->assertStringNotContainsString($this->pullStateFile, $runtime);
         $this->assertStringContainsString(
-            "--mount='" . $this->stateFile . ":/tmp/reprint/.import-state.json'",
+            "--mount='" . $this->pullStateFile . ":/tmp/reprint/state.json'",
             $startSh,
         );
         $this->assertStringContainsString(
-            "--mount='" . $this->skippedFile . ":/tmp/reprint/.import-fetch-list-skipped.jsonl'",
+            "--mount='" . $this->skippedFetchListFile . ":/tmp/reprint/skipped-fetch-list.jsonl'",
             $startSh,
         );
 
@@ -114,9 +114,9 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 
         $mount_sources = array_column($startJson['mounts'], 'source');
         $mount_targets = array_column($startJson['mounts'], 'target');
-        $this->assertContains($this->stateFile, $mount_sources);
-        $this->assertContains($this->skippedFile, $mount_sources);
-        $this->assertContains('/tmp/reprint/.import-state.json', $mount_targets);
-        $this->assertContains('/tmp/reprint/.import-fetch-list-skipped.jsonl', $mount_targets);
+        $this->assertContains($this->pullStateFile, $mount_sources);
+        $this->assertContains($this->skippedFetchListFile, $mount_sources);
+        $this->assertContains('/tmp/reprint/state.json', $mount_targets);
+        $this->assertContains('/tmp/reprint/skipped-fetch-list.jsonl', $mount_targets);
     }
 }

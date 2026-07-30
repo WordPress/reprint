@@ -15,7 +15,7 @@ class PullFilterFakeClient extends \ImportClient
     public int $db_sync_runs = 0;
     public int $db_apply_runs = 0;
     public array $progress_events = [];
-    public array $status_errors = [];
+    public array $progress_file_errors = [];
 
     /** @var resource|null */
     private $terminal_progress_stream = null;
@@ -35,9 +35,9 @@ class PullFilterFakeClient extends \ImportClient
         $this->progress_events[] = $data;
     }
 
-    public function write_status_file(?string $error = null): void
+    public function write_progress_file(?string $error = null): void
     {
-        $this->status_errors[] = $error;
+        $this->progress_file_errors[] = $error;
     }
 
     public function captureTerminalProgress(): void
@@ -103,11 +103,11 @@ class PullFilterFakeClient extends \ImportClient
         $this->files_pull_runs++;
         if ($this->create_skipped_list) {
             file_put_contents(
-                $this->state_dir . '/.import-fetch-list-skipped.jsonl',
+                $this->state_dir . '/pull/skipped-fetch-list.jsonl',
                 "{\"path\":\"" . base64_encode('/wp-content/uploads/2024/01/photo.jpg') . "\"}\n",
             );
         } else {
-            @unlink($this->state_dir . '/.import-fetch-list-skipped.jsonl');
+            @unlink($this->state_dir . '/pull/skipped-fetch-list.jsonl');
         }
 
         $state = $this->get_import_state();
@@ -192,6 +192,7 @@ class PullFilterOptionTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -230,7 +231,7 @@ class PullFilterOptionTest extends TestCase
     private function readState(): array
     {
         return json_decode(
-            file_get_contents($this->stateDir . '/.import-state.json'),
+            file_get_contents($this->stateDir . '/pull/state.json'),
             true,
         );
     }
@@ -261,7 +262,7 @@ class PullFilterOptionTest extends TestCase
             ob_end_clean();
         }
 
-        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDir . '/pull/state.json');
     }
 
     public function testPullDoesNotAdvancePastFailedPreflight(): void
@@ -293,11 +294,11 @@ class PullFilterOptionTest extends TestCase
         $this->assertCount(1, $error_events);
         $this->assertSame("preflight", $error_events[0]["failed_stage"]);
         $this->assertSame("Exporter unavailable", $error_events[0]["message"]);
-        $status_errors = array_values(array_filter(
-            $client->status_errors,
+        $progress_file_errors = array_values(array_filter(
+            $client->progress_file_errors,
             static fn ($error): bool => $error !== null,
         ));
-        $this->assertSame(["Exporter unavailable"], $status_errors);
+        $this->assertSame(["Exporter unavailable"], $progress_file_errors);
     }
 
     public function testPullResumesAfterFilesPullCompletedBeforePipelineStageWasMarked(): void
@@ -419,7 +420,7 @@ class PullFilterOptionTest extends TestCase
             ob_end_clean();
         }
 
-        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDir . '/pull/state.json');
     }
 
     public function testPullFilesSummaryReportsNoChangedFilesPulled(): void
@@ -774,7 +775,7 @@ class PullFilterOptionTest extends TestCase
             ob_end_clean();
         }
 
-        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDir . '/pull/state.json');
     }
 
     public function testPullWithEssentialFilesPersistsDeferredFilesState(): void
@@ -795,7 +796,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertTrue($state["pull_pipeline"]["skipped_pending"]);
         $this->assertTrue($state["pull_pipeline"]["has_completed_once"]);
         $this->assertSame('essential-files', $state["filter"]);
-        $this->assertFileExists($this->stateDir . '/.import-fetch-list-skipped.jsonl');
+        $this->assertFileExists($this->stateDir . '/pull/skipped-fetch-list.jsonl');
     }
 
     public function testPullWithoutFilterRecordsFullDownloadMode(): void
@@ -815,7 +816,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertFalse($state["pull_pipeline"]["skipped_pending"]);
         $this->assertTrue($state["pull_pipeline"]["has_completed_once"]);
         $this->assertSame('none', $state["filter"]);
-        $this->assertFileDoesNotExist($this->stateDir . '/.import-fetch-list-skipped.jsonl');
+        $this->assertFileDoesNotExist($this->stateDir . '/pull/skipped-fetch-list.jsonl');
     }
 
     public function testPullDerivesFlatDocumentRootFromFlattenTo(): void
