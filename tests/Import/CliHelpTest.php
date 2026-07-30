@@ -67,7 +67,10 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('update entries for paths they change', $output);
         $this->assertStringContainsString('paths committed by the target', $output);
         $this->assertStringContainsString('Complete files-pull, pull-files, or files-push once', $output);
-        $this->assertStringContainsString('omit URL user-info and SECRET_KEY', $output);
+        $this->assertStringContainsString(
+            'omit URL user-info, SECRET_KEY, and the site-export-api marker',
+            $output
+        );
         $this->assertStringContainsString('same files-pull with --abort', $output);
         $this->assertStringContainsString('push operation plan', $output);
         $this->assertStringContainsString('default-skipped paths', $output);

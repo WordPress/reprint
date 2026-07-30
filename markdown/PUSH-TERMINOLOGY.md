@@ -125,7 +125,7 @@ succeed.
 One target URL in a state directory uses:
 
 ```text
-<state-dir>/remote-<sha256(target URL with user-info and SECRET_KEY removed)>/
+<state-dir>/remote-<sha256(target URL with user-info, SECRET_KEY, and site-export-api removed)>/
   .remote-index.jsonl
   .remote-index.next.jsonl
   .local-index.jsonl
@@ -134,9 +134,9 @@ One target URL in a state directory uses:
   push/
 ```
 
-The hash omits URL user-info and `SECRET_KEY`; changing any other query
-parameter selects a different remote state directory. A different local
-document root uses a different state directory.
+The hash omits URL user-info, `SECRET_KEY`, and the `site-export-api` endpoint
+alias; changing any other query parameter selects a different remote state
+directory. A different local document root uses a different state directory.
 
 Use `remote_state_directory`, `$remote_state_directory`, and `remote state
 directory` for `remote-<hash>/`. Use `local_index_path`, `$local_index_path`,
@@ -285,8 +285,9 @@ sha256(<target-url-without-authentication>)
 The local index is `<state-dir>/remote-<hash>/.local-index.jsonl`, and the
 `local push state directory` is `<state-dir>/remote-<hash>/push/`. `files-push`
 chooses `start` or `resume` only from whether `sender.json` exists there. The
-hash omits URL user-info and `SECRET_KEY`; files-push receives its secret
-through `--secret`. A different local tree uses a different state directory.
+hash omits URL user-info, `SECRET_KEY`, and the `site-export-api` endpoint
+alias; files-push receives its secret through `--secret`. A different local
+tree uses a different state directory.
 receiver-confirmed upload positions remain receiver-owned; they are not a
 files-push cursor and are not copied into `.import-state.json` or
 `.import-status.json`.

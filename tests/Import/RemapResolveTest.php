@@ -63,9 +63,12 @@ class RemapResolveTest extends TestCase
         (new \ReflectionClass($c))->getProperty($p)->setValue($c, $v);
     }
 
-    private function client(array $pathsUrls): \ImportClient
+    private function client(
+        array $pathsUrls,
+        string $targetUrl = 'https://src.example/export.php'
+    ): \ImportClient
     {
-        $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
+        $c = new \ImportClient($targetUrl, $this->stateDir, $this->fsRoot);
         $this->set($c, 'state', array('preflight' => array('data' => array(
             'runtime' => array('document_root' => ''),
             'database' => array('wp' => array('paths_urls' => $pathsUrls)),
@@ -79,16 +82,20 @@ class RemapResolveTest extends TestCase
         return $this->call($c, 'resolve_remap', array($pairs));
     }
 
-    private function assertRemapConsistent($c): void
+    private function persistPathMapping($c): void
     {
-        $this->call($c, 'assert_files_remap_consistent');
+        $this->call($c, 'persist_path_mapping');
     }
 
-    private function writeLocalIndex(\ImportClient $client): void
+    private function readPathMapping(\ImportClient $client): array
     {
-        file_put_contents(
-            $client->remote_state_directory . '/.remote-index.jsonl',
-            "{}\n"
+        return json_decode(
+            file_get_contents(
+                $client->remote_state_directory . '/path-mapping.json'
+            ),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
         );
     }
 
@@ -210,7 +217,39 @@ class RemapResolveTest extends TestCase
         $this->assertSame($this->root . '/special-plugins', $rules['/detached/plugins']);
     }
 
-    // --- state consistency -------------------------------------------------
+    // --- persisted path mapping -------------------------------------------
+
+    public function testPersistsResolvedTargetAndLocalPrefixes(): void
+    {
+        $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
+        $this->set($c, 'remap_rules', array(
+            '/var/www/html/wp-content' => $this->root . '/content',
+        ));
+
+        $this->persistPathMapping($c);
+
+        $mapping = $this->readPathMapping($c);
+        $this->assertSame(realpath($this->fsRoot), base64_decode($mapping['filesystem_root_b64']));
+        $this->assertSame(realpath($this->fsRoot), base64_decode($mapping['local_tree_b64']));
+        $this->assertSame('/', base64_decode($mapping['target_document_root_b64']));
+        $this->assertSame(
+            [
+                [
+                    'kind' => 'default',
+                    'remote_prefix_b64' => base64_encode('/'),
+                    'local_prefix_b64' => base64_encode(realpath($this->fsRoot)),
+                ],
+                [
+                    'kind' => 'remap',
+                    'remote_prefix_b64' => base64_encode('/var/www/html/wp-content'),
+                    'local_prefix_b64' => base64_encode($this->root . '/content'),
+                ],
+            ],
+            $mapping['prefix_rules']
+        );
+        $this->assertFileExists($c->remote_state_directory . '/pull-state.json');
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+    }
 
     public function testRejectsChangedRemapRulesForSameState(): void
     {
@@ -218,27 +257,60 @@ class RemapResolveTest extends TestCase
         $this->set($c, 'remap_rules', array(
             '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
-        $this->assertRemapConsistent($c);
+        $this->persistPathMapping($c);
 
         $this->set($c, 'remap_rules', array(
             '/var/www/html/wp-content' => $this->root . '/content',
         ));
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot change --remap rules');
-        $this->assertRemapConsistent($c);
+        $this->expectExceptionMessage(
+            'Cannot change the resolved path mapping'
+        );
+        $this->persistPathMapping($c);
     }
 
-    public function testRejectsRemapWithUntrackedExistingFilesIndex(): void
+    public function testReloadsTheRelationshipStateForTheSameTargetAndLocalTree(): void
     {
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
-        $this->writeLocalIndex($c);
-        $this->set($c, 'remap_rules', array(
-            '/var/www/html/wp-content' => $this->root . '/wp-content',
-        ));
+        $this->persistPathMapping($c);
+        $remoteStateDirectory = $c->remote_state_directory;
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('existing files index');
-        $this->assertRemapConsistent($c);
+        $resumed = new \ImportClient(
+            'https://src.example/export.php',
+            $this->stateDir,
+            $this->fsRoot
+        );
+
+        $this->assertSame(
+            $remoteStateDirectory,
+            $resumed->remote_state_directory
+        );
+    }
+
+    public function testKeepsPullStateSeparateForTwoTargets(): void
+    {
+        $first = $this->client(
+            array('content_dir' => '/var/www/html/wp-content'),
+            'https://first.example/export.php'
+        );
+        $this->persistPathMapping($first);
+
+        $second = $this->client(
+            array('content_dir' => '/var/www/html/wp-content'),
+            'https://second.example/export.php'
+        );
+        $this->persistPathMapping($second);
+
+        $this->assertNotSame(
+            $first->remote_state_directory,
+            $second->remote_state_directory
+        );
+        $this->assertFileExists(
+            $first->remote_state_directory . '/pull-state.json'
+        );
+        $this->assertFileExists(
+            $second->remote_state_directory . '/pull-state.json'
+        );
     }
 
     // --- errors ------------------------------------------------------------

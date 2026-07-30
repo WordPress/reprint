@@ -125,6 +125,80 @@ final class FilesPushCommandTest extends TestCase
         );
     }
 
+    public function testPullAliasMarkerDoesNotChangeTheLocalIndexPath(): void
+    {
+        $targetUrl = 'https://example.test/?reprint-api=1';
+        $beforePullNormalization = ImportClient::prepare_files_command_context(
+            $targetUrl,
+            $this->stateDirectory,
+            $this->localTree,
+            'files-diff'
+        );
+        $afterPullNormalization = ImportClient::prepare_files_command_context(
+            $targetUrl . '&site-export-api',
+            $this->stateDirectory,
+            $this->localTree,
+            'files-diff'
+        );
+
+        $this->assertSame(
+            $beforePullNormalization['remote_state_directory'],
+            $afterPullNormalization['remote_state_directory']
+        );
+    }
+
+    public function testCommandContextRejectsMappingForAnotherLocalTree(): void
+    {
+        $targetUrl = 'https://example.test/?reprint-api=1';
+        $context = ImportClient::prepare_files_command_context(
+            $targetUrl,
+            $this->stateDirectory,
+            $this->localTree,
+            'files-push'
+        );
+        mkdir($context['remote_state_directory'], 0700, true);
+        file_put_contents(
+            $context['remote_state_directory'] . '/path-mapping.json',
+            json_encode([
+                'target_url_fingerprint' => hash('sha256', $targetUrl),
+                'filesystem_root_b64' => base64_encode($context['local_tree']),
+                'local_tree_b64' => base64_encode($context['local_tree']),
+                'target_document_root_b64' => base64_encode('/var/www/html'),
+                'prefix_rules' => [[
+                    'kind' => 'default',
+                    'remote_prefix_b64' => base64_encode('/var/www/html'),
+                    'local_prefix_b64' => base64_encode($context['local_tree']),
+                ]],
+            ], JSON_THROW_ON_ERROR)
+        );
+        $otherTree = $this->root . '/other-tree';
+        mkdir($otherTree);
+        $canonicalOtherTree = realpath($otherTree);
+        $this->assertIsString($canonicalOtherTree);
+
+        try {
+            ImportClient::prepare_files_command_context(
+                $targetUrl,
+                $this->stateDirectory,
+                $otherTree,
+                'files-push'
+            );
+            $this->fail('Expected the state directory to reject another local tree.');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString(
+                'records local tree '
+                    . $context['local_tree']
+                    . ', not '
+                    . $canonicalOtherTree,
+                $error->getMessage()
+            );
+            $this->assertStringContainsString(
+                'Use a different --state-dir for this local tree.',
+                $error->getMessage()
+            );
+        }
+    }
+
     public function testFilesPushRejectsOptionsOutsideItsExactAllowlist(): void
     {
         foreach (['--abort', '--filter=none', '--docroot=' . $this->localTree, '--duty=0.5'] as $rejectedOption) {
@@ -260,6 +334,53 @@ final class FilesPushCommandTest extends TestCase
 
         $this->assertNoSenderState($this->stateDirectory);
         $this->assertFileDoesNotExist($this->stateDirectory . '/.import-state.json');
+    }
+
+    public function testFilesPushRefusesPersistedRemapsBeforeStartingSender(): void
+    {
+        $targetUrl = 'https://example.test/?reprint-api=1';
+        $context = ImportClient::prepare_files_command_context(
+            $targetUrl,
+            $this->stateDirectory,
+            $this->localTree,
+            'files-push'
+        );
+        mkdir($context['remote_state_directory'], 0700, true);
+        file_put_contents(
+            $context['remote_state_directory'] . '/path-mapping.json',
+            json_encode([
+                'target_url_fingerprint' => hash('sha256', $targetUrl),
+                'filesystem_root_b64' => base64_encode($context['local_tree']),
+                'local_tree_b64' => base64_encode($context['local_tree']),
+                'target_document_root_b64' => base64_encode('/var/www/html'),
+                'prefix_rules' => [[
+                    'kind' => 'remap',
+                    'remote_prefix_b64' =>
+                        base64_encode('/var/www/html/wp-content'),
+                    'local_prefix_b64' =>
+                        base64_encode($context['local_tree'] . '/content'),
+                ]],
+            ], JSON_THROW_ON_ERROR)
+        );
+
+        try {
+            ImportClient::prepare_files_push_context(
+                $targetUrl,
+                $this->stateDirectory,
+                $this->localTree,
+                ['secret' => 'token', 'force_http' => false]
+            );
+            $this->fail('Expected files-push to reject the persisted remap.');
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString(
+                'contains remapped paths',
+                $error->getMessage()
+            );
+        }
+
+        $this->assertDirectoryDoesNotExist(
+            $context['push_state_directory']
+        );
     }
 
     public function testFilesPushMasksTheSharedSecretInOutputAndStateFiles(): void

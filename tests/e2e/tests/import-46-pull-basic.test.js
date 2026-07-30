@@ -15,6 +15,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, assertSiteMirror,
     fsRootDir, assertPullPipelineComplete, compareDatabases, createMysqlConnection, getDbName,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -64,8 +65,8 @@ describe('Import: Pull Basic', { timeout: 180000 }, () => {
     });
 
     it('state shows pull complete', () => {
-        const stateFile = join(tempDir, '.import-state.json');
-        assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
+        const stateFile = getPullStatePath(tempDir);
+        assert.ok(existsSync(stateFile), 'Expected pull-state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assertPullPipelineComplete(state);
     });
@@ -98,7 +99,7 @@ describe('Import: Pull Basic', { timeout: 180000 }, () => {
         assert.equal(result.exitCode, 0,
             `Expected exit 0 on re-pull, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
         assertPullPipelineComplete(state);
     });
 });

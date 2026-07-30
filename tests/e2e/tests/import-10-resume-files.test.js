@@ -13,6 +13,7 @@ import {
     assertTreesMatch,
     assertFileCount, assertSiteMirror,
     fsRootDir,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -56,7 +57,7 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
     });
 
     it('state shows complete', () => {
-        const stateFile = join(tempDir, '.import-state.json');
+        const stateFile = getPullStatePath(tempDir);
         assert.ok(existsSync(stateFile), 'Expected state file to exist');
 
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));

@@ -1,6 +1,6 @@
 /**
  * Test 25: State File Corruption via import.php
- * Tests importer behavior when .import-state.json is corrupted or contains
+ * Tests importer behavior when bootstrap state is corrupted or contains
  * unexpected data. Verifies the importer recovers gracefully.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -12,6 +12,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, readAuditLog,
     fsRootDir,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -46,7 +47,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0 (graceful recovery)\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, '.import-state.json');
+            const stateFile = getPullStatePath(tempDir);
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete');
         });
@@ -96,7 +97,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, '.import-state.json');
+            const stateFile = getPullStatePath(tempDir);
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.command_name, 'files-pull', 'Expected command to be updated');
             assert.equal(state.active_resumable_command.completion_state, 'complete');
@@ -129,7 +130,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0 with --abort\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, '.import-state.json');
+            const stateFile = getPullStatePath(tempDir);
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.notEqual(state.active_resumable_command.completion_state, 'in_progress', 'Expected status to be cleared');
             assert.ok(!state.active_resumable_command.remote_cursor, 'Expected cursor to be cleared');
@@ -141,7 +142,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, '.import-state.json');
+            const stateFile = getPullStatePath(tempDir);
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete');
         });

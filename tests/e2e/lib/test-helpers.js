@@ -237,6 +237,30 @@ export function getRemoteStateDirectory(outputDir, stateFileName) {
 }
 
 /**
+ * Return the persisted pull state path for an E2E import.
+ */
+export function getPullStatePath(outputDir) {
+    const bootstrapStatePath = join(outputDir, '.import-state.json');
+    if (existsSync(bootstrapStatePath)) {
+        return bootstrapStatePath;
+    }
+    const hasRelationshipPullState = readdirSync(outputDir, { withFileTypes: true })
+        .some(
+            entry =>
+                entry.isDirectory()
+                && entry.name.startsWith('remote-')
+                && existsSync(join(outputDir, entry.name, 'pull-state.json')),
+        );
+    if (!hasRelationshipPullState) {
+        return bootstrapStatePath;
+    }
+    return join(
+        getRemoteStateDirectory(outputDir, 'pull-state.json'),
+        'pull-state.json',
+    );
+}
+
+/**
  * Run the importer CLI.
  * @param {string} url - Export URL
  * @param {string} outputDir - Local output directory (state files live here; fs-root is outputDir/fs-root)
@@ -290,7 +314,7 @@ export function runImporter(url, outputDir, command, options = {}) {
     // Non-preflight commands require a prior preflight run.
     // Automatically run one if the state file doesn't already have preflight data.
     if (command !== 'preflight' && command !== 'preflight-assert' && options.skipPreflight !== true) {
-        const stateFile = join(outputDir, '.import-state.json');
+        const stateFile = getPullStatePath(outputDir);
         let needsPreflight = true;
         try {
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));

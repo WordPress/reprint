@@ -129,6 +129,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             'configure_remote_state_directory',
             [$this->fsRoot]
         );
+        $client->save_import_state();
     }
 
     private function skippedFile(): string
@@ -198,6 +199,34 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         );
         $this->assertStringContainsString(
             "Remote upload proxy failed.",
+            $runtime,
+        );
+    }
+
+    public function testApplyRuntimeSelectsTheOnlyPullStateForAFlattenedRoot(): void
+    {
+        $this->writeState([]);
+        $remoteStateDirectory = dirname($this->skippedFile());
+        rename(
+            $this->stateDir . '/.import-state.json',
+            $remoteStateDirectory . '/pull-state.json'
+        );
+        $flattenedRoot = $this->tempDir . '/flattened';
+        mkdir($flattenedRoot);
+        file_put_contents($flattenedRoot . '/index.php', "<?php echo 'ok';\n");
+
+        $client = new \ImportClient(
+            '-',
+            $this->stateDir,
+            $flattenedRoot,
+            'apply-runtime'
+        );
+        $state = $this->callPrivate($client, 'load_state');
+        $this->setPrivate($client, 'state', $state);
+        $runtime = $this->runApplyRuntime($client);
+
+        $this->assertStringContainsString(
+            $this->fsRoot . '/index.php',
             $runtime,
         );
     }

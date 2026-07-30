@@ -12,6 +12,7 @@ import {
     assertTreesMatch,
     assertFileCount, assertSiteMirror,
     fsRootDir, getRemoteStateDirectory,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -40,8 +41,8 @@ describe('Import: Basic File Sync', () => {
     });
 
     it('state file shows complete', () => {
-        const stateFile = join(tempDir, '.import-state.json');
-        assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
+        const stateFile = getPullStatePath(tempDir);
+        assert.ok(existsSync(stateFile), 'Expected pull-state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.equal(state.active_resumable_command.command_name, 'files-pull');
         assert.equal(state.active_resumable_command.completion_state, 'complete');
@@ -113,7 +114,7 @@ describe('Import: Basic File Sync', () => {
         });
         assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const stateFile = join(tempDir, '.import-state.json');
+        const stateFile = getPullStatePath(tempDir);
         const state = JSON.parse(readFileSync(stateFile, 'utf8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete');
     });

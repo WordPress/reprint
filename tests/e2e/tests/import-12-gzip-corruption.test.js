@@ -11,6 +11,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     writeTestHooks, removeTestHooks, readAuditLog,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -87,7 +88,7 @@ describe('Import: Gzip Corruption', () => {
             // Same as above: must not hang. Either succeeds (partial data OK)
             // or fails with a clear error.
             if (result.exitCode === 0) {
-                const stateFile = join(tempDir, '.import-state.json');
+                const stateFile = getPullStatePath(tempDir);
                 if (existsSync(stateFile)) {
                     const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
                     assert.ok(

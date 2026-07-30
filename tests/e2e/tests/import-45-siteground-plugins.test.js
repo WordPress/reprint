@@ -18,6 +18,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     fsRootDir, getDbName, createMysqlConnection,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -111,7 +112,7 @@ describe('Import: SiteGround plugin stripping', () => {
         });
         assert.equal(result.exitCode, 0, `preflight failed:\n${result.stderr}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
         assert.equal(state.webhost, 'siteground',
             `Expected webhost 'siteground', got '${state.webhost}'`);
     });

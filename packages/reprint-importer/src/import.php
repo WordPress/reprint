@@ -277,8 +277,14 @@ class ImportClient
     /** @var string State directory for one target URL. */
     public $remote_state_directory;
 
-    /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
+    /** @var string Root bootstrap state used until preflight identifies the local tree. */
+    private $bootstrap_state_file;
+
+    /** @var string Path to pull-state.json — persists command, cursor, stage across invocations. */
     private $state_file;
+
+    /** @var string Path to the immutable resolved path mapping. */
+    private $path_mapping_file;
 
     /**
      * @var float Monotonic timestamp of last progress JSON line emitted.
@@ -554,7 +560,11 @@ class ImportClient
             }
         }
         $this->remote_state_directory = $this->state_dir;
-        $this->state_file = $this->state_dir . "/.import-state.json";
+        $this->bootstrap_state_file =
+            $this->state_dir . "/.import-state.json";
+        $this->state_file = $this->bootstrap_state_file;
+        $this->path_mapping_file =
+            $this->state_dir . "/path-mapping.json";
         $this->remote_index_file =
             $this->state_dir . "/.remote-index.jsonl";
         $this->index_update_wal_path =
@@ -570,6 +580,28 @@ class ImportClient
             $this->state_dir . "/pull-volatile-files.json";
         $this->status_file = $this->state_dir . "/.import-status.json";
 
+        if ($signal_handling_command === 'import-metadata') {
+            $existing_remote_state_directory =
+                $this->find_only_pull_state_directory();
+        } else {
+            $existing_remote_state_directory =
+                $this->find_remote_state_directory(
+                    $signal_handling_command !== 'apply-runtime'
+                );
+            if (
+                $signal_handling_command === 'apply-runtime'
+                && $existing_remote_state_directory === null
+            ) {
+                $existing_remote_state_directory =
+                    $this->find_only_pull_state_directory();
+            }
+        }
+        if ($existing_remote_state_directory !== null) {
+            $this->select_remote_state_directory(
+                $existing_remote_state_directory
+            );
+        }
+
         // Detect TTY for progress display. In stdout mode this is re-evaluated
         // against STDERR in run() once we know the output mode.
         $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
@@ -581,19 +613,39 @@ class ImportClient
     }
 
     /** Selects the per-target files state directory. */
-    private function configure_remote_state_directory(): void
+    private function configure_remote_state_directory(
+        bool $select_pull_state = true
+    ): void
     {
-        $this->remote_state_directory = self::remote_state_directory(
+        $remote_state_directory = self::remote_state_directory(
             $this->remote_url,
             $this->state_dir
         );
         if (
-            !is_dir($this->remote_state_directory)
-            && !mkdir($this->remote_state_directory, 0755, true)
+            !is_dir($remote_state_directory)
+            && !mkdir($remote_state_directory, 0755, true)
         ) {
             throw new RuntimeException(
-                "Failed to create directory: {$this->remote_state_directory}"
+                "Failed to create directory: {$remote_state_directory}"
             );
+        }
+        $this->select_remote_state_directory(
+            $remote_state_directory,
+            $select_pull_state
+        );
+    }
+
+    /** Selects paths owned by one existing target relationship. */
+    private function select_remote_state_directory(
+        string $remote_state_directory,
+        bool $select_pull_state = true
+    ): void {
+        $this->remote_state_directory = $remote_state_directory;
+        if ($select_pull_state) {
+            $this->state_file =
+                $this->remote_state_directory . "/pull-state.json";
+            $this->path_mapping_file =
+                $this->remote_state_directory . "/path-mapping.json";
         }
         $this->remote_index_file =
             $this->remote_state_directory . "/.remote-index.jsonl";
@@ -607,6 +659,92 @@ class ImportClient
             $this->remote_state_directory . "/pull-plan.skipped.jsonl";
         $this->volatile_files_file =
             $this->remote_state_directory . "/pull-volatile-files.json";
+    }
+
+    /**
+     * Finds a persisted relationship by pull filesystem root and, normally,
+     * target URL.
+     */
+    private function find_remote_state_directory(
+        bool $match_target_url = true
+    ): ?string
+    {
+        $canonical_filesystem_root =
+            self::canonicalize_path_with_missing_components($this->fs_root);
+        if ($canonical_filesystem_root === null) {
+            return null;
+        }
+        $target_url_fingerprint = hash(
+            'sha256',
+            self::target_url_for_relationship($this->remote_url)
+        );
+        $mapping_files = glob(
+            $this->state_dir . '/remote-*/path-mapping.json'
+        );
+        if (!is_array($mapping_files)) {
+            return null;
+        }
+        $matching_directories = [];
+        foreach ($mapping_files as $mapping_file) {
+            $mapping = self::read_path_mapping($mapping_file);
+            if (
+                $match_target_url
+                &&
+                $mapping['target_url_fingerprint']
+                    !== $target_url_fingerprint
+            ) {
+                continue;
+            }
+            $filesystem_root = base64_decode(
+                $mapping['filesystem_root_b64'],
+                true
+            );
+            $local_tree = base64_decode(
+                $mapping['local_tree_b64'],
+                true
+            );
+            if (
+                $filesystem_root === $canonical_filesystem_root
+                || $local_tree === $canonical_filesystem_root
+            ) {
+                $matching_directory = realpath(dirname($mapping_file));
+                $matching_directories[] = $matching_directory === false
+                    ? dirname($mapping_file)
+                    : $matching_directory;
+            }
+        }
+        if (count($matching_directories) > 1) {
+            throw new RuntimeException(
+                'More than one target relationship uses the local tree '
+                . $canonical_filesystem_root
+                . ' in '
+                . $this->state_dir
+                . '. Use a state directory containing one matching relationship.'
+            );
+        }
+        return $matching_directories[0] ?? null;
+    }
+
+    /** Finds the only persisted pull state for a local-only command. */
+    private function find_only_pull_state_directory(): ?string
+    {
+        $pull_state_files = glob(
+            $this->state_dir . '/remote-*/pull-state.json'
+        );
+        if (!is_array($pull_state_files) || $pull_state_files === []) {
+            return null;
+        }
+        if (count($pull_state_files) > 1) {
+            throw new RuntimeException(
+                'A local-only command cannot select one pull state because '
+                . $this->state_dir
+                . ' contains more than one target relationship.'
+            );
+        }
+        $pull_state_directory = realpath(dirname($pull_state_files[0]));
+        return $pull_state_directory === false
+            ? dirname($pull_state_files[0])
+            : $pull_state_directory;
     }
 
     /**
@@ -805,9 +943,12 @@ class ImportClient
     /**
      * Resolve file-selection options after preflight is available.
      */
-    public function prepare_files_pull_options(array $options, bool $assert_remap = true): void
+    public function prepare_files_pull_options(
+        array $options,
+        bool $persist_path_mapping = true
+    ): void
     {
-        $this->configure_remote_state_directory();
+        $this->configure_remote_state_directory($persist_path_mapping);
         $remap_raw = $options["remap"] ?? [];
         if (!empty($remap_raw)) {
             $this->remap_rules = $this->resolve_remap($remap_raw);
@@ -821,8 +962,8 @@ class ImportClient
             $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
         }
 
-        if ($assert_remap) {
-            $this->assert_files_remap_consistent();
+        if ($persist_path_mapping) {
+            $this->persist_path_mapping();
         }
     }
 
@@ -1066,9 +1207,9 @@ class ImportClient
         }
 
         // files-diff and files-push use local push state and must not load
-        // or write the pull command's .import-state.json file.
+        // or write the pull command's pull-state.json file.
         if ($command === "files-diff") {
-            $this->configure_remote_state_directory();
+            $this->configure_remote_state_directory(false);
             if (is_file($this->index_update_wal_path)) {
                 throw new RuntimeException(
                     'Finish or abort the interrupted files-pull before running files-diff.'
@@ -1078,7 +1219,7 @@ class ImportClient
             return;
         }
         if ($command === "files-push") {
-            $this->configure_remote_state_directory();
+            $this->configure_remote_state_directory(false);
             if (is_file($this->index_update_wal_path)) {
                 throw new RuntimeException(
                     'Finish or abort the interrupted files-pull before running files-push.'
@@ -1096,9 +1237,6 @@ class ImportClient
         }
 
         $this->state = ImportState::from_array($this->load_state());
-        if (($this->import_state()->preflight ?? null) !== null) {
-            $this->configure_remote_state_directory();
-        }
 
         if ($command === "import-metadata") {
             $this->run_import_metadata();
@@ -1851,6 +1989,20 @@ class ImportClient
                 . '. Pass --force-http only for a target you trust.'
             );
         }
+        $path_mapping_file =
+            $context['remote_state_directory'] . '/path-mapping.json';
+        if (is_file($path_mapping_file)) {
+            $path_mapping = self::read_path_mapping($path_mapping_file);
+            foreach ($path_mapping['prefix_rules'] as $prefix_rule) {
+                if ($prefix_rule['kind'] === 'remap') {
+                    throw new RuntimeException(
+                        'files-push cannot use this local index because '
+                        . $path_mapping_file
+                        . ' contains remapped paths.'
+                    );
+                }
+            }
+        }
         return $context;
     }
 
@@ -1935,6 +2087,26 @@ class ImportClient
                 . ' must be outside the local tree ' . $canonical_local_tree . '.'
             );
         }
+        $path_mapping_file = $remote_state_directory . '/path-mapping.json';
+        if (is_file($path_mapping_file)) {
+            $path_mapping = self::read_path_mapping($path_mapping_file);
+            /** @var string $mapped_local_tree */
+            $mapped_local_tree = base64_decode(
+                $path_mapping['local_tree_b64'],
+                true
+            );
+            if ($mapped_local_tree !== $canonical_local_tree) {
+                throw new RuntimeException(
+                    'The path mapping '
+                    . $path_mapping_file
+                    . ' records local tree '
+                    . $mapped_local_tree
+                    . ', not '
+                    . $canonical_local_tree
+                    . '. Use a different --state-dir for this local tree.'
+                );
+            }
+        }
 
         return [
             'target_url' => $target_url,
@@ -1945,7 +2117,114 @@ class ImportClient
         ];
     }
 
-    /** Removes authentication inputs which do not identify a target. */
+    /**
+     * Reads and validates one resolved path mapping.
+     *
+     * @return array {
+     *     @type string $target_url_fingerprint    Target URL fingerprint.
+     *     @type string $filesystem_root_b64       Pull filesystem root.
+     *     @type string $local_tree_b64            Canonical local tree.
+     *     @type string $target_document_root_b64  Target document root.
+     *     @type array  $prefix_rules              Resolved prefix rules.
+     * }
+     * @phpstan-return array{target_url_fingerprint:string,filesystem_root_b64:string,local_tree_b64:string,target_document_root_b64:string,prefix_rules:list<array{kind:'default'|'remap',remote_prefix_b64:string,local_prefix_b64:string}>}
+     */
+    private static function read_path_mapping(string $mapping_file): array
+    {
+        $json = file_get_contents($mapping_file);
+        if (!is_string($json)) {
+            throw new RuntimeException(
+                'Failed to read the path mapping: ' . $mapping_file . '.'
+            );
+        }
+        $mapping = json_decode(
+            $json,
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        if (!is_array($mapping)) {
+            throw new RuntimeException(
+                'The path mapping is not a JSON object: '
+                . $mapping_file
+                . '.'
+            );
+        }
+        foreach ([
+            'target_url_fingerprint',
+            'filesystem_root_b64',
+            'local_tree_b64',
+            'target_document_root_b64',
+        ] as $key) {
+            if (!isset($mapping[$key]) || !is_string($mapping[$key])) {
+                throw new RuntimeException(
+                    'The path mapping '
+                    . $mapping_file
+                    . ' has no string '
+                    . $key
+                    . '.'
+                );
+            }
+        }
+        foreach ([
+            'filesystem_root_b64',
+            'local_tree_b64',
+            'target_document_root_b64',
+        ] as $key) {
+            if (base64_decode($mapping[$key], true) === false) {
+                throw new RuntimeException(
+                    'The path mapping '
+                    . $mapping_file
+                    . ' has invalid base64 in '
+                    . $key
+                    . '.'
+                );
+            }
+        }
+        if (!isset($mapping['prefix_rules']) || !is_array($mapping['prefix_rules'])) {
+            throw new RuntimeException(
+                'The path mapping '
+                . $mapping_file
+                . ' has no prefix_rules array.'
+            );
+        }
+        foreach ($mapping['prefix_rules'] as $position => $prefix_rule) {
+            if (
+                !is_array($prefix_rule)
+                || !in_array(
+                    $prefix_rule['kind'] ?? null,
+                    ['default', 'remap'],
+                    true
+                )
+                || !isset(
+                    $prefix_rule['remote_prefix_b64'],
+                    $prefix_rule['local_prefix_b64']
+                )
+                || !is_string($prefix_rule['remote_prefix_b64'])
+                || !is_string($prefix_rule['local_prefix_b64'])
+                || base64_decode(
+                    $prefix_rule['remote_prefix_b64'],
+                    true
+                ) === false
+                || base64_decode(
+                    $prefix_rule['local_prefix_b64'],
+                    true
+                ) === false
+            ) {
+                throw new RuntimeException(
+                    'The path mapping '
+                    . $mapping_file
+                    . ' has an invalid prefix rule at position '
+                    . $position
+                    . '.'
+                );
+            }
+        }
+        /** @var array{target_url_fingerprint:string,filesystem_root_b64:string,local_tree_b64:string,target_document_root_b64:string,prefix_rules:list<array{kind:'default'|'remap',remote_prefix_b64:string,local_prefix_b64:string}>} $mapping */
+        return $mapping;
+    }
+
+    /** Removes endpoint aliases and authentication inputs which do not identify a target. */
     private static function target_url_for_relationship(
         string $target_url
     ): string {
@@ -1965,7 +2244,11 @@ class ImportClient
                 $query_name = explode('=', $query_part, 2)[0];
                 if (
                     $query_part !== ''
-                    && rawurldecode($query_name) !== 'SECRET_KEY'
+                    && !in_array(
+                        rawurldecode($query_name),
+                        ['SECRET_KEY', 'site-export-api'],
+                        true
+                    )
                 ) {
                     $query_parts[] = $query_part;
                 }
@@ -4514,9 +4797,8 @@ class ImportClient
         }
 
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL"] = $base_url;
-        $state_dir = realpath($this->state_dir) ?: $this->state_dir;
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
-            rtrim($state_dir, "/") . "/.import-state.json";
+            $this->state_file;
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
             $this->skipped_download_list_file;
         $manifest->routes[] = [
@@ -8560,51 +8842,117 @@ class ImportClient
     }
 
     /**
-     * Refuse to reuse a files index with different --remap rules.
+     * Stores the resolved mapping once for the target relationship.
      *
-     * The files index stores remote paths. Local writes/deletes derive their
-     * targets from the current remap rules, so changing those rules while the
-     * same index is still in use can point future updates at the wrong path.
+     * The local index stores paths after pull remapping, while later push work
+     * needs their original target coordinates. Changing the resolved rules
+     * while reusing that index could address a different target path, so the
+     * first mapping is immutable. Rule order is normalized because matching
+     * chooses the deepest remote prefix rather than the first listed rule.
      */
-    private function assert_files_remap_consistent(): void
+    private function persist_path_mapping(): void
     {
-        $fingerprint = $this->files_remap_fingerprint();
-        $previous = $this->import_state()->files_remap_fingerprint ?? null;
-
-        $has_existing_index =
-            file_exists($this->remote_index_file)
-            && filesize($this->remote_index_file) > 0;
-        if ($previous === null && $has_existing_index && !empty($this->remap_rules)) {
+        $filesystem_root = $this->get_filesystem_root_path();
+        $local_tree =
+            self::canonicalize_path_with_missing_components(
+                $this->local_tree()
+            );
+        if ($local_tree === null) {
             throw new RuntimeException(
-                "Cannot use --remap with an existing files index that was created before remap tracking. " .
-                    "Use a new --state-dir or clear the existing files index first.",
+                'Failed to resolve the local tree for the path mapping.'
             );
         }
-
-        if ($previous !== null && $previous !== $fingerprint) {
+        $target_document_root =
+            $this->import_state()->preflight['data']['runtime'][
+                'document_root'
+            ] ?? null;
+        if (!is_string($target_document_root)) {
             throw new RuntimeException(
-                "Cannot change --remap rules while reusing the same files index. " .
-                    "Use the original --remap rules, or use a new --state-dir for a fresh files-pull.",
+                'Preflight did not report a target document root for the path mapping.'
             );
         }
-
-        if ($previous === null) {
-            $this->import_state()->files_remap_fingerprint = $fingerprint;
-            $this->save_state($this->state);
+        $target_document_root =
+            rtrim(normalize_path($target_document_root), '/') ?: '/';
+        $resolved_prefix_rules = $this->remap_rules;
+        if (!array_key_exists($target_document_root, $resolved_prefix_rules)) {
+            $resolved_prefix_rules[$target_document_root] = $local_tree;
         }
-    }
+        ksort($resolved_prefix_rules, SORT_STRING);
+        $prefix_rules = [];
+        foreach (
+            $resolved_prefix_rules
+            as $remote_prefix => $local_prefix
+        ) {
+            $prefix_rules[] = [
+                'kind' => array_key_exists(
+                    $remote_prefix,
+                    $this->remap_rules
+                )
+                    ? 'remap'
+                    : 'default',
+                'remote_prefix_b64' => base64_encode($remote_prefix),
+                'local_prefix_b64' => base64_encode($local_prefix),
+            ];
+        }
+        $mapping = [
+            'target_url_fingerprint' => hash(
+                'sha256',
+                self::target_url_for_relationship($this->remote_url)
+            ),
+            'filesystem_root_b64' => base64_encode($filesystem_root),
+            'local_tree_b64' => base64_encode($local_tree),
+            'target_document_root_b64' =>
+                base64_encode($target_document_root),
+            'prefix_rules' => $prefix_rules,
+        ];
 
-    /**
-     * Stable fingerprint for the resolved remap rule set.
-     *
-     * Rule order does not matter: remap matching chooses the deepest source
-     * path, not the first matching rule.
-     */
-    private function files_remap_fingerprint(): string
-    {
-        $rules = $this->remap_rules;
-        ksort($rules, SORT_STRING);
-        return hash("sha256", json_encode($rules, JSON_UNESCAPED_SLASHES));
+        if (is_file($this->path_mapping_file)) {
+            if (self::read_path_mapping($this->path_mapping_file) !== $mapping) {
+                throw new RuntimeException(
+                    'Cannot change the resolved path mapping in '
+                    . $this->remote_state_directory
+                    . '. Use the original --remap rules, or use a new '
+                    . '--state-dir for a fresh files-pull.'
+                );
+            }
+        } else {
+            $temporary_mapping_file = $this->path_mapping_file . '.tmp';
+            $json = json_encode(
+                $mapping,
+                JSON_PRETTY_PRINT
+                    | JSON_UNESCAPED_SLASHES
+                    | JSON_THROW_ON_ERROR
+            );
+            if (
+                file_put_contents($temporary_mapping_file, $json) === false
+            ) {
+                throw new RuntimeException(
+                    'Failed to write the path mapping: '
+                    . $temporary_mapping_file
+                    . '.'
+                );
+            }
+            if (!rename($temporary_mapping_file, $this->path_mapping_file)) {
+                throw new RuntimeException(
+                    'Failed to replace the path mapping: '
+                    . $this->path_mapping_file
+                    . '.'
+                );
+            }
+        }
+
+        $this->save_state($this->state);
+        if (
+            $this->bootstrap_state_file !== $this->state_file
+            && is_file($this->bootstrap_state_file)
+            && !unlink($this->bootstrap_state_file)
+        ) {
+            throw new RuntimeException(
+                'Failed to remove the bootstrap pull state: '
+                . $this->bootstrap_state_file
+                . '.'
+            );
+        }
     }
 
     /**
@@ -11030,7 +11378,6 @@ class ImportClient
         $follow = $this->import_state()->follow_symlinks ?? false;
         $nonempty = $this->import_state()->fs_root_nonempty_behavior ?? "error";
         $max_packet = $this->import_state()->max_allowed_packet ?? null;
-        $files_remap_fingerprint = $this->import_state()->files_remap_fingerprint ?? null;
         $pull = $this->import_state()->pull_pipeline ?? null;
         $this->state = ImportState::from_array($this->default_state());
         $this->import_state()->preflight = $preflight;
@@ -11039,7 +11386,6 @@ class ImportClient
         $this->import_state()->follow_symlinks = $follow;
         $this->import_state()->fs_root_nonempty_behavior = $nonempty;
         $this->import_state()->max_allowed_packet = $max_packet;
-        $this->import_state()->files_remap_fingerprint = $files_remap_fingerprint;
         if ($pull !== null) {
             $this->import_state()->pull_pipeline = $pull;
         }
@@ -11067,7 +11413,6 @@ class ImportClient
             "filter" => "none",
             "user_agent" => null,
             "max_allowed_packet" => null,
-            "files_remap_fingerprint" => null,
             "files_pull_only_fingerprint" => null,
             "files_pull_summary" => [
                 "files_pulled" => 0,
@@ -12847,7 +13192,8 @@ if (
                 "  remote-<hash>/pull-index-updates.wal    Active files-pull WAL\n" .
                 "  remote-<hash>/pull-plan.jsonl           Files pending download\n" .
                 "  remote-<hash>/pull-plan.skipped.jsonl   Skipped files (when --filter=essential-files)\n" .
-                "  .import-state.json                      Resumable state\n" .
+                "  remote-<hash>/pull-state.json           Resumable pull state\n" .
+                "  remote-<hash>/path-mapping.json         Immutable resolved path mapping\n" .
                 "  .import-audit.log                       Audit log\n",
         ],
         "files-diff" => [
@@ -12861,8 +13207,8 @@ if (
                 "updates entries for paths committed by the target.\n" .
                 "The local tree at --fs-root must be the exact document root later\n" .
                 "passed to files-push. Use the same exporter endpoint as pull but\n" .
-                "omit URL user-info and SECRET_KEY. After pull-files received a bare\n" .
-                "site URL, include the site-export-api query which it added.\n" .
+                "omit URL user-info, SECRET_KEY, and the site-export-api marker\n" .
+                "which pull-files may add to a bare site URL.\n" .
                 "The output is a local minimized push operation plan before target\n" .
                 "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
                 "default-skipped paths include generated wp-content caches, version-\n" .
@@ -12976,8 +13322,9 @@ if (
             "short" => "Print local import lifecycle metadata as JSON",
             "usage" => "reprint import-metadata --state-dir=DIR",
             "description" =>
-                "Reads --state-dir/.import-state.json and prints metadata for\n" .
-                "host integrations. No network calls are made.\n",
+                "Reads the only remote-<hash>/pull-state.json in --state-dir\n" .
+                "and prints metadata for host integrations. No network calls\n" .
+                "are made. Refuses an ambiguous state directory.\n",
             "extra" =>
                 "Example:\n" .
                 "  reprint import-metadata --state-dir=./state | jq '.hasCompletedOnce'\n",

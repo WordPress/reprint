@@ -26,6 +26,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     readAuditLog,
     fsRootDir, getRemoteStateDirectory,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -213,7 +214,7 @@ describe('Import: Follow Symlinks', () => {
     });
 
     it('state shows complete', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete');
         assert.equal(state.follow_symlinks, true, 'follow_symlinks should be persisted in state');
     });

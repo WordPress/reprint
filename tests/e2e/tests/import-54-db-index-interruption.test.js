@@ -14,6 +14,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     writeTestHooks, removeTestHooks,
     readHookState, clearHookState,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -64,7 +65,7 @@ describe('Import: Database Index Response Interruption', () => {
         );
 
         const state = JSON.parse(
-            readFileSync(join(tempDir, '.import-state.json'), 'utf-8'),
+            readFileSync(getPullStatePath(tempDir), 'utf-8'),
         );
         assert.equal(
             state.active_resumable_command.completion_state,

@@ -10,6 +10,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -114,7 +115,7 @@ describe('Import: SQL Output Modes', () => {
         });
 
         it('state file records sql_output mode', () => {
-            const stateFile = join(tempDir, '.import-state.json');
+            const stateFile = getPullStatePath(tempDir);
             assert.ok(existsSync(stateFile), 'Expected state file to exist');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.sql_output, 'mysql',

@@ -13,6 +13,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertPullPipelineComplete,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -61,7 +62,7 @@ describe('Import: Pull start-runtime none', { timeout: 180000 }, () => {
     });
 
     it('marks the pull complete and generates playground runtime files', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
         assertPullPipelineComplete(state);
         assert.equal(state.active_resumable_command.completion_state, 'complete');
 

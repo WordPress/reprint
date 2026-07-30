@@ -84,13 +84,14 @@ previously pushed rows.
 The local index lives at:
 
 ```text
-<state-dir>/remote-<sha256(target URL with user-info and SECRET_KEY removed)>/.local-index.jsonl
+<state-dir>/remote-<sha256(target URL with user-info, SECRET_KEY, and site-export-api removed)>/.local-index.jsonl
 ```
 
-The hash omits URL user-info and `SECRET_KEY`, so pull URL authentication and
-push's `--secret` select the same local index. Changing any other query
-parameter selects a different local index and push-state directory. A different
-local document root uses a different state directory.
+The hash omits URL user-info, `SECRET_KEY`, and the `site-export-api` endpoint
+alias, so pull URL authentication, pull's bare-URL normalization, and push's
+`--secret` select the same local index. Changing any other query parameter
+selects a different local index and push-state directory. A different local
+document root uses a different state directory.
 
 Entries for actual pulled or pushed paths record the locally observed type,
 size, and ctime. Remote values cannot stand in for these fields because ctime
@@ -462,10 +463,11 @@ The local index is
 `<state-dir>/remote-<hash>/.local-index.jsonl`; sender state lives at
 `<state-dir>/remote-<hash>/push/`. A different target query selects a different
 remote state directory. A different local tree uses a different state
-directory. The hash omits URL user-info and `SECRET_KEY`; files-push rejects
-both and receives its secret through `--secret`. Fragments are rejected. The
-local push state directory must be outside the local tree so planning cannot
-index its own changing files.
+directory. The hash omits URL user-info, `SECRET_KEY`, and the
+`site-export-api` endpoint alias; files-push rejects authentication in its
+target URL and receives its secret through `--secret`. Fragments are rejected.
+The local push state directory must be outside the local tree so planning
+cannot index its own changing files.
 
 One process starts or resumes exactly one sender. Before every `next_step()` it
 checks whether another step may begin. The wall-clock admission deadline is 80

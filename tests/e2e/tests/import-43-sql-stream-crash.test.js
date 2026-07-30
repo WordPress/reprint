@@ -18,6 +18,7 @@ import {
     readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -181,7 +182,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
                     }
                 }
 
-                const stateFile = join(tempDir, '.import-state.json');
+                const stateFile = getPullStatePath(tempDir);
                 assert.ok(existsSync(stateFile), 'Expected state file to exist');
                 const state = JSON.parse(readFileSync(stateFile, 'utf8'));
                 assert.equal(state.active_resumable_command.completion_state, 'complete',

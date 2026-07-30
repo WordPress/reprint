@@ -25,6 +25,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     fsRootDir,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -113,7 +114,7 @@ require_once ABSPATH . 'wp-settings.php';
         });
         assert.equal(result.exitCode, 0, `preflight failed:\n${result.stderr}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
         const pathsUrls = state.preflight?.data?.database?.wp?.paths_urls;
         assert.ok(pathsUrls, 'Expected paths_urls in preflight data');
 
@@ -151,7 +152,7 @@ require_once ABSPATH . 'wp-settings.php';
     });
 
     it('wp-admin files exist at the resolved core path in fs-root', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
         const wpAdminPath = state.preflight?.data?.database?.wp?.paths_urls?.wp_admin_path;
         assert.ok(wpAdminPath, 'wp_admin_path not found in state');
 
@@ -167,7 +168,7 @@ require_once ABSPATH . 'wp-settings.php';
     });
 
     it('wp-content files exist at the separate content path in fs-root', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
         const contentDir = state.preflight?.data?.database?.wp?.paths_urls?.content_dir;
         assert.ok(contentDir, 'content_dir not found in state');
 
