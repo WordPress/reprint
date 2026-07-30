@@ -7,7 +7,7 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * --remap: the single write seam (remote_path_to_local_path_within_import_root)
+ * --remap: the single write seam (map_target_filesystem_path_to_local_filesystem_path)
  * routes in-scope source paths to their target and leaves the rest nested.
  */
 class RemapSeamTest extends TestCase
@@ -71,7 +71,7 @@ class RemapSeamTest extends TestCase
         $c = $this->clientWithRules(array(
             '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
-        $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
+        $local = $this->call($c, 'map_target_filesystem_path_to_local_filesystem_path', array(
             '/var/www/html/wp-content/plugins/woo/woo.php',
         ));
         $this->assertSame($this->root . '/wp-content/plugins/woo/woo.php', $local);
@@ -86,7 +86,7 @@ class RemapSeamTest extends TestCase
             '/srv/wp-content' => $this->root . '/archive-of-everything',
             '/srv/wp-content/plugins' => $this->root . '/p',
         ));
-        $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
+        $local = $this->call($c, 'map_target_filesystem_path_to_local_filesystem_path', array(
             '/srv/wp-content/plugins/woo/woo.php',
         ));
         $this->assertSame($this->root . '/p/woo/woo.php', $local);
@@ -99,7 +99,7 @@ class RemapSeamTest extends TestCase
         $c = $this->clientWithRules(array(
             '/var/www/html/wp-content' => $this->root,
         ));
-        $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
+        $local = $this->call($c, 'map_target_filesystem_path_to_local_filesystem_path', array(
             '/var/www/html/wp-content/plugins/woo/woo.php',
         ));
         $this->assertSame($this->root . '/plugins/woo/woo.php', $local);
@@ -110,7 +110,7 @@ class RemapSeamTest extends TestCase
         $c = $this->clientWithRules(array(
             '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
-        $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
+        $local = $this->call($c, 'map_target_filesystem_path_to_local_filesystem_path', array(
             '/var/www/html/wp-admin/index.php',
         ));
         $this->assertSame($this->root . '/var/www/html/wp-admin/index.php', $local);
@@ -119,7 +119,7 @@ class RemapSeamTest extends TestCase
     public function testNoRulesIsLegacyMapping(): void
     {
         $c = $this->clientWithRules(array());
-        $local = $this->call($c, 'remote_path_to_local_path_within_import_root', array(
+        $local = $this->call($c, 'map_target_filesystem_path_to_local_filesystem_path', array(
             '/var/www/html/wp-content/x.txt',
         ));
         $this->assertSame($this->root . '/var/www/html/wp-content/x.txt', $local);

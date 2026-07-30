@@ -1,8 +1,91 @@
-# Push terminology
+# Reprint terminology
 
-This is the vocabulary contract for every push surface. Read it before
-changing push code, tests, documentation, plans, review replies, commit
-messages, or pull-request descriptions.
+This is the vocabulary contract for every Reprint surface. Read it before
+changing pull or push code, tests, documentation, plans, review replies,
+commit messages, or pull-request descriptions.
+
+## Coordinate systems and relationship state
+
+Every path name states the machine whose coordinates it uses and whether it
+is filesystem-absolute or document-root-relative.
+
+- A **state directory** is the caller-selected local directory containing
+  Reprint state for one local document root. Use `$state_directory`.
+- The **local document root** is the local directory whose contents are
+  compared, pulled, and pushed. Use `$local_document_root`.
+- The **import root** is the local directory under which a pulled target
+  filesystem is reconstructed. The local document root may be nested inside
+  it. Use `$import_root`.
+- A **target** is the site addressed by the configured exporter API URL. It is
+  the source during pull and the destination during push. Use `$target_url`.
+- The **target identity URL** removes URL user-info, `SECRET_KEY`, and the
+  `site-export-api` alias from the target URL. Use `$target_identity_url`.
+- The **target fingerprint** is the SHA-256 of the target identity URL and is
+  only a directory-safe identifier. Use `$target_fingerprint`.
+- A **target relationship** is the synchronization relationship between the
+  state directory's local document root and one target.
+- A **target relationship directory** is the local
+  `remote-<target-fingerprint>/` directory containing one target
+  relationship's state. Use `$target_relationship_directory`.
+- The **target document root** is the absolute document root on the target
+  machine. Use `$target_document_root`.
+
+The four domain path terms are:
+
+| Term | Meaning | Preferred name |
+| --- | --- | --- |
+| Target filesystem path | Absolute path on the target machine. | `$target_filesystem_path` |
+| Local filesystem path | Absolute path on the local machine. | `$local_filesystem_path` |
+| Target document path | Path relative to the target document root. | `$target_document_path` |
+| Local document path | Path relative to the local document root. | `$local_document_path` |
+
+An **absolute path** begins at `/`. A **document path** has no leading slash.
+A **normalized path** has repeated separators and `.` or `..` segments removed
+lexically; it does not inspect the filesystem. A **resolved absolute path** is
+an absolute path whose existing symlinks `realpath()` resolved. An
+**uncreated suffix** is the final sequence of segments that does not yet
+exist. A **base64 path** describes transport encoding, not coordinates.
+
+Use `resolve_absolute_path_with_uncreated_suffix()` for a path resolver that
+retains a missing suffix. Do not call this a canonical path. Do not use a bare
+`$path`, `$local_path`, or `$remote_path` when more than one coordinate system
+is present.
+
+The pull conversion flow is target filesystem path → local filesystem path →
+local document path. Push applies the reverse mapping from local document path
+to target document path.
+
+## Indexes and mappings
+
+- A **target index** is the last target filesystem state accepted by pull.
+  Its entries use target filesystem paths and target-observed metadata. Use
+  `$target_index_file`.
+- A **local index** is the locally accounted baseline. Its entries use local
+  document paths and locally observed metadata. Use `$local_index_file`.
+- A **fresh local index** is the current local-document-root scan created while
+  planning a push. Use `$fresh_local_index_file`.
+- An **index entry** records one path, type, size, and ctime. Use
+  `$index_entry`.
+- The **index-update WAL** records completed pull mutations awaiting application
+  to the target and local indexes.
+- A **pull plan** lists target filesystem paths still scheduled for download or
+  deletion. A **push plan** pairs local document paths with target document
+  paths.
+
+A **resolved path mapping** is an immutable mapping between target filesystem
+prefixes and local filesystem prefixes. A **pull mapping** converts a target
+filesystem path to a local filesystem path. A **push mapping** converts a local
+document path to a target document path. An **addressable mapping** maps every
+relevant local document path to exactly one target document path below the
+target document root; an **ambiguous mapping** has more than one target path,
+and an **unaddressable mapping** has none. An **identity mapping** leaves local
+and target document paths identical. `path-mapping.json` stores the resolved
+path mapping for a target relationship.
+
+A state directory belongs to one local document root and may contain several
+target relationships. Each target relationship directory is keyed only by its
+target fingerprint. Reusing a mapped relationship with another local document
+root is rejected.
 
 ## Core nouns
 
@@ -138,14 +221,14 @@ sender-owned exclusions to `plan/excluded_paths.json` when it starts.
 `fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
 `local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
 
-The **previous local index** describes the local tree as the pair's last
+The **previous local index** describes the local document root as the pair's last
 completed push observed it. The sender saves it after a successful commit, and
 `files-diff` reads it. PushPlan diffs its fresh local index against the copy
 its caller supplies. `byte_offset_in_previous_local_index` is the position
 from which its current lookahead entry is read again after resume.
 
 The PushPlan cursor is stored in `sender.json`. It contains the plan
-directory, local tree root, previous local index, and current
+directory, local document root, previous local index, and current
 planning position. During `indexing`, that position contains the
 FileIndexProcessor cursor and the committed byte offset in
 `fresh_local_index.jsonl`. During `diffing`, it contains the index offsets,
@@ -170,7 +253,7 @@ an explicit `request_too_large` failure lowers future request sizes.
 
 When a local path to push changes, the sender reports `local_path_changed` and
 moves to `removing`. After removal a new sender builds a fresh local index. The
-sender trusts the completed deletion plan without checking the live local tree;
+sender trusts the completed deletion plan without checking the live local document root;
 changes after planning belong to the next push.
 
 Receiver-confirmed file and work-delete cursors remain receiver state. A newly
@@ -193,7 +276,7 @@ reports `complete`, `restart`, or `failed`.
 
 ## Files-diff CLI names
 
-The local-only command is `files-diff`. Its `target URL`, `local tree`, `pair
+The local-only command is `files-diff`. Its `target URL`, `local document root`, `pair
 key`, and `local push state directory` have the same meanings and pair-key
 formula as `files-push`. It reads the pair's `previous_local_index.jsonl`,
 which a completed files-push publishes, and never changes it.
@@ -216,14 +299,14 @@ running the command again prints the complete report.
 ## Files-push CLI names
 
 The low-level, files-only command is `files-push`. Its `target URL` is the
-exporter API URL, and its `local tree` is the canonical directory supplied by
+exporter API URL, and its `local document root` is the resolved absolute directory supplied by
 `--fs-root`. It requires `--secret=TOKEN`; `--force-http` is the explicit
 plain-HTTP opt-in.
 
-The `pair key` identifies exactly one target URL and canonical local tree:
+The `pair key` identifies exactly one target URL and resolved local document root:
 
 ```text
-sha256(rtrim(<target-url>, "?&") + "\0" + <canonical-local-tree-path>)
+sha256(rtrim(<target-url>, "?&") + "\0" + <resolved-local-document-root>)
 ```
 
 The `local push state directory` is `<state-dir>/push/<pair-key>/`. `files-push`
@@ -291,7 +374,7 @@ Use these names verbatim inside `PushPlan`:
 | Meaning | Name |
 | --- | --- |
 | Active plan directory | `$plan_directory` |
-| Local tree root | `$local_tree_root`, `set_local_tree_root()` |
+| Local tree root | `$local_document_root`, `set_local_document_root()` |
 | Previous local index | `$previous_local_index` |
 | Open previous local index | `$previous_local_index_handle` |
 | Previous local index lookahead entry | `$previous_local_index_lookahead_entry`, `$previous_local_index_lookahead_entry_loaded` |

@@ -42,7 +42,7 @@ function runtime_applier_for(string $runtime): RuntimeApplier
  * Appliers may append platform-specific code to the result (e.g. the
  * php-builtin applier adds CLI-server routing).
  */
-function generate_runtime_php(RuntimeManifest $manifest, string $fs_root): string
+function generate_runtime_php(RuntimeManifest $manifest, string $import_root): string
 {
     $lines = [];
     $lines[] = '<?php';
@@ -72,7 +72,7 @@ function generate_runtime_php(RuntimeManifest $manifest, string $fs_root): strin
     // Constants
     if (!empty($manifest->constants)) {
         foreach ($manifest->constants as $name => $value) {
-            $resolved = resolve_runtime_placeholders($value, $fs_root);
+            $resolved = resolve_runtime_placeholders($value, $import_root);
             $escaped = addslashes($resolved);
             $lines[] = "if (!defined('{$name}')) {";
             $lines[] = "    define('{$name}', '{$escaped}');";
@@ -84,7 +84,7 @@ function generate_runtime_php(RuntimeManifest $manifest, string $fs_root): strin
     // Server variables
     if (!empty($manifest->server_vars)) {
         foreach ($manifest->server_vars as $name => $value) {
-            $resolved = resolve_runtime_placeholders($value, $fs_root);
+            $resolved = resolve_runtime_placeholders($value, $import_root);
             $escaped = addslashes($resolved);
             $lines[] = "\$_SERVER['{$name}'] = '{$escaped}';";
         }
@@ -354,9 +354,9 @@ function generate_route_handler_code(RuntimeManifest $manifest): string
 /**
  * Replace {fs-root} placeholders with the actual fs-root path.
  */
-function resolve_runtime_placeholders(string $value, string $fs_root): string
+function resolve_runtime_placeholders(string $value, string $import_root): string
 {
-    return str_replace('{fs-root}', rtrim($fs_root, '/'), $value);
+    return str_replace('{fs-root}', rtrim($import_root, '/'), $value);
 }
 
 /**

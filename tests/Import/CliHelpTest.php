@@ -46,7 +46,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--force-http', $output);
         $this->assertStringContainsString('--verbose, -v', $output);
         $this->assertStringContainsString('low-level, files-only command', $output);
-        $this->assertStringContainsString('existing local tree at --fs-root', $output);
+        $this->assertStringContainsString('existing local document root at --fs-root', $output);
         $this->assertStringContainsString('read or modify', $output);
         $this->assertStringNotContainsString('--abort', $output);
         $this->assertStringNotContainsString('--filter', $output);

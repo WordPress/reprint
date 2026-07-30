@@ -129,7 +129,7 @@ class SymlinkBundleTest extends TestCase
 
     private function place(\ImportClient $c, string $path): string
     {
-        return (new \ReflectionClass($c))->getMethod('remote_path_to_local_path_within_import_root')->invoke($c, $path);
+        return (new \ReflectionClass($c))->getMethod('map_target_filesystem_path_to_local_filesystem_path')->invoke($c, $path);
     }
 
     public function testEscapingTargetRoutesIntoBundle(): void

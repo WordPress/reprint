@@ -20,16 +20,16 @@ class CurlTimeoutRecoveryTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
-    private $fs_root;
+    private $import_root;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/curl-timeout-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $this->fs_root = $this->tempDir . '/fs-root';
+        $this->import_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->fs_root, 0755, true);
+        mkdir($this->import_root, 0755, true);
     }
 
     protected function tearDown(): void
@@ -125,7 +125,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         $client = new $clientClass(
             'http://fake.url',
             $this->stateDir,
-            $this->fs_root,
+            $this->import_root,
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
 
@@ -226,7 +226,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
     public function testFileFetchHardCrashCheckpointDoesNotPutCursorBehindBytes()
     {
-        $trackedPath = $this->fs_root . '/uploads/large.bin';
+        $trackedPath = $this->import_root . '/uploads/large.bin';
         mkdir(dirname($trackedPath), 0755, true);
         file_put_contents($trackedPath, str_repeat('a', 256));
 

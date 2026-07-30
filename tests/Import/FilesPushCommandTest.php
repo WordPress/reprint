@@ -43,7 +43,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertNull(ImportClient::files_push_stop_cause(1000.0, PHP_INT_MAX, 0, -1, $chunkBytes));
     }
 
-    public function testPairContextUsesTheTrimmedTargetAndCanonicalLocalTree(): void
+    public function testPairContextUsesTheTrimmedTargetAndResolvedLocalDocumentRoot(): void
     {
         $targetUrl = 'https://example.test/?reprint-api=1&&';
         $context = ImportClient::prepare_files_push_context(
@@ -52,13 +52,13 @@ final class FilesPushCommandTest extends TestCase
             $this->localTree,
             ['secret' => 'token', 'force_http' => false]
         );
-        $canonicalLocalTree = realpath($this->localTree);
-        $this->assertIsString($canonicalLocalTree);
+        $resolvedLocalDocumentRoot = realpath($this->localTree);
+        $this->assertIsString($resolvedLocalDocumentRoot);
         $trimmedTargetUrl = rtrim($targetUrl, '?&');
-        $expectedPair = hash('sha256', $trimmedTargetUrl . "\0" . $canonicalLocalTree);
+        $expectedPair = hash('sha256', $trimmedTargetUrl . "\0" . $resolvedLocalDocumentRoot);
 
         $this->assertSame($trimmedTargetUrl, $context['target_url']);
-        $this->assertSame($canonicalLocalTree, $context['local_tree']);
+        $this->assertSame($resolvedLocalDocumentRoot, $context['local_document_root']);
         $this->assertSame($expectedPair, $context['pair']);
         $this->assertSame(
             realpath($this->stateDirectory) . '/push/' . $expectedPair,
@@ -184,7 +184,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame(1, $missingTreeResult['exit']);
         $missingTreeError = $this->lastJsonLine($missingTreeResult['stderr']);
         $this->assertSame(
-            'The local tree does not exist or is not a directory: ' . $missingTree . '.',
+            'The local document root does not exist or is not a directory: ' . $missingTree . '.',
             $missingTreeError['error'] ?? null
         );
         $this->assertDirectoryDoesNotExist($missingTree);
@@ -201,7 +201,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame(1, $symlinkResult['exit']);
         $symlinkError = $this->lastJsonLine($symlinkResult['stderr']);
         $this->assertSame(
-            'The local tree must not be a symlink: ' . $symlinkedTree . '.',
+            'The local document root must not be a symlink: ' . $symlinkedTree . '.',
             $symlinkError['error'] ?? null
         );
 
@@ -215,7 +215,7 @@ final class FilesPushCommandTest extends TestCase
         ]);
         $this->assertSame(1, $nestedStateResult['exit']);
         $nestedStateError = $this->lastJsonLine($nestedStateResult['stderr']);
-        $this->assertStringContainsString('must be outside the local tree', $nestedStateError['error'] ?? '');
+        $this->assertStringContainsString('must be outside the local document root', $nestedStateError['error'] ?? '');
         $this->assertStringContainsString( (string) realpath($this->localTree), $nestedStateError['error'] ?? '' );
 
         $this->assertNoSenderState($this->stateDirectory);

@@ -774,7 +774,7 @@ final class PushPlanTest extends TestCase
     }
 
     /**
-     * Makes the local tree match one test description while preserving unchanged paths.
+     * Makes the local document root match one test description while preserving unchanged paths.
      *
      * @param string $treeDescriptionPath JSONL path descriptions created by writeIndex().
      */

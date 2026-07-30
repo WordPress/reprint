@@ -36,7 +36,7 @@ class PlaygroundCliApplier implements RuntimeApplier
      */
     private const VFS_ROOT = '/wordpress';
 
-    public function apply(RuntimeManifest $manifest, string $fs_root, string $output_dir, array $options = []): array
+    public function apply(RuntimeManifest $manifest, string $import_root, string $output_dir, array $options = []): array
     {
         $port = (int) ($options['port'] ?? 9400);
 
@@ -88,7 +88,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         $start_path = $output_dir . '/start.sh';
         $start_script = $this->generate_start_script(
             $manifest,
-            $fs_root,
+            $import_root,
             $output_dir,
             $runtime_path,
             $port,
@@ -104,7 +104,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         // callers running inside a VFS must map them to host paths.
         $config_path = $output_dir . '/start.json';
         $config = $this->generate_start_config(
-            $fs_root,
+            $import_root,
             $output_dir,
             $runtime_path,
             $port,
@@ -194,7 +194,7 @@ class PlaygroundCliApplier implements RuntimeApplier
      * to shared host directories) are resolved by Playground's
      * --follow-symlinks flag — no per-symlink mounts needed.
      */
-    private function build_mounts(string $fs_root, array $options): array
+    private function build_mounts(string $import_root, array $options): array
     {
         $mounts = [];
 
@@ -209,7 +209,7 @@ class PlaygroundCliApplier implements RuntimeApplier
             }
         }
 
-        $real_fs_root = realpath($fs_root) ?: $fs_root;
+        $real_fs_root = realpath($import_root) ?: $import_root;
 
         if ($wordpress_core_dir !== '' && $wordpress_core_dir !== $real_fs_root) {
             // WPCloud-style layout: WordPress core is separate from the
@@ -242,7 +242,7 @@ class PlaygroundCliApplier implements RuntimeApplier
      * importer ran on to the actual host paths.
      */
     private function generate_start_config(
-        string $fs_root,
+        string $import_root,
         string $output_dir,
         string $runtime_path,
         int $port,
@@ -262,7 +262,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         // WordPress layout mounts. For standard sites this is a single
         // mount. For WPCloud-style sites, three mounts assemble a standard
         // layout from separate directories.
-        foreach ($this->build_mounts($fs_root, $options) as $mount) {
+        foreach ($this->build_mounts($import_root, $options) as $mount) {
             [$source, $target] = explode(':', $mount, 2);
             $config['mounts_before_install'][] = [
                 'source' => $source,
@@ -299,14 +299,14 @@ class PlaygroundCliApplier implements RuntimeApplier
      */
     private function generate_start_script(
         RuntimeManifest $manifest,
-        string $fs_root,
+        string $import_root,
         string $output_dir,
         string $runtime_path,
         int $port,
         array $options,
         array $extra_mounts = []
     ): string {
-        $config = $this->generate_start_config($fs_root, $output_dir, $runtime_path, $port, $options, $extra_mounts);
+        $config = $this->generate_start_config($import_root, $output_dir, $runtime_path, $port, $options, $extra_mounts);
 
         $lines = [];
         $lines[] = '#!/usr/bin/env bash';

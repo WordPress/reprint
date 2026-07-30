@@ -82,7 +82,7 @@
  * local index used for planning. The sender compares the live path with those
  * values before sending and again after each read. A difference removes the
  * upload-only push session, because its work and the planned local index no
- * longer describe the same local tree.
+ * longer describe the same local document root.
  *
  * Receiver-confirmed file and deletion-list positions are never copied into
  * active state. A newly opened sender reads them from `push_status`; a
@@ -356,11 +356,11 @@ final class PushFilesSender
             }
         }
 
-        $canonical_docroot = realpath($docroot);
-        if ($canonical_docroot === false) {
+        $resolved_local_document_root = realpath($docroot);
+        if ($resolved_local_document_root === false) {
             throw new InvalidArgumentException('PushFilesSender requires a real docroot directory.');
         }
-        $this->docroot = rtrim($canonical_docroot, '/');
+        $this->docroot = rtrim($resolved_local_document_root, '/');
         $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->plan_directory = $this->push_state_directory . '/plan';
@@ -1119,7 +1119,7 @@ final class PushFilesSender
     }
 
     /**
-     * Moves a changed local tree to push-session removal.
+     * Moves a changed local document root to push-session removal.
      */
     private function start_removing_push_session_after_local_change(): void
     {
