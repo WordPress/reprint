@@ -7,10 +7,10 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * --follow-symlinks=<directory> ("symlink bundle") mode: resolving the bundle
- * destination, classifying escaping vs in-scope paths, and routing placement.
+ * --follow-symlinks=<directory> local followed symlinks root: resolving the
+ * root, classifying escaping vs in-scope paths, and routing placement.
  */
-class SymlinkBundleTest extends TestCase
+class FollowedSymlinksRootTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
@@ -20,7 +20,7 @@ class SymlinkBundleTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->tempDir = sys_get_temp_dir() . '/symlink-bundle-' . uniqid();
+        $this->tempDir = sys_get_temp_dir() . '/followed-symlinks-root-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/srv/htdocs';
         mkdir($this->stateDir, 0755, true);
@@ -54,22 +54,22 @@ class SymlinkBundleTest extends TestCase
         return new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
     }
 
-    // ── Resolving the bundle destination (:fs-root: grammar, within-root) ──
+    // ── Resolving the local followed symlinks root (:fs-root: grammar, within-root) ──
 
     private function resolve(string $raw): string
     {
         $c = $this->newClient();
-        return (new \ReflectionClass($c))->getMethod('resolve_symlink_bundle_directory')->invoke($c, $raw);
+        return (new \ReflectionClass($c))->getMethod('resolve_local_followed_symlinks_root')->invoke($c, $raw);
     }
 
     public function testFsRootTokenResolvesUnderRoot(): void
     {
-        $this->assertSame($this->root . '/.symlinks-bundle', $this->resolve(':fs-root:/.symlinks-bundle'));
+        $this->assertSame($this->root . '/.followed-symlinks-root', $this->resolve(':fs-root:/.followed-symlinks-root'));
     }
 
     public function testRawAbsoluteWithinRootIsKept(): void
     {
-        $this->assertSame($this->root . '/.symlinks-bundle', $this->resolve($this->root . '/.symlinks-bundle'));
+        $this->assertSame($this->root . '/.followed-symlinks-root', $this->resolve($this->root . '/.followed-symlinks-root'));
     }
 
     public function testFsRootItselfIsAccepted(): void
@@ -87,7 +87,7 @@ class SymlinkBundleTest extends TestCase
     public function testRelativeIsRejected(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        $this->resolve('.symlinks-bundle');
+        $this->resolve('.followed-symlinks-root');
     }
 
     // ── "Escaping" classification against the original export scope ──
@@ -110,18 +110,18 @@ class SymlinkBundleTest extends TestCase
         $this->assertFalse($this->inScope(['/srv/site/wp-content'], '/home/master/shared/foo'));
     }
 
-    // ── Placement routing (bundle vs default vs remap) ──
+    // ── Placement routing (local followed symlinks root vs default vs remap) ──
 
     /**
-     * @param string|null $bundleSub Bundle dir as a suffix under fs-root (null = no bundle).
+     * @param string|null $followedSymlinksRootSub Root suffix under fs-root (null = filesystem root).
      * @param array<int,string> $scopePrefixes Original export scope (--only prefixes).
      * @param array<string,string> $remapRules source => absolute target.
      */
-    private function placeClient(?string $bundleSub, array $scopePrefixes, array $remapRules = []): \ImportClient
+    private function placeClient(?string $followedSymlinksRootSub, array $scopePrefixes, array $remapRules = []): \ImportClient
     {
         $c = $this->newClient();
         $rc = new \ReflectionClass($c);
-        $rc->getProperty('symlink_bundle_directory')->setValue($c, $bundleSub === null ? null : $this->root . $bundleSub);
+        $rc->getProperty('local_followed_symlinks_root')->setValue($c, $followedSymlinksRootSub === null ? null : $this->root . $followedSymlinksRootSub);
         $rc->getProperty('pull_only_files_with_path_prefixes')->setValue($c, $scopePrefixes);
         $rc->getProperty('resolved_path_mappings')->setValue($c, $remapRules);
         return $c;
@@ -132,25 +132,25 @@ class SymlinkBundleTest extends TestCase
         return (new \ReflectionClass($c))->getMethod('map_remote_absolute_path_to_local_absolute_path')->invoke($c, $path);
     }
 
-    public function testEscapingTargetRoutesIntoBundle(): void
+    public function testEscapingTargetRoutesIntoLocalFollowedSymlinksRoot(): void
     {
-        $c = $this->placeClient('/.symlinks-bundle', ['/var/www/html']);
+        $c = $this->placeClient('/.followed-symlinks-root', ['/var/www/html']);
         $this->assertSame(
-            $this->root . '/.symlinks-bundle/tmp/shared/foo/style.css',
+            $this->root . '/.followed-symlinks-root/tmp/shared/foo/style.css',
             $this->place($c, '/tmp/shared/foo/style.css')
         );
     }
 
-    public function testInScopePathNotBundled(): void
+    public function testInScopePathDoesNotUseLocalFollowedSymlinksRoot(): void
     {
-        $c = $this->placeClient('/.symlinks-bundle', ['/var/www/html']);
+        $c = $this->placeClient('/.followed-symlinks-root', ['/var/www/html']);
         $this->assertSame(
             $this->root . '/var/www/html/index.php',
             $this->place($c, '/var/www/html/index.php')
         );
     }
 
-    public function testDefaultPlacementWhenNoBundleDirectory(): void
+    public function testDefaultPlacementWhenNoLocalFollowedSymlinksRoot(): void
     {
         $c = $this->placeClient(null, []);
         $this->assertSame(
@@ -160,61 +160,61 @@ class SymlinkBundleTest extends TestCase
     }
 
     // Regression: an escaping root (/shared) that is an ANCESTOR of the scope
-    // (/shared/wp-content) must not bundle the in-scope subtree.
+    // (/shared/wp-content) must not move the in-scope subtree.
     public function testAncestorEscapingRootLeavesInScopeContentInPlace(): void
     {
-        $c = $this->placeClient('/.symlinks-bundle', ['/shared/wp-content']);
+        $c = $this->placeClient('/.followed-symlinks-root', ['/shared/wp-content']);
         $this->assertSame(
             $this->root . '/shared/wp-content/plugins/foo.php',
             $this->place($c, '/shared/wp-content/plugins/foo.php'),
-            'in-scope content must not be pulled into the bundle'
+            'in-scope content must not use the local followed symlinks root'
         );
         $this->assertSame(
-            $this->root . '/.symlinks-bundle/shared/other/bar.php',
+            $this->root . '/.followed-symlinks-root/shared/other/bar.php',
             $this->place($c, '/shared/other/bar.php'),
-            'genuinely escaping content is still bundled'
+            'genuinely escaping content uses the local followed symlinks root'
         );
     }
 
-    // Regression: an explicit --remap rule wins over bundling, so file placement
+    // Regression: an explicit --remap rule wins over followed-symlink placement, so file placement
     // and the symlink repoint (which share this seam) agree — no dangling link.
     public function testRemapWinsOverBundle(): void
     {
-        $c = $this->placeClient('/.symlinks-bundle', ['/var/www/html'], ['/escaped' => $this->root . '/x']);
+        $c = $this->placeClient('/.followed-symlinks-root', ['/var/www/html'], ['/escaped' => $this->root . '/x']);
         $this->assertSame(
             $this->root . '/x/foo',
             $this->place($c, '/escaped/foo'),
-            'remap target wins; the path is not diverted into the bundle'
+            'remap target wins; the path does not use the local followed symlinks root'
         );
     }
 
-    // ── Bundle-directory fingerprint guard ──
+    // ── Local followed symlinks root fingerprint guard ──
 
-    private function assertGuard(\ImportClient $c, ?string $bundleDir, ?string $persistedFingerprint): void
+    private function assertGuard(\ImportClient $c, ?string $localFollowedSymlinksRoot, ?string $persistedFingerprint): void
     {
         $rc = new \ReflectionClass($c);
-        $rc->getProperty('symlink_bundle_directory')->setValue($c, $bundleDir);
-        $rc->getProperty('state')->getValue($c)->symlink_bundle_directory_fingerprint = $persistedFingerprint;
-        $rc->getMethod('assert_symlink_bundle_directory_unchanged')->invoke($c);
+        $rc->getProperty('local_followed_symlinks_root')->setValue($c, $localFollowedSymlinksRoot);
+        $rc->getProperty('state')->getValue($c)->local_followed_symlinks_root_fingerprint = $persistedFingerprint;
+        $rc->getMethod('assert_local_followed_symlinks_root_unchanged')->invoke($c);
     }
 
-    public function testGuardRejectsChangedBundleDirectory(): void
+    public function testGuardRejectsChangedLocalFollowedSymlinksRoot(): void
     {
         $c = $this->newClient();
         $this->expectException(\RuntimeException::class);
         $this->assertGuard($c, $this->root . '/.bundle-a', hash('sha256', $this->root . '/.bundle-b'));
     }
 
-    public function testGuardAllowsUnchangedBundleDirectory(): void
+    public function testGuardAllowsUnchangedLocalFollowedSymlinksRoot(): void
     {
         $c = $this->newClient();
         $this->assertGuard($c, $this->root . '/.bundle-a', hash('sha256', $this->root . '/.bundle-a'));
         $this->addToAssertionCount(1); // no exception == pass
     }
 
-    public function testGuardRejectsDroppingTheBundleDirectory(): void
+    public function testGuardRejectsDroppingTheLocalFollowedSymlinksRoot(): void
     {
-        // A flag-less run after a bundled pull must error, not silently revert
+        // A flag-less run after a pull with a local followed symlinks root must error, not silently revert
         // to default placement.
         $c = $this->newClient();
         $this->expectException(\RuntimeException::class);
@@ -223,7 +223,7 @@ class SymlinkBundleTest extends TestCase
 
     public function testGuardTreatsBareFollowAndFsRootAsEquivalent(): void
     {
-        // Bare --follow-symlinks (no bundle dir) and --follow-symlinks=:fs-root:
+        // Bare --follow-symlinks (no explicit root) and --follow-symlinks=:fs-root:
         // fingerprint identically — both place at fs-root.
         $c = $this->newClient();
         $this->assertGuard($c, null, hash('sha256', $this->root));
@@ -261,14 +261,14 @@ class SymlinkBundleTest extends TestCase
 
     // ── Intermediate symlinks are repointed through the placement seam ──
 
-    public function testIntermediateSymlinkRepointsIntoBundle(): void
+    public function testIntermediateSymlinkRepointsIntoLocalFollowedSymlinksRoot(): void
     {
         // In-scope intermediate link whose relative target resolves to an
-        // escaping (bundled) location: the raw target would dangle at
-        // fs-root/opt/data; it must be repointed to the bundle placement.
+        // escaping location: the raw target would dangle at fs-root/opt/data;
+        // it must be repointed to the local followed symlinks root.
         $c = $this->newClient();
         $rc = new \ReflectionClass($c);
-        $rc->getProperty('symlink_bundle_directory')->setValue($c, $this->root . '/.symlinks-bundle');
+        $rc->getProperty('local_followed_symlinks_root')->setValue($c, $this->root . '/.followed-symlinks-root');
         $rc->getProperty('pull_only_files_with_path_prefixes')->setValue($c, ['/src/wp-content']);
         $rc->getProperty('follow_symlinks')->setValue($c, true);
         $rc->getProperty('remote_index_prefix_cache')->setValue($c, ['/opt/data' => true]);
@@ -285,7 +285,7 @@ class SymlinkBundleTest extends TestCase
 
         $link = $this->root . '/src/wp-content/data';
         $this->assertTrue(is_link($link), 'intermediate link is created');
-        $this->assertStringContainsString('.symlinks-bundle/opt/data', readlink($link),
-            'target is repointed to the bundled placement, not the raw source spelling');
+        $this->assertStringContainsString('.followed-symlinks-root/opt/data', readlink($link),
+            'target is repointed to the local followed symlinks root, not the raw source spelling');
     }
 }

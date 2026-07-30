@@ -351,8 +351,8 @@ class ImportState
     /** @var string|null Webhost detected during preflight. */
     public ?string $webhost = null;
     public bool $follow_symlinks = true;
-    /** @var string|null Fingerprint of the --follow-symlinks bundle directory; guards resume. */
-    public ?string $symlink_bundle_directory_fingerprint = null;
+    /** @var string|null Fingerprint of the local followed symlinks root; guards resume. */
+    public ?string $local_followed_symlinks_root_fingerprint = null;
     public string $fs_root_nonempty_behavior = 'error';
     public string $filter = 'none';
     /** @var string|null User-Agent that worked during preflight. */
@@ -421,7 +421,7 @@ class ImportState
         $state->version = isset($data['version']) ? (string) $data['version'] : null;
         $state->webhost = isset($data['webhost']) ? (string) $data['webhost'] : null;
         $state->follow_symlinks = (bool) ($data['follow_symlinks'] ?? true);
-        $state->symlink_bundle_directory_fingerprint = isset($data['symlink_bundle_directory_fingerprint']) ? (string) $data['symlink_bundle_directory_fingerprint'] : null;
+        $state->local_followed_symlinks_root_fingerprint = isset($data['local_followed_symlinks_root_fingerprint']) ? (string) $data['local_followed_symlinks_root_fingerprint'] : null;
         $state->fs_root_nonempty_behavior = isset($data['fs_root_nonempty_behavior']) ? (string) $data['fs_root_nonempty_behavior'] : 'error';
         $state->filter = isset($data['filter']) ? (string) $data['filter'] : 'none';
         $state->user_agent = isset($data['user_agent']) ? (string) $data['user_agent'] : null;
@@ -463,7 +463,7 @@ class ImportState
             'version' => $this->version,
             'webhost' => $this->webhost,
             'follow_symlinks' => $this->follow_symlinks,
-            'symlink_bundle_directory_fingerprint' => $this->symlink_bundle_directory_fingerprint,
+            'local_followed_symlinks_root_fingerprint' => $this->local_followed_symlinks_root_fingerprint,
             'fs_root_nonempty_behavior' => $this->fs_root_nonempty_behavior,
             'filter' => $this->filter,
             'user_agent' => $this->user_agent,

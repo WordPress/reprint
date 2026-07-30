@@ -131,7 +131,7 @@
     "edit-locks": {
       "port": 8122
     },
-    "symlink-bundle": {
+    "followed-symlinks-root": {
       "port": 8123
     },
     "adversarial-database": {
