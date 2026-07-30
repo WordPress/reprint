@@ -3,7 +3,7 @@
  *
  * Simulates a SiteGround hosting environment where sg-cachepress and
  * sg-security are installed and active.  Verifies that after the full
- * import pipeline (preflight -> files-sync -> db-sync -> db-apply ->
+ * import pipeline (preflight -> files-pull -> db-pull -> db-apply ->
  * apply-runtime), both plugins are:
  *   1. Deactivated in the target database during db-apply
  *   2. Removed from the local filesystem during apply-runtime
@@ -116,18 +116,18 @@ describe('Import: SiteGround plugin stripping', () => {
             `Expected webhost 'siteground', got '${state.webhost}'`);
     });
 
-    it('files-sync downloads the site', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull downloads the site', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
-        assert.equal(result.exitCode, 0, `files-sync failed:\n${result.stderr}`);
+        assert.equal(result.exitCode, 0, `files-pull failed:\n${result.stderr}`);
     });
 
-    it('db-sync downloads the SQL dump', () => {
-        const result = runImporter(importUrl(), tempDir, 'db-sync', {
+    it('db-pull downloads the SQL dump', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-pull', {
             secret: getSiteSecret(site),
         });
-        assert.equal(result.exitCode, 0, `db-sync failed:\n${result.stderr}`);
+        assert.equal(result.exitCode, 0, `db-pull failed:\n${result.stderr}`);
         assert.ok(existsSync(join(tempDir, 'db.sql')), 'db.sql should exist');
     });
 
@@ -197,12 +197,12 @@ describe('Import: SiteGround plugin stripping', () => {
     describe('apply-runtime removes SG plugin files', () => {
         beforeAll(() => {
             const flatDir = join(tempDir, 'flattened');
-            const flatResult = runImporter(importUrl(), tempDir, 'flat-document-root', {
+            const flatResult = runImporter(importUrl(), tempDir, 'flat-docroot', {
                 secret: getSiteSecret(site),
                 extraArgs: [`--flatten-to=${flatDir}`],
             });
             assert.equal(flatResult.exitCode, 0,
-                `flat-document-root failed:\n${flatResult.stderr}`);
+                `flat-docroot failed:\n${flatResult.stderr}`);
 
             execFileSync('php', [
                 IMPORTER_PATH,

@@ -1,6 +1,6 @@
 /**
  * Test 01: Basic File Sync via import.php
- * Tests files-sync completes, files match source, and restart behavior.
+ * Tests files-pull completes, files match source, and restart behavior.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -32,8 +32,8 @@ describe('Import: Basic File Sync', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('files-sync completes successfully', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull completes successfully', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -72,7 +72,7 @@ describe('Import: Basic File Sync', () => {
     });
 
     it('re-running after completion refuses without --abort', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             autoResume: false,
         });
@@ -86,7 +86,7 @@ describe('Import: Basic File Sync', () => {
     });
 
     it('--abort clears sync progress and exits', () => {
-        const restart = runImporter(importUrl(), tempDir, 'files-sync', {
+        const restart = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--abort'],
         });
@@ -102,7 +102,7 @@ describe('Import: Basic File Sync', () => {
     });
 
     it('running after --abort performs a delta sync', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);

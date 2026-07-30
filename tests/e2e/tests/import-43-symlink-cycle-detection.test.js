@@ -64,14 +64,14 @@ describe('Import: Symlink cycle detection', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('files-sync completes without hanging', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull completes without hanging', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--follow-symlinks'],
         });
         assert.equal(
             result.exitCode, 0,
-            `files-sync should complete (not hang on cycle)\nstderr: ${result.stderr}`,
+            `files-pull should complete (not hang on cycle)\nstderr: ${result.stderr}`,
         );
     });
 

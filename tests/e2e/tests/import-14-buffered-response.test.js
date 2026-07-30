@@ -32,8 +32,8 @@ describe('Import: Buffered Response', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('files-sync through buffered proxy completes', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull through buffered proxy completes', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -52,10 +52,10 @@ describe('Import: Buffered Response', () => {
         assertSiteMirror(join(fsRootDir(tempDir), getSiteDir(site)));
     });
 
-    it('db-sync through buffered proxy completes', () => {
+    it('db-pull through buffered proxy completes', () => {
         const sqlDir = createTempDir('e2e-import-buffered-sql');
         try {
-            const result = runImporter(importUrl(), sqlDir, 'db-sync', {
+            const result = runImporter(importUrl(), sqlDir, 'db-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}`);

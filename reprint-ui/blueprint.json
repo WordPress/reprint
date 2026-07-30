@@ -14,7 +14,7 @@
       "path": "/wordpress/wp-content/mu-plugins/reprint-ui/index.php",
       "data": {
         "resource": "url",
-        "url": "https://raw.githubusercontent.com/Automattic/streaming-site-migration/trunk/reprint-ui/index.php"
+        "url": "https://raw.githubusercontent.com/WordPress/reprint/trunk/reprint-ui/index.php"
       }
     },
     {
@@ -22,7 +22,7 @@
       "path": "/wordpress/wp-content/mu-plugins/reprint-ui/reprint.phar",
       "data": {
         "resource": "url",
-        "url": "https://raw.githubusercontent.com/Automattic/streaming-site-migration/trunk/reprint.phar"
+        "url": "https://github.com/WordPress/reprint/releases/latest/download/reprint.phar"
       }
     }
   ]

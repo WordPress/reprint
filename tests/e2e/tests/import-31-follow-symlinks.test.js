@@ -196,14 +196,14 @@ describe('Import: Follow Symlinks', () => {
 
     // ─── Run the import ────────────────────────────────────────────
 
-    it('files-sync with --follow-symlinks completes', () => {
+    it('files-pull with --follow-symlinks completes', () => {
         // Clear any prior state first
-        runImporter(importUrl(), tempDir, 'files-sync', {
+        runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--abort'],
         });
 
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--follow-symlinks'],
             timeout: 120000,

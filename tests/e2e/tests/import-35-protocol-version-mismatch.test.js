@@ -3,8 +3,8 @@
  *
  * Verifies that preflight-assert correctly detects incompatible protocol
  * versions between the export plugin (remote) and the importer (client).
- * Tests all three failure modes: remote too old, client too old, and
- * remote not reporting a version at all.
+ * Tests all three failure modes: remote lower, remote higher, and no remote
+ * version.
  */
 import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
@@ -56,7 +56,7 @@ describe('Import: Protocol Version Mismatch', () => {
         if (tempDir) cleanupTempDir(tempDir);
     });
 
-    it('passes when versions are compatible', () => {
+    it('passes when versions match', () => {
         const result = runImporter(importUrl(), tempDir, 'preflight-assert', {
             secret: getSiteSecret(site),
         });
@@ -66,7 +66,7 @@ describe('Import: Protocol Version Mismatch', () => {
         assert.match(result.stdout, /remote v\d+, client v\d+/);
     });
 
-    it('fails when remote protocol version is too old', () => {
+    it('fails when the remote protocol version is lower', () => {
         const state = readState();
         state.remote_protocol_version = 0;
         writeState(state);
@@ -77,13 +77,13 @@ describe('Import: Protocol Version Mismatch', () => {
 
         assert.equal(result.exitCode, 1, `Expected exit 1:\nstdout: ${result.stdout}`);
         assert.ok(result.stdout.includes('[FAIL] Protocol compatible'), `Expected FAIL for protocol check:\n${result.stdout}`);
-        assert.ok(result.stdout.includes('too old'), `Expected "too old" message:\n${result.stdout}`);
+        assert.ok(result.stdout.includes('does not match'), `Expected mismatch message:\n${result.stdout}`);
         assert.ok(result.stdout.includes('Update the export plugin'), `Expected update instruction:\n${result.stdout}`);
     });
 
-    it('fails when client protocol version is too old for remote', () => {
+    it('fails when the remote protocol version is higher', () => {
         const state = readState();
-        state.remote_protocol_min_version = 999;
+        state.remote_protocol_version = 999;
         writeState(state);
 
         const result = runImporter(importUrl(), tempDir, 'preflight-assert', {
@@ -92,14 +92,13 @@ describe('Import: Protocol Version Mismatch', () => {
 
         assert.equal(result.exitCode, 1, `Expected exit 1:\nstdout: ${result.stdout}`);
         assert.ok(result.stdout.includes('[FAIL] Protocol compatible'), `Expected FAIL for protocol check:\n${result.stdout}`);
-        assert.ok(result.stdout.includes('too old'), `Expected "too old" message:\n${result.stdout}`);
+        assert.ok(result.stdout.includes('does not match'), `Expected mismatch message:\n${result.stdout}`);
         assert.ok(result.stdout.includes('Update the importer'), `Expected update instruction:\n${result.stdout}`);
     });
 
     it('fails when remote does not report a protocol version', () => {
         const state = readState();
         state.remote_protocol_version = null;
-        state.remote_protocol_min_version = null;
         writeState(state);
 
         const result = runImporter(importUrl(), tempDir, 'preflight-assert', {

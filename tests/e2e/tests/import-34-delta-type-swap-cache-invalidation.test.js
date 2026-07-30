@@ -101,7 +101,7 @@ chown -R nginx:nginx ${sh(remoteRoot)}
         const tempDir = createTempDir(tempPrefix);
         setupInitialRemoteLayout();
 
-        const initial = runImporter(importUrl(), tempDir, 'files-sync', {
+        const initial = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(initial.exitCode, 0, `Expected exit 0\nstderr: ${initial.stderr}\nstdout: ${initial.stdout}`);
@@ -109,13 +109,13 @@ chown -R nginx:nginx ${sh(remoteRoot)}
         applyDeltaRemoteChanges();
 
         // Abort previous completion so we can run a delta
-        const abort = runImporter(importUrl(), tempDir, 'files-sync', {
+        const abort = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--abort'],
         });
         assert.equal(abort.exitCode, 0, `Expected abort exit 0\nstderr: ${abort.stderr}\nstdout: ${abort.stdout}`);
 
-        const delta = runImporter(importUrl(), tempDir, 'files-sync', {
+        const delta = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(delta.exitCode, 0, `Expected exit 0\nstderr: ${delta.stderr}\nstdout: ${delta.stdout}`);

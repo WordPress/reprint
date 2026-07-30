@@ -1,5 +1,5 @@
 /**
- * Test 38: flat-document-root with WP Cloud-like directory layout
+ * Test 38: flat-docroot with WP Cloud-like directory layout
  *
  * Simulates a WP Cloud hosting environment where:
  * - ABSPATH is the document root (/srv/e2e-sites/wpcloud-flatten/)
@@ -9,8 +9,8 @@
  *
  * Tests that:
  * 1. Preflight correctly resolves wp_admin_path / wp_includes_path via realpath()
- * 2. files-sync with --follow-symlinks downloads files at their resolved locations
- * 3. flat-document-root creates a standard WP layout by sourcing each component
+ * 2. files-pull with --follow-symlinks downloads files at their resolved locations
+ * 3. flat-docroot creates a standard WP layout by sourcing each component
  *    from where it physically lives
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -142,12 +142,12 @@ require_once ABSPATH . 'wp-settings.php';
         );
     });
 
-    it('files-sync completes with follow_symlinks', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull completes with follow_symlinks', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--follow-symlinks'],
         });
-        assert.equal(result.exitCode, 0, `files-sync failed:\n${result.stderr}`);
+        assert.equal(result.exitCode, 0, `files-pull failed:\n${result.stderr}`);
     });
 
     it('wp-admin files exist at the resolved core path in fs-root', () => {
@@ -182,18 +182,18 @@ require_once ABSPATH . 'wp-settings.php';
         );
     });
 
-    describe('flat-document-root', () => {
+    describe('flat-docroot', () => {
         let flattenTo;
 
         beforeAll(() => {
             flattenTo = join(tempDir, 'flattened');
-            const result = runImporter(importUrl(), tempDir, 'flat-document-root', {
+            const result = runImporter(importUrl(), tempDir, 'flat-docroot', {
                 secret: getSiteSecret(site),
                 extraArgs: [`--flatten-to=${flattenTo}`],
             });
             assert.equal(
                 result.exitCode, 0,
-                `flat-document-root failed:\n${result.stderr}\n${result.stdout}`,
+                `flat-docroot failed:\n${result.stderr}\n${result.stdout}`,
             );
         });
 

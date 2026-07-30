@@ -46,7 +46,7 @@ describe('Import: Permission Errors', () => {
         }
 
         it('file sync completes', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -105,8 +105,8 @@ INSERT INTO wp_secret_table VALUES (1, 'top secret');
             return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         }
 
-        it('db-sync completes', () => {
-            const result = runImporter(importUrl(), tempDir, 'db-sync', {
+        it('db-pull completes', () => {
+            const result = runImporter(importUrl(), tempDir, 'db-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);

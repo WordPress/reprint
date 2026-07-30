@@ -1,6 +1,6 @@
 /**
  * Test 10: File Resume via import.php
- * Tests that files-sync can resume after a partial transfer.
+ * Tests that files-pull can resume after a partial transfer.
  * Uses large-directory site (5000+ files) with --max-exec=10 to force short requests.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -43,11 +43,11 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('files-sync completes via multiple resumable requests', () => {
+    it('files-pull completes via multiple resumable requests', () => {
         // Use --max-exec=3 to force short server execution times,
         // which means each request only transfers a subset of files before returning partial.
         // The importer automatically resumes from the cursor.
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             timeout: 180000,
             extraArgs: ['--max-exec=10'],

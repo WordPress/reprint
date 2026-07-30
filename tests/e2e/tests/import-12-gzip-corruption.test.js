@@ -35,11 +35,11 @@ describe('Import: Gzip Corruption', () => {
         removeTestHooks(site);
     });
 
-    it('db-sync detects gzip corruption and fails gracefully', () => {
+    it('db-pull detects gzip corruption and fails gracefully', () => {
         const tempDir = createTempDir('e2e-import-gzip-sql');
         try {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
-            const result = runImporter(url, tempDir, 'db-sync', {
+            const result = runImporter(url, tempDir, 'db-pull', {
                 secret: getSiteSecret(site),
                 // The corruption only fires after the full payload streams,
                 // so under WASM PHP the test must allow time for the entire
@@ -76,7 +76,7 @@ describe('Import: Gzip Corruption', () => {
         const tempDir = createTempDir('e2e-import-gzip-files');
         try {
             const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
-            const result = runImporter(url, tempDir, 'files-sync', {
+            const result = runImporter(url, tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 // The corruption only fires after the full payload streams,
                 // so under WASM PHP the test must allow time for the entire

@@ -113,7 +113,7 @@ describe('Import: --preserve-local', () => {
         });
 
         it('errors on non-empty directory without --preserve-local', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 autoResume: false,
             });
@@ -149,8 +149,8 @@ describe('Import: --preserve-local', () => {
             cleanupTempDir(tempDir);
         });
 
-        it('files-sync completes with --preserve-local', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        it('files-pull completes with --preserve-local', () => {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--on-fs-root-nonempty=preserve-local'],
             });
@@ -315,7 +315,7 @@ describe('Import: --preserve-local', () => {
         });
 
         it('completes after forced resume with --max-exec=3', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--on-fs-root-nonempty=preserve-local', '--max-exec=3'],
                 timeout: 120000,
@@ -360,7 +360,7 @@ describe('Import: --preserve-local', () => {
         });
 
         it('initial import completes', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--on-fs-root-nonempty=preserve-local'],
             });
@@ -379,14 +379,14 @@ describe('Import: --preserve-local', () => {
         it('delta sync completes', () => {
             // Abort previous completion, then re-run — triggers delta.
             // preserve_local is restored from persisted state.
-            const abort = runImporter(importUrl(), tempDir, 'files-sync', {
+            const abort = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--abort'],
             });
             assert.equal(abort.exitCode, 0,
                 `Expected abort exit 0\nstderr: ${abort.stderr}\nstdout: ${abort.stdout}`);
 
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0,
@@ -479,8 +479,8 @@ describe('Import: --preserve-local', () => {
             cleanupTempDir(tempDir);
         });
 
-        it('files-sync completes without security errors', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        it('files-pull completes without security errors', () => {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--on-fs-root-nonempty=preserve-local'],
             });

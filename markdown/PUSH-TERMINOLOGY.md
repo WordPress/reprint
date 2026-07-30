@@ -127,10 +127,10 @@ It contains `push.json`, `push.lock`, optional `commit.json`, and `work/`. The
 work directory contains `files/`, optional `inflight.json` and
 `inflight.data`, `deletes`, and an optional private maintenance copy. `files/`
 is the only path-shaped work tree. The shared `.reprint/push/` directory contains
-`push-create.lock`, `commit-state`, `commit-state.lock`, and bounded removal
+`create-remove.lock`, `commit-state`, `commit-state.lock`, and bounded removal
 tombstones named `.removing-<push-session-id>/`.
 
-`push-create.lock` is the create/remove lock. Create and every bounded remove
+`create-remove.lock` is the create/remove lock. Create and every bounded remove
 call acquire it non-blockingly. Remove holds it while inspecting and renaming
 the live push directory and while performing one tombstone cleanup step, so
 create cannot recreate the same push session until that cleanup finishes.

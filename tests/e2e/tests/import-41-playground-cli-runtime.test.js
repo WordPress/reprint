@@ -2,8 +2,8 @@
  * Test 41: Playground CLI runtime target
  *
  * Verifies the apply-runtime --runtime=playground-cli flow:
- * 1. files-sync downloads the remote site
- * 2. db-sync + db-apply import the database into SQLite
+ * 1. files-pull downloads the remote site
+ * 2. db-pull + db-apply import the database into SQLite
  * 3. apply-runtime --runtime=playground-cli generates runtime.php,
  *    blueprint.json, and start.sh with the correct structure
  */
@@ -64,23 +64,23 @@ describe('Import: Playground CLI runtime', () => {
         assert.equal(details.sqlite_driver_parser, 'verified');
     });
 
-    it('files-sync downloads the site', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull downloads the site', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0,
-            `files-sync failed (exit ${result.exitCode})\nstderr: ${result.stderr}`);
+            `files-pull failed (exit ${result.exitCode})\nstderr: ${result.stderr}`);
 
         const state = JSON.parse(readFileSync(join(tempDir, '.reprint/pull/state.json'), 'utf-8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete');
     });
 
-    it('db-sync downloads the SQL dump', () => {
-        const result = runImporter(importUrl(), tempDir, 'db-sync', {
+    it('db-pull downloads the SQL dump', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0,
-            `db-sync failed (exit ${result.exitCode})\nstderr: ${result.stderr}`);
+            `db-pull failed (exit ${result.exitCode})\nstderr: ${result.stderr}`);
 
         assert.ok(existsSync(join(tempDir, 'db.sql')), 'db.sql should exist');
     });

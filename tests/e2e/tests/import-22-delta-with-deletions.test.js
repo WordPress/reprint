@@ -1,6 +1,6 @@
 /**
  * Test 22: Delta Sync with Source Deletions via import.php
- * Tests that files-sync correctly detects when files have been
+ * Tests that files-pull correctly detects when files have been
  * deleted on the source between initial and delta syncs.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -43,7 +43,7 @@ describe('Import: Delta Sync with Deletions', () => {
     }
 
     it('initial sync includes the extra files', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -70,13 +70,13 @@ describe('Import: Delta Sync with Deletions', () => {
         execSync(`sudo rm -f ${JSON.stringify(extraFile1)} ${JSON.stringify(extraFile2)}`);
 
         // Abort previous completion so we can run a delta
-        const abort = runImporter(importUrl(), tempDir, 'files-sync', {
+        const abort = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--abort'],
         });
         assert.equal(abort.exitCode, 0);
 
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);

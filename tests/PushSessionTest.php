@@ -1456,7 +1456,7 @@ final class PushSessionTest extends TestCase {
     public function testCreateRemoveLockContentionLeavesTheLivePushDirectoryUntouched(): void {
         $push_session = $this->push_session('cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd');
         $push_directory = $push_session->get_push_directory();
-        $create_remove_lock_path = dirname($push_directory) . '/push-create.lock';
+        $create_remove_lock_path = dirname($push_directory) . '/create-remove.lock';
         $lock_process = $this->start_lock_process($create_remove_lock_path);
 
         $failure = null;
@@ -1504,7 +1504,7 @@ final class PushSessionTest extends TestCase {
         }
         $this->assertDirectoryDoesNotExist($push_directory);
 
-        $lock_process = $this->start_lock_process($push_sessions_directory . '/push-create.lock');
+        $lock_process = $this->start_lock_process($push_sessions_directory . '/create-remove.lock');
         $failure = null;
         try {
             $push_session->remove_push_directory();

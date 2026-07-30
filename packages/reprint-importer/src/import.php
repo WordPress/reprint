@@ -144,27 +144,14 @@ function reprint_apply_curl_ca_bundle($ch): ?string {
 /**
  * The wire-protocol version this importer speaks.
  *
- * Both the export plugin (server) and the importer (client) are deployed
- * independently.  These two constants let them detect incompatibility at
- * preflight time instead of producing silent corruption.
+ * The export plugin and importer report this value during preflight so a
+ * mismatched deployment fails before any content is transferred.
  *
  * Bump this whenever a change to the wire protocol (cursor encoding,
  * multipart structure, header names, endpoint parameters, response format)
  * would break an older export plugin.
  */
 define('IMPORT_PROTOCOL_VERSION', 1);
-
-/**
- * The oldest *export plugin* protocol version this importer can talk to.
- *
- * During preflight-assert the importer checks that the remote's
- * protocol_version is >= this value; if not, it tells the user to
- * update the export plugin.
- *
- * Raise this when you drop backward-compatibility with old export plugins.
- * Keep it equal to IMPORT_PROTOCOL_VERSION if no backward compat is needed.
- */
-define('IMPORT_MIN_EXPORT_VERSION', 1);
 
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -933,7 +920,7 @@ class ImportClient
         }
         $command = $options["command"] ?? null;
 
-        // Apply legacy command aliases so callers using old names still work.
+        // Map accepted command aliases to the canonical command names.
         static $command_aliases = [
             "files-sync" => "files-pull",
             "db-sync" => "db-pull",
@@ -2186,12 +2173,11 @@ class ImportClient
             $this->import_state()->version = $wp_version;
         }
 
-        // Store remote protocol version for compatibility checks
+        // Store the remote protocol version for the preflight assertion.
         if (isset($payload["protocol_version"])) {
             $this->import_state()->remote_protocol_version = (int) $payload["protocol_version"];
-        }
-        if (isset($payload["protocol_min_version"])) {
-            $this->import_state()->remote_protocol_min_version = (int) $payload["protocol_min_version"];
+        } else {
+            $this->import_state()->remote_protocol_version = null;
         }
 
         // Detect webhost environment from preflight data.
@@ -2497,18 +2483,17 @@ class ImportClient
             $all_pass = false;
         }
 
-        // 3. Protocol version compatibility
+        // 3. Protocol version
         $remote_ver = $this->import_state()->remote_protocol_version ?? null;
-        $remote_min = $this->import_state()->remote_protocol_min_version ?? null;
         if ($remote_ver === null) {
             $proto_ok = false;
             $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";
-        } elseif ($remote_ver < IMPORT_MIN_EXPORT_VERSION) {
+        } elseif ($remote_ver < IMPORT_PROTOCOL_VERSION) {
             $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} is too old (client requires >= v" . IMPORT_MIN_EXPORT_VERSION . "). Update the export plugin.";
-        } elseif (IMPORT_PROTOCOL_VERSION < $remote_min) {
+            $proto_detail = "Remote protocol v{$remote_ver} does not match client protocol v" . IMPORT_PROTOCOL_VERSION . ". Update the export plugin.";
+        } elseif ($remote_ver > IMPORT_PROTOCOL_VERSION) {
             $proto_ok = false;
-            $proto_detail = "Client protocol v" . IMPORT_PROTOCOL_VERSION . " is too old (remote requires >= v{$remote_min}). Update the importer.";
+            $proto_detail = "Remote protocol v{$remote_ver} does not match client protocol v" . IMPORT_PROTOCOL_VERSION . ". Update the importer.";
         } else {
             $proto_ok = true;
             $proto_detail = "remote v{$remote_ver}, client v" . IMPORT_PROTOCOL_VERSION;
@@ -12360,7 +12345,7 @@ if (
         $cyan  = $is_tty ? "\033[36m" : "";
         $reset = $is_tty ? "\033[0m" : "";
 
-        $repo = "adamziel/streaming-site-migration";
+        $repo = "WordPress/reprint";
         $zip_url = "https://github.com/{$repo}/releases/download/{$version}/reprint-exporter-wp.zip";
         $releases_url = "https://github.com/{$repo}/releases";
 
@@ -12863,7 +12848,7 @@ if (
 
     $command = $argv[1];
 
-    // Legacy command names that still work on the CLI.
+    // Map accepted command aliases to the canonical command names.
     $command_aliases = [
         "files-sync" => "files-pull",
         "db-sync" => "db-pull",

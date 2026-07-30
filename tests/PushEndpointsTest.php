@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../packages/reprint-importer/src/import.php';
+require_once __DIR__ . '/../importer/import.php';
 require_once __DIR__ . '/../packages/reprint-importer/src/lib/upload/class-multipart-push-stream-client.php';
 
 final class PushEndpointsTest extends TestCase {
@@ -492,7 +492,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('complete', $create['status'], (string) json_encode($create));
         $push_directory = $this->reprint_directory . '/.reprint/push/' . $push_session_id;
         $push_sessions_directory = dirname($push_directory);
-        $lock_process = $this->startLockProcess($push_sessions_directory . '/push-create.lock');
+        $lock_process = $this->startLockProcess($push_sessions_directory . '/create-remove.lock');
 
         try {
             $remove = $client->send_push_request('POST', 'push_remove', [
@@ -563,7 +563,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_directory);
         $this->assertDirectoryExists($tombstone);
 
-        $lock_process = $this->startLockProcess($push_sessions_directory . '/push-create.lock');
+        $lock_process = $this->startLockProcess($push_sessions_directory . '/create-remove.lock');
         try {
             $blocked_remove = $client->send_push_request('POST', 'push_remove', [
                 'push_session_id' => $push_session_id,

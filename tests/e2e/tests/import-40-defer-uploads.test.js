@@ -1,7 +1,7 @@
 /**
  * Test 40: --filter=essential-files / --filter=skipped-earlier
  *
- * Tests that --filter=essential-files skips uploads during files-sync
+ * Tests that --filter=essential-files skips uploads during files-pull
  * and that --filter=skipped-earlier downloads them in a separate run.
  *
  * The remote site has:
@@ -71,7 +71,7 @@ describe('Import: --filter', () => {
         });
 
         it('--filter=essential-files completes', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--filter=essential-files'],
             });
@@ -117,7 +117,7 @@ describe('Import: --filter', () => {
 
         // Now download the skipped files
         it('--filter=skipped-earlier downloads the uploads', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--filter=skipped-earlier'],
             });
@@ -153,7 +153,7 @@ describe('Import: --filter', () => {
             // blocks filter changes mid-sync). Previously this threw
             // "Cannot change --filter from 'skipped-earlier' to
             // 'essential-files' while a sync is in progress."
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--filter=essential-files'],
             });
@@ -182,7 +182,7 @@ describe('Import: --filter', () => {
         });
 
         it('completes with forced resume via --max-exec=3', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--filter=essential-files', '--max-exec=3'],
                 timeout: 120000,
@@ -225,8 +225,8 @@ describe('Import: --filter', () => {
             cleanupTempDir(tempDir);
         });
 
-        it('files-sync without --filter completes', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        it('files-pull without --filter completes', () => {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0,
@@ -262,7 +262,7 @@ describe('Import: --filter', () => {
         });
 
         it('errors when no prior essential-files run exists', () => {
-            const result = runImporter(importUrl(), tempDir, 'files-sync', {
+            const result = runImporter(importUrl(), tempDir, 'files-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: ['--filter=skipped-earlier'],
                 autoResume: false,

@@ -35,12 +35,12 @@ describe('Import: 301 Redirect', () => {
         assert.ok(location.includes('8081'), 'Expected redirect to port 8081');
     });
 
-    it('importer reports HTTP 301 error for files-sync', () => {
+    it('importer reports HTTP 301 error for files-pull', () => {
         const tempDir = createTempDir('e2e-import-redirect-files');
         try {
             // Use the redirect site URL but with the basic site's directory
             const url = `${getSiteUrl('redirect-301')}&directory=/srv/e2e-sites/basic`;
-            const result = runImporter(url, tempDir, 'files-sync', {
+            const result = runImporter(url, tempDir, 'files-pull', {
                 secret: getSiteSecret('redirect-301'),
                 // The importer makes its own HTTP request after preflight; under
                 // WASM PHP, both phases need ~12s of boot plus the actual handshake.
@@ -61,11 +61,11 @@ describe('Import: 301 Redirect', () => {
         }
     });
 
-    it('importer reports HTTP 301 error for db-sync', () => {
+    it('importer reports HTTP 301 error for db-pull', () => {
         const tempDir = createTempDir('e2e-import-redirect-sql');
         try {
             const url = `${getSiteUrl('redirect-301')}&directory=/srv/e2e-sites/basic`;
-            const result = runImporter(url, tempDir, 'db-sync', {
+            const result = runImporter(url, tempDir, 'db-pull', {
                 secret: getSiteSecret('redirect-301'),
                 // The importer makes its own HTTP request after preflight; under
                 // WASM PHP, both phases need ~12s of boot plus the actual handshake.

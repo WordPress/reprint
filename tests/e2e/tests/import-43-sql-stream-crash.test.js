@@ -129,7 +129,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
             try {
                 // autoResume=false requires this one importer invocation to
                 // recover instead of starting another process.
-                const result = runImporter(importUrl(), tempDir, 'db-sync', {
+                const result = runImporter(importUrl(), tempDir, 'db-pull', {
                     secret: getSiteSecret(site),
                     extraArgs: sqlOutputArgs(mode, importDb),
                     autoResume: false,

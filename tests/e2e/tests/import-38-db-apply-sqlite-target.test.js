@@ -36,11 +36,11 @@ describe('Import: SQLite db-apply target', () => {
     }
 
     it('applies db.sql into SQLite via the upstream PDO-compatible driver', () => {
-        const syncResult = runImporter(importUrl(), tempDir, 'db-sync', {
+        const syncResult = runImporter(importUrl(), tempDir, 'db-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(syncResult.exitCode, 0,
-            `Expected db-sync exit 0, got ${syncResult.exitCode}\nstderr: ${syncResult.stderr}\nstdout: ${syncResult.stdout}`);
+            `Expected db-pull exit 0, got ${syncResult.exitCode}\nstderr: ${syncResult.stderr}\nstdout: ${syncResult.stdout}`);
 
         const applyResult = runImporter(importUrl(), tempDir, 'db-apply', {
             secret: getSiteSecret(site),

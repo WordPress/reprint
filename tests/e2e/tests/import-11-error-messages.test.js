@@ -28,7 +28,7 @@ describe('Import: Error Messages', () => {
         const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const dir = createTempDir('e2e-import-wrong-hmac');
         try {
-            const result = runImporter(url, dir, 'files-sync', {
+            const result = runImporter(url, dir, 'files-pull', {
                 secret: 'wrong-secret-value',
             });
             assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code for wrong HMAC');
@@ -46,7 +46,7 @@ describe('Import: Error Messages', () => {
         const url = 'http://127.0.0.1:19999/?reprint-api&directory=/tmp';
         const dir = createTempDir('e2e-import-unreachable');
         try {
-            const result = runImporter(url, dir, 'files-sync', {
+            const result = runImporter(url, dir, 'files-pull', {
                 secret: 'any-secret',
                 // runImporter auto-runs preflight first; under WASM PHP each
                 // invocation needs ~12s of boot before curl even attempts the
@@ -87,12 +87,12 @@ describe('Import: Error Messages', () => {
         }
     });
 
-    it('files-sync without preflight fails with useful error', () => {
+    it('files-pull without preflight fails with useful error', () => {
         const site = 'basic';
         const url = `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
         const dir = createTempDir('e2e-import-delta-no-initial');
         try {
-            const result = runImporter(url, dir, 'files-sync', {
+            const result = runImporter(url, dir, 'files-pull', {
                 secret: getSiteSecret(site),
                 skipPreflight: true,
             });

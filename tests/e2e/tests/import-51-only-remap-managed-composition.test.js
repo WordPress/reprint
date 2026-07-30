@@ -5,7 +5,7 @@
  * site" flow, plus the scoped re-sync that follows it. It exercises the v1
  * invocation —
  *
- *   files-sync --only :wp-content: --remap :wp-content: :fs-root:/wp-content \
+ *   files-pull --only :wp-content: --remap :wp-content: :fs-root:/wp-content \
  *     --on-fs-root-nonempty=preserve-local --no-follow-symlinks
  *
  * — against a fs-root pre-populated with the realistic managed hosting layout
@@ -134,8 +134,8 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
     // ================================================================
     // Phase 1 — first migration: --only :wp-content:
     // ================================================================
-    it('files-sync completes with --only + --remap + preserve-local', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull completes with --only + --remap + preserve-local', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--only', ':wp-content:', ...remap, ...preserve],
         });
@@ -220,7 +220,7 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
         execSync(`sudo rm -rf ${JSON.stringify(join(siteDir, 'wp-content', 'plugins', 'custom-plugin'))}`);
         assert.ok(!existsSync(join(siteDir, 'wp-content', 'plugins', 'custom-plugin')),
             'precondition: source custom-plugin removed');
-        const abort = runImporter(importUrl(), tempDir, 'files-sync', {
+        const abort = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--abort'],
             autoResume: false,
@@ -229,7 +229,7 @@ describe('Import: --only + --remap onto a managed Atomic docroot', () => {
     });
 
     it('scoped delta re-sync completes (--only :wp-content:/plugins)', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--only', ':wp-content:/plugins', ...remap, ...preserve],
         });
