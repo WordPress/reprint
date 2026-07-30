@@ -21,9 +21,8 @@ if (!ob_get_level()) {
 /**
  * The wire-protocol version this export plugin speaks.
  *
- * Both the export plugin (server) and the importer (client) are deployed
- * independently.  These two constants let them detect incompatibility at
- * preflight time instead of producing silent corruption.
+ * The export plugin and importer report this value during preflight so a
+ * mismatched deployment fails before any content is transferred.
  *
  * EXPORT_PROTOCOL_VERSION is sent to the importer in the preflight JSON
  * response as `protocol_version`.  Bump it whenever a change to the wire
@@ -31,18 +30,6 @@ if (!ob_get_level()) {
  * parameters, response format) would break an older importer.
  */
 define('EXPORT_PROTOCOL_VERSION', 1);
-
-/**
- * The oldest *importer* protocol version this export plugin can talk to.
- *
- * Sent to the importer in the preflight response as `protocol_min_version`.
- * The importer checks that its own IMPORT_PROTOCOL_VERSION is >= this value;
- * if not, it tells the user to update the importer.
- *
- * Raise this when you drop backward-compatibility with old importers.
- * Keep it equal to EXPORT_PROTOCOL_VERSION if no backward compat is needed.
- */
-define('EXPORT_MIN_IMPORT_VERSION', 1);
 
 // File type mask + file type values (top bits of st_mode)
 define('STAT_TYPE_MASK',   0170000);
@@ -2099,7 +2086,6 @@ function endpoint_preflight(array $config): array
         "error" => $preflight_error,
         "timestamp" => time(),
         "protocol_version" => EXPORT_PROTOCOL_VERSION,
-        "protocol_min_version" => EXPORT_MIN_IMPORT_VERSION,
         "wp_detect" => [
             "found" => !empty($wp_detect["roots"]),
             "searched" => $wp_detect["searched"],

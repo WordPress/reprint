@@ -351,7 +351,6 @@ class ImportState
     /** @var array<string,mixed>|null */
     public ?array $preflight = null;
     public ?int $remote_protocol_version = null;
-    public ?int $remote_protocol_min_version = null;
     /** @var string|null Importer version saved with state. */
     public ?string $version = null;
     /** @var string|null Webhost detected during preflight. */
@@ -424,7 +423,6 @@ class ImportState
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
         $state->preflight = $data['preflight'];
         $state->remote_protocol_version = $data['remote_protocol_version'];
-        $state->remote_protocol_min_version = $data['remote_protocol_min_version'];
         $state->version = $data['version'];
         $state->webhost = $data['webhost'];
         $state->follow_symlinks = $data['follow_symlinks'];
@@ -463,7 +461,6 @@ class ImportState
             'active_resumable_command' => $this->active_resumable_command->to_array(),
             'preflight' => $this->preflight,
             'remote_protocol_version' => $this->remote_protocol_version,
-            'remote_protocol_min_version' => $this->remote_protocol_min_version,
             'version' => $this->version,
             'webhost' => $this->webhost,
             'follow_symlinks' => $this->follow_symlinks,
