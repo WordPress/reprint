@@ -20,7 +20,7 @@ async function ensureWpCli() {
         const fd = openSync(WP_CLI_LOCK, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
         closeSync(fd);
         acquired = true;
-    } catch (e) {
+    } catch {
         // Another process holds the lock — wait for it
     }
 
@@ -38,7 +38,7 @@ async function ensureWpCli() {
             writeFileSync(WP_CLI_READY, 'ready\n');
             console.log(`WP-CLI ready at ${WP_CLI_PATH}`);
         } finally {
-            try { unlinkSync(WP_CLI_LOCK); } catch (e) {}
+            try { unlinkSync(WP_CLI_LOCK); } catch {}
         }
     } else {
         const deadline = Date.now() + 120000;

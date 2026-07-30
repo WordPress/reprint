@@ -57,22 +57,6 @@ abstract class FileSyncProducerTestBase extends TestCase
     }
 
     /**
-     * Create a file in test directory
-     */
-    protected function createFile(string $dir, string $path, string $content): string
-    {
-        $fullPath = $dir . '/' . $path;
-        $pathDir = dirname($fullPath);
-
-        if (!is_dir($pathDir)) {
-            mkdir($pathDir, 0755, true);
-        }
-
-        file_put_contents($fullPath, $content);
-        return $fullPath;
-    }
-
-    /**
      * Delete a file from test directory
      */
     protected function deleteFile(string $dir, string $path): void

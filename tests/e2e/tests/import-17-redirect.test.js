@@ -5,9 +5,8 @@
  *
  * The redirect-301 site (port 8097) redirects all requests to port 8081 (basic).
  */
-import { describe, it, beforeAll, afterAll } from 'vitest';
+import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret,

@@ -18,7 +18,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir, readAuditLog,
 } from '../lib/test-helpers.js';
-import { ensureSite, SITE_ROOT } from '../lib/site-setup.js';
+import { ensureSite } from '../lib/site-setup.js';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 
@@ -103,8 +103,6 @@ describe('Import: Runtime file download', () => {
     });
 
     it('downloads the prepend script into runtime_files/', () => {
-        const downloaded = join(tempDir, 'runtime_files', 'scripts', 'env.php');
-
         // Glob for any file under runtime_files/scripts/ if exact path differs
         assert.ok(
             existsSync(join(tempDir, 'runtime_files')),

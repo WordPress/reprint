@@ -122,20 +122,6 @@ abstract class MySQLDumpProducerTestBase extends TestCase
     }
 
     /**
-     * Splits SQL dump into individual statements.
-     */
-    protected function splitSQLStatements(string $sql): array
-    {
-        // Simple split on semicolon followed by newline
-        // This won't handle all edge cases but works for our dumps
-        $statements = preg_split('/;\s*\n/', $sql);
-        return array_filter($statements, function ($stmt) {
-            $trimmed = trim($stmt);
-            return $trimmed !== "" && strncmp($trimmed, "--", 2) !== 0;
-        });
-    }
-
-    /**
      * Compares data between two databases.
      */
     protected function assertDatabasesEqual(

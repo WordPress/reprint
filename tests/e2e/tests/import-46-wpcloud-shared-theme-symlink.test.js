@@ -55,7 +55,7 @@ describe('Import: Shared theme symlink remains working', () => {
         try {
             await fetch(apiUrl, { method: 'GET' });
             return;
-        } catch (_) {
+        } catch {
             // If local infra does not expose this port yet, serve plugin API
             // directly via PHP built-in server for this test.
         }
@@ -73,7 +73,7 @@ describe('Import: Shared theme symlink remains working', () => {
             try {
                 await fetch(apiUrl, { method: 'GET' });
                 return;
-            } catch (_) {
+            } catch {
                 await sleep(100);
             }
         }

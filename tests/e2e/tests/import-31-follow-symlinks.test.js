@@ -79,7 +79,7 @@ describe('Import: Follow Symlinks', () => {
         try {
             await fetch(apiUrl, { method: 'GET' });
             return;
-        } catch (_) {
+        } catch {
             // The configured e2e infrastructure may not expose port 8101 locally.
             // Start a PHP built-in server for this site as a fallback.
         }
@@ -97,7 +97,7 @@ describe('Import: Follow Symlinks', () => {
             try {
                 await fetch(apiUrl, { method: 'GET' });
                 return;
-            } catch (_) {
+            } catch {
                 await sleep(100);
             }
         }
@@ -343,7 +343,7 @@ describe('Import: Follow Symlinks', () => {
                 } else {
                     paths.add(path);
                 }
-            } catch (e) {
+            } catch {
                 // skip malformed lines
             }
         }

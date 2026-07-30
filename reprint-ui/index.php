@@ -648,8 +648,6 @@ function setPhase(phase, state, meta) {
   if (state) el.classList.add(state);
   if (meta != null) el.querySelector('.meta').textContent = meta;
 }
-function fmtBytes(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';if(n<1073741824)return (n/1048576).toFixed(1)+' MB';return (n/1073741824).toFixed(2)+' GB';}
-
 let selectedSiteId = null;
 let selectedSiteUrl = null;
 

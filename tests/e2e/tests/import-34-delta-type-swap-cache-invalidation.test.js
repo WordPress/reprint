@@ -53,7 +53,7 @@ describe('Import: Delta type swaps cache invalidation', () => {
                 if (res.status >= 200) {
                     return;
                 }
-            } catch (_) {
+            } catch {
                 // retry
             }
             await sleep(100);

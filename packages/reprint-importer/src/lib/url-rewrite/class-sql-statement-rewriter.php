@@ -301,13 +301,6 @@ class SqlStatementRewriter
      * }
      * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
      */
-    // Called via reflection in SqlStatementRewriterLexerWalkerTest.
-    // @phpstan-ignore method.unused
-    private function map_values_to_columns(string $sql): ?array
-    {
-        return $this->map_values_to_columns_from_tokens(self::significant_tokens($sql));
-    }
-
     /**
      * Consumes a pre-lexed token array. Lets callers that already lexed the
      * statement avoid a second WP_MySQL_Lexer pass.

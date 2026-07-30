@@ -7,7 +7,6 @@
  */
 import {
     cpSync, existsSync, writeFileSync, mkdirSync,
-    symlinkSync, chmodSync,
     openSync, closeSync, unlinkSync, constants,
 } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -19,7 +18,7 @@ import { randomBytes } from 'node:crypto';
 
 const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
 
-export const SITE_ROOT = REGISTRY.siteRoot;
+const SITE_ROOT = REGISTRY.siteRoot;
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
 const DB_PASS = REGISTRY.dbPass;
@@ -38,7 +37,7 @@ const MARKER = '.e2e-provisioned';
  * Download and extract WordPress once, caching at /tmp/wordpress-template.
  * Uses a lock file to prevent races when Node runs test files in parallel.
  */
-export async function ensureWpTemplate() {
+async function ensureWpTemplate() {
     if (existsSync(WP_READY)) {
         return;
     }
@@ -49,7 +48,7 @@ export async function ensureWpTemplate() {
         const fd = openSync(WP_LOCK, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
         closeSync(fd);
         acquired = true;
-    } catch (e) {
+    } catch {
         // Another process holds the lock — wait for it
     }
 
@@ -67,7 +66,7 @@ export async function ensureWpTemplate() {
             writeFileSync(WP_READY, `${WP_VERSION}\n`);
             console.log(`WordPress template ready at ${WP_TEMPLATE}`);
         } finally {
-            try { unlinkSync(WP_LOCK); } catch (e) {}
+            try { unlinkSync(WP_LOCK); } catch {}
         }
     } else {
         const deadline = Date.now() + 120000;
@@ -109,20 +108,6 @@ require_once ABSPATH . 'wp-settings.php';
 }
 
 /**
- * Write the minimal wp-config.php used by the export plugin.
- * Does NOT load wp-settings.php — the plugin reads DB creds and table prefix directly.
- */
-function writeMinimalWpConfig(siteDir, dbHost, dbName, dbUser, dbPass, tablePrefix = 'wp_') {
-    writeFileSync(join(siteDir, 'wp-config.php'), `<?php
-define('DB_HOST', '${dbHost}');
-define('DB_NAME', '${dbName}');
-define('DB_USER', '${dbUser}');
-define('DB_PASSWORD', '${dbPass}');
-$table_prefix = '${tablePrefix}';
-`);
-}
-
-/**
  * Run wp core install to create all real WordPress tables.
  */
 function wpCoreInstall(siteDir, siteUrl, siteName) {
@@ -157,7 +142,7 @@ function wpPluginActivate(siteDir, pluginSlug) {
 /**
  * Create standard sample test files using Node fs APIs.
  */
-export function createSampleFiles(siteDir) {
+function createSampleFiles(siteDir) {
     const dataDir = join(siteDir, 'test-data');
     mkdirSync(join(dataDir, 'subdir', 'nested'), { recursive: true });
     writeFileSync(join(dataDir, 'hello.txt'), 'Hello World\n');
@@ -196,7 +181,7 @@ export async function ensureSite(name, options = {}) {
         const fd = openSync(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
         closeSync(fd);
         acquired = true;
-    } catch (e) {
+    } catch {
         // Another process holds the lock — wait for marker
     }
 
@@ -213,7 +198,7 @@ export async function ensureSite(name, options = {}) {
 
     // Double-check after acquiring lock (another process may have finished first)
     if (existsSync(markerPath)) {
-        try { unlinkSync(lockPath); } catch (e) {}
+        try { unlinkSync(lockPath); } catch {}
         return;
     }
 
@@ -328,6 +313,6 @@ export async function ensureSite(name, options = {}) {
     log('Setup complete');
 
     } finally {
-        try { unlinkSync(lockPath); } catch (e) {}
+        try { unlinkSync(lockPath); } catch {}
     }
 }

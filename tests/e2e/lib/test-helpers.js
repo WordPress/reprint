@@ -2,9 +2,9 @@
  * E2E test helpers for the streaming site migration system.
  */
 import assert from 'node:assert/strict';
-import { execSync, execFileSync, spawn } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, unlinkSync, lstatSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdirSync, lstatSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createConnection } from 'mysql2/promise';
@@ -43,13 +43,6 @@ export function getSiteSecret(siteName) {
  */
 export function getSiteDir(siteName) {
     return join(SITE_ROOT, siteName);
-}
-
-/**
- * Get test data directory path.
- */
-export function getTestDataDir(siteName) {
-    return join(SITE_ROOT, siteName, 'test-data');
 }
 
 /**
@@ -280,7 +273,7 @@ export function runImporter(url, outputDir, command, options = {}) {
             if (state.preflight && state.preflight.data) {
                 needsPreflight = false;
             }
-        } catch (_) {
+        } catch {
             // No state file or invalid JSON — need preflight
         }
         if (needsPreflight) {
@@ -348,7 +341,7 @@ export function createTempDir(prefix = 'e2e-import') {
 export function cleanupTempDir(dir) {
     try {
         execSync(`rm -rf ${JSON.stringify(dir)}`, { timeout: 10000 });
-    } catch (e) {
+    } catch {
         // Ignore cleanup errors
     }
 }
@@ -372,7 +365,7 @@ export function hashDirectory(dirPath) {
         let entries;
         try {
             entries = readdirSync(currentDir);
-        } catch (e) {
+        } catch {
             return; // Skip unreadable directories
         }
 
@@ -381,7 +374,7 @@ export function hashDirectory(dirPath) {
             let stat;
             try {
                 stat = lstatSync(fullPath);
-            } catch (e) {
+            } catch {
                 continue;
             }
 
@@ -396,7 +389,7 @@ export function hashDirectory(dirPath) {
                     const relPath = relative(dirPath, fullPath);
                     const hash = sha1File(fullPath);
                     hashes.set(relPath, hash);
-                } catch (e) {
+                } catch {
                     // Skip unreadable files
                 }
             }
@@ -410,7 +403,7 @@ export function hashDirectory(dirPath) {
 /**
  * Compare two directory hashes and return differences.
  */
-export function compareDirectoryHashes(source, imported) {
+function compareDirectoryHashes(source, imported) {
     const missing = [];
     const extra = [];
     const different = [];
@@ -545,7 +538,7 @@ export function removeTestHooks(siteName) {
     const hookPath = join(SITE_ROOT, siteName, 'wp-content', 'plugins', 'site-export', 'test-hooks.php');
     try {
         execSync(`sudo rm -f ${JSON.stringify(hookPath)}`);
-    } catch (e) {
+    } catch {
         // Ignore
     }
 }
@@ -575,7 +568,7 @@ export function readHookState(siteName) {
     const statePath = hookStatePath(siteName);
     try {
         return JSON.parse(readFileSync(statePath, 'utf-8'));
-    } catch (e) {
+    } catch {
         return null;
     }
 }
@@ -587,7 +580,7 @@ export function clearHookState(siteName) {
     const statePath = hookStatePath(siteName);
     try {
         execSync(`sudo rm -f ${JSON.stringify(statePath)}`);
-    } catch (e) {
+    } catch {
         // Ignore
     }
 }
@@ -770,5 +763,4 @@ export function assertPullPipelineComplete(state, command = 'pull') {
     );
 }
 
-// Re-export constants
-export { SITE_ROOT, PROJECT_ROOT, IMPORTER_PATH, PHP_BINARY, DB_HOST, DB_USER, DB_PASS };
+export { PHP_BINARY };

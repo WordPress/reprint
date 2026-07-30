@@ -66,7 +66,6 @@ describe('Import: Unicode Paths', () => {
         assert.ok(existsSync(importedRoot), `Expected ${importedRoot} to exist`);
 
         // Check for files with special names
-        const sourceHashes = hashDirectory(getSiteDir(site));
         const importedHashes = hashDirectory(importedRoot);
 
         // Check some known unicode filenames exist in imported set

@@ -41,7 +41,7 @@ describe('Import: Full Round-Trip', () => {
             const conn = await createMysqlConnection();
             await conn.query(`DROP DATABASE IF EXISTS \`${importDbName}\``);
             await conn.end();
-        } catch (e) {
+        } catch {
             // Ignore cleanup errors
         }
     });
@@ -105,7 +105,7 @@ describe('Import: Full Round-Trip', () => {
             `  missing tables: ${comparison.missingTables.join(', ')}\n` +
             `  extra tables: ${comparison.extraTables.join(', ')}\n` +
             `  row count mismatches: ${JSON.stringify(
-                Object.entries(comparison.rowCounts).filter(([_, v]) => !v.match)
+                Object.entries(comparison.rowCounts).filter(([, value]) => !value.match)
             )}`
         );
     });
