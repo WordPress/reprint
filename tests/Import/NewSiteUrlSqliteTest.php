@@ -103,14 +103,9 @@ class NewSiteUrlSqliteTest extends TestCase
      */
     private function writeState(array $extra = []): void
     {
-        $state = array_merge([
-            'command' => null,
-            'status' => null,
-            'apply' => [],
-        ], $extra);
-        file_put_contents(
-            $this->tempDir . '/.import-state.json',
-            json_encode($state, JSON_PRETTY_PRINT),
+        \write_current_import_state(
+            new \ImportClient('http://example.invalid', $this->tempDir, $this->tempDir),
+            $extra
         );
     }
 

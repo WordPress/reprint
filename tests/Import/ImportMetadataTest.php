@@ -63,9 +63,9 @@ class ImportMetadataTest extends TestCase
      */
     private function writeState(array $state): void
     {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES),
+        \write_current_import_state(
+            new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot),
+            $state
         );
     }
 

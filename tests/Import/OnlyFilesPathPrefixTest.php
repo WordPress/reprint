@@ -65,7 +65,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     private function client(array $preflightData): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
-        $this->set($c, 'state', array('preflight' => array('data' => $preflightData)));
+        $c->get_import_state()->preflight = array('data' => $preflightData);
         $this->set($c, 'audit_log', $this->tempDir . '/audit.log');
         return $c;
     }
@@ -111,9 +111,9 @@ class OnlyFilesPathPrefixTest extends TestCase
             'filter' => 'none',
         );
 
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode(array_replace_recursive($defaults, $state), JSON_PRETTY_PRINT)
+        \write_current_import_state(
+            new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot),
+            array_replace_recursive($defaults, $state)
         );
     }
 
@@ -234,7 +234,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/plugins'));
         $original_fingerprint = $this->call($c, 'files_pull_only_fingerprint');
 
-        $this->set($c, 'state', array('files_pull_only_fingerprint' => $original_fingerprint));
+        $c->get_import_state()->files_pull_only_fingerprint = $original_fingerprint;
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
 
         $this->expectException(\RuntimeException::class);
@@ -246,7 +246,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     {
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
 
-        $this->set($c, 'state', array('files_pull_only_fingerprint' => 'different'));
+        $c->get_import_state()->files_pull_only_fingerprint = 'different';
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
 
         $this->call($c, 'assert_files_pull_only_unchanged_while_resuming', array(false));

@@ -1,9 +1,11 @@
 <?php
+declare(strict_types=1);
+
 /**
  * Typed import-state objects.
  *
  * The importer persists state as JSON, so these objects keep explicit
- * in-process property names while to_array()/from_array() preserve the stable
+ * in-process property names while to_array()/from_array() define the current
  * on-disk schema.
  */
 
@@ -24,10 +26,11 @@ class ResumableCommandCheckpointState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $state->command_name = isset($data['command_name']) ? (string) $data['command_name'] : null;
-        $state->completion_state = isset($data['completion_state']) ? (string) $data['completion_state'] : null;
-        $state->current_stage = isset($data['current_stage']) ? (string) $data['current_stage'] : null;
-        $state->remote_cursor = isset($data['remote_cursor']) ? (string) $data['remote_cursor'] : null;
+        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        $state->command_name = $data['command_name'];
+        $state->completion_state = $data['completion_state'];
+        $state->current_stage = $data['current_stage'];
+        $state->remote_cursor = $data['remote_cursor'];
         return $state;
     }
 
@@ -62,11 +65,12 @@ class DatabaseTableIndexState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $state->file = isset($data['file']) ? (string) $data['file'] : null;
-        $state->tables = (int) ($data['tables'] ?? 0);
-        $state->rows_estimated = (int) ($data['rows_estimated'] ?? 0);
-        $state->bytes = (int) ($data['bytes'] ?? 0);
-        $state->updated_at = isset($data['updated_at']) ? (string) $data['updated_at'] : null;
+        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        $state->file = $data['file'];
+        $state->tables = $data['tables'];
+        $state->rows_estimated = $data['rows_estimated'];
+        $state->bytes = $data['bytes'];
+        $state->updated_at = $data['updated_at'];
         return $state;
     }
 
@@ -93,8 +97,9 @@ class FileDiffProgressState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $state->remote_offset = (int) ($data['remote_offset'] ?? 0);
-        $state->local_after = isset($data['local_after']) ? (string) $data['local_after'] : null;
+        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        $state->remote_offset = $data['remote_offset'];
+        $state->local_after = $data['local_after'];
         return $state;
     }
 
@@ -115,7 +120,8 @@ class RemoteFileIndexCursorState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $state->cursor = isset($data['cursor']) ? (string) $data['cursor'] : null;
+        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        $state->cursor = $data['cursor'];
         return $state;
     }
 
@@ -145,11 +151,12 @@ class FetchListProgressState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $state->offset = (int) ($data['offset'] ?? 0);
-        $state->next_offset = (int) ($data['next_offset'] ?? 0);
-        $state->batch_file = isset($data['batch_file']) ? (string) $data['batch_file'] : null;
-        $state->cursor = isset($data['cursor']) ? (string) $data['cursor'] : null;
-        $state->batch_entries = (int) ($data['batch_entries'] ?? 0);
+        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        $state->offset = $data['offset'];
+        $state->next_offset = $data['next_offset'];
+        $state->batch_file = $data['batch_file'];
+        $state->cursor = $data['cursor'];
+        $state->batch_entries = $data['batch_entries'];
         return $state;
     }
 
@@ -173,7 +180,8 @@ class FilesPullSummaryState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $state->files_pulled = (int) ($data['files_pulled'] ?? 0);
+        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        $state->files_pulled = $data['files_pulled'];
         return $state;
     }
 
@@ -225,19 +233,18 @@ class DatabaseApplyCommandState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $state->statements_executed = (int) ($data['statements_executed'] ?? 0);
-        $state->bytes_read = (int) ($data['bytes_read'] ?? 0);
-        $state->rewrite_url = isset($data['rewrite_url']) && is_array($data['rewrite_url']) ? $data['rewrite_url'] : null;
-        $state->target_engine = isset($data['target_engine']) ? (string) $data['target_engine'] : null;
-        $state->target_db = isset($data['target_db']) ? (string) $data['target_db'] : null;
-        $state->target_host = isset($data['target_host']) ? (string) $data['target_host'] : null;
-        $state->target_port = isset($data['target_port']) ? (int) $data['target_port'] : null;
-        $state->target_user = isset($data['target_user']) ? (string) $data['target_user'] : null;
-        $state->target_pass = isset($data['target_pass']) ? (string) $data['target_pass'] : null;
-        $state->target_sqlite_path = isset($data['target_sqlite_path']) ? (string) $data['target_sqlite_path'] : null;
-        $state->remote_paths_removed_from_local_site = isset($data['remote_paths_removed_from_local_site']) && is_array($data['remote_paths_removed_from_local_site'])
-            ? array_values($data['remote_paths_removed_from_local_site'])
-            : [];
+        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        $state->statements_executed = $data['statements_executed'];
+        $state->bytes_read = $data['bytes_read'];
+        $state->rewrite_url = $data['rewrite_url'];
+        $state->target_engine = $data['target_engine'];
+        $state->target_db = $data['target_db'];
+        $state->target_host = $data['target_host'];
+        $state->target_port = $data['target_port'];
+        $state->target_user = $data['target_user'];
+        $state->target_pass = $data['target_pass'];
+        $state->target_sqlite_path = $data['target_sqlite_path'];
+        $state->remote_paths_removed_from_local_site = array_values($data['remote_paths_removed_from_local_site']);
         return $state;
     }
 
@@ -270,8 +277,9 @@ class AdaptiveTuningState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $state->config = isset($data['config']) && is_array($data['config']) ? $data['config'] : [];
-        $state->state = isset($data['state']) && is_array($data['state']) ? $data['state'] : [];
+        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        $state->config = $data['config'];
+        $state->state = $data['state'];
         return $state;
     }
 
@@ -307,14 +315,13 @@ class PullPipelineCheckpointState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $state->started_by_command = isset($data['started_by_command']) ? (string) $data['started_by_command'] : null;
-        $state->stage_sequence = isset($data['stage_sequence']) && is_array($data['stage_sequence'])
-            ? array_values($data['stage_sequence'])
-            : [];
-        $state->last_completed_stage = isset($data['last_completed_stage']) ? (string) $data['last_completed_stage'] : null;
-        $state->files_filter = isset($data['files_filter']) ? (string) $data['files_filter'] : null;
-        $state->skipped_pending = (bool) ($data['skipped_pending'] ?? false);
-        $state->has_completed_once = (bool) ($data['has_completed_once'] ?? false);
+        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        $state->started_by_command = $data['started_by_command'];
+        $state->stage_sequence = array_values($data['stage_sequence']);
+        $state->last_completed_stage = $data['last_completed_stage'];
+        $state->files_filter = $data['files_filter'];
+        $state->skipped_pending = $data['skipped_pending'];
+        $state->has_completed_once = $data['has_completed_once'];
         return $state;
     }
 
@@ -335,8 +342,7 @@ class PullPipelineCheckpointState
  * In-process import state with typed properties for each persisted field.
  *
  * This object mirrors .import-state.json. Add new persistent state here first;
- * from_array() accepts missing legacy fields and to_array() keeps the JSON
- * schema stable for existing installations.
+ * from_array() requires the complete current schema.
  */
 class ImportState
 {
@@ -414,42 +420,40 @@ class ImportState
     public static function from_array(array $data): self
     {
         $state = new self();
-        $state->active_resumable_command = self::resumable_command_checkpoint_from($data['active_resumable_command'] ?? []);
-        $state->preflight = isset($data['preflight']) && is_array($data['preflight']) ? $data['preflight'] : null;
-        $state->remote_protocol_version = isset($data['remote_protocol_version']) ? (int) $data['remote_protocol_version'] : null;
-        $state->remote_protocol_min_version = isset($data['remote_protocol_min_version']) ? (int) $data['remote_protocol_min_version'] : null;
-        $state->version = isset($data['version']) ? (string) $data['version'] : null;
-        $state->webhost = isset($data['webhost']) ? (string) $data['webhost'] : null;
-        $state->follow_symlinks = (bool) ($data['follow_symlinks'] ?? true);
-        $state->local_followed_symlinks_root_fingerprint = isset($data['local_followed_symlinks_root_fingerprint']) ? (string) $data['local_followed_symlinks_root_fingerprint'] : null;
-        $state->fs_root_nonempty_behavior = isset($data['fs_root_nonempty_behavior']) ? (string) $data['fs_root_nonempty_behavior'] : 'error';
-        $state->filter = isset($data['filter']) ? (string) $data['filter'] : 'none';
-        $state->user_agent = isset($data['user_agent']) ? (string) $data['user_agent'] : null;
-        $state->max_allowed_packet = isset($data['max_allowed_packet']) ? (int) $data['max_allowed_packet'] : null;
-        $state->resolved_path_mappings_fingerprint = isset($data['resolved_path_mappings_fingerprint']) ? (string) $data['resolved_path_mappings_fingerprint'] : null;
-        $state->files_pull_only_fingerprint = isset($data['files_pull_only_fingerprint']) ? (string) $data['files_pull_only_fingerprint'] : null;
-        $state->files_pull_summary = self::files_pull_summary_from($data['files_pull_summary'] ?? []);
-        $state->db_index = self::database_table_index_from($data['db_index'] ?? []);
-        $state->diff = self::file_diff_progress_from($data['diff'] ?? []);
-        $state->index = self::remote_file_index_cursor_from($data['index'] ?? []);
-        $state->fetch = self::fetch_list_progress_from($data['fetch'] ?? []);
-        $state->fetch_skipped = self::fetch_list_progress_from($data['fetch_skipped'] ?? []);
-        $state->current_file = isset($data['current_file']) ? (string) $data['current_file'] : null;
-        $state->current_file_bytes = isset($data['current_file_bytes']) ? (int) $data['current_file_bytes'] : null;
-        $state->sql_bytes = isset($data['sql_bytes']) ? (int) $data['sql_bytes'] : null;
-        $state->sql_statements_counted = (int) ($data['sql_statements_counted'] ?? 0);
-        $state->apply = self::database_apply_command_from($data['apply'] ?? []);
-        $state->sql_output = isset($data['sql_output']) ? (string) $data['sql_output'] : null;
-        $state->mysql_host = isset($data['mysql_host']) ? (string) $data['mysql_host'] : null;
-        $state->mysql_port = isset($data['mysql_port']) ? (int) $data['mysql_port'] : null;
-        $state->mysql_user = isset($data['mysql_user']) ? (string) $data['mysql_user'] : null;
-        $state->mysql_database = isset($data['mysql_database']) ? (string) $data['mysql_database'] : null;
-        $state->consecutive_interrupted_responses = (int) (
-            $data['consecutive_interrupted_responses']
-            ?? 0
-        );
-        $state->tuning = self::adaptive_tuning_from($data['tuning'] ?? []);
-        $state->pull_pipeline = self::pull_pipeline_checkpoint_from($data['pull_pipeline'] ?? []);
+        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
+        $state->preflight = $data['preflight'];
+        $state->remote_protocol_version = $data['remote_protocol_version'];
+        $state->remote_protocol_min_version = $data['remote_protocol_min_version'];
+        $state->version = $data['version'];
+        $state->webhost = $data['webhost'];
+        $state->follow_symlinks = $data['follow_symlinks'];
+        $state->local_followed_symlinks_root_fingerprint = $data['local_followed_symlinks_root_fingerprint'];
+        $state->fs_root_nonempty_behavior = $data['fs_root_nonempty_behavior'];
+        $state->filter = $data['filter'];
+        $state->user_agent = $data['user_agent'];
+        $state->max_allowed_packet = $data['max_allowed_packet'];
+        $state->resolved_path_mappings_fingerprint = $data['resolved_path_mappings_fingerprint'];
+        $state->files_pull_only_fingerprint = $data['files_pull_only_fingerprint'];
+        $state->files_pull_summary = FilesPullSummaryState::from_array($data['files_pull_summary']);
+        $state->db_index = DatabaseTableIndexState::from_array($data['db_index']);
+        $state->diff = FileDiffProgressState::from_array($data['diff']);
+        $state->index = RemoteFileIndexCursorState::from_array($data['index']);
+        $state->fetch = FetchListProgressState::from_array($data['fetch']);
+        $state->fetch_skipped = FetchListProgressState::from_array($data['fetch_skipped']);
+        $state->current_file = $data['current_file'];
+        $state->current_file_bytes = $data['current_file_bytes'];
+        $state->sql_bytes = $data['sql_bytes'];
+        $state->sql_statements_counted = $data['sql_statements_counted'];
+        $state->apply = DatabaseApplyCommandState::from_array($data['apply']);
+        $state->sql_output = $data['sql_output'];
+        $state->mysql_host = $data['mysql_host'];
+        $state->mysql_port = $data['mysql_port'];
+        $state->mysql_user = $data['mysql_user'];
+        $state->mysql_database = $data['mysql_database'];
+        $state->consecutive_interrupted_responses = $data['consecutive_interrupted_responses'];
+        $state->tuning = AdaptiveTuningState::from_array($data['tuning']);
+        $state->pull_pipeline = PullPipelineCheckpointState::from_array($data['pull_pipeline']);
         return $state;
     }
 
@@ -491,49 +495,34 @@ class ImportState
             'pull_pipeline' => $this->pull_pipeline->to_array(),
         ];
     }
+}
 
-    private static function resumable_command_checkpoint_from($value): ResumableCommandCheckpointState
-    {
-        return $value instanceof ResumableCommandCheckpointState ? $value : ResumableCommandCheckpointState::from_array(is_array($value) ? $value : []);
+/**
+ * Reject import-state shapes other than the one written by the current code.
+ *
+ * @param array<string,mixed> $data          Observed state data.
+ * @param string[]            $expected_keys Current field names.
+ */
+function reprint_assert_import_state_keys(array $data, array $expected_keys, string $state_name): void
+{
+    $actual_keys = array_keys($data);
+    sort($actual_keys);
+    sort($expected_keys);
+    if ($actual_keys === $expected_keys) {
+        return;
     }
 
-    private static function files_pull_summary_from($value): FilesPullSummaryState
-    {
-        return $value instanceof FilesPullSummaryState ? $value : FilesPullSummaryState::from_array(is_array($value) ? $value : []);
+    $missing_keys = array_values(array_diff($expected_keys, $actual_keys));
+    $unexpected_keys = array_values(array_diff($actual_keys, $expected_keys));
+    $details = [];
+    if ($missing_keys !== []) {
+        $details[] = 'missing ' . implode(', ', $missing_keys);
+    }
+    if ($unexpected_keys !== []) {
+        $details[] = 'unexpected ' . implode(', ', $unexpected_keys);
     }
 
-    private static function database_table_index_from($value): DatabaseTableIndexState
-    {
-        return $value instanceof DatabaseTableIndexState ? $value : DatabaseTableIndexState::from_array(is_array($value) ? $value : []);
-    }
-
-    private static function file_diff_progress_from($value): FileDiffProgressState
-    {
-        return $value instanceof FileDiffProgressState ? $value : FileDiffProgressState::from_array(is_array($value) ? $value : []);
-    }
-
-    private static function remote_file_index_cursor_from($value): RemoteFileIndexCursorState
-    {
-        return $value instanceof RemoteFileIndexCursorState ? $value : RemoteFileIndexCursorState::from_array(is_array($value) ? $value : []);
-    }
-
-    private static function fetch_list_progress_from($value): FetchListProgressState
-    {
-        return $value instanceof FetchListProgressState ? $value : FetchListProgressState::from_array(is_array($value) ? $value : []);
-    }
-
-    private static function database_apply_command_from($value): DatabaseApplyCommandState
-    {
-        return $value instanceof DatabaseApplyCommandState ? $value : DatabaseApplyCommandState::from_array(is_array($value) ? $value : []);
-    }
-
-    private static function adaptive_tuning_from($value): AdaptiveTuningState
-    {
-        return $value instanceof AdaptiveTuningState ? $value : AdaptiveTuningState::from_array(is_array($value) ? $value : []);
-    }
-
-    private static function pull_pipeline_checkpoint_from($value): PullPipelineCheckpointState
-    {
-        return $value instanceof PullPipelineCheckpointState ? $value : PullPipelineCheckpointState::from_array(is_array($value) ? $value : []);
-    }
+    throw new UnexpectedValueException(
+        $state_name . ' does not match the current state schema: ' . implode('; ', $details)
+    );
 }

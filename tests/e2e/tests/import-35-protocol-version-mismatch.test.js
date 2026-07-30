@@ -98,8 +98,8 @@ describe('Import: Protocol Version Mismatch', () => {
 
     it('fails when remote does not report a protocol version', () => {
         const state = readState();
-        delete state.remote_protocol_version;
-        delete state.remote_protocol_min_version;
+        state.remote_protocol_version = null;
+        state.remote_protocol_min_version = null;
         writeState(state);
 
         const result = runImporter(importUrl(), tempDir, 'preflight-assert', {

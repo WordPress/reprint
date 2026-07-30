@@ -10,27 +10,25 @@ class ImportStateTest extends TestCase
 {
     public function testStateHydratesDocumentedNestedObjects(): void
     {
-        $state = \ImportState::from_array([
-            'active_resumable_command' => [
-                'command_name' => 'files-pull',
-                'completion_state' => 'partial',
-                'current_stage' => 'fetch',
-                'remote_cursor' => 'cursor-1',
-            ],
-            'pull_pipeline' => [
-                'started_by_command' => 'pull',
-                'stage_sequence' => ['preflight', 'files-pull'],
-                'last_completed_stage' => 'preflight',
-                'files_filter' => 'essential-files',
-                'skipped_pending' => true,
-                'has_completed_once' => false,
-            ],
-            'apply' => [
-                'statements_executed' => 12,
-                'bytes_read' => 34,
-                'target_engine' => 'sqlite',
-            ],
-        ]);
+        $data = (new \ImportState())->to_array();
+        $data['active_resumable_command'] = [
+            'command_name' => 'files-pull',
+            'completion_state' => 'partial',
+            'current_stage' => 'fetch',
+            'remote_cursor' => 'cursor-1',
+        ];
+        $data['pull_pipeline'] = [
+            'started_by_command' => 'pull',
+            'stage_sequence' => ['preflight', 'files-pull'],
+            'last_completed_stage' => 'preflight',
+            'files_filter' => 'essential-files',
+            'skipped_pending' => true,
+            'has_completed_once' => false,
+        ];
+        $data['apply']['statements_executed'] = 12;
+        $data['apply']['bytes_read'] = 34;
+        $data['apply']['target_engine'] = 'sqlite';
+        $state = \ImportState::from_array($data);
 
         $this->assertSame('files-pull', $state->active_resumable_command->command_name);
         $this->assertSame('partial', $state->active_resumable_command->completion_state);
@@ -41,7 +39,7 @@ class ImportStateTest extends TestCase
 
     public function testStateRoundTripsToPersistedArraySchema(): void
     {
-        $state = \ImportState::from_array([]);
+        $state = new \ImportState();
         $state->active_resumable_command->command_name = 'db-pull';
         $state->active_resumable_command->completion_state = 'complete';
         $state->pull_pipeline->started_by_command = 'pull';
@@ -57,9 +55,63 @@ class ImportStateTest extends TestCase
 
     public function testStateObjectsDoNotExposeArrayOffsetMutation(): void
     {
-        $state = \ImportState::from_array([]);
+        $state = new \ImportState();
 
         $this->assertNotInstanceOf(\ArrayAccess::class, $state);
         $this->assertNotInstanceOf(\ArrayAccess::class, $state->active_resumable_command);
+    }
+
+    public function testStateRejectsAnIncompleteSchema(): void
+    {
+        $data = (new \ImportState())->to_array();
+        unset($data['webhost']);
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('missing webhost');
+
+        \ImportState::from_array($data);
+    }
+
+    public function testStateRejectsUnexpectedFields(): void
+    {
+        $data = (new \ImportState())->to_array();
+        $data['status'] = 'complete';
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('unexpected status');
+
+        \ImportState::from_array($data);
+    }
+
+    public function testStatePathRejectsInvalidBase64(): void
+    {
+        $decode = $this->statePathDecoder();
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('contains invalid base64');
+
+        $decode('base64:not base64');
+    }
+
+    public function testStatePathRejectsAnUnprefixedString(): void
+    {
+        $decode = $this->statePathDecoder();
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('missing the base64: encoding prefix');
+
+        $decode('/srv/htdocs/wp-config.php');
+    }
+
+    private function statePathDecoder(): \Closure
+    {
+        $client = new \ImportClient(
+            'https://source.example/',
+            sys_get_temp_dir(),
+            sys_get_temp_dir(),
+        );
+        $method = (new \ReflectionClass($client))->getMethod('decode_state_path_value');
+        $method->setAccessible(true);
+        return $method->getClosure($client);
     }
 }

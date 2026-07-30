@@ -356,13 +356,8 @@ class ImportClient
      *  that consumers should display as "files done". */
     private $fetch_list_done = null;
 
-    /**
-     * @var ImportState Persistent import state loaded from / saved to $state_file.
-     *
-     * The on-disk schema remains JSON, but in-process code gets documented
-     * state objects and typed nested properties.
-     */
-    public $state;
+    /** @var ImportState Persistent import state loaded from / saved to $state_file. */
+    private ImportState $state;
 
     /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
     private $shutdown_requested = false;
@@ -6828,6 +6823,7 @@ class ImportClient
             "offset" => $next_offset,
             "next_offset" => $next_offset,
             "batch_file" => null,
+            "batch_entries" => 0,
             "cursor" => null,
         ]));
         $this->save_state($this->state);
@@ -11016,48 +11012,26 @@ class ImportClient
     }
 
     /**
-     * Reset state to defaults while preserving cross-command data like
-     * preflight results, version, and follow_symlinks.
+     * Reset command state while preserving data shared across commands.
      */
     private function reset_state(): void
     {
-        $preflight = $this->import_state()->preflight ?? null;
-        $version = $this->import_state()->version ?? null;
-        $webhost = $this->import_state()->webhost ?? null;
-        $follow = $this->import_state()->follow_symlinks ?? false;
-        $nonempty = $this->import_state()->fs_root_nonempty_behavior ?? "error";
-        $max_packet = $this->import_state()->max_allowed_packet ?? null;
-        $resolved_path_mappings_fingerprint = $this->import_state()->resolved_path_mappings_fingerprint ?? null;
-        $pull = $this->import_state()->pull_pipeline ?? null;
+        $previous_state = $this->state;
         $this->state = new ImportState();
-        $this->import_state()->preflight = $preflight;
-        $this->import_state()->version = $version;
-        $this->import_state()->webhost = $webhost;
-        $this->import_state()->follow_symlinks = $follow;
-        $this->import_state()->fs_root_nonempty_behavior = $nonempty;
-        $this->import_state()->max_allowed_packet = $max_packet;
-        $this->import_state()->resolved_path_mappings_fingerprint = $resolved_path_mappings_fingerprint;
-        if ($pull !== null) {
-            $this->import_state()->pull_pipeline = $pull;
-        }
+        $this->state->preflight = $previous_state->preflight;
+        $this->state->version = $previous_state->version;
+        $this->state->webhost = $previous_state->webhost;
+        $this->state->follow_symlinks = $previous_state->follow_symlinks;
+        $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
+        $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
+        $this->state->resolved_path_mappings_fingerprint = $previous_state->resolved_path_mappings_fingerprint;
+        $this->state->pull_pipeline = $previous_state->pull_pipeline;
     }
 
-    /** Return the in-process typed state, hydrating legacy arrays at the boundary. */
+    /** Return the in-process import state. */
     private function import_state(): ImportState
     {
-        if (!$this->state instanceof ImportState) {
-            $this->state = ImportState::from_array($this->state_to_array($this->state));
-        }
         return $this->state;
-    }
-
-    /** Convert either the typed state object or a legacy array to the persisted schema. */
-    private function state_to_array($state): array
-    {
-        if ($state instanceof ImportState) {
-            return $state->to_array();
-        }
-        return ImportState::from_array(is_array($state) ? $state : [])->to_array();
     }
 
     /**
@@ -11094,8 +11068,6 @@ class ImportClient
 
     /**
      * Decode base64-encoded path fields in state after loading.
-     *
-     * Supports legacy plain-string fields for backward compatibility.
      */
     private function decode_state_paths(array $state): array
     {
@@ -11280,16 +11252,16 @@ class ImportClient
             return $value;
         }
         if (!str_starts_with($value, self::STATE_PATH_ENCODING_PREFIX)) {
-            return $value;
+            throw new UnexpectedValueException(
+                "Import state path is missing the base64: encoding prefix."
+            );
         }
         $encoded = substr($value, strlen(self::STATE_PATH_ENCODING_PREFIX));
         $decoded = base64_decode($encoded, true);
         if ($decoded === false) {
-            $this->audit_log(
-                "Warning: invalid base64-encoded state path; resetting field",
-                true,
+            throw new UnexpectedValueException(
+                "Import state path contains invalid base64 after the base64: encoding prefix."
             );
-            return null;
         }
         return $decoded;
     }
@@ -11319,7 +11291,6 @@ class ImportClient
             return new ImportState();
         }
 
-        $state = $this->state_to_array($state);
         $state = $this->decode_state_paths($state);
 
         return ImportState::from_array($state);
@@ -11331,14 +11302,14 @@ class ImportClient
      * Uses atomic write (temp file + rename) to prevent corruption if
      * the process is killed mid-write.
      */
-    private function save_state($state): void
+    private function save_state(ImportState $state): void
     {
         // Keep the spinner alive between curl requests. save_state is
         // called frequently during streaming operations, so this fills
         // the gaps where curl's progress callback doesn't fire.
         $this->progress->tick_spinner();
 
-        $state = $this->state_to_array($state);
+        $state = $state->to_array();
         if ($this->tuner instanceof AdaptiveTuner) {
             $state["tuning"] = [
                 "config" => $this->tuner->get_config(),
@@ -11391,9 +11362,7 @@ class ImportClient
      */
     public function write_status_file(?string $error = null): void
     {
-        $state = $this->state instanceof ImportState
-            ? $this->state
-            : ImportState::from_array($this->state_to_array($this->state));
+        $state = $this->state;
         $command = $state->active_resumable_command->command_name;
         $status = $error !== null ? "error" : ($state->active_resumable_command->completion_state ?? "in_progress");
 
