@@ -182,7 +182,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         );
     }
 
-    public function testApplyRuntimeAddsProxyWhileFilesSyncIsIncomplete(): void
+    public function testApplyRuntimeAddsProxyWhileFilesPullIsIncomplete(): void
     {
         $this->writeState([
             'active_resumable_command' => [
@@ -210,7 +210,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         );
     }
 
-    public function testApplyRuntimeOmitsProxyAfterFilesSyncCompletes(): void
+    public function testApplyRuntimeOmitsProxyAfterFilesPullCompletes(): void
     {
         $this->writeState([
             'active_resumable_command' => [

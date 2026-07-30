@@ -1268,7 +1268,7 @@ class ImportClient
                     return;
 
                 case "files-pull":
-                    $this->run_files_sync();
+                    $this->run_files_pull();
                     break;
 
                 case "files-index":
@@ -2699,7 +2699,7 @@ class ImportClient
      *
      * Both modes share the same pipeline: index → diff → fetch.
      */
-    public function run_files_sync(): void
+    public function run_files_pull(): void
     {
         $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
 
@@ -2770,7 +2770,7 @@ class ImportClient
                 $this->import_state()->files_pull_summary = new FilesPullSummaryState();
                 $this->save_state($this->state);
                 $this->open_local_index_wal();
-                $this->run_files_sync_pipeline();
+                $this->run_files_pull_pipeline();
                 // The deferred tail reopens a completed files-pull. Once the
                 // tail finishes, restore the completed status so later filter
                 // changes are judged against the actual lifecycle state.
@@ -2934,7 +2934,7 @@ class ImportClient
         $this->save_state($this->state);
 
         $this->open_local_index_wal();
-        $this->run_files_sync_pipeline();
+        $this->run_files_pull_pipeline();
 
         // Pipeline returns early with partial status if interrupted
         if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
@@ -2975,7 +2975,7 @@ class ImportClient
      * Reads the current stage from state and runs each stage in sequence.
      * Returns early (with partial status) if any stage doesn't complete.
      */
-    private function run_files_sync_pipeline(): void
+    private function run_files_pull_pipeline(): void
     {
         $stage = $this->import_state()->active_resumable_command->current_stage ?? "index";
 

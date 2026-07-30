@@ -11,7 +11,7 @@ class PullFilterFakeClient extends \ImportClient
     private bool $create_skipped_list;
     public int $files_pulled = 0;
     public int $preflight_runs = 0;
-    public int $files_sync_runs = 0;
+    public int $files_pull_runs = 0;
     public int $db_sync_runs = 0;
     public int $db_apply_runs = 0;
     public array $progress_events = [];
@@ -90,7 +90,7 @@ class PullFilterFakeClient extends \ImportClient
         $this->save_import_state();
     }
 
-    public function run_files_sync(): void
+    public function run_files_pull(): void
     {
         $state = $this->get_import_state();
         if (
@@ -100,7 +100,7 @@ class PullFilterFakeClient extends \ImportClient
             return;
         }
 
-        $this->files_sync_runs++;
+        $this->files_pull_runs++;
         if ($this->create_skipped_list) {
             file_put_contents(
                 $this->state_dir . '/.import-fetch-list-skipped.jsonl',
@@ -278,7 +278,7 @@ class PullFilterOptionTest extends TestCase
 
         $state = $this->readState();
         $this->assertSame(1, $client->preflight_runs);
-        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertSame(0, $client->files_pull_runs);
         $this->assertNull($state["pull_pipeline"]["last_completed_stage"]);
 
         $error_events = array_values(array_filter(
@@ -323,7 +323,7 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertSame(0, $client->files_pull_runs);
         $this->assertSame(1, $client->db_sync_runs);
         $this->assertSame('pull', $state["pull_pipeline"]["started_by_command"]);
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
@@ -357,7 +357,7 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame(1, $client->files_sync_runs);
+        $this->assertSame(1, $client->files_pull_runs);
         $this->assertSame('pull', $state["pull_pipeline"]["started_by_command"]);
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
     }
@@ -486,7 +486,7 @@ class PullFilterOptionTest extends TestCase
 
         $state = $this->readState();
         $this->assertSame(1, $client->preflight_runs);
-        $this->assertSame(1, $client->files_sync_runs);
+        $this->assertSame(1, $client->files_pull_runs);
         $this->assertSame(0, $client->db_sync_runs);
         $this->assertSame(0, $client->db_apply_runs);
         $this->assertSame('pull-files', $state["pull_pipeline"]["started_by_command"]);
@@ -510,7 +510,7 @@ class PullFilterOptionTest extends TestCase
 
         $state = $this->readState();
         $this->assertSame(1, $client->preflight_runs);
-        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertSame(0, $client->files_pull_runs);
         $this->assertNull($state["pull_pipeline"]["last_completed_stage"]);
 
         $error_events = array_values(array_filter(
@@ -548,7 +548,7 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertSame(0, $client->files_pull_runs);
         $this->assertSame('files-pull', $state["pull_pipeline"]["last_completed_stage"]);
         $this->assertSame('files-pull', $state["active_resumable_command"]["command_name"]);
     }
@@ -574,7 +574,7 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame(1, $client->files_sync_runs);
+        $this->assertSame(1, $client->files_pull_runs);
         $this->assertSame('pull-files', $state["pull_pipeline"]["started_by_command"]);
         $this->assertSame('files-pull', $state["pull_pipeline"]["last_completed_stage"]);
     }
@@ -613,7 +613,7 @@ class PullFilterOptionTest extends TestCase
             ob_end_clean();
         }
 
-        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertSame(0, $client->files_pull_runs);
         $this->assertSame(0, $client->db_sync_runs);
     }
 
@@ -627,7 +627,7 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame(2, $client->files_sync_runs);
+        $this->assertSame(2, $client->files_pull_runs);
         $this->assertSame('pull-files', $state["pull_pipeline"]["started_by_command"]);
         $this->assertSame('files-pull', $state["pull_pipeline"]["last_completed_stage"]);
     }
@@ -645,7 +645,7 @@ class PullFilterOptionTest extends TestCase
         ob_end_clean();
 
         $state = $this->readState();
-        $this->assertSame(2, $client->files_sync_runs);
+        $this->assertSame(2, $client->files_pull_runs);
         $this->assertSame(1, $client->db_sync_runs);
         $this->assertSame('pull', $state["pull_pipeline"]["started_by_command"]);
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
@@ -664,7 +664,7 @@ class PullFilterOptionTest extends TestCase
 
         $state = $this->readState();
         $this->assertSame(1, $client->preflight_runs);
-        $this->assertSame(0, $client->files_sync_runs);
+        $this->assertSame(0, $client->files_pull_runs);
         $this->assertSame(1, $client->db_sync_runs);
         $this->assertSame(1, $client->db_apply_runs);
         $this->assertSame('pull-db', $state["pull_pipeline"]["started_by_command"]);

@@ -14,7 +14,7 @@ require_once __DIR__ . '/../../importer/import.php';
  * In preserve-local mode, previously-synced files that changed remotely
  * must still be re-downloaded (not skipped).
  */
-class FilesSyncStateTest extends TestCase
+class FilesPullStateTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
@@ -157,7 +157,7 @@ class FilesSyncStateTest extends TestCase
     /**
      * A completed files-pull should refuse to re-run.
      */
-    public function testCompletedFilesSyncRefusesToRerun()
+    public function testCompletedFilesPullRefusesToRerun()
     {
         $this->writeState([
             "active_resumable_command" => [
@@ -168,7 +168,7 @@ class FilesSyncStateTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $method = $reflection->getMethod('run_files_sync');
+        $method = $reflection->getMethod('run_files_pull');
         $method->invoke($client);
 
         $state = $this->readState();
@@ -267,11 +267,11 @@ class FilesSyncStateTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
         $reflection->getMethod('handle_abort')->invoke($client, 'files-pull');
 
-        // Step 2: new client, try run_files_sync
+        // Step 2: new client, try run_files_pull
         [$client2, $reflection2] = $this->prepareClient();
 
         try {
-            $reflection2->getMethod('run_files_sync')->invoke($client2);
+            $reflection2->getMethod('run_files_pull')->invoke($client2);
         } catch (\Exception $e) {
             // Expected: will fail trying to contact the fake URL
         }
@@ -315,7 +315,7 @@ class FilesSyncStateTest extends TestCase
         $filterProp->setValue($client, 'skipped-earlier');
 
         try {
-            $reflection->getMethod('run_files_sync')->invoke($client);
+            $reflection->getMethod('run_files_pull')->invoke($client);
         } catch (\Exception $e) {
             // Expected: the fetch fails against the fake URL. The point is that
             // it got PAST the "no completed sync with skipped files" guard.

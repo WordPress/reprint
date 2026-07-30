@@ -18,7 +18,7 @@ class PullFailureReportedException extends RuntimeException
  * subset, and `pull-db` runs the database subset.
  *
  * The class holds a reference to ImportClient because each stage
- * delegates to an ImportClient method (run_preflight, run_files_sync,
+ * delegates to an ImportClient method (run_preflight, run_files_pull,
  * etc.). The orchestration logic (pipeline state, retry loop, stage
  * framing) lives here; the actual transfer logic stays in ImportClient.
  */
@@ -435,7 +435,7 @@ class Pull
             case 'files-pull':
                 $this->client->prepare_files_pull_options($options);
                 $this->run_until_complete('files-pull', function () {
-                    $this->client->run_files_sync();
+                    $this->client->run_files_pull();
                 });
                 $skipped_pending =
                     $options['filter'] === 'essential-files' &&

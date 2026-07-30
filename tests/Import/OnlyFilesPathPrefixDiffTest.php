@@ -98,7 +98,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         return $paths;
     }
 
-    /** Mirror FilesSyncStateTest: load state + preserve-local, then set the --only file path prefixes. */
+    /** Mirror FilesPullStateTest: load state + preserve-local, then set the --only file path prefixes. */
     private function prepareClient(array $pull_only_files_with_path_prefixes): array
     {
         $defaults = [
