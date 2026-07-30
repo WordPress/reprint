@@ -19,9 +19,9 @@ the end maps it to a PR stack.
    moves work files into place, executes deletions, and commits the database
    diff, and fixes symlinks — inside a maintenance window that lasts seconds,
    not the length of the transfer.
-5. It stores the current local paths as the pair's previous local index
-   and stores the current rows as the previously pushed rows. The push is
-   complete only after this step; a crashed push is
+5. It stores the current local paths as the previous local index for that
+   remote Reprint API URL and stores the current rows as the previously pushed
+   rows. The push is complete only after this step; a crashed push is
    re-driven from the top and converges.
 
 Both sides act only when the local machine calls: no worker, no polling, no
@@ -78,14 +78,15 @@ managed `false` hard-disables push without abandoning durable commit recovery.
 
 ctime is machine-local, so push never compares a local timestamp to a remote
 one. It only answers "what changed locally since my last successful push to
-this remote" by comparing the current local paths and rows against the pair's
-previous local index and the previously pushed rows.
+this remote" by comparing the current local paths and rows against the previous
+local index and previously pushed rows for that remote Reprint API URL.
 
-The local machine keeps these files **per remote Reprint API URL and resolved
-filesystem root**, overwritten after each successful commit:
+The local machine keeps these files **per remote Reprint API URL**, overwritten
+after each successful commit. The state directory already selects one
+filesystem root:
 
-    <state-dir>/push/<pair-key>/previous_local_index.jsonl
-    <state-dir>/push/<pair-key>/previously_pushed_rows.jsonl   (phase two)
+    <state-dir>/push/<md5-of-trimmed-remote-reprint-api-url>/previous_local_index.jsonl
+    <state-dir>/push/<md5-of-trimmed-remote-reprint-api-url>/previously_pushed_rows.jsonl   (phase two)
 
 The previous local index records the local path type, size, and ctime as the
 completing push observed them. Besides planning the next push, it feeds the
@@ -131,7 +132,8 @@ A push plan is an internal part of the sender lifecycle:
    copy. It then removes the complete `plan/` directory and the sender-owned
    exclusions file. After the target
    confirms removal of a discarded push session, the sender removes the same
-   files without changing the pair's previous local index.
+   files without changing the previous local index for that remote Reprint API
+   URL.
 
 Until the sender stores the initial PushPlan cursor, `starting_plan` remains
 the durable phase. An interrupted start is repeated and overwrites its initial
@@ -274,15 +276,16 @@ configuration; request parameters cannot select any of them.
 
 `PushFilesSender` joins the durable `PushPlan` to the receiver's push session.
 Every local Reprint command workflow runs under `<state-dir>/process.lock`.
-The production CLI acquires this non-blocking lock before it prepares pair
-context, constructs `ImportClient`, or writes the command audit entry. It
-passes the open lock to `ImportClient::run()` and releases it after the command.
-A direct `ImportClient::run()` call acquires the lock when its caller supplies
-none. The one state-directory-wide Reprint process lock prevents concurrent
-pull, push, diff, and other local Reprint processes from using that site state,
-regardless of their target or local-tree pair.
+The production CLI acquires this non-blocking lock before it resolves the local
+push state directory, constructs `ImportClient`, or writes the command audit
+entry. It passes the open lock to `ImportClient::run()` and releases it after
+the command. A direct `ImportClient::run()` call acquires the lock when its
+caller supplies none. The one state-directory-wide Reprint process lock
+prevents concurrent pull, push, diff, and other local Reprint processes from
+using that site state, regardless of their remote Reprint API URLs.
 
-An active push keeps these files under `<state-dir>/push/<pair-key>/`:
+An active push keeps these files under
+`<state-dir>/push/<md5-of-trimmed-remote-reprint-api-url>/`:
 
 ```text
 previous_local_index.jsonl          index saved after the previous commit
@@ -414,17 +417,17 @@ write `pull/state.json`, show a plan, ask for confirmation, transfer a
 database, retry a failed request, or start a replacement sender after a
 `restart` outcome.
 
-The command derives one pair key without general URL normalization:
+The local push state directory is `<state-dir>/push/` followed by:
 
 ```text
-sha256(rtrim(<remote-reprint-api-url>, "?&") + "\0" + <resolved-filesystem-root>)
+md5(rtrim(<remote-reprint-api-url>, "?&"))
 ```
 
-Its sender state lives at `<state-dir>/push/<pair-key>/`. A different target
-query or resolved filesystem root therefore selects a different retained local
-index. Fragments, URL user-info, and `SECRET_KEY` target parameters are
-rejected. The local push state directory must be outside the filesystem root so
-planning cannot index its own changing files.
+A different remote query therefore selects a different retained local index. A
+different filesystem root requires a different state directory and does not
+participate in the directory name. Fragments, URL user-info, and `SECRET_KEY`
+target parameters are rejected. The local push state directory must be outside
+the filesystem root so planning cannot index its own changing files.
 
 One process starts or resumes exactly one sender. Before every `next_step()` it
 checks whether another step may begin. The wall-clock admission deadline is 80
@@ -445,18 +448,19 @@ The stable CLI mapping is `complete`/0, `partial`/2, `interrupted`/2,
 `restart`/2, `failed`/1, and `error`/1. Exit 2 asks the operator to run the
 same command again. After `restart`, that next run builds a fresh plan. The
 shared audit log records opening mode, phase changes, planned pauses, handled
-interruptions, and terminal outcomes with the pair key. The flat progress file
-records only the command, pair, outcome, phase, reason, detail, and timestamp;
-neither file copies receiver cursors or tentative upload positions.
+interruptions, and terminal outcomes. The flat progress file records only
+`command`, `status`, `phase`, `reason`, `detail`, and `ts`; neither file copies
+receiver cursors or tentative upload positions.
 
 ## Local files-diff command
 
 `reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR` reports a local
 minimized push operation plan before target exclusions: the local paths a
-files-push would send or delete, compared against the pair's previous local
-index published by a completed files-push. It uses the files-push pair-key
-formula, including its trailing `?` and `&` trim, so another URL query or
-filesystem root cannot reuse the index. It accepts only `--state-dir` and
+files-push would send or delete, compared against the previous local index for
+that remote Reprint API URL published by a completed files-push. It uses the
+files-push local push state directory formula, including its trailing `?` and
+`&` trim, so another URL query cannot reuse the index. A different filesystem
+root uses a different state directory. It accepts only `--state-dir` and
 `--fs-root`; it needs no secret, performs no preflight, and makes no network
 request. It runs one complete PushPlan against `previous_local_index.jsonl` in
 `files-diff-plan/` while the command holds the state-directory-wide Reprint
@@ -506,8 +510,8 @@ Order:
    `commit.json` checkpoint written before each document-root mutation. The
    future database batch and symlink updates follow the same bounded cursor.
 4. **Maintenance off:** commit releases its `commit-state` ownership after
-   completion; the driver saves the pair's previous local index and rows
-   after commit completes.
+   completion; the driver saves the previous local index and rows for that
+   remote Reprint API URL after commit completes.
 
 If the driver dies mid-commit: WordPress stops honoring the `.maintenance`
 file after 10 minutes on its own, and the next commit request resumes from
@@ -599,8 +603,8 @@ Files first, database second, each PR small and stacked in this order:
     one sender per process, applies caller time and memory admission budgets,
     and reports completion, continuation, restart, or failure without retrying.
 12. **`reprint files-diff`** — a local-only command that reports the paths a
-    files-push would send or delete against the pair's previous local index,
-    without contacting the target.
+    files-push would send or delete against the previous local index for that
+    remote Reprint API URL, without contacting the target.
 13. **`reprint push`** — the high-level command that adds a change summary,
     confirmation boundary, database work, transfer, commit, and resume.
 14. **Budgets and resumable limits** — push requests stay bounded by two

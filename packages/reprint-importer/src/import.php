@@ -698,9 +698,8 @@ class ImportClient
      *
      * @param string       $command Normalized CLI command name.
      * @param list<string> $argv    Raw command arguments.
-     * @param string|null  $pair    Files-diff or files-push pair key, when available.
      */
-    public function audit_log_argv(string $command, array $argv, ?string $pair = null): void
+    public function audit_log_argv(string $command, array $argv): void
     {
         // Mask the remote URL (argv[2]) to avoid logging secrets embedded in query strings.
         $masked = $argv;
@@ -715,8 +714,10 @@ class ImportClient
                 $masked[$argument_index] = '--secret=***';
             }
         }
-        $pair_field = $pair === null ? '' : " | pair={$pair}";
-        $this->audit_log("COMMAND | {$command}{$pair_field} | argv=" . implode(' ', $masked), false);
+        $this->audit_log(
+            "COMMAND | {$command} | argv=" . implode(' ', $masked),
+            false
+        );
     }
 
     /**
@@ -836,7 +837,8 @@ class ImportClient
     /**
      * Runs one import command while holding the state directory's process lock.
      *
-     * CLI callers pass the lock acquired before pair setup and audit logging.
+     * CLI callers pass the lock acquired before local push state setup and
+     * audit logging.
      * Direct callers may omit it; this method then acquires the lock before
      * reading or writing command state. A supplied lock remains caller-owned.
      *
@@ -1267,7 +1269,8 @@ class ImportClient
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI filesystem paths, never HTML output.
     /**
-     * Reports local paths changed since the pair's previous local index.
+     * Reports local paths changed since the previous push to this remote
+     * Reprint API URL.
      *
      * files-diff makes no network request. It runs one complete PushPlan
      * against the previous local index a completed files-push published, then
@@ -1276,29 +1279,28 @@ class ImportClient
      * running the command again prints the complete report.
      *
      * @param array $options {
-     *     Parsed files-diff options and context.
+     *     Parsed files-diff options.
      *
-     *     @type array $files_diff_context Validated pair context.
+     *     @type string $files_diff_push_state_directory Local push state directory resolved by the CLI entry point.
      * }
      * @phpstan-param array<string,mixed> $options
      */
     private function run_files_diff(array $options): void
     {
-        $context = $options['files_diff_context'] ?? self::prepare_files_pair_context(
+        $push_state_directory = $options['files_diff_push_state_directory'] ?? self::resolve_push_state_directory(
             $this->remote_reprint_api_url,
             $this->state_dir,
             $this->filesystem_root,
             'files-diff'
         );
-        if (!is_array($context)) {
-            throw new InvalidArgumentException('files-diff requires its validated command context.');
+        if (!is_string($push_state_directory)) {
+            throw new InvalidArgumentException('files-diff requires its resolved local push state directory.');
         }
 
-        $push_state_directory = $context['push_state_directory'];
         $previous_local_index = $push_state_directory . '/previous_local_index.jsonl';
         $missing_previous_local_index_message =
-            'files-diff requires the pair\'s previous local index, which a completed files-push publishes '
-            . 'for the same remote Reprint API URL, state directory, and filesystem root.';
+            'files-diff requires the previous local index published by a completed files-push '
+            . 'for the same remote Reprint API URL and state directory.';
         if (!is_dir($push_state_directory)) {
             throw new RuntimeException($missing_previous_local_index_message);
         }
@@ -1321,7 +1323,7 @@ class ImportClient
             }
             $plan = PushPlan::start(
                 $plan_directory,
-                $context['filesystem_root'],
+                $this->filesystem_root,
                 $previous_local_index,
                 $excluded_paths_path
             );
@@ -1548,7 +1550,7 @@ class ImportClient
         try {
             $this->audit_log(
                 ( $resuming ? 'RESUME' : 'START' )
-                    . " files-push | pair={$context['pair']} | phase={$phase}",
+                    . " files-push | phase={$phase}",
                 false
             );
 
@@ -1577,7 +1579,7 @@ class ImportClient
                 $phase = $sender->get_phase();
                 if ($phase !== $previous_phase) {
                     $this->audit_log(
-                        "PHASE files-push | pair={$context['pair']} | from={$previous_phase} | to={$phase}",
+                        "PHASE files-push | from={$previous_phase} | to={$phase}",
                         false
                     );
                     $previous_phase = $phase;
@@ -1628,33 +1630,33 @@ class ImportClient
 
         switch ($status) {
             case 'complete':
-                $audit_line = "COMPLETE files-push | pair={$context['pair']} | phase={$phase}";
+                $audit_line = "COMPLETE files-push | phase={$phase}";
                 $message = 'Files push complete.';
                 $this->exit_code = 0;
                 break;
             case 'partial':
-                $audit_line = "PARTIAL files-push | pair={$context['pair']} | phase={$phase} | cause={$reason}";
+                $audit_line = "PARTIAL files-push | phase={$phase} | cause={$reason}";
                 $message = 'Files push paused at a durable boundary; run the same command again to continue.';
                 $this->exit_code = 2;
                 break;
             case 'interrupted':
-                $audit_line = "INTERRUPTED files-push | pair={$context['pair']} | phase={$phase} | signal={$this->files_push_stop_signal}";
+                $audit_line = "INTERRUPTED files-push | phase={$phase} | signal={$this->files_push_stop_signal}";
                 $message = 'Files push was interrupted at a durable boundary; run the same command again to continue.';
                 $this->exit_code = 2;
                 break;
             case 'restart':
-                $audit_line = "RESTART files-push | pair={$context['pair']} | phase={$phase} | reason={$reason}";
+                $audit_line = "RESTART files-push | phase={$phase} | reason={$reason}";
                 $message = 'Files push must restart; the next run will build a fresh plan.';
                 $this->exit_code = 2;
                 break;
             case 'failed':
-                $audit_line = "FAILED files-push | pair={$context['pair']} | phase={$phase} | reason={$reason}";
+                $audit_line = "FAILED files-push | phase={$phase} | reason={$reason}";
                 $message = $detail === null ? 'Files push failed.' : 'Files push failed: ' . $detail;
                 $this->exit_code = 1;
                 break;
             case 'error':
             default:
-                $audit_line = "ERROR files-push | pair={$context['pair']} | phase={$phase} | reason={$reason}";
+                $audit_line = "ERROR files-push | phase={$phase} | reason={$reason}";
                 $message = $detail === null ? 'Files push stopped with an error.' : 'Files push stopped with an error: ' . $detail;
                 $this->exit_code = 1;
                 break;
@@ -1663,7 +1665,6 @@ class ImportClient
         $this->audit_log($audit_line, false);
         $result = [
             'command' => 'files-push',
-            'pair' => $context['pair'],
             'status' => $status,
             'phase' => $phase,
             'message' => $message,
@@ -1677,7 +1678,6 @@ class ImportClient
         // Write the flat progress snapshot without consulting import state.
         $progress_payload = [
             'command' => 'files-push',
-            'pair' => $context['pair'],
             'status' => $status,
             'phase' => $phase,
             'reason' => $reason,
@@ -1724,10 +1724,9 @@ class ImportClient
      *
      *     @type string $remote_reprint_api_url Remote Reprint API URL.
      *     @type string $filesystem_root  Resolved filesystem root being sent.
-     *     @type string $pair                 Target/filesystem-root pair key.
      *     @type string $push_state_directory Local push state directory.
      * }
-     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
+     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,push_state_directory:string}
      */
     public static function prepare_files_push_context(
         string $remote_reprint_api_url,
@@ -1745,7 +1744,7 @@ class ImportClient
             );
         }
 
-        $context = self::prepare_files_pair_context(
+        $push_state_directory = self::resolve_push_state_directory(
             $remote_reprint_api_url,
             $state_dir,
             $filesystem_root,
@@ -1761,32 +1760,33 @@ class ImportClient
                 . '. Pass --force-http only for a remote Reprint API URL you trust.'
             );
         }
-        return $context;
+        $resolved_local_filesystem_root = realpath($filesystem_root);
+        if ($resolved_local_filesystem_root === false) {
+            throw new InvalidArgumentException(
+                'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
+            );
+        }
+        return [
+            'remote_reprint_api_url' => rtrim($remote_reprint_api_url, '?&'),
+            'filesystem_root' => rtrim($resolved_local_filesystem_root, '/') ?: '/',
+            'push_state_directory' => $push_state_directory,
+        ];
     }
 
     /**
-     * Validates the local inputs shared by files-diff and files-push.
+     * Resolves the local push state directory for a remote Reprint API URL.
      *
-     * This helper deliberately does not require a secret or HTTPS. files-diff
-     * identifies the pull source by URL but performs no network request.
+     * This method deliberately does not require a secret or HTTPS. files-diff
+     * identifies the pull source by URL but makes no network request.
      *
      * @param string $command Command name used in error messages.
-     * @return array {
-     *     Validated pair context.
-     *
-     *     @type string $remote_reprint_api_url Remote Reprint API URL.
-     *     @type string $filesystem_root  Resolved filesystem root.
-     *     @type string $pair                 Target/filesystem-root pair key.
-     *     @type string $push_state_directory Local push state directory.
-     * }
-     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
      */
-    public static function prepare_files_pair_context(
+    public static function resolve_push_state_directory(
         string $remote_reprint_api_url,
         string $state_dir,
         string $filesystem_root,
         string $command
-    ): array {
+    ): string {
         $masked_remote_reprint_api_url =
             self::mask_url_credentials($remote_reprint_api_url);
         if (strpos($remote_reprint_api_url, '#') !== false) {
@@ -1817,9 +1817,8 @@ class ImportClient
         }
         $resolved_local_filesystem_root = rtrim($resolved_local_filesystem_root, '/') ?: '/';
         $remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
-        $pair = hash('sha256', $remote_reprint_api_url . "\0" . $resolved_local_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
-        $push_state_directory = $state_dir . '/push/' . $pair;
+        $push_state_directory = $state_dir . '/push/' . md5($remote_reprint_api_url);
         if (strpos($push_state_directory, '/') !== 0) {
             $working_directory = getcwd();
             if ($working_directory === false) {
@@ -1857,12 +1856,7 @@ class ImportClient
             );
         }
 
-        return [
-            'remote_reprint_api_url' => $remote_reprint_api_url,
-            'filesystem_root' => $resolved_local_filesystem_root,
-            'pair' => $pair,
-            'push_state_directory' => $push_state_directory,
-        ];
+        return $push_state_directory;
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
@@ -1912,7 +1906,7 @@ class ImportClient
         }
     }
 
-    /** Masks URL authority credentials without changing the pair-key input. */
+    /** Masks URL authority credentials without changing the URL used to name the local push state directory. */
     private static function mask_url_credentials(string $url): string
     {
         $masked = preg_replace(
@@ -5228,8 +5222,8 @@ class ImportClient
         // Parse URL mapping
         $url_mapping = [];
         if (!empty($options["rewrite_url"])) {
-            foreach ($options["rewrite_url"] as $pair) {
-                $url_mapping[$pair[0]] = $pair[1];
+            foreach ($options["rewrite_url"] as [$source_url, $target_url]) {
+                $url_mapping[$source_url] = $target_url;
             }
         }
 
@@ -8737,14 +8731,14 @@ class ImportClient
     }
 
     /**
-     * Build the remap rules from the raw remap pairs + preflight data.
+     * Build the remap rules from raw SOURCE TARGET arguments and preflight data.
      *
      * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
      * Source arguments resolve against the remote site's WordPress path tokens.
      * Target arguments resolve under --fs-root and must stay within it.
      * Each rule is a full source path => full local target path (both absolute).
      *
-     * @param array<int,array{0:string,1:string}> $remap_raw Raw (SOURCE, TARGET) pairs.
+     * @param array<int,array{0:string,1:string}> $remap_raw Raw SOURCE/TARGET mappings.
      * @return array<string,string> Source path => target path (both absolute).
      */
     private function resolve_remap(array $remap_raw): array
@@ -11608,7 +11602,7 @@ if (
     //   type           'value'         --name=VAL
     //                  'flag'          --name (sets a boolean)
     //                  'value-or-next' --name=VAL or --name VAL
-    //                  'pair'          --name A B (repeatable, takes 2 args)
+    //                  'two-arguments' --name A B (repeatable, takes 2 arguments)
     //   target         Where to store the parsed value:
     //                  'state_dir' | 'filesystem_root' → special local variables
     //                  'key'                   → $options['key']
@@ -11624,7 +11618,7 @@ if (
     //   cast           'int' | 'float' | 'size' (default: string)
     //   flag_value     What to store for flag types (default: true)
     //   valid_values   Array of allowed values (enforced at parse time)
-    //   pair_args      Arg labels for pair type help, e.g. 'FROM TO'
+    //   argument_labels Labels for two-argument type help, e.g. 'FROM TO'
     // ================================================================
     $option_defs = [
         // ── Required options ─────────────────────────────────────
@@ -11904,9 +11898,9 @@ if (
         ],
         [
             'name' => 'rewrite-url',
-            'type' => 'pair',
+            'type' => 'two-arguments',
             'target' => 'rewrite_url',
-            'pair_args' => 'FROM TO',
+            'argument_labels' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
             'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
@@ -11920,9 +11914,9 @@ if (
         ],
         [
             'name' => 'remap',
-            'type' => 'pair',
+            'type' => 'two-arguments',
             'target' => 'remap',
-            'pair_args' => 'SOURCE TARGET',
+            'argument_labels' => 'SOURCE TARGET',
             'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
                 '(a :fs-root: path or an absolute path within --fs-root); repeatable',
             'commands' => ['pull-files', 'files-pull'],
@@ -12116,10 +12110,10 @@ if (
                             }
                             break;
 
-                        case 'pair':
+                        case 'two-arguments':
                             if ($arg === "--{$cli_name}") {
                                 if (!isset($argv[$i + 1]) || !isset($argv[$i + 2])) {
-                                    fwrite(STDERR, "--{$def['name']} requires two arguments: " . ($def['pair_args'] ?? 'ARG1 ARG2') . "\n");
+                                    fwrite(STDERR, "--{$def['name']} requires two arguments: " . ($def['argument_labels'] ?? 'ARG1 ARG2') . "\n");
                                     exit(1);
                                 }
                                 $target = $def['target'];
@@ -12397,8 +12391,8 @@ if (
             case 'value':
             case 'value-or-next':
                 return "{$name}=" . ($def['placeholder'] ?? 'VALUE');
-            case 'pair':
-                return "{$name} " . ($def['pair_args'] ?? 'ARG1 ARG2');
+            case 'two-arguments':
+                return "{$name} " . ($def['argument_labels'] ?? 'ARG1 ARG2');
             case 'flag':
             default:
                 return $name;
@@ -12590,7 +12584,7 @@ if (
             "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR",
             "description" =>
                 "Shows which local paths a files-push would send or delete, comparing\n" .
-                "the filesystem root at --fs-root with the pair's previous local index —\n" .
+                "the filesystem root at --fs-root with the previous local index for this remote Reprint API URL —\n" .
                 "the index a completed files-push publishes for the same remote Reprint API URL,\n" .
                 "state directory, and filesystem root.\n" .
                 "The output is a local minimized push operation plan before target\n" .
@@ -12918,11 +12912,11 @@ if (
     }
 
     try {
-        // Acquire the lock before pair setup and audit writes so each command
-        // owns every local state transition for its complete invocation.
+        // Acquire the lock before local push state setup and audit writes so
+        // each command owns every local state transition for its complete invocation.
         $reprint_process_lock = new ReprintProcessLock($state_dir);
         $reprint_files_push_context = null;
-        $reprint_files_diff_context = null;
+        $reprint_files_diff_push_state_directory = null;
         if ($command === 'files-push') {
             $reprint_files_push_context = ImportClient::prepare_files_push_context(
                 $remote_reprint_api_url,
@@ -12931,7 +12925,7 @@ if (
                 $options
             );
         } elseif ($command === 'files-diff') {
-            $reprint_files_diff_context = ImportClient::prepare_files_pair_context(
+            $reprint_files_diff_push_state_directory = ImportClient::resolve_push_state_directory(
                 $remote_reprint_api_url,
                 $state_dir,
                 $filesystem_root,
@@ -12939,16 +12933,15 @@ if (
             );
         }
         $client = new ImportClient($remote_reprint_api_url, $state_dir, $filesystem_root, $command);
-        $reprint_files_pair = $reprint_files_push_context['pair'] ?? ( $reprint_files_diff_context['pair'] ?? null );
-        $client->audit_log_argv($command, $argv, $reprint_files_pair);
+        $client->audit_log_argv($command, $argv);
         $client->run(
             $options
                 + ( $reprint_files_push_context === null
                     ? []
                     : ['files_push_context' => $reprint_files_push_context] )
-                + ( $reprint_files_diff_context === null
+                + ( $reprint_files_diff_push_state_directory === null
                     ? []
-                    : ['files_diff_context' => $reprint_files_diff_context] ),
+                    : ['files_diff_push_state_directory' => $reprint_files_diff_push_state_directory] ),
             $reprint_process_lock
         );
         // EXIT_AFTER_IMPORT controls whether we hand control back to

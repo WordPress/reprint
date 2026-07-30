@@ -10,8 +10,8 @@
  * PushFilesSender owns the only caller-visible push lifecycle. Its caller holds
  * the Reprint process lock while the sender creates and removes the target push
  * session, drives its internal PushPlan, streams the selected paths, commits the
- * push, and saves the completed fresh local index as the pair's previous local
- * index. The target owns the
+ * push, and saves the completed fresh local index as the previous local index
+ * for this remote Reprint API URL. The target owns the
  * upload cursor for every path and for the deletion list. Durable sender state
  * retains the top-level phase, the selected path-list cursor, and learned
  * request limits and the PushPlan cursor needed after a process restart.
@@ -56,25 +56,26 @@
  *
  * A new sender calls `push_create` to learn target-owned exclusions before
  * starting PushPlan. The plan builds the fresh local index and diffs it against
- * the pair's previous local index, one bounded step at a time. That index is
- * saved by the previous successful push and also read by files-diff. After planning
+ * the previous local index for this remote Reprint API URL, one bounded step
+ * at a time. That index is saved by the previous successful push and also read
+ * by files-diff. After planning
  * completes, local files, symlinks, and empty directories stream through
  * multipart requests. The raw deletion list follows, and repeated `push_commit`
  * calls let the target install the work in bounded steps. A confirmed commit
- * enters another phase which saves the fresh local index as the pair's
- * previous local index through a swap file. Index completion, plan completion,
- * local-index saving, and plan discard each have a separate durable phase. A
- * stopped process therefore repeats only an idempotent boundary action rather
- * than a group of unrelated transitions.
+ * enters another phase which saves the fresh local index as the previous local
+ * index for this remote Reprint API URL through a swap file. Index completion,
+ * plan completion, local-index saving, and plan discard each have a separate
+ * durable phase. A stopped process therefore repeats only an idempotent
+ * boundary action rather than a group of unrelated transitions.
  *
  * sender.json owns the top-level phase and the cursor returned by
  * PushPlan. PushFilesSender stores that cursor after every completed planning
  * step but never interprets its internal phase or offsets. The sender creates
  * the active plan directory before planning and removes the whole directory
- * only after success or target-session removal. The pair's previous local
- * index remains beside sender.json. Once the plan result is saved or discarded,
- * the sender clears its cursor before removing the directory without reopening
- * PushPlan.
+ * only after success or target-session removal. The previous local index for
+ * this remote Reprint API URL remains beside sender.json. Once the plan result
+ * is saved or discarded, the sender clears its cursor before removing the
+ * directory without reopening PushPlan.
  *
  * ## Resume after local changes
  *
@@ -135,7 +136,7 @@ final class PushFilesSender
     /** @var string Sender-owned active plan directory. */
     private string $plan_directory;
 
-    /** @var string Pair's previous local index, saved after a successful push and read by files-diff. */
+    /** @var string Previous local index for this remote Reprint API URL. */
     private string $previous_local_index;
 
     /** @var string Path where the serialized sender state is stored. */
@@ -1188,7 +1189,7 @@ final class PushFilesSender
     }
 
     /**
-     * Saves the committed fresh local index as the pair's previous local index.
+     * Saves the committed fresh local index for this remote Reprint API URL.
      *
      * If the process stops before the next phase is stored, repeating the
      * deliberate whole-index copy is safe and leaves readers on either the old

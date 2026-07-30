@@ -59,7 +59,7 @@ local relative path to a push-root-relative path.
 - The **local index WAL** records completed pull mutations awaiting application
   to the local index.
 - A **pull plan** lists remote absolute paths still scheduled for download or
-  deletion. A **push plan** pairs local relative paths with push-root-relative
+  deletion. A **push plan** maps local relative paths to push-root-relative
   paths.
 
 A **resolved path mapping** is an immutable mapping between remote absolute
@@ -181,7 +181,7 @@ scope supplied by their parent directories.
 │   ├── sql-stats.json
 │   └── sql-buffer
 └── push/
-    └── <pair-key>/
+    └── <md5-of-trimmed-remote-reprint-api-url>/
 ```
 
 Use these path names:
@@ -214,15 +214,16 @@ Every local Reprint command workflow runs under the **Reprint process lock** at
 `$process_lock_path`, and `$process_lock`. The lock is non-blocking and
 state-directory-wide: pull, push, diff, and other local Reprint processes
 cannot run concurrently against the same state directory, even when their
-remote Reprint API URL or filesystem-root pairs differ.
+remote Reprint API URLs differ.
 
-The production CLI acquires the Reprint process lock before it prepares pair
-context, constructs `ImportClient`, or writes the command audit entry. It
-passes the open lock to `ImportClient::run()` and releases it after the command.
-A direct `ImportClient::run()` call acquires the lock when its caller supplies
-none. `PushFilesSender::start()` and `PushFilesSender::resume()` receive that
-open lock from the caller; sender `close()` does not release it. This local
-lock is separate from the receiver's push-session and commit locks.
+The production CLI acquires the Reprint process lock before it resolves the
+local push state directory, constructs `ImportClient`, or writes the command
+audit entry. It passes the open lock to `ImportClient::run()` and releases it
+after the command. A direct `ImportClient::run()` call acquires the lock when
+its caller supplies none. `PushFilesSender::start()` and
+`PushFilesSender::resume()` receive that open lock from the caller; sender
+`close()` does not release it. This local lock is separate from the receiver's
+push-session and commit locks.
 
 ## Pull local index WAL
 
@@ -237,7 +238,9 @@ command; unrelated commands do not consume it.
 ## Local push state
 
 The local machine keeps planning and active state outside the receiver push
-directory. Under `<state-dir>/push/<pair-key>/`, use these names verbatim:
+directory. Under
+`<state-dir>/push/<md5-of-trimmed-remote-reprint-api-url>/`, use these names
+verbatim:
 
 | Surface | Name |
 | --- | --- |
@@ -262,11 +265,12 @@ sender-owned exclusions to `plan/excluded_paths.json` when it starts.
 `fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
 `local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
 
-The **previous local index** describes the filesystem root as the pair's last
-completed push observed it. The sender saves it after a successful commit, and
-`files-diff` reads it. PushPlan diffs its fresh local index against the copy
-its caller supplies. `byte_offset_in_previous_local_index` is the position
-from which its current lookahead entry is read again after resume.
+The **previous local index** describes the filesystem root as its last
+completed push to the remote Reprint API URL observed it. The sender saves it
+after a successful commit, and `files-diff` reads it. PushPlan diffs its fresh
+local index against the copy its caller supplies.
+`byte_offset_in_previous_local_index` is the position from which its current
+lookahead entry is read again after resume.
 
 The PushPlan cursor is stored in `sender.json`. It contains the plan
 directory, filesystem root, previous local index, and current
@@ -317,10 +321,11 @@ reports `complete`, `restart`, or `failed`.
 
 ## Files-diff CLI names
 
-The local-only command is `files-diff`. Its `remote Reprint API URL`, `filesystem root`, `pair
-key`, and `local push state directory` have the same meanings and pair-key
-formula as `files-push`. It reads the pair's `previous_local_index.jsonl`,
-which a completed files-push publishes, and never changes it.
+The local-only command is `files-diff`. Its `remote Reprint API URL`,
+`filesystem root`, and `local push state directory` have the same meanings and
+directory formula as `files-push`. It reads
+`previous_local_index.jsonl` for that remote Reprint API URL, which a completed
+files-push publishes, and never changes it.
 
 Each JSONL change record has `command: "files-diff"`, an `action` of `push` or
 `delete`, and `path_b64`. A push record also has the local path `type`, `size`,
@@ -344,23 +349,24 @@ exporter API URL, and its `filesystem root` is the resolved absolute directory s
 `--fs-root`. It requires `--secret=TOKEN`; `--force-http` is the explicit
 plain-HTTP opt-in.
 
-The `pair key` identifies exactly one remote Reprint API URL and resolved filesystem root:
+The **local push state directory** is `<state-dir>/push/` followed by:
 
 ```text
-sha256(rtrim(<remote-reprint-api-url>, "?&") + "\0" + <resolved-filesystem-root>)
+md5(rtrim(<remote-reprint-api-url>, "?&"))
 ```
 
-The `local push state directory` is `<state-dir>/push/<pair-key>/`. `files-push`
-chooses `start` or `resume` only from whether `sender.json` exists there. The
-receiver-confirmed upload positions remain receiver-owned; they are not a
-files-push cursor and are not copied into `pull/state.json` or
-`progress.json`.
+The state directory belongs to one filesystem root. Use a different state
+directory for a different filesystem root; the filesystem root does not
+participate in the directory name. `files-push` chooses `start` or `resume`
+only from whether `sender.json` exists there. The receiver-confirmed upload
+positions remain receiver-owned; they are not a files-push cursor and are not
+copied into `pull/state.json` or `progress.json`.
 
 Files-push lifecycle lines use these command-first names verbatim: `START
 files-push`, `RESUME files-push`, `PHASE files-push`, `PARTIAL files-push`,
 `INTERRUPTED files-push`, `COMPLETE files-push`, `RESTART files-push`, `FAILED
-files-push`, and `ERROR files-push`. Every line contains `pair=<pair-key>`.
-Planned stop causes are `time_limit` and `memory_limit`.
+files-push`, and `ERROR files-push`. Planned stop causes are `time_limit` and
+`memory_limit`.
 
 The CLI outcome names are `complete`, `partial`, `interrupted`, `restart`,
 `failed`, and `error`. `complete` exits 0; `partial`, `interrupted`, and

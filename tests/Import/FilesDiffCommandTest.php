@@ -12,12 +12,12 @@ require_once __DIR__ . '/../../importer/import.php';
 /**
  * The files-diff user contract.
  *
- * files-diff compares the filesystem root with the pair's previous local index —
- * the index a completed files-push publishes — without contacting the target,
- * and reports the complete diff on every run. These tests pin that contract:
- * local-only operation, correct change records, arbitrary path bytes, the
- * previous-local-index requirement, no mutation of that index, and a complete
- * report after an interrupted run.
+ * files-diff compares the filesystem root with the previous local index for
+ * the remote Reprint API URL — the index a completed files-push publishes —
+ * without contacting the target, and reports the complete diff on every run.
+ * These tests pin that contract: local-only operation, correct change records,
+ * arbitrary path bytes, the previous-local-index requirement, no mutation of
+ * that index, and a complete report after an interrupted run.
  */
 final class FilesDiffCommandTest extends TestCase
 {
@@ -228,7 +228,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertCanonicalSingleJsonLine($result['stderr']);
         $this->assertStringContainsString('completed files-push', $result['output']);
         $this->assertStringContainsString(
-            'same remote Reprint API URL, state directory, and filesystem root',
+            'same remote Reprint API URL and state directory',
             $result['output']
         );
     }
@@ -244,7 +244,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertCanonicalSingleJsonLine($result['stderr']);
         $this->assertStringContainsString('completed files-push', $result['output']);
         $this->assertStringContainsString(
-            'same remote Reprint API URL, state directory, and filesystem root',
+            'same remote Reprint API URL and state directory',
             $result['output']
         );
     }
@@ -393,10 +393,9 @@ final class FilesDiffCommandTest extends TestCase
 
     private function pushStateDirectory(): string
     {
-        $resolvedLocalDocumentRoot = realpath($this->localTree);
-        $this->assertIsString($resolvedLocalDocumentRoot);
-        $pair = hash('sha256', rtrim($this->targetUrl, '?&') . "\0" . $resolvedLocalDocumentRoot);
-        return realpath($this->stateDirectory) . '/push/' . $pair;
+        return realpath($this->stateDirectory)
+            . '/push/'
+            . md5(rtrim($this->targetUrl, '?&'));
     }
 
     /** @param list<string> $extraArguments
