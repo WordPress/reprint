@@ -2733,7 +2733,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(0, $initial['exit'], $initial['output']);
         $initial_result = $this->lastCliJsonLine($initial['stdout']);
         $this->assertSame('complete', $initial_result['status'] ?? null);
-        $push_state_directory = $this->filesPushStateDirectory($local_docroot, $state_directory);
+        $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $this->assertSame($initial_contents, file_get_contents($this->docroot . '/nested/multi-chunk.bin'));
         $this->assertSame('delete me later', file_get_contents($this->docroot . '/delete-later.txt'));
         $this->assertDirectoryExists($this->docroot . '/empty-directory');
@@ -2918,7 +2918,7 @@ final class PushEndpointsTest extends TestCase {
         }
 
         $this->assertNotSame(0, $killed['exit']);
-        $push_state_directory = $this->filesPushStateDirectory($local_docroot, $state_directory);
+        $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $active_state = $this->loadActiveState($push_state_directory);
         $this->assertIsArray($active_state);
         $this->waitForPushLockRelease($active_state['push_session_id']);
@@ -2937,7 +2937,7 @@ final class PushEndpointsTest extends TestCase {
         $state_directory = $this->root . '/cli-failed-state';
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/value.txt', 'value after failure');
-        $push_state_directory = $this->filesPushStateDirectory($local_docroot, $state_directory);
+        $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $sender = $this->startSender(
             $this->filesPushSenderOptions($local_docroot, $push_state_directory)
         );
@@ -2987,7 +2987,7 @@ final class PushEndpointsTest extends TestCase {
         $state_directory = $this->root . '/cli-restart-state';
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/value.txt', 'before');
-        $push_state_directory = $this->filesPushStateDirectory($local_docroot, $state_directory);
+        $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $sender = $this->startSender(
             $this->filesPushSenderOptions($local_docroot, $push_state_directory)
         );
@@ -3114,25 +3114,17 @@ final class PushEndpointsTest extends TestCase {
         $this->fail('No JSON line was found in CLI output: ' . $output);
     }
 
-    private function filesPushStateDirectory(
-        string $local_docroot,
-        string $state_directory
-    ): string {
-        $canonical_local_docroot = realpath($local_docroot);
-        $this->assertIsString($canonical_local_docroot);
-        $target_local_tree_hash = hash(
-            'sha256',
-            rtrim($this->base_url, '?&') . "\0" . $canonical_local_docroot
-        );
-        return $state_directory . '/push/' . $target_local_tree_hash;
+    private function filesPushStateDirectory(string $state_directory): string {
+        $target_url_hash = hash('sha256', rtrim($this->base_url, '?&'));
+        return $state_directory
+            . '/remote-'
+            . $target_url_hash
+            . '/push';
     }
 
     private function filesLocalIndexPath(string $push_state_directory): string
     {
-        return dirname(dirname($push_state_directory))
-            . '/local-index/'
-            . basename($push_state_directory)
-            . '.jsonl';
+        return dirname($push_state_directory) . '/.local-index.jsonl';
     }
 
     /** @return array<string,mixed> */
@@ -3646,9 +3638,9 @@ final class PushEndpointsTest extends TestCase {
     private function localIndexPath(string $push_state_directory): string
     {
         return $this->root
-            . '/local-index/'
+            . '/remote-'
             . hash('sha256', $push_state_directory)
-            . '.jsonl';
+            . '/.local-index.jsonl';
     }
 
     /**

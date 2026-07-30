@@ -124,6 +124,26 @@ class RemoteUploadProxyRuntimeTest extends TestCase
     {
         $state = $this->callPrivate($client, 'load_state');
         $this->setPrivate($client, 'state', $state);
+        $this->callPrivate(
+            $client,
+            'configure_remote_state_directory',
+            [$this->fsRoot]
+        );
+    }
+
+    private function skippedFile(): string
+    {
+        $context = \ImportClient::prepare_files_command_context(
+            'https://source.example/export.php',
+            $this->stateDir,
+            $this->fsRoot,
+            'files-diff'
+        );
+        $remoteStateDirectory = $context['remote_state_directory'];
+        if (!is_dir($remoteStateDirectory)) {
+            mkdir($remoteStateDirectory);
+        }
+        return $remoteStateDirectory . '/pull-plan.skipped.jsonl';
     }
 
     private function runApplyRuntime(\ImportClient $client): string
@@ -152,7 +172,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             'filter' => 'essential-files',
         ]);
         file_put_contents(
-            $this->stateDir . '/.import-download-list-skipped.jsonl',
+            $this->skippedFile(),
             json_encode(['path' => '/wp-content/uploads/2024/01/photo.jpg']) . "\n",
         );
 

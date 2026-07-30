@@ -92,6 +92,9 @@ class OnlyFilesPathPrefixTest extends TestCase
             ),
             'preflight' => array(
                 'data' => array(
+                    'runtime' => array(
+                        'document_root' => '/var/www/html',
+                    ),
                     'database' => array(
                         'wp' => array(
                             'paths_urls' => array(
@@ -139,6 +142,20 @@ class OnlyFilesPathPrefixTest extends TestCase
     private function readState(): array
     {
         return json_decode(file_get_contents($this->stateDir . '/.import-state.json'), true);
+    }
+
+    private function remoteStateDirectory(): string
+    {
+        $hash = hash(
+            'sha256',
+            'https://src.example/export.php'
+        );
+        $remoteStateDirectory =
+            realpath($this->stateDir) . '/remote-' . $hash;
+        if (!is_dir($remoteStateDirectory)) {
+            mkdir($remoteStateDirectory);
+        }
+        return $remoteStateDirectory;
     }
 
     public function testResolvePullOnlyFilesPrefixAddsDirectoriesOutsideWpContent(): void
@@ -267,7 +284,10 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     public function testRunAllowsSameOnlyPrefixesWhileFilesPullIsInProgress(): void
     {
-        file_put_contents($this->stateDir . '/.import-remote-index.jsonl', '');
+        file_put_contents(
+            $this->remoteStateDirectory() . '/.remote-index.next.jsonl',
+            ''
+        );
         $this->writeFilesPullState(array(
             'files_pull_only_fingerprint' => $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
@@ -284,7 +304,10 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     public function testRunRecordsOnlyFingerprintForInProgressFilesPullState(): void
     {
-        file_put_contents($this->stateDir . '/.import-remote-index.jsonl', '');
+        file_put_contents(
+            $this->remoteStateDirectory() . '/.remote-index.next.jsonl',
+            ''
+        );
         $this->writeFilesPullState(array(
             'files_pull_only_fingerprint' => null,
         ));

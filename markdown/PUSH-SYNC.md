@@ -77,19 +77,20 @@ managed `false` hard-disables push without abandoning durable commit recovery.
 ## Change detection: local machine compared against itself
 
 ctime is machine-local, so push never compares a local timestamp to a remote
-one. It compares current local paths with one local index for the target URL
-and canonical local tree. Database rows are compared with the previously pushed
-rows.
+one. It compares current local paths with one local index for the target URL in
+the caller-selected state directory. Database rows are compared with the
+previously pushed rows.
 
 The local index lives at:
 
 ```text
-<state-dir>/local-index/<sha256(target URL with user-info and SECRET_KEY removed + NUL + canonical local tree)>.jsonl
+<state-dir>/remote-<sha256(target URL with user-info and SECRET_KEY removed)>/.local-index.jsonl
 ```
 
 The hash omits URL user-info and `SECRET_KEY`, so pull URL authentication and
 push's `--secret` select the same local index. Changing any other query
-parameter selects a different local index and push-state directory.
+parameter selects a different local index and push-state directory. A different
+local document root uses a different state directory.
 
 Entries for actual pulled or pushed paths record the locally observed type,
 size, and ctime. Remote values cannot stand in for these fields because ctime
@@ -100,14 +101,15 @@ changes, files-diff reads the index, and files-push updates it after the target
 commit succeeds. Paths skipped by the local indexer's default rules do not
 enter the local index.
 
-files-pull writes each import-index update batch to the existing
-`.import-index-updates.wal`. A record for an actual local mutation also carries
-the resulting local path and, for an F record, its local type, size, and ctime.
-The importer applies the batch to the import index, derives local-index updates
-from those mutation records, then applies them to the local index. An F update
-also adds its directory ancestors. A D update removes the path and its
-descendants. The importer clears the WAL batch only after both index updates
-finish.
+files-pull writes each completed operation to
+`remote-<hash>/pull-index-updates.wal`. Each record carries the
+`remote_path_b64` projection for `.remote-index.jsonl`. A record for an actual
+local mutation also carries the `local_path_b64` projection and, for an F
+record, separate remote and local type, size, and ctime fields. The importer
+applies the remote projection, derives local-index updates from the local
+projection, then applies them to `.local-index.jsonl`. An F update also adds
+its directory ancestors. A D update removes the path and its descendants. The
+importer clears the WAL batch only after both index replacements finish.
 
 A selected, filtered, remapped, or preserve-local pull updates only local paths
 it actually changes, their directory ancestors, and descendants removed by a
@@ -117,10 +119,10 @@ to a path changed by pull also remains pending because the F record contains
 the type, size, and ctime observed immediately after that pull mutation.
 Directory emptiness comes from descendants retained by the local-index merge.
 
-An interruption leaves `.import-index-updates.wal`, so files-diff and
+An interruption leaves `pull-index-updates.wal`, so files-diff and
 files-push do not read the local index while the files-pull lifecycle is
 unfinished. Resuming files-pull applies any retained batch before continuing.
-Aborting files-pull replays the current WAL batch into the import index and
+Aborting files-pull replays the current WAL batch into the remote index and
 local index, then clears pull progress and the WAL marker while keeping the
 local index and downloaded files.
 files-pull also refuses to start while the same target and local tree have an
@@ -312,8 +314,13 @@ regardless of their target URL or local tree.
 The local index and active push files use the same target/local-tree hash:
 
 ```text
-<state-dir>/local-index/<hash>.jsonl  local index
-<state-dir>/push/<hash>/
+<state-dir>/remote-<hash>/
+  .remote-index.jsonl                 target-observed index
+  .remote-index.next.jsonl            next target index
+  .local-index.jsonl                  locally accounted index
+  pull-plan.jsonl                     files pending download
+  pull-index-updates.wal              completed pull operations
+  push/
   excluded_paths.json                 sender-owned target exclusions
   sender.json                         active push state
   plan/
@@ -448,15 +455,17 @@ The command uses this digest to name its local index and sender directory,
 without general URL normalization:
 
 ```text
-sha256(<target-url-without-authentication> + "\0" + <canonical-local-tree-path>)
+sha256(<target-url-without-authentication>)
 ```
 
-The local index is `<state-dir>/local-index/<hash>.jsonl`; sender state lives at
-`<state-dir>/push/<hash>/`. A different target query or canonical local tree
-therefore selects a different local index and sender directory. The hash omits
-URL user-info and `SECRET_KEY`; files-push rejects both and receives its secret
-through `--secret`. Fragments are rejected. The local push state directory must
-be outside the local tree so planning cannot index its own changing files.
+The local index is
+`<state-dir>/remote-<hash>/.local-index.jsonl`; sender state lives at
+`<state-dir>/remote-<hash>/push/`. A different target query selects a different
+remote state directory. A different local tree uses a different state
+directory. The hash omits URL user-info and `SECRET_KEY`; files-push rejects
+both and receives its secret through `--secret`. Fragments are rejected. The
+local push state directory must be outside the local tree so planning cannot
+index its own changing files.
 
 One process starts or resumes exactly one sender. Before every `next_step()` it
 checks whether another step may begin. The wall-clock admission deadline is 80

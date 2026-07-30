@@ -67,8 +67,10 @@ class RemapResolveTest extends TestCase
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
         $this->set($c, 'state', array('preflight' => array('data' => array(
+            'runtime' => array('document_root' => ''),
             'database' => array('wp' => array('paths_urls' => $pathsUrls)),
         ))));
+        $this->call($c, 'configure_remote_state_directory', array($this->fsRoot));
         return $c;
     }
 
@@ -82,9 +84,12 @@ class RemapResolveTest extends TestCase
         $this->call($c, 'assert_files_remap_consistent');
     }
 
-    private function writeLocalIndex(): void
+    private function writeLocalIndex(\ImportClient $client): void
     {
-        file_put_contents($this->stateDir . '/.import-index.jsonl', "{}\n");
+        file_put_contents(
+            $client->remote_state_directory . '/.remote-index.jsonl',
+            "{}\n"
+        );
     }
 
     // --- resolution: SOURCE TARGET → one source => target rule -------------
@@ -225,8 +230,8 @@ class RemapResolveTest extends TestCase
 
     public function testRejectsRemapWithUntrackedExistingFilesIndex(): void
     {
-        $this->writeLocalIndex();
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
+        $this->writeLocalIndex($c);
         $this->set($c, 'remap_rules', array(
             '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));

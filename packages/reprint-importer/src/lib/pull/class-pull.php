@@ -278,6 +278,7 @@ class Pull
             // recorded that stage as complete. Clear the direct command
             // checkpoint first so the stage computes a fresh delta.
             $state_dir = $this->client->state_dir;
+            $remote_state_directory = $this->client->remote_state_directory;
             if ($state_command === 'files-pull' && in_array('files-pull', $stages, true)) {
                 // Keep the local file index, but clear transient files-pull
                 // download state so this pipeline computes a fresh
@@ -298,9 +299,9 @@ class Pull
                 $state->files_pull_only_fingerprint = null;
                 $this->client->save_import_state();
                 foreach ([
-                    "{$state_dir}/.import-remote-index.jsonl",
-                    "{$state_dir}/.import-download-list.jsonl",
-                    "{$state_dir}/.import-download-list-skipped.jsonl",
+                    "{$remote_state_directory}/.remote-index.next.jsonl",
+                    "{$remote_state_directory}/pull-plan.jsonl",
+                    "{$remote_state_directory}/pull-plan.skipped.jsonl",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -768,6 +769,7 @@ class Pull
     private function prepare_repull(string $command): void
     {
         $state_dir = $this->client->state_dir;
+        $remote_state_directory = $this->client->remote_state_directory;
         switch ($command) {
             case 'pull':
                 $reset_file_transfer_state = true;
@@ -826,9 +828,9 @@ class Pull
 
         $paths = [];
         if ($reset_file_transfer_state) {
-            $paths[] = $state_dir . "/.import-remote-index.jsonl";
-            $paths[] = $state_dir . "/.import-download-list.jsonl";
-            $paths[] = $state_dir . "/.import-download-list-skipped.jsonl";
+            $paths[] = $remote_state_directory . "/.remote-index.next.jsonl";
+            $paths[] = $remote_state_directory . "/pull-plan.jsonl";
+            $paths[] = $remote_state_directory . "/pull-plan.skipped.jsonl";
         }
         if ($reset_db_state) {
             $paths[] = $state_dir . "/db.sql";

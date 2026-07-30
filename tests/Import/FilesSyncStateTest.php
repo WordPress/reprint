@@ -74,7 +74,15 @@ class FilesSyncStateTest extends TestCase
                 "current_stage" => null,
                 "remote_cursor" => null,
             ],
-            "preflight" => ["data" => ["ok" => true], "http_code" => 200],
+            "preflight" => [
+                "data" => [
+                    "ok" => true,
+                    "runtime" => [
+                        "document_root" => "",
+                    ],
+                ],
+                "http_code" => 200,
+            ],
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,
             "version" => null,
@@ -115,7 +123,7 @@ class FilesSyncStateTest extends TestCase
      */
     private function readDownloadList(): array
     {
-        $file = $this->stateDir . '/.import-download-list.jsonl';
+        $file = $this->remoteStateDirectory() . '/pull-plan.jsonl';
         if (!file_exists($file)) {
             return [];
         }
@@ -129,6 +137,21 @@ class FilesSyncStateTest extends TestCase
         return $paths;
     }
 
+    private function remoteStateDirectory(): string
+    {
+        $context = \ImportClient::prepare_files_command_context(
+            'http://fake.url',
+            $this->stateDir,
+            $this->fs_root,
+            'files-diff'
+        );
+        $remoteStateDirectory = $context['remote_state_directory'];
+        if (!is_dir($remoteStateDirectory)) {
+            mkdir($remoteStateDirectory);
+        }
+        return $remoteStateDirectory;
+    }
+
     /**
      * Set up a client with state loaded and preserve-local mode.
      */
@@ -140,6 +163,10 @@ class FilesSyncStateTest extends TestCase
         $stateProperty = $reflection->getProperty('state');
         $loadState = $reflection->getMethod('load_state');
         $stateProperty->setValue($client, $loadState->invoke($client));
+        $reflection->getMethod('configure_remote_state_directory')->invoke(
+            $client,
+            $this->fs_root
+        );
 
         $ttyProperty = $reflection->getProperty('is_tty');
         $ttyProperty->setValue($client, false);
@@ -191,7 +218,7 @@ class FilesSyncStateTest extends TestCase
             "filter" => "essential-files",
         ]);
         file_put_contents(
-            $this->stateDir . '/.import-download-list-skipped.jsonl',
+            $this->remoteStateDirectory() . '/pull-plan.skipped.jsonl',
             json_encode([
                 "path" => base64_encode('/wp-content/uploads/2024/01/photo.jpg'),
             ], JSON_UNESCAPED_SLASHES) . "\n",
@@ -215,7 +242,9 @@ class FilesSyncStateTest extends TestCase
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
         $this->assertNull($state["active_resumable_command"]["current_stage"]);
         $this->assertEquals("skipped-earlier", $state["filter"]);
-        $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
+        $this->assertFileDoesNotExist(
+            $this->remoteStateDirectory() . '/pull-plan.skipped.jsonl'
+        );
     }
 
     /**
@@ -223,7 +252,7 @@ class FilesSyncStateTest extends TestCase
      */
     public function testAbortClearsCompletedStatus()
     {
-        $indexFile = $this->stateDir . '/.import-index.jsonl';
+        $indexFile = $this->remoteStateDirectory() . '/.remote-index.jsonl';
         file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
@@ -253,7 +282,7 @@ class FilesSyncStateTest extends TestCase
      */
     public function testAbortThenRerunStartsFresh()
     {
-        $indexFile = $this->stateDir . '/.import-index.jsonl';
+        $indexFile = $this->remoteStateDirectory() . '/.remote-index.jsonl';
         file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
@@ -295,7 +324,7 @@ class FilesSyncStateTest extends TestCase
     public function testSkippedEarlierAfterCompositePullAdoptsFilesPullState(): void
     {
         file_put_contents(
-            $this->stateDir . '/.import-download-list-skipped.jsonl',
+            $this->remoteStateDirectory() . '/pull-plan.skipped.jsonl',
             $this->indexLine('/wp-content/uploads/2024/01/photo.jpg', 1000, 100),
         );
         $this->writeState([
@@ -346,11 +375,12 @@ class FilesSyncStateTest extends TestCase
     public function testDeltaDiffRedownloadsChangedIndexedFile()
     {
         // Local index: file synced at ctime 1000
-        $localIndex = $this->stateDir . '/.import-index.jsonl';
+        $localIndex = $this->remoteStateDirectory() . '/.remote-index.jsonl';
         file_put_contents($localIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 1000, 200));
 
         // Remote index: same file at ctime 2000 (changed)
-        $remoteIndex = $this->stateDir . '/.import-remote-index.jsonl';
+        $remoteIndex =
+            $this->remoteStateDirectory() . '/.remote-index.next.jsonl';
         file_put_contents($remoteIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 2000, 250));
 
         // The file exists locally (downloaded during the initial sync)
@@ -386,11 +416,12 @@ class FilesSyncStateTest extends TestCase
     public function testDeltaDiffSkipsPreExistingLocalFile()
     {
         // Local index: empty (file was never synced by us)
-        $localIndex = $this->stateDir . '/.import-index.jsonl';
+        $localIndex = $this->remoteStateDirectory() . '/.remote-index.jsonl';
         file_put_contents($localIndex, '');
 
         // Remote index: file exists on remote
-        $remoteIndex = $this->stateDir . '/.import-remote-index.jsonl';
+        $remoteIndex =
+            $this->remoteStateDirectory() . '/.remote-index.next.jsonl';
         file_put_contents($remoteIndex, $this->indexLine('/wp-content/object-cache.php', 1000, 500));
 
         // The file exists locally (pre-existing, e.g. hosting drop-in)

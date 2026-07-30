@@ -232,7 +232,7 @@ final class FilesDiffCommandTest extends TestCase
             $result['output']
         );
         $this->assertStringContainsString(
-            'same target URL, state directory, and local tree',
+            'same target URL and state directory',
             $result['output']
         );
     }
@@ -251,7 +251,7 @@ final class FilesDiffCommandTest extends TestCase
             $result['output']
         );
         $this->assertStringContainsString(
-            'same target URL, state directory, and local tree',
+            'same target URL and state directory',
             $result['output']
         );
     }

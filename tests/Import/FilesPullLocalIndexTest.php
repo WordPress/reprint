@@ -50,8 +50,8 @@ final class FilesPullLocalIndexTest extends TestCase
         $this->localTree = $this->rawFileRoot . '/var/www/html';
         mkdir($this->stateDirectory, 0700, true);
         mkdir($this->rawFileRoot, 0700, true);
-        $this->writePullState();
         $this->targetUrl = $this->startIndexServer();
+        $this->writePullState();
     }
 
     protected function tearDown(): void
@@ -112,7 +112,7 @@ final class FilesPullLocalIndexTest extends TestCase
         $this->completeFilesPull();
 
         $localIndexes = glob(
-            $this->stateDirectory . '/local-index/*.jsonl'
+            $this->stateDirectory . '/remote-*' . '/.local-index.jsonl'
         );
         $this->assertIsArray($localIndexes);
         $this->assertCount(1, $localIndexes);
@@ -303,7 +303,8 @@ final class FilesPullLocalIndexTest extends TestCase
         $this->completeFilesPull();
         $pulledContents = 'complete file retained in the WAL before interruption';
         $this->interruptPullAfterFile($pulledContents);
-        $walPath = $this->stateDirectory . '/.import-index-updates.wal';
+        $walPath =
+            $this->remoteStateDirectory() . '/pull-index-updates.wal';
 
         $this->assertFileExists($walPath);
         $blockedDiff = $this->runFilesDiff();
@@ -327,7 +328,8 @@ final class FilesPullLocalIndexTest extends TestCase
     {
         $this->completeFilesPull();
         $this->interruptPullAfterFile('complete file retained before abort');
-        $walPath = $this->stateDirectory . '/.import-index-updates.wal';
+        $walPath =
+            $this->remoteStateDirectory() . '/pull-index-updates.wal';
         $this->assertFileExists($walPath);
 
         $abort = $this->runFilesPull(['--abort']);
@@ -507,7 +509,8 @@ final class FilesPullLocalIndexTest extends TestCase
             '--fs-root=' . $this->rawFileRoot,
         ]);
         $readyPath = $this->root . '/remote-overrides.json.pause-ready';
-        $walPath = $this->stateDirectory . '/.import-index-updates.wal';
+        $walPath =
+            $this->remoteStateDirectory() . '/pull-index-updates.wal';
         $deadline = microtime(true) + 10;
         while (
             ( !is_file($readyPath) || !is_file($walPath) || filesize($walPath) === 0 )
@@ -674,6 +677,25 @@ final class FilesPullLocalIndexTest extends TestCase
         return $context['local_index_path'];
     }
 
+    private function remoteStateDirectory(): string
+    {
+        if (is_dir($this->localTree)) {
+            $context = \ImportClient::prepare_files_command_context(
+                $this->targetUrl,
+                $this->stateDirectory,
+                $this->localTree,
+                'files-diff'
+            );
+            return $context['remote_state_directory'];
+        }
+        return realpath($this->stateDirectory)
+            . '/remote-'
+            . hash(
+                'sha256',
+                rtrim($this->targetUrl, '?&')
+            );
+    }
+
     private function writePullState(): void
     {
         file_put_contents(
@@ -705,7 +727,12 @@ final class FilesPullLocalIndexTest extends TestCase
                 ],
             ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)
         );
-        file_put_contents($this->stateDirectory . '/.import-index.jsonl', '');
+        $remoteStateDirectory = $this->remoteStateDirectory();
+        mkdir($remoteStateDirectory);
+        file_put_contents(
+            $remoteStateDirectory . '/.remote-index.jsonl',
+            ''
+        );
     }
 
     private function startIndexServer(): string

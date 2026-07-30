@@ -12,7 +12,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch,
-    fsRootDir,
+    fsRootDir, getRemoteStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -83,7 +83,10 @@ describe('Import: Delta Sync with Deletions', () => {
     });
 
     it('download list includes deleted files', () => {
-        const dlPath = join(tempDir, '.import-download-list.jsonl');
+        const dlPath = join(
+            getRemoteStateDirectory(tempDir, '.remote-index.jsonl'),
+            'pull-plan.jsonl',
+        );
         if (existsSync(dlPath)) {
             const content = readFileSync(dlPath, 'utf-8');
             // The download list should reference the deleted files

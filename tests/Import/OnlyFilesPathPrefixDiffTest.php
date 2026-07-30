@@ -79,12 +79,15 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
     private function writeIndex(string $name, string $contents): void
     {
-        file_put_contents($this->stateDir . '/' . $name, $contents);
+        file_put_contents(
+            $this->remoteStateDirectory() . '/' . $name,
+            $contents
+        );
     }
 
     private function readLocalIndexPaths(): array
     {
-        $file = $this->stateDir . '/.import-index.jsonl';
+        $file = $this->remoteStateDirectory() . '/.remote-index.jsonl';
         if (!file_exists($file)) {
             return [];
         }
@@ -98,6 +101,21 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         return $paths;
     }
 
+    private function remoteStateDirectory(): string
+    {
+        $context = \ImportClient::prepare_files_command_context(
+            'http://fake.url',
+            $this->stateDir,
+            $this->fs_root,
+            'files-diff'
+        );
+        $remoteStateDirectory = $context['remote_state_directory'];
+        if (!is_dir($remoteStateDirectory)) {
+            mkdir($remoteStateDirectory);
+        }
+        return $remoteStateDirectory;
+    }
+
     /** Mirror FilesSyncStateTest: load state + preserve-local, then set the --only file path prefixes. */
     private function prepareClient(array $pull_only_files_with_path_prefixes): array
     {
@@ -107,7 +125,15 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
                 "completion_state" => "in_progress",
                 "current_stage" => "diff",
             ],
-            "preflight" => ["data" => ["ok" => true], "http_code" => 200],
+            "preflight" => [
+                "data" => [
+                    "ok" => true,
+                    "runtime" => [
+                        "document_root" => "",
+                    ],
+                ],
+                "http_code" => 200,
+            ],
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
         ];
@@ -119,6 +145,10 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $client = new \ImportClient('http://fake.url', $this->stateDir, $this->fs_root);
         $r = new \ReflectionClass($client);
         $r->getProperty('state')->setValue($client, $r->getMethod('load_state')->invoke($client));
+        $r->getMethod('configure_remote_state_directory')->invoke(
+            $client,
+            $this->fs_root
+        );
         $r->getProperty('is_tty')->setValue($client, false);
         $r->getProperty('fs_root_nonempty_behavior')->setValue($client, 'preserve-local');
         $r->getProperty('pull_only_files_with_path_prefixes')->setValue($client, $pull_only_files_with_path_prefixes);
@@ -131,12 +161,12 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         // and a selected orphan absent from the --only remote index. The
         // delete drains must reconcile only within the --only file prefixes, so the local index
         // accumulates as a union across files-pull --only runs.
-        $this->writeIndex('.import-index.jsonl',
+        $this->writeIndex('.remote-index.jsonl',
             $this->indexLine('/wp-config.php', 1000, 10)               // unselected
             . $this->indexLine('/wp-content/keep.txt', 1000, 10)       // matched
             . $this->indexLine('/wp-content/old/orphan.txt', 1000, 10) // selected orphan
         );
-        $this->writeIndex('.import-remote-index.jsonl',
+        $this->writeIndex('.remote-index.next.jsonl',
             $this->indexLine('/wp-content/keep.txt', 1000, 10)
         );
 
@@ -163,12 +193,12 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         // delete them: that would recursively remove the very directories
         // the user asked to pull, while the matched children keep the
         // download list empty — silent data loss.
-        $this->writeIndex('.import-index.jsonl',
+        $this->writeIndex('.remote-index.jsonl',
             $this->indexLine('/wp-content/themes', 1000, 0, 'dir')
             . $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
             . $this->indexLine('/wp-content/themes/old/orphan.css', 1000, 10)
         );
-        $this->writeIndex('.import-remote-index.jsonl',
+        $this->writeIndex('.remote-index.next.jsonl',
             $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
         );
 

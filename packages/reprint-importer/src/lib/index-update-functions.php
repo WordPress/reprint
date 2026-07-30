@@ -368,12 +368,18 @@ function read_index_entry($handle): ?array
  * Yields the final update for each path and the latest operation which removed
  * its descendants.
  *
- * @param resource $handle Open path-sorted update file. Local-index update
- *                         batches also carry their operation positions.
+ * @param resource $handle       Open path-sorted update file. Local-index
+ *                               update batches also carry their operation
+ *                               positions.
+ * @param string   $field_prefix Field prefix in a pull WAL projection.
  * @return \Generator<int,array{path:string,delete:bool,ctime:int,size:int,type:string|null,operation_position:int|null,last_descendant_removal_position:int|null},mixed,void>
  */
-function read_index_updates($handle): \Generator
+function read_index_updates($handle, string $field_prefix = ''): \Generator
 {
+    $path_key = $field_prefix === '' ? 'path' : $field_prefix . 'path_b64';
+    $ctime_key = $field_prefix . 'ctime';
+    $size_key = $field_prefix . 'size';
+    $type_key = $field_prefix . 'type';
     $current = null;
     while (true) {
         $line = fgets($handle);
@@ -387,23 +393,23 @@ function read_index_updates($handle): \Generator
         if (substr($line, -1) !== "\n" && feof($handle)) {
             break;
         }
-        /** @var array{op:'D'|'F',path:string,operation_position?:int,ctime?:int,size?:int,type?:'file'|'link'|'dir'} $data */
+        /** @var array<string,mixed> $data */
         $data = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
         /** @var string $path */
-        $path = base64_decode($data['path']);
+        $path = base64_decode($data[$path_key]);
         $delete = $data['op'] === 'D';
         $operation_position = $data['operation_position'] ?? null;
         $last_descendant_removal_position =
             $operation_position !== null
-            && ( $delete || $data['type'] !== 'dir' )
+            && ( $delete || $data[$type_key] !== 'dir' )
                 ? $operation_position
                 : null;
         $entry = [
             'path' => $path,
             'delete' => $delete,
-            'ctime' => $delete ? 0 : $data['ctime'],
-            'size' => $delete ? 0 : $data['size'],
-            'type' => $delete ? null : $data['type'],
+            'ctime' => $delete ? 0 : $data[$ctime_key],
+            'size' => $delete ? 0 : $data[$size_key],
+            'type' => $delete ? null : $data[$type_key],
             'operation_position' => $operation_position,
             'last_descendant_removal_position' =>
                 $last_descendant_removal_position,

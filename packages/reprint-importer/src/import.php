@@ -268,11 +268,14 @@ class ImportClient
     /** @var string Export server URL. */
     public $remote_url;
 
-    /** @var string Directory for import state files (.import-state.json, db.sql, etc.). */
+    /** @var string Directory for import state files shared across target relationships. */
     public $state_dir;
 
     /** @var string Directory where downloaded site files are written (no filesystem-root/ wrapper). */
     public $fs_root;
+
+    /** @var string State directory for one target URL. */
+    public $remote_state_directory;
 
     /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
     private $state_file;
@@ -287,16 +290,15 @@ class ImportClient
     private $progress_throttle = 1.0;
 
     /**
-     * @var string Path to .import-index.jsonl — sorted JSON-lines file tracking every
-     * imported file's path, ctime, size, and type. Used for delta detection: on the next
-     * sync we compare this against the remote index to decide what to download or delete.
+     * @var string Path to .remote-index.jsonl — sorted JSON-lines file tracking
+     * the last target-observed path, ctime, size, and type.
      */
-    private $index_file;
+    private $remote_index_file;
 
     /**
-     * @var string Path to .import-index-updates.wal — the append-only write-ahead
-     * log for the current files-pull. Applied batches are cleared, but the file
-     * remains until the lifecycle completes or is aborted.
+     * @var string Path to pull-index-updates.wal — the append-only write-ahead
+     * log for the current files-pull. Applied batches are cleared, but the
+     * file remains until the lifecycle completes or is aborted.
      */
     private $index_update_wal_path;
 
@@ -304,15 +306,16 @@ class ImportClient
     private $index_update_wal_handle;
 
     /**
-     * @var string Path to .import-remote-index.jsonl — latest file index received
-     * from the server, including directory `empty` fields when available.
+     * @var string Path to .remote-index.next.jsonl — latest file index
+     * received from the server, including directory `empty` fields when
+     * available.
      */
-    private $remote_index_file;
+    private $remote_index_next_file;
 
-    /** @var string Path to .import-download-list.jsonl — files to download, computed by diffing the remote and import indexes. */
+    /** @var string Path to pull-plan.jsonl — files to download, computed by diffing the remote indexes. */
     private $download_list_file;
 
-    /** @var string Path to .import-download-list-skipped.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
+    /** @var string Path to pull-plan.skipped.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
     private $skipped_download_list_file;
 
     /** @var string Path to .import-audit.log — append-only log of every operation for debugging. */
@@ -538,26 +541,6 @@ class ImportClient
         $this->remote_url = rtrim($remote_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->fs_root = rtrim($fs_root, "/");
-        $this->state_file = $this->state_dir . "/.import-state.json";
-        $this->index_file = $this->state_dir . "/.import-index.jsonl";
-        $this->index_update_wal_path =
-            $this->state_dir . "/.import-index-updates.wal";
-        $this->remote_index_file =
-            $this->state_dir . "/.import-remote-index.jsonl";
-        $this->download_list_file =
-            $this->state_dir . "/.import-download-list.jsonl";
-        $this->skipped_download_list_file =
-            $this->state_dir . "/.import-download-list-skipped.jsonl";
-        $this->audit_log = $this->state_dir . "/.import-audit.log";
-        $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
-        $this->status_file = $this->state_dir . "/.import-status.json";
-
-        // Detect TTY for progress display. In stdout mode this is re-evaluated
-        // against STDERR in run() once we know the output mode.
-        $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
-        $this->progress_fd = STDOUT;
-        $this->progress = new TerminalProgress($this->is_tty, $this->progress_fd);
-        $this->pull = new Pull($this, $this->progress);
 
         // Create directories
         if (!is_dir($this->state_dir)) {
@@ -570,8 +553,60 @@ class ImportClient
                 throw new RuntimeException("Failed to create directory: {$this->fs_root}");
             }
         }
+        $this->remote_state_directory = $this->state_dir;
+        $this->state_file = $this->state_dir . "/.import-state.json";
+        $this->remote_index_file =
+            $this->state_dir . "/.remote-index.jsonl";
+        $this->index_update_wal_path =
+            $this->state_dir . "/pull-index-updates.wal";
+        $this->remote_index_next_file =
+            $this->state_dir . "/.remote-index.next.jsonl";
+        $this->download_list_file =
+            $this->state_dir . "/pull-plan.jsonl";
+        $this->skipped_download_list_file =
+            $this->state_dir . "/pull-plan.skipped.jsonl";
+        $this->audit_log = $this->state_dir . "/.import-audit.log";
+        $this->volatile_files_file =
+            $this->state_dir . "/pull-volatile-files.json";
+        $this->status_file = $this->state_dir . "/.import-status.json";
+
+        // Detect TTY for progress display. In stdout mode this is re-evaluated
+        // against STDERR in run() once we know the output mode.
+        $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
+        $this->progress_fd = STDOUT;
+        $this->progress = new TerminalProgress($this->is_tty, $this->progress_fd);
+        $this->pull = new Pull($this, $this->progress);
 
         $this->state = ImportState::from_array($this->default_state());
+    }
+
+    /** Selects the per-target files state directory. */
+    private function configure_remote_state_directory(): void
+    {
+        $this->remote_state_directory = self::remote_state_directory(
+            $this->remote_url,
+            $this->state_dir
+        );
+        if (
+            !is_dir($this->remote_state_directory)
+            && !mkdir($this->remote_state_directory, 0755, true)
+        ) {
+            throw new RuntimeException(
+                "Failed to create directory: {$this->remote_state_directory}"
+            );
+        }
+        $this->remote_index_file =
+            $this->remote_state_directory . "/.remote-index.jsonl";
+        $this->index_update_wal_path =
+            $this->remote_state_directory . "/pull-index-updates.wal";
+        $this->remote_index_next_file =
+            $this->remote_state_directory . "/.remote-index.next.jsonl";
+        $this->download_list_file =
+            $this->remote_state_directory . "/pull-plan.jsonl";
+        $this->skipped_download_list_file =
+            $this->remote_state_directory . "/pull-plan.skipped.jsonl";
+        $this->volatile_files_file =
+            $this->remote_state_directory . "/pull-volatile-files.json";
     }
 
     /**
@@ -579,10 +614,10 @@ class ImportClient
      */
     public function index_count(): int
     {
-        if (!is_file($this->index_file)) {
+        if (!is_file($this->remote_index_file)) {
             return 0;
         }
-        $handle = fopen($this->index_file, "r");
+        $handle = fopen($this->remote_index_file, "r");
         if (!$handle) {
             return 0;
         }
@@ -594,8 +629,8 @@ class ImportClient
         return $count;
     }
 
-    /** Appends one F record for the import index to the current WAL batch. */
-    private function upsert_import_index_entry(
+    /** Appends one target-observed F record to the current WAL batch. */
+    private function upsert_remote_index_entry(
         string $path,
         int $ctime,
         int $size,
@@ -603,17 +638,17 @@ class ImportClient
     ): void {
         $this->write_index_update([
             "op" => "F",
-            "path" => base64_encode($path),
-            "ctime" => $ctime,
-            "size" => $size,
-            "type" => $type,
+            "remote_path_b64" => base64_encode($path),
+            "remote_ctime" => $ctime,
+            "remote_size" => $size,
+            "remote_type" => $type,
         ]);
     }
 
     /**
      * Appends one F record for a completed files-pull change.
      *
-     * The record updates the import index and, when the local path belongs in
+     * The record updates the remote index and, when the local path belongs in
      * it, the local index.
      */
     private function record_pulled_path(
@@ -625,10 +660,10 @@ class ImportClient
     ): void {
         $update = [
             "op" => "F",
-            "path" => base64_encode($path),
-            "ctime" => $ctime,
-            "size" => $size,
-            "type" => $type,
+            "remote_path_b64" => base64_encode($path),
+            "remote_ctime" => $ctime,
+            "remote_size" => $size,
+            "remote_type" => $type,
         ];
         $local_index_entry_path =
             $this->local_index_entry_path($local_path);
@@ -647,6 +682,7 @@ class ImportClient
             $update["local_ctime"] = (int) $stat["ctime"];
             $update["local_size"] =
                 $type === "dir" ? 0 : (int) $stat["size"];
+            $update["local_type"] = $type;
         }
         $this->write_index_update($update);
     }
@@ -676,18 +712,18 @@ class ImportClient
      * Appends one complete record to the index-update WAL.
      *
      * @param array $update {
-     *     One import-index update, with local-index fields when files-pull
+     *     One remote-index update, with local-index fields when files-pull
      *     changed a non-skipped path.
      *
-     *     @type string $op          `F` or `D`.
-     *     @type string $path        Base64-encoded import-index path.
-     *     @type int    $ctime       Remote ctime for an `F` record.
-     *     @type int    $size        Remote size for an `F` record.
-     *     @type string $type        Pulled path type used by both indexes for
-     *                               an `F` record.
+     *     @type string $op              `F` or `D`.
+     *     @type string $remote_path_b64 Base64-encoded remote-index path.
+     *     @type int    $remote_ctime    Remote ctime for an `F` record.
+     *     @type int    $remote_size     Remote size for an `F` record.
+     *     @type string $remote_type     Remote type for an `F` record.
      *     @type string $local_path_b64 Base64-encoded local-index path.
      *     @type int    $local_ctime    Local ctime for an `F` record.
      *     @type int    $local_size     Local size for an `F` record.
+     *     @type string $local_type     Local type for an `F` record.
      * }
      */
     private function write_index_update(array $update): void
@@ -771,6 +807,7 @@ class ImportClient
      */
     public function prepare_files_pull_options(array $options, bool $assert_remap = true): void
     {
+        $this->configure_remote_state_directory();
         $remap_raw = $options["remap"] ?? [];
         if (!empty($remap_raw)) {
             $this->remap_rules = $this->resolve_remap($remap_raw);
@@ -1031,6 +1068,7 @@ class ImportClient
         // files-diff and files-push use local push state and must not load
         // or write the pull command's .import-state.json file.
         if ($command === "files-diff") {
+            $this->configure_remote_state_directory();
             if (is_file($this->index_update_wal_path)) {
                 throw new RuntimeException(
                     'Finish or abort the interrupted files-pull before running files-diff.'
@@ -1040,6 +1078,7 @@ class ImportClient
             return;
         }
         if ($command === "files-push") {
+            $this->configure_remote_state_directory();
             if (is_file($this->index_update_wal_path)) {
                 throw new RuntimeException(
                     'Finish or abort the interrupted files-pull before running files-push.'
@@ -1057,6 +1096,9 @@ class ImportClient
         }
 
         $this->state = ImportState::from_array($this->load_state());
+        if (($this->import_state()->preflight ?? null) !== null) {
+            $this->configure_remote_state_directory();
+        }
 
         if ($command === "import-metadata") {
             $this->run_import_metadata();
@@ -1417,7 +1459,7 @@ class ImportClient
         $local_index_path = $context['local_index_path'];
         $missing_local_index_message =
             'files-diff requires the local index created by files-pull or files-push '
-            . 'for the same target URL, state directory, and local tree.';
+            . 'for the same target URL and state directory.';
 
         $plan_directory = $push_state_directory . '/files-diff-plan';
         try {
@@ -1772,10 +1814,11 @@ class ImportClient
      *
      *     @type string $target_url           Target exporter API URL.
      *     @type string $local_tree           Canonical local tree being sent.
-     *     @type string $push_state_directory Local push state directory.
-     *     @type string $local_index_path      Local index used by pull and push.
+     *     @type string $remote_state_directory State directory for the target relationship.
+     *     @type string $push_state_directory   Local push state directory.
+     *     @type string $local_index_path        Local index used by pull and push.
      * }
-     * @phpstan-return array{target_url:string,local_tree:string,push_state_directory:string,local_index_path:string}
+     * @phpstan-return array{target_url:string,local_tree:string,remote_state_directory:string,push_state_directory:string,local_index_path:string}
      */
     public static function prepare_files_push_context(
         string $target_url,
@@ -1823,10 +1866,11 @@ class ImportClient
      *
      *     @type string $target_url           Target exporter API URL.
      *     @type string $local_tree           Canonical local tree.
-     *     @type string $push_state_directory Local push state directory.
-     *     @type string $local_index_path      Local index used by pull and push.
+     *     @type string $remote_state_directory State directory for the target relationship.
+     *     @type string $push_state_directory   Local push state directory.
+     *     @type string $local_index_path        Local index used by pull and push.
      * }
-     * @phpstan-return array{target_url:string,local_tree:string,push_state_directory:string,local_index_path:string}
+     * @phpstan-return array{target_url:string,local_tree:string,remote_state_directory:string,push_state_directory:string,local_index_path:string}
      */
     public static function prepare_files_command_context(
         string $target_url,
@@ -1863,10 +1907,6 @@ class ImportClient
         }
         $canonical_local_tree = rtrim($canonical_local_tree, '/') ?: '/';
         $target_url = rtrim($target_url, '?&');
-        $target_local_tree_hash = self::target_url_and_local_tree_hash(
-            $target_url,
-            $canonical_local_tree
-        );
         // Resolve an absolute physical state path even when its final components do not exist.
         if (strpos($state_directory, '/') !== 0) {
             $working_directory = getcwd();
@@ -1881,10 +1921,11 @@ class ImportClient
         if ($canonical_state_directory !== null) {
             $state_directory = $canonical_state_directory;
         }
-        $push_state_directory =
-            rtrim($state_directory, '/')
-            . '/push/'
-            . $target_local_tree_hash;
+        $remote_state_directory = self::remote_state_directory(
+            $target_url,
+            $state_directory
+        );
+        $push_state_directory = $remote_state_directory . '/push';
         if (
             $canonical_local_tree === '/'
             || path_is_within_root($push_state_directory, $canonical_local_tree)
@@ -1898,22 +1939,15 @@ class ImportClient
         return [
             'target_url' => $target_url,
             'local_tree' => $canonical_local_tree,
+            'remote_state_directory' => $remote_state_directory,
             'push_state_directory' => $push_state_directory,
-            'local_index_path' => self::local_index_path(
-                $target_url,
-                $state_directory,
-                $canonical_local_tree
-            ),
+            'local_index_path' => $remote_state_directory . '/.local-index.jsonl',
         ];
     }
 
-    /**
-     * Hashes the target endpoint and canonical local tree without URL user-info
-     * or SECRET_KEY.
-     */
-    private static function target_url_and_local_tree_hash(
-        string $target_url,
-        string $local_tree
+    /** Removes authentication inputs which do not identify a target. */
+    private static function target_url_for_relationship(
+        string $target_url
     ): string {
         /** @var string $target_url */
         $target_url = preg_replace(
@@ -1942,10 +1976,7 @@ class ImportClient
                     : '?' . implode('&', $query_parts) );
         }
 
-        return hash(
-            'sha256',
-            rtrim($target_url, '?&') . "\0" . $local_tree
-        );
+        return rtrim($target_url, '?&');
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
@@ -2029,9 +2060,9 @@ class ImportClient
                 $this->import_state()->active_resumable_command->completion_state = null;
                 $this->import_state()->active_resumable_command->current_stage = null;
                 $this->import_state()->index = new RemoteFileIndexCursorState();
-                if (file_exists($this->remote_index_file)) {
-                    @unlink($this->remote_index_file);
-                    $this->audit_log("FILE DELETE | {$this->remote_index_file}");
+                if (file_exists($this->remote_index_next_file)) {
+                    @unlink($this->remote_index_next_file);
+                    $this->audit_log("FILE DELETE | {$this->remote_index_next_file}");
                 }
                 $this->save_state($this->state);
                 break;
@@ -2102,13 +2133,13 @@ class ImportClient
     }
 
     /**
-     * Clear sync progress and transient files while keeping the import index,
+     * Clear sync progress and transient files while keeping the remote index,
      * local index, and downloaded files, so the next files-pull computes a delta.
      */
     public function clear_files_pull_progress(): void
     {
         $this->audit_log(
-            "RESTART | Clearing files-pull progress (keeping import index, local index, and files)",
+            "RESTART | Clearing files-pull progress (keeping remote index, local index, and files)",
             true,
         );
         // Apply completed file changes to both indexes before discarding
@@ -2118,9 +2149,9 @@ class ImportClient
         $this->reset_state();
         $this->index_update_wal_handle = null;
 
-        if (file_exists($this->remote_index_file)) {
-            @unlink($this->remote_index_file);
-            $this->audit_log("FILE DELETE | {$this->remote_index_file}");
+        if (file_exists($this->remote_index_next_file)) {
+            @unlink($this->remote_index_next_file);
+            $this->audit_log("FILE DELETE | {$this->remote_index_next_file}");
         }
         if (file_exists($this->download_list_file)) {
             @unlink($this->download_list_file);
@@ -2747,36 +2778,9 @@ class ImportClient
      */
     public function run_files_sync(): void
     {
-        $local_tree = $this->local_tree();
-        if (strpos($local_tree, '/') !== 0) {
-            /** @var string $working_directory */
-            $working_directory = getcwd();
-            $local_tree = $working_directory . '/' . $local_tree;
-        }
-        $canonical_local_tree =
-            self::canonicalize_path_with_missing_components($local_tree);
-        if ($canonical_local_tree === null) {
-            throw new RuntimeException(
-                'Failed to resolve the local tree: ' . $local_tree . '.'
-            );
-        }
-        $canonical_local_tree = rtrim($canonical_local_tree, '/') ?: '/';
-        /** @var string $canonical_state_directory */
-        $canonical_state_directory = realpath($this->state_dir);
-        $target_local_tree_hash = self::target_url_and_local_tree_hash(
-            $this->remote_url,
-            $canonical_local_tree
-        );
-        $local_index_path = self::local_index_path(
-            $this->remote_url,
-            $canonical_state_directory,
-            $canonical_local_tree
-        );
-        $sender_state_path =
-            $canonical_state_directory
-            . '/push/'
-            . $target_local_tree_hash
-            . '/sender.json';
+        $local_index_path =
+            $this->remote_state_directory . '/.local-index.jsonl';
+        $sender_state_path = $this->remote_state_directory . '/push/sender.json';
         if (is_file($sender_state_path)) {
             throw new RuntimeException(
                 'Finish the unfinished files-push before running files-pull.'
@@ -2918,11 +2922,11 @@ class ImportClient
             [".", ".."]
         )) === 0;
 
-        // An import index from a prior completed sync means the next run is a
+        // A remote index from a prior completed sync means the next run is a
         // delta: re-index the remote, diff against that index, fetch only changes.
         $is_delta =
-            file_exists($this->index_file) &&
-            filesize($this->index_file) > 0;
+            file_exists($this->remote_index_file) &&
+            filesize($this->remote_index_file) > 0;
 
         // Resuming an in-progress sync
         if ($has_progress) {
@@ -3031,7 +3035,7 @@ class ImportClient
                 && !mkdir($local_index_directory, 0755, true)
             ) {
                 throw new RuntimeException(
-                    'Failed to create the local-index directory: '
+                    'Failed to create the remote state directory: '
                     . $local_index_directory
                     . '.'
                 );
@@ -3074,11 +3078,10 @@ class ImportClient
         $this->report_volatile_files();
     }
 
-    /** Returns the local index path for one target and local tree. */
-    private static function local_index_path(
+    /** Returns the state directory for one target. */
+    private static function remote_state_directory(
         string $target_url,
-        string $state_directory,
-        string $local_tree
+        string $state_directory
     ): string
     {
         if (strpos($state_directory, '/') !== 0) {
@@ -3086,31 +3089,20 @@ class ImportClient
             $working_directory = getcwd();
             $state_directory = $working_directory . '/' . $state_directory;
         }
-        if (strpos($local_tree, '/') !== 0) {
-            /** @var string $working_directory */
-            $working_directory = getcwd();
-            $local_tree = $working_directory . '/' . $local_tree;
-        }
         $canonical_state_directory =
             self::canonicalize_path_with_missing_components($state_directory);
-        $canonical_local_tree =
-            self::canonicalize_path_with_missing_components($local_tree);
-        if (
-            $canonical_state_directory === null
-            || $canonical_local_tree === null
-        ) {
+        if ($canonical_state_directory === null) {
             throw new RuntimeException(
-                'Failed to resolve the local-index path.'
+                'Failed to resolve the remote state directory.'
             );
         }
-        $target_local_tree_hash = self::target_url_and_local_tree_hash(
-            $target_url,
-            rtrim($canonical_local_tree, '/') ?: '/'
+        $target_url_hash = hash(
+            'sha256',
+            self::target_url_for_relationship($target_url)
         );
         return rtrim($canonical_state_directory, '/')
-            . '/local-index/'
-            . $target_local_tree_hash
-            . '.jsonl';
+            . '/remote-'
+            . $target_url_hash;
     }
 
     /** Returns the document root under this import's filesystem root. */
@@ -3173,7 +3165,7 @@ class ImportClient
                     return;
                 }
             }
-            $this->sort_index_file($this->remote_index_file);
+            $this->sort_index_file($this->remote_index_next_file);
             $this->import_state()->active_resumable_command->current_stage = "diff";
             $this->import_state()->diff = new FileDiffProgressState();
             if (file_exists($this->download_list_file)) {
@@ -3426,14 +3418,14 @@ class ImportClient
             $this->discover_symlink_targets();
         }
 
-        $this->sort_index_file($this->remote_index_file);
+        $this->sort_index_file($this->remote_index_next_file);
         $this->import_state()->active_resumable_command->completion_state = "complete";
         $this->import_state()->active_resumable_command->current_stage = null;
         $this->save_state($this->state);
 
         $count = 0;
-        if (file_exists($this->remote_index_file)) {
-            $h = fopen($this->remote_index_file, "r");
+        if (file_exists($this->remote_index_next_file)) {
+            $h = fopen($this->remote_index_next_file, "r");
             if ($h) {
                 while (fgets($h) !== false) {
                     $count++;
@@ -3447,14 +3439,14 @@ class ImportClient
         );
 
         $this->progress->show_lifecycle_line("files-index complete: {$count} entries indexed\n");
-        $this->progress->show_lifecycle_line("Remote index: {$this->remote_index_file}\n");
+        $this->progress->show_lifecycle_line("Remote index: {$this->remote_index_next_file}\n");
         $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
             "command" => "files-index",
             "entries_indexed" => $count,
-            "remote_index" => $this->remote_index_file,
+            "remote_index" => $this->remote_index_next_file,
             "audit_log" => $this->audit_log,
             "message" => "files-index complete: {$count} entries indexed",
         ], true);
@@ -3605,11 +3597,11 @@ class ImportClient
     private function extract_symlink_dirs_from_index(array $visited): array
     {
         $targets = [];
-        if (!file_exists($this->remote_index_file)) {
+        if (!file_exists($this->remote_index_next_file)) {
             return $targets;
         }
 
-        $handle = fopen($this->remote_index_file, "r");
+        $handle = fopen($this->remote_index_next_file, "r");
         if (!$handle) {
             return $targets;
         }
@@ -3677,11 +3669,11 @@ class ImportClient
      */
     private function recreate_intermediate_symlinks(): void
     {
-        if (!file_exists($this->remote_index_file)) {
+        if (!file_exists($this->remote_index_next_file)) {
             return;
         }
 
-        $h = fopen($this->remote_index_file, "r");
+        $h = fopen($this->remote_index_next_file, "r");
         if (!$h) {
             return;
         }
@@ -4046,12 +4038,12 @@ class ImportClient
      * Print file index statistics: total indexed files and their size,
      * plus pending downloads and their size.
      *
-     * Reads .import-remote-index.jsonl for all indexed files and
-     * .import-download-list.jsonl for files not yet downloaded.
+     * Reads .remote-index.next.jsonl for all indexed files and pull-plan.jsonl
+     * for files not yet downloaded.
      */
     private function run_files_stats(): void
     {
-        $remote_index = $this->remote_index_file;
+        $remote_index = $this->remote_index_next_file;
         $download_list = $this->download_list_file;
 
         // Single pass over the remote index to build a path→size map.
@@ -4526,7 +4518,7 @@ class ImportClient
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
             rtrim($state_dir, "/") . "/.import-state.json";
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
-            rtrim($state_dir, "/") . "/.import-download-list-skipped.jsonl";
+            $this->skipped_download_list_file;
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
@@ -6438,22 +6430,22 @@ class ImportClient
             );
         }
 
-        $mode = file_exists($this->remote_index_file) ? "a" : "w";
+        $mode = file_exists($this->remote_index_next_file) ? "a" : "w";
         // Initialize the index counter from the existing file so resume
         // shows a monotonically increasing count.
         if ($mode === "a" && $this->index_entries_counted === 0) {
-            $this->index_entries_counted = $this->count_newlines($this->remote_index_file);
+            $this->index_entries_counted = $this->count_newlines($this->remote_index_next_file);
         }
         if ($mode === "w") {
             $this->audit_log(
-                "FILE CREATE | {$this->remote_index_file} | downloading fresh remote index",
+                "FILE CREATE | {$this->remote_index_next_file} | downloading fresh remote index",
             );
         } else {
             $this->audit_log(
-                "FILE APPEND | {$this->remote_index_file} | resuming remote index download",
+                "FILE APPEND | {$this->remote_index_next_file} | resuming remote index download",
             );
         }
-        $handle = fopen($this->remote_index_file, $mode);
+        $handle = fopen($this->remote_index_next_file, $mode);
         if (!$handle) {
             throw new RuntimeException("Failed to open remote index file");
         }
@@ -6668,11 +6660,11 @@ class ImportClient
     }
 
     /**
-     * Diff the import index against the remote index and build the download list.
+     * Diff the remote index against the next remote index and build the pull plan.
      */
     private function diff_indexes_and_build_fetch_list(): bool
     {
-        if (!file_exists($this->remote_index_file)) {
+        if (!file_exists($this->remote_index_next_file)) {
             throw new RuntimeException("Remote index file not found");
         }
 
@@ -6719,7 +6711,7 @@ class ImportClient
             );
         }
 
-        $remote_handle = fopen($this->remote_index_file, "r");
+        $remote_handle = fopen($this->remote_index_next_file, "r");
         if (!$remote_handle) {
             fclose($download_handle);
             throw new RuntimeException("Failed to open remote index file");
@@ -6728,8 +6720,8 @@ class ImportClient
             fseek($remote_handle, $remote_offset);
         }
 
-        $local_handle = file_exists($this->index_file)
-            ? fopen($this->index_file, "r")
+        $local_handle = file_exists($this->remote_index_file)
+            ? fopen($this->remote_index_file, "r")
             : null;
         $local = read_index_entry($local_handle);
         if ($local_after) {
@@ -6775,7 +6767,7 @@ class ImportClient
                     $local["type"] !== $remote["type"]
                 ) {
                     // File is in both indexes but changed on the remote.
-                    // Always re-download — this file is in our import index,
+                    // Always re-download — this file is in our remote index,
                     // meaning we synced it before; preserve-local does not
                     // protect files we own.
                     $target_handle = ($skipped_handle !== null && $this->is_uploads_path($remote["path"], $uploads_basedir))
@@ -6999,7 +6991,7 @@ class ImportClient
     /**
      * Builds a JSON batch file listing the next set of paths to download.
      *
-     * Reads from the download list (.import-download-list.jsonl) starting at
+     * Reads from the download list (pull-plan.jsonl) starting at
      * $offset, accumulating paths into a JSON array until the batch approaches
      * 80% of the server's max request size.  Always includes at least one path,
      * even if it alone exceeds the limit.
@@ -7238,7 +7230,7 @@ class ImportClient
 
         $update = [
             "op" => "D",
-            "path" => base64_encode($path),
+            "remote_path_b64" => base64_encode($path),
         ];
         $local_index_entry_path =
             $this->local_index_entry_path($local_path);
@@ -7307,7 +7299,7 @@ class ImportClient
         }
     }
 
-    /** Applies the current WAL to the import index and local index. */
+    /** Applies the current WAL to the remote index and local index. */
     private function apply_index_update_wal(): void
     {
         if ($this->index_update_wal_handle) {
@@ -7325,19 +7317,19 @@ class ImportClient
             return;
         }
 
-        $new_index = $this->index_file . ".new";
+        $new_index = $this->remote_index_file . ".new";
         $this->audit_log(
-            "INDEX MERGE START | merging updates into {$this->index_file}",
+            "INDEX MERGE START | merging updates into {$this->remote_index_file}",
         );
         $base_index_handle = null;
         $wal_handle = null;
         $new_index_handle = null;
         try {
-            if (is_file($this->index_file)) {
-                $base_index_handle = fopen($this->index_file, 'rb');
+            if (is_file($this->remote_index_file)) {
+                $base_index_handle = fopen($this->remote_index_file, 'rb');
                 if (!is_resource($base_index_handle)) {
                     throw new RuntimeException(
-                        'Failed to open the import index.'
+                        'Failed to open the remote index.'
                     );
                 }
             }
@@ -7348,12 +7340,12 @@ class ImportClient
                 || !is_resource($new_index_handle)
             ) {
                 throw new RuntimeException(
-                    'Failed to merge import-index updates.'
+                    'Failed to merge remote-index updates.'
                 );
             }
 
             $base = read_index_entry($base_index_handle);
-            $updates = read_index_updates($wal_handle);
+            $updates = read_index_updates($wal_handle, 'remote_');
             $updates->rewind();
             while ($base !== null || $updates->valid()) {
                 $update = $updates->valid() ? $updates->current() : null;
@@ -7390,12 +7382,13 @@ class ImportClient
                 fclose($new_index_handle);
             }
         }
-        if (!rename($new_index, $this->index_file)) {
+        if (!rename($new_index, $this->remote_index_file)) {
             throw new RuntimeException("Failed to replace index file");
         }
-        $this->audit_log("INDEX MERGE COMPLETE | {$this->index_file} updated");
+        $this->audit_log("INDEX MERGE COMPLETE | {$this->remote_index_file} updated");
 
-        $updates_path = $this->state_dir . '/.local-index-updates.tmp';
+        $updates_path =
+            $this->remote_state_directory . '/.local-index-updates.tmp';
         $wal_handle = null;
         $updates_handle = null;
         try {
@@ -7419,7 +7412,7 @@ class ImportClient
                     if (substr($line, -1) !== "\n" && feof($wal_handle)) {
                         break;
                     }
-                    /** @var array{op:'D'|'F',path:string,ctime?:int,size?:int,type?:string,local_path_b64?:string,local_ctime?:int,local_size?:int} $update */
+                    /** @var array{op:'D'|'F',remote_path_b64:string,remote_ctime?:int,remote_size?:int,remote_type?:string,local_path_b64?:string,local_ctime?:int,local_size?:int,local_type?:string} $update */
                     $update = json_decode(
                         $line,
                         true,
@@ -7437,7 +7430,7 @@ class ImportClient
                         $local_index_update += [
                             'ctime' => $update['local_ctime'],
                             'size' => $update['local_size'],
-                            'type' => $update['type'],
+                            'type' => $update['local_type'],
                         ];
                     }
                     write_local_index_update(
@@ -7467,11 +7460,8 @@ class ImportClient
 
             if ($updates_written > 0) {
                 apply_local_index_updates(
-                    self::local_index_path(
-                        $this->remote_url,
-                        $this->state_dir,
-                        $this->local_tree()
-                    ),
+                    $this->remote_state_directory
+                        . '/.local-index.jsonl',
                     $updates_path
                 );
             }
@@ -8506,7 +8496,7 @@ class ImportClient
 
     /**
      * Checks if the remote index contains $path or any descendant under it.
-     * Runs a memoized O(N) scan of .import-remote-index.jsonl.
+     * Runs a memoized O(N) scan of .remote-index.next.jsonl.
      */
     private function remote_index_contains_path_prefix(string $path): bool
     {
@@ -8519,12 +8509,12 @@ class ImportClient
             return $this->remote_index_prefix_cache[$path];
         }
 
-        if (!file_exists($this->remote_index_file)) {
+        if (!file_exists($this->remote_index_next_file)) {
             $this->remote_index_prefix_cache[$path] = false;
             return false;
         }
 
-        $h = fopen($this->remote_index_file, "r");
+        $h = fopen($this->remote_index_next_file, "r");
         if (!$h) {
             $this->remote_index_prefix_cache[$path] = false;
             return false;
@@ -8581,7 +8571,9 @@ class ImportClient
         $fingerprint = $this->files_remap_fingerprint();
         $previous = $this->import_state()->files_remap_fingerprint ?? null;
 
-        $has_existing_index = file_exists($this->index_file) && filesize($this->index_file) > 0;
+        $has_existing_index =
+            file_exists($this->remote_index_file)
+            && filesize($this->remote_index_file) > 0;
         if ($previous === null && $has_existing_index && !empty($this->remap_rules)) {
             throw new RuntimeException(
                 "Cannot use --remap with an existing files index that was created before remap tracking. " .
@@ -8621,7 +8613,7 @@ class ImportClient
      * The in-progress remote index cursor/file was built from one directory[]
      * allowlist. Switching the selected source path prefixes mid-resume would
      * mix indexes from different traversals. Completed runs are allowed to use
-     * different --only prefixes because the import index is intentionally a union
+     * different --only prefixes because the remote index is intentionally a union
      * across files-pull --only runs.
      */
     private function assert_files_pull_only_unchanged_while_resuming(bool $has_progress): void
@@ -9509,7 +9501,7 @@ class ImportClient
                 $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$path}", true);
                 $this->emit_skip_progress($path);
                 if ($ctime > 0) {
-                    $this->upsert_import_index_entry($path, $ctime, 0, "dir");
+                    $this->upsert_remote_index_entry($path, $ctime, 0, "dir");
                 }
                 return;
             }
@@ -9517,7 +9509,7 @@ class ImportClient
                 $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$path}", true);
                 $this->emit_skip_progress($path);
                 if ($ctime > 0) {
-                    $this->upsert_import_index_entry($path, $ctime, 0, "dir");
+                    $this->upsert_remote_index_entry($path, $ctime, 0, "dir");
                 }
                 return;
             }
@@ -9771,7 +9763,7 @@ class ImportClient
             }
             $this->write_index_update([
                 "op" => "D",
-                "path" => base64_encode($path),
+                "remote_path_b64" => base64_encode($path),
             ]);
 
             if ($error_type === "file_changed") {
@@ -12827,7 +12819,7 @@ if (
                 "\n" .
                 "On the first run, indexes the full remote directory tree and then\n" .
                 "downloads every file. On subsequent runs, re-indexes the remote tree,\n" .
-                "diffs against the import index, and downloads only what changed.\n" .
+                "diffs against the remote index, and downloads only what changed.\n" .
                 "Interrupted pulls resume from the last saved cursor.\n" .
                 "The state directory's .reprint.lock is held for the entire command,\n" .
                 "so another local Reprint command cannot use the same state directory.\n" .
@@ -12849,11 +12841,12 @@ if (
                 "Output files:\n" .
                 "  (fs-root)/                              Downloaded files\n" .
                 "  .reprint.lock                           Local Reprint process lock\n" .
-                "  .import-index.jsonl                     Import index\n" .
-                "  .import-index-updates.wal               Active files-pull WAL\n" .
-                "  .import-remote-index.jsonl              Remote index snapshot\n" .
-                "  .import-download-list.jsonl             Files pending download\n" .
-                "  .import-download-list-skipped.jsonl     Skipped files (when --filter=essential-files)\n" .
+                "  remote-<hash>/.remote-index.jsonl       Target-observed index\n" .
+                "  remote-<hash>/.local-index.jsonl        Locally accounted index\n" .
+                "  remote-<hash>/.remote-index.next.jsonl  Next target index\n" .
+                "  remote-<hash>/pull-index-updates.wal    Active files-pull WAL\n" .
+                "  remote-<hash>/pull-plan.jsonl           Files pending download\n" .
+                "  remote-<hash>/pull-plan.skipped.jsonl   Skipped files (when --filter=essential-files)\n" .
                 "  .import-state.json                      Resumable state\n" .
                 "  .import-audit.log                       Audit log\n",
         ],
@@ -12914,7 +12907,7 @@ if (
             "description" =>
                 "Streams the full remote directory tree over HTTP and writes each\n" .
                 "entry (path, size, ctime, type, and directory emptiness) to\n" .
-                ".import-remote-index.jsonl.\n" .
+                "remote-<hash>/.remote-index.next.jsonl.\n" .
                 "\n" .
                 "On the first run, builds the complete index. On subsequent runs,\n" .
                 "re-indexes and diffs against the prior snapshot to produce a\n" .
@@ -12928,9 +12921,9 @@ if (
         ],
         "files-stats" => [
             "level" => "low",
-            "short" => "Show file counts and sizes from the import index",
+            "short" => "Show file counts and sizes from the remote index",
             "description" =>
-                "Reads import index files to report (no network calls):\n" .
+                "Reads remote index files to report (no network calls):\n" .
                 "\n" .
                 "  - Total indexed files and their combined size\n" .
                 "  - Files not yet downloaded and their combined size\n" .

@@ -65,7 +65,7 @@ class DownloadListProgressTest extends TestCase
      */
     private function writeDownloadList(int $count, ?string $file = null): string
     {
-        $file = $file ?? $this->stateDir . '/.import-download-list.jsonl';
+        $file = $file ?? $this->remoteStateDirectory() . '/pull-plan.jsonl';
         $handle = fopen($file, 'w');
         for ($i = 0; $i < $count; $i++) {
             fwrite($handle, json_encode(["path" => base64_encode("/file-{$i}.txt")]) . "\n");
@@ -83,7 +83,15 @@ class DownloadListProgressTest extends TestCase
                 "current_stage" => null,
                 "remote_cursor" => null,
             ],
-            "preflight" => ["data" => ["ok" => true], "http_code" => 200],
+            "preflight" => [
+                "data" => [
+                    "ok" => true,
+                    "runtime" => [
+                        "document_root" => "",
+                    ],
+                ],
+                "http_code" => 200,
+            ],
             "remote_protocol_version" => null,
             "remote_protocol_min_version" => null,
             "version" => null,
@@ -107,6 +115,10 @@ class DownloadListProgressTest extends TestCase
         $loadState = $reflection->getMethod('load_state');
         $stateProperty = $reflection->getProperty('state');
         $stateProperty->setValue($client, $loadState->invoke($client));
+        $reflection->getMethod('configure_remote_state_directory')->invoke(
+            $client,
+            $this->fs_root
+        );
 
         $ttyProperty = $reflection->getProperty('is_tty');
         $ttyProperty->setValue($client, false);
@@ -115,6 +127,21 @@ class DownloadListProgressTest extends TestCase
         $filterProp->setValue($client, $filter);
 
         return [$client, $reflection];
+    }
+
+    private function remoteStateDirectory(): string
+    {
+        $context = \ImportClient::prepare_files_command_context(
+            'http://fake.url',
+            $this->stateDir,
+            $this->fs_root,
+            'files-diff'
+        );
+        $remoteStateDirectory = $context['remote_state_directory'];
+        if (!is_dir($remoteStateDirectory)) {
+            mkdir($remoteStateDirectory);
+        }
+        return $remoteStateDirectory;
     }
 
     private function readCounters(\ImportClient $client, \ReflectionClass $reflection): array
@@ -287,7 +314,8 @@ class DownloadListProgressTest extends TestCase
     public function testSkippedListHasOwnCounters()
     {
         $this->writeDownloadList(50);
-        $skippedList = $this->stateDir . '/.import-download-list-skipped.jsonl';
+        $skippedList =
+            $this->remoteStateDirectory() . '/pull-plan.skipped.jsonl';
         $this->writeDownloadList(200, $skippedList);
         $offset20 = $this->byteOffsetAfterLines($skippedList, 20);
 

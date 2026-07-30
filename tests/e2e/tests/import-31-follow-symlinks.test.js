@@ -25,7 +25,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     readAuditLog,
-    fsRootDir,
+    fsRootDir, getRemoteStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -328,7 +328,10 @@ describe('Import: Follow Symlinks', () => {
 
     it('multiple symlinks to same target do not create duplicate index entries', () => {
         // After sort+dedup, each path should appear at most once
-        const remoteIndex = join(tempDir, '.import-remote-index.jsonl');
+        const remoteIndex = join(
+            getRemoteStateDirectory(tempDir, '.remote-index.next.jsonl'),
+            '.remote-index.next.jsonl',
+        );
         if (!existsSync(remoteIndex)) return;
 
         const lines = readFileSync(remoteIndex, 'utf-8').split('\n').filter(l => l.trim());

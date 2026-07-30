@@ -765,12 +765,13 @@ final class PushPlanTest extends TestCase
 
     private function pushStateDirectory(): string
     {
-        return $this->tempDir . '/state/push/example.com';
+        return $this->tempDir . '/state/remote-example.com/push';
     }
 
     private function localIndexPath(): string
     {
-        return $this->tempDir . '/state/local-index/example.com.jsonl';
+        return $this->tempDir
+            . '/state/remote-example.com/.local-index.jsonl';
     }
 
     private function excludedPathsPath(): string

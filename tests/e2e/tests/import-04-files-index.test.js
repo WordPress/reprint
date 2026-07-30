@@ -1,6 +1,6 @@
 /**
  * Test 04: Files Index via import.php
- * Tests files-index command produces .import-remote-index.jsonl.
+ * Tests files-index command produces .remote-index.next.jsonl.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    countJsonlLines,
+    countJsonlLines, getRemoteStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -30,14 +30,17 @@ describe('Import: Files Index', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('files-index produces .import-remote-index.jsonl', () => {
+    it('files-index produces .remote-index.next.jsonl', () => {
         const result = runImporter(importUrl(), tempDir, 'files-index', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const indexFile = join(tempDir, '.import-remote-index.jsonl');
-        assert.ok(existsSync(indexFile), 'Expected .import-remote-index.jsonl to exist');
+        const indexFile = join(
+            getRemoteStateDirectory(tempDir, '.remote-index.next.jsonl'),
+            '.remote-index.next.jsonl',
+        );
+        assert.ok(existsSync(indexFile), 'Expected .remote-index.next.jsonl to exist');
 
         const lines = readFileSync(indexFile, 'utf-8').trim().split('\n').filter(l => l);
         assert.ok(lines.length > 0, 'Expected at least one index entry');
@@ -62,7 +65,10 @@ describe('Import: Files Index', () => {
     });
 
     it('remote index has at least 3000 entries', () => {
-        const indexFile = join(tempDir, '.import-remote-index.jsonl');
+        const indexFile = join(
+            getRemoteStateDirectory(tempDir, '.remote-index.next.jsonl'),
+            '.remote-index.next.jsonl',
+        );
         const count = countJsonlLines(indexFile);
         assert.ok(count >= 3000,
             `Expected at least 3000 entries in remote index, got ${count}`);

@@ -43,7 +43,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertNull(ImportClient::files_push_stop_cause(1000.0, PHP_INT_MAX, 0, -1, $chunkBytes));
     }
 
-    public function testCommandContextUsesTheTrimmedTargetAndCanonicalLocalTree(): void
+    public function testCommandContextUsesTheTargetStateDirectoryAndCanonicalLocalTree(): void
     {
         $targetUrl = 'https://example.test/?reprint-api=1&&';
         $context = ImportClient::prepare_files_push_context(
@@ -55,22 +55,22 @@ final class FilesPushCommandTest extends TestCase
         $canonicalLocalTree = realpath($this->localTree);
         $this->assertIsString($canonicalLocalTree);
         $trimmedTargetUrl = rtrim($targetUrl, '?&');
-        $expectedTargetLocalTreeHash = hash(
-            'sha256',
-            $trimmedTargetUrl . "\0" . $canonicalLocalTree
-        );
+        $expectedTargetHash = hash('sha256', $trimmedTargetUrl);
 
         $this->assertSame($trimmedTargetUrl, $context['target_url']);
         $this->assertSame($canonicalLocalTree, $context['local_tree']);
         $this->assertSame(
-            realpath($this->stateDirectory) . '/push/' . $expectedTargetLocalTreeHash,
+            realpath($this->stateDirectory)
+                . '/remote-'
+                . $expectedTargetHash,
+            $context['remote_state_directory']
+        );
+        $this->assertSame(
+            $context['remote_state_directory'] . '/push',
             $context['push_state_directory']
         );
         $this->assertSame(
-            realpath($this->stateDirectory)
-                . '/local-index/'
-                . $expectedTargetLocalTreeHash
-                . '.jsonl',
+            $context['remote_state_directory'] . '/.local-index.jsonl',
             $context['local_index_path']
         );
 
@@ -93,7 +93,7 @@ final class FilesPushCommandTest extends TestCase
             $context['push_state_directory'],
             $differentQuery['push_state_directory']
         );
-        $this->assertNotSame(
+        $this->assertSame(
             $context['local_index_path'],
             $differentTree['local_index_path']
         );
