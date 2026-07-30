@@ -6613,7 +6613,7 @@ class ImportClient
                     // Always re-download — this file is in our local index,
                     // meaning we synced it before; preserve-local does not
                     // protect files we own.
-                    $fetch_list_handle = (
+                    $selected_fetch_list_handle = (
                         $skipped_handle !== null &&
                         (
                             $uploads_basedir !== null
@@ -6631,7 +6631,7 @@ class ImportClient
                         : $fetch_list_handle;
                     $this->append_to_fetch_list(
                         $remote_index_entry["path"],
-                        $fetch_list_handle,
+                        $selected_fetch_list_handle,
                     );
                 }
                 $last_local_index_entry_path = $local_index_entry["path"];
@@ -6645,7 +6645,7 @@ class ImportClient
                     $this->audit_log($skip_reason, true);
                     $this->emit_skip_progress($remote_index_entry["path"]);
                 } else {
-                    $fetch_list_handle = (
+                    $selected_fetch_list_handle = (
                         $skipped_handle !== null &&
                         (
                             $uploads_basedir !== null
@@ -6661,7 +6661,7 @@ class ImportClient
                     )
                         ? $skipped_handle
                         : $fetch_list_handle;
-                    $this->append_to_fetch_list($remote_index_entry["path"], $fetch_list_handle);
+                    $this->append_to_fetch_list($remote_index_entry["path"], $selected_fetch_list_handle);
                 }
             }
 
