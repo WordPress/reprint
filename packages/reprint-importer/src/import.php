@@ -3955,7 +3955,7 @@ class ImportClient
     }
 
     /**
-     * Prints host-facing import lifecycle metadata without mutating state.
+     * Prints host-facing import metadata without mutating state.
      */
     private function run_import_metadata(): void
     {
@@ -3977,16 +3977,47 @@ class ImportClient
      *     @type bool  $hasCompletedOnce Whether the pull pipeline has completed
      *                                   at least once.
      *     @type mixed $pullStage        Last completed pull stage.
+     *     @type array $sourceSite {
+     *         Source-site values reported by preflight.
+     *
+     *         @type string|null $homeUrl                    WordPress home URL.
+     *         @type string|null $siteUrl                    WordPress site URL.
+     *         @type string|null $tablePrefix                WordPress database
+     *                                                       table prefix.
+     *         @type string|null $wordpressDatabaseCharset   Charset used by
+     *                                                       WordPress.
+     *         @type string|null $serverDatabaseCharset      Database server's
+     *                                                       default charset.
+     *     }
      * }
-     * @phpstan-return array{hasCompletedOnce: bool, pullStage: mixed}
+     * @phpstan-return array{
+     *     hasCompletedOnce: bool,
+     *     pullStage: mixed,
+     *     sourceSite: array{
+     *         homeUrl: string|null,
+     *         siteUrl: string|null,
+     *         tablePrefix: string|null,
+     *         wordpressDatabaseCharset: string|null,
+     *         serverDatabaseCharset: string|null
+     *     }
+     * }
      */
     private function build_import_metadata(): array
     {
         $pull = $this->import_state()->pull_pipeline;
+        $database = $this->import_state()->preflight["data"]["database"] ?? [];
+        $wordpress = $database["wp"] ?? [];
 
         return [
             "hasCompletedOnce" => $pull->has_completed_once,
             "pullStage" => $pull->last_completed_stage,
+            "sourceSite" => [
+                "homeUrl" => $wordpress["home"] ?? null,
+                "siteUrl" => $wordpress["siteurl"] ?? null,
+                "tablePrefix" => $wordpress["table_prefix"] ?? null,
+                "wordpressDatabaseCharset" => $wordpress["wpdb_charset"] ?? null,
+                "serverDatabaseCharset" => $database["server_charset"] ?? null,
+            ],
         ];
     }
 
@@ -12666,11 +12697,11 @@ if (
         ],
         "import-metadata" => [
             "level" => "low",
-            "short" => "Print local pull lifecycle metadata as JSON",
+            "short" => "Print local metadata for host integrations as JSON",
             "usage" => "reprint import-metadata --state-dir=DIR",
             "description" =>
-                "Reads --state-dir/pull/state.json and prints metadata for\n" .
-                "host integrations. No network calls are made.\n",
+                "Reads --state-dir/pull/state.json and prints pull lifecycle and\n" .
+                "source-site metadata for host integrations. No network calls are made.\n",
             "extra" =>
                 "Example:\n" .
                 "  reprint import-metadata --state-dir=./state | jq '.hasCompletedOnce'\n",
