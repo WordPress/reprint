@@ -118,7 +118,7 @@ class LegacyCommandAliasTest extends TestCase
         $client = new \ImportClient('http://fake.invalid', $this->stateDir, $this->fs_root);
         $reflection = new \ReflectionClass($client);
         $loadState = $reflection->getMethod('load_state');
-        $state = $loadState->invoke($client);
+        $state = $loadState->invoke($client)->to_array();
 
         $this->assertArrayNotHasKey('command', $state);
         $this->assertArrayNotHasKey('status', $state);

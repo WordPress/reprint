@@ -588,7 +588,7 @@ class ImportClient
             }
         }
 
-        $this->state = ImportState::from_array($this->default_state());
+        $this->state = new ImportState();
     }
 
     /**
@@ -978,7 +978,7 @@ class ImportClient
             $this->pull->assert_options_valid_before_state_write($command, $options);
         }
 
-        $this->state = ImportState::from_array($this->load_state());
+        $this->state = $this->load_state();
 
         if ($command === "import-metadata") {
             $this->run_import_metadata();
@@ -10996,9 +10996,6 @@ class ImportClient
     }
 
     /**
-     * Return the default compact state structure.
-     */
-    /**
      * Reset state to defaults while preserving cross-command data like
      * preflight results, version, and follow_symlinks.
      */
@@ -11012,7 +11009,7 @@ class ImportClient
         $max_packet = $this->import_state()->max_allowed_packet ?? null;
         $files_remap_fingerprint = $this->import_state()->files_remap_fingerprint ?? null;
         $pull = $this->import_state()->pull_pipeline ?? null;
-        $this->state = ImportState::from_array($this->default_state());
+        $this->state = new ImportState();
         $this->import_state()->preflight = $preflight;
         $this->import_state()->version = $version;
         $this->import_state()->webhost = $webhost;
@@ -11024,114 +11021,6 @@ class ImportClient
             $this->import_state()->pull_pipeline = $pull;
         }
     }
-
-    public function default_state(): array
-    {
-        return [
-            // Resume checkpoint for the lower-level command currently being
-            // run directly or as a stage inside a pull pipeline.
-            "active_resumable_command" => [
-                "command_name" => null,
-                "completion_state" => null,
-                "current_stage" => null,
-                "remote_cursor" => null,
-            ],
-            "preflight" => null,
-            "remote_protocol_version" => null,
-            "remote_protocol_min_version" => null,
-            "version" => null,
-            "webhost" => null,
-            "follow_symlinks" => true,
-            "symlink_bundle_directory_fingerprint" => null,
-            "fs_root_nonempty_behavior" => "error",
-            "filter" => "none",
-            "user_agent" => null,
-            "max_allowed_packet" => null,
-            "files_remap_fingerprint" => null,
-            "files_pull_only_fingerprint" => null,
-            "files_pull_summary" => [
-                "files_pulled" => 0,
-            ],
-            "db_index" => [
-                "file" => null,
-                "tables" => 0,
-                "rows_estimated" => 0,
-                "bytes" => 0,
-                "updated_at" => null,
-            ],
-            "diff" => [
-                "remote_offset" => 0,
-                "local_after" => null,
-            ],
-            "index" => [
-                "cursor" => null,
-            ],
-            "fetch" => [
-                "offset" => 0,
-                "next_offset" => 0,
-                "batch_file" => null,
-                "cursor" => null,
-                "batch_entries" => 0,
-            ],
-            "fetch_skipped" => [
-                "offset" => 0,
-                "next_offset" => 0,
-                "batch_file" => null,
-                "cursor" => null,
-                "batch_entries" => 0,
-            ],
-            // Crash recovery: track in-progress file downloads
-            // If we crash mid-write, we can truncate to the expected size on resume
-            "current_file" => null,        // Path to file being written
-            "current_file_bytes" => null,  // Expected bytes written so far
-            // Crash recovery: track SQL file size
-            "sql_bytes" => null,           // Expected SQL file size
-            // SQL streaming progress for user-facing statement counts.
-            "sql_statements_counted" => 0,
-            // db-apply state
-            "apply" => [
-                "statements_executed" => 0,
-                "bytes_read" => 0,
-                "rewrite_url" => null,
-                // Target database configuration — persisted by db-apply
-                // so that apply-runtime can generate DB_* constants.
-                "target_engine" => null,
-                "target_db" => null,
-                "target_host" => null,
-                "target_port" => null,
-                "target_user" => null,
-                "target_pass" => null,
-                "target_sqlite_path" => null,
-                "remote_paths_removed_from_local_site" => [],
-            ],
-            // SQL output mode (file, stdout, mysql) — persisted for resume
-            "sql_output" => null,
-            // MySQL connection parameters — persisted for resume (password excluded)
-            "mysql_host" => null,
-            "mysql_port" => null,
-            "mysql_user" => null,
-            "mysql_database" => null,
-            // Stop resuming after repeated interrupted responses without
-            // cursor progress.
-            "consecutive_interrupted_responses" => 0,
-            // Adaptive tuning state/config
-            "tuning" => [
-                "config" => [],
-                "state" => [],
-            ],
-            // Resume checkpoint for the user-facing pull pipeline command
-            // being orchestrated.
-            "pull_pipeline" => [
-                "started_by_command" => null,
-                "stage_sequence" => [],
-                "last_completed_stage" => null,
-                "files_filter" => null,
-                "skipped_pending" => false,
-                "has_completed_once" => false,
-            ],
-        ];
-    }
-
 
     /** Return the in-process typed state, hydrating legacy arrays at the boundary. */
     private function import_state(): ImportState
@@ -11148,95 +11037,7 @@ class ImportClient
         if ($state instanceof ImportState) {
             return $state->to_array();
         }
-        return is_array($state) ? $state : $this->default_state();
-    }
-
-    /**
-     * Normalize state array to the compact schema.
-     */
-    private function normalize_state(array $state): array
-    {
-        $defaults = $this->default_state();
-        $state = array_intersect_key($state, $defaults);
-        $state = array_merge($defaults, $state);
-        $active_resumable_command = $state["active_resumable_command"] ?? [];
-        if (!is_array($active_resumable_command)) {
-            $active_resumable_command = [];
-        }
-        $active_resumable_command = array_intersect_key(
-            $active_resumable_command,
-            $defaults["active_resumable_command"],
-        );
-        $state["active_resumable_command"] = array_merge(
-            $defaults["active_resumable_command"],
-            $active_resumable_command,
-        );
-        $diff = $state["diff"];
-        if (!is_array($diff)) {
-            $diff = [];
-        }
-        $diff = array_intersect_key($diff, $defaults["diff"]);
-        $state["diff"] = array_merge($defaults["diff"], $diff);
-        $index = $state["index"] ?? [];
-        if (!is_array($index)) {
-            $index = [];
-        }
-        $index = array_intersect_key($index, $defaults["index"]);
-        $state["index"] = array_merge($defaults["index"], $index);
-        $fetch = $state["fetch"] ?? [];
-        if (!is_array($fetch)) {
-            $fetch = [];
-        }
-        $fetch = array_intersect_key($fetch, $defaults["fetch"]);
-        $state["fetch"] = array_merge($defaults["fetch"], $fetch);
-        $files_pull_summary = $state["files_pull_summary"] ?? [];
-        if (!is_array($files_pull_summary)) {
-            $files_pull_summary = [];
-        }
-        $files_pull_summary = array_intersect_key(
-            $files_pull_summary,
-            $defaults["files_pull_summary"],
-        );
-        $state["files_pull_summary"] = array_merge(
-            $defaults["files_pull_summary"],
-            $files_pull_summary,
-        );
-        $tuning = $state["tuning"] ?? [];
-        if (!is_array($tuning)) {
-            $tuning = [];
-        }
-        $tuning = array_intersect_key($tuning, $defaults["tuning"]);
-        $tuning = array_merge($defaults["tuning"], $tuning);
-        $state["tuning"] = $tuning;
-        $index_db = $state["db_index"] ?? [];
-        if (!is_array($index_db)) {
-            $index_db = [];
-        }
-        $index_db = array_intersect_key(
-            $index_db,
-            $defaults["db_index"],
-        );
-        $index_db = array_merge(
-            $defaults["db_index"],
-            $index_db,
-        );
-        $state["db_index"] = $index_db;
-        $apply = $state["apply"] ?? [];
-        if (!is_array($apply)) {
-            $apply = [];
-        }
-        $apply = array_intersect_key($apply, $defaults["apply"]);
-        $state["apply"] = array_merge($defaults["apply"], $apply);
-        $pull = $state["pull_pipeline"] ?? [];
-        if (!is_array($pull)) {
-            $pull = [];
-        }
-        $pull = array_intersect_key($pull, $defaults["pull_pipeline"]);
-        $state["pull_pipeline"] = array_merge($defaults["pull_pipeline"], $pull);
-        if (!is_array($state["pull_pipeline"]["stage_sequence"])) {
-            $state["pull_pipeline"]["stage_sequence"] = [];
-        }
-        return $state;
+        return ImportState::from_array(is_array($state) ? $state : [])->to_array();
     }
 
     /**
@@ -11476,15 +11277,15 @@ class ImportClient
     /**
      * Load import state from disk.
      */
-    private function load_state(): array
+    private function load_state(): ImportState
     {
         if (!file_exists($this->state_file)) {
-            return $this->default_state();
+            return new ImportState();
         }
 
         $contents = file_get_contents($this->state_file);
         if ($contents === false) {
-            return $this->default_state();
+            return new ImportState();
         }
 
         $state = json_decode($contents, true);
@@ -11495,13 +11296,13 @@ class ImportClient
             );
             $corrupt_name = $this->state_file . ".corrupt." . time();
             @rename($this->state_file, $corrupt_name);
-            return $this->default_state();
+            return new ImportState();
         }
 
-        $state = $this->normalize_state($state);
+        $state = $this->state_to_array($state);
         $state = $this->decode_state_paths($state);
 
-        return $state;
+        return ImportState::from_array($state);
     }
 
     /**
@@ -11524,7 +11325,6 @@ class ImportClient
                 "state" => $this->tuner->get_state(),
             ];
         }
-        $state = $this->normalize_state($state);
         $state = $this->encode_state_paths($state);
 
         // Write to temp file first, then atomic rename

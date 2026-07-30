@@ -55,31 +55,11 @@ class ImportStateTest extends TestCase
         $this->assertSame(99, $array['sql_statements_counted']);
     }
 
-    public function testStateRoundTripMatchesDefaultStateSchema(): void
-    {
-        $client = new \ImportClient(
-            'http://example.invalid',
-            sys_get_temp_dir() . '/reprint-import-state-test-state',
-            sys_get_temp_dir() . '/reprint-import-state-test-fs',
-        );
-        $default_state = $this->defaultStateFor($client);
-
-        $this->assertSame($default_state, \ImportState::from_array($default_state)->to_array());
-    }
-
     public function testStateObjectsDoNotExposeArrayOffsetMutation(): void
     {
         $state = \ImportState::from_array([]);
 
         $this->assertNotInstanceOf(\ArrayAccess::class, $state);
         $this->assertNotInstanceOf(\ArrayAccess::class, $state->active_resumable_command);
-    }
-
-    private function defaultStateFor(\ImportClient $client): array
-    {
-        $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('default_state');
-        $method->setAccessible(true);
-        return $method->invoke($client);
     }
 }

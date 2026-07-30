@@ -183,6 +183,10 @@ class FilesPullSummaryState
     }
 }
 
+/**
+ * db-apply state, including target database configuration retained so
+ * apply-runtime can generate DB_* constants.
+ */
 class DatabaseApplyCommandState
 {
     /** @var int SQL statements successfully executed. */
@@ -336,6 +340,7 @@ class PullPipelineCheckpointState
  */
 class ImportState
 {
+    /** Resume checkpoint for a lower-level command run directly or inside a pull pipeline. */
     public ResumableCommandCheckpointState $active_resumable_command;
     /** @var array<string,mixed>|null */
     public ?array $preflight = null;
@@ -361,19 +366,34 @@ class ImportState
     public RemoteFileIndexCursorState $index;
     public DownloadListFetchProgressState $fetch;
     public DownloadListFetchProgressState $fetch_skipped;
+    /** @var string|null Path to the file being written for crash recovery. */
     public ?string $current_file = null;
+    /** @var int|null Expected bytes written to the current file. */
     public ?int $current_file_bytes = null;
+    /** @var int|null Expected SQL file size recorded for crash recovery. */
     public ?int $sql_bytes = null;
     /** @var int SQL statements counted while streaming db.sql. */
     public int $sql_statements_counted = 0;
     public DatabaseApplyCommandState $apply;
+    /** @var string|null SQL output mode persisted for resume: file, stdout, or mysql. */
     public ?string $sql_output = null;
+    /**
+     * @var string|null MySQL host persisted for resume.
+     *
+     * The password is deliberately excluded from import state.
+     */
     public ?string $mysql_host = null;
+    /** @var int|null MySQL port persisted for resume. */
     public ?int $mysql_port = null;
+    /** @var string|null MySQL user persisted for resume. */
     public ?string $mysql_user = null;
+    /** @var string|null MySQL database persisted for resume. */
     public ?string $mysql_database = null;
+    /** Number of consecutive interrupted responses without cursor progress. */
     public int $consecutive_interrupted_responses = 0;
+    /** Adaptive tuner configuration and state. */
     public AdaptiveTuningState $tuning;
+    /** Resume checkpoint for the user-facing pull pipeline. */
     public PullPipelineCheckpointState $pull_pipeline;
 
     public function __construct()
