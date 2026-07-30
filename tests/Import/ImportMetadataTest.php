@@ -81,6 +81,7 @@ class ImportMetadataTest extends TestCase
         $client->run(['command' => 'import-metadata']);
         $output = ob_get_clean();
 
+        $this->assertStringNotContainsString("\n", trim($output));
         $metadata = json_decode($output, true);
         $this->assertIsArray($metadata, $output);
 
@@ -95,6 +96,8 @@ class ImportMetadataTest extends TestCase
         $metadata = $this->readMetadata();
 
         $this->assertFalse($metadata['hasCompletedOnce']);
+        $this->assertFalse($metadata['hasLocalIndex']);
+        $this->assertFalse($metadata['hasSkippedFiles']);
         $this->assertFileDoesNotExist($this->stateDir . '/pull/state.json');
         $this->assertNull($metadata['pullStage']);
         $this->assertSame([
@@ -103,6 +106,10 @@ class ImportMetadataTest extends TestCase
             'tablePrefix' => null,
             'wordpressDatabaseCharset' => null,
             'serverDatabaseCharset' => null,
+            'contentDirectory' => null,
+            'wordpressAbsolutePath' => null,
+            'wordpressRoots' => [],
+            'extraDirectories' => [],
         ], $metadata['sourceSite']);
     }
 
@@ -121,10 +128,26 @@ class ImportMetadataTest extends TestCase
                             'siteurl' => 'https://example.com/wordpress',
                             'table_prefix' => 'wp_4_',
                             'wpdb_charset' => 'utf8mb3',
+                            'paths_urls' => [
+                                'content_dir' => '/srv/htdocs/wp-content',
+                                'abspath' => '/wordpress/core/7.0/',
+                            ],
+                        ],
+                    ],
+                    'runtime' => [
+                        'ini_get_all' => [
+                            'auto_prepend_file' => '/scripts/env.php',
+                        ],
+                    ],
+                    'wp_detect' => [
+                        'roots' => [
+                            ['path' => '/wordpress/core/7.0'],
+                            ['path' => '/wordpress/core'],
                         ],
                     ],
                 ],
             ],
+            'webhost' => 'wpcloud',
         ]);
 
         $metadata = $this->readMetadata();
@@ -135,7 +158,34 @@ class ImportMetadataTest extends TestCase
             'tablePrefix' => 'wp_4_',
             'wordpressDatabaseCharset' => 'utf8mb3',
             'serverDatabaseCharset' => 'latin1',
+            'contentDirectory' => '/srv/htdocs/wp-content',
+            'wordpressAbsolutePath' => '/wordpress/core/7.0/',
+            'wordpressRoots' => [
+                '/wordpress/core/7.0',
+                '/wordpress/core',
+            ],
+            'extraDirectories' => ['/scripts'],
         ], $metadata['sourceSite']);
+    }
+
+    /**
+     * Verifies pull artifact availability is reported without exposing paths.
+     */
+    public function testImportMetadataReportsPullArtifacts(): void
+    {
+        file_put_contents(
+            $this->stateDir . '/pull/local-index.jsonl',
+            "{\"path\":\"L3dwLWNvbnRlbnQ=\"}\n"
+        );
+        file_put_contents(
+            $this->stateDir . '/pull/skipped-fetch-list.jsonl',
+            "{\"path\":\"L3dwLWNvbnRlbnQvdXBsb2Fkcy9waG90by5qcGc=\"}\n"
+        );
+
+        $metadata = $this->readMetadata();
+
+        $this->assertTrue($metadata['hasLocalIndex']);
+        $this->assertTrue($metadata['hasSkippedFiles']);
     }
 
     /**
