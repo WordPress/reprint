@@ -97,6 +97,45 @@ class ImportMetadataTest extends TestCase
         $this->assertFalse($metadata['hasCompletedOnce']);
         $this->assertFileDoesNotExist($this->stateDir . '/pull/state.json');
         $this->assertNull($metadata['pullStage']);
+        $this->assertSame([
+            'homeUrl' => null,
+            'siteUrl' => null,
+            'tablePrefix' => null,
+            'wordpressDatabaseCharset' => null,
+            'serverDatabaseCharset' => null,
+        ], $metadata['sourceSite']);
+    }
+
+    /**
+     * Verifies source-site values are exposed without leaking the preflight schema.
+     */
+    public function testImportMetadataReportsSourceSiteFields(): void
+    {
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'database' => [
+                        'server_charset' => 'latin1',
+                        'wp' => [
+                            'home' => 'https://example.com',
+                            'siteurl' => 'https://example.com/wordpress',
+                            'table_prefix' => 'wp_4_',
+                            'wpdb_charset' => 'utf8mb3',
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $metadata = $this->readMetadata();
+
+        $this->assertSame([
+            'homeUrl' => 'https://example.com',
+            'siteUrl' => 'https://example.com/wordpress',
+            'tablePrefix' => 'wp_4_',
+            'wordpressDatabaseCharset' => 'utf8mb3',
+            'serverDatabaseCharset' => 'latin1',
+        ], $metadata['sourceSite']);
     }
 
     /**
