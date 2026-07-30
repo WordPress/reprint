@@ -1,5 +1,5 @@
 /**
- * E2E test helpers for the streaming site migration system.
+ * E2E test helpers for Reprint.
  */
 import assert from 'node:assert/strict';
 import { execSync, execFileSync } from 'node:child_process';
