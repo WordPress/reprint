@@ -74,7 +74,7 @@ describe('Import: Pull Multi-Request', { timeout: 300000 }, () => {
     });
 
     it('state shows pull complete', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
         assertPullPipelineComplete(state);
     });
 

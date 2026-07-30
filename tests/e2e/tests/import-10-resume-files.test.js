@@ -56,7 +56,7 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
     });
 
     it('state shows complete', () => {
-        const stateFile = join(tempDir, 'pull/state.json');
+        const stateFile = join(tempDir, '.import-state.json');
         assert.ok(existsSync(stateFile), 'Expected state file to exist');
 
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));

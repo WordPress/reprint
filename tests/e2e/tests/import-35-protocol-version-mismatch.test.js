@@ -19,7 +19,7 @@ import { ensureSite } from '../lib/site-setup.js';
 describe('Import: Protocol Version Mismatch', () => {
     const site = 'basic';
     let tempDir;
-    const stateFileName = 'pull/state.json';
+    const stateFileName = '.import-state.json';
 
     function importUrl() {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;

@@ -22,7 +22,6 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $this->outputDir = $this->tempDir . '/runtime';
 
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
     }
@@ -150,7 +149,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             'filter' => 'essential-files',
         ]);
         file_put_contents(
-            $this->stateDir . '/pull/skipped-fetch-list.jsonl',
+            $this->stateDir . '/.import-fetch-list-skipped.jsonl',
             json_encode(['path' => '/wp-content/uploads/2024/01/photo.jpg']) . "\n",
         );
 

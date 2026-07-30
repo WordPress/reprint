@@ -61,7 +61,7 @@ describe('Import: Pull start-runtime none', { timeout: 180000 }, () => {
     });
 
     it('marks the pull complete and generates playground runtime files', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
         assertPullPipelineComplete(state);
         assert.equal(state.active_resumable_command.completion_state, 'complete');
 

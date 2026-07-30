@@ -25,11 +25,11 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
 
         mkdir($this->fsRoot, 0755, true);
         mkdir($this->outputDir, 0755, true);
-        mkdir($stateDir . '/pull', 0755, true);
+        mkdir($stateDir, 0755, true);
 
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
-        $this->pullStateFile = $stateDir . '/pull/state.json';
-        $this->skippedFetchListFile = $stateDir . '/pull/skipped-fetch-list.jsonl';
+        $this->pullStateFile = $stateDir . '/.import-state.json';
+        $this->skippedFetchListFile = $stateDir . '/.import-fetch-list-skipped.jsonl';
         file_put_contents($this->pullStateFile, "{\"command\":\"files-pull\",\"status\":\"partial\"}\n");
         file_put_contents($this->skippedFetchListFile, "{\"path\":\"/wp-content/uploads/test.jpg\"}\n");
     }

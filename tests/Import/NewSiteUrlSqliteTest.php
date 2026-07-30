@@ -404,7 +404,7 @@ class NewSiteUrlSqliteTest extends TestCase
             'target_db' => 'wp_test',
         ]);
 
-        $state = json_decode(file_get_contents($this->tempDir . '/pull/state.json'), true);
+        $state = json_decode(file_get_contents($this->tempDir . '/.import-state.json'), true);
         $this->assertSame('complete', $state['active_resumable_command']['completion_state']);
         $this->assertSame(3, $state['apply']['statements_executed']);
         $this->assertSame(strlen($sql), $state['apply']['bytes_read']);

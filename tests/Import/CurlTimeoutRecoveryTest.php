@@ -29,7 +29,6 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -76,7 +75,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
     private function readState(): array
     {
-        $contents = file_get_contents($this->stateDir . '/pull/state.json');
+        $contents = file_get_contents($this->stateDir . '/.import-state.json');
         return json_decode($contents, true);
     }
 

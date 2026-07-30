@@ -24,7 +24,6 @@ class OnlyCliParseTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/only-cli-' . uniqid();
         mkdir($this->tempDir . '/state', 0755, true);
-        mkdir($this->tempDir . '/state/pull', 0755, true);
         mkdir($this->tempDir . '/fs', 0755, true);
     }
 
@@ -42,7 +41,7 @@ class OnlyCliParseTest extends TestCase
             $this->serverPipes = array();
         }
 
-        // The real CLI run may drop state files (pull/state.json, audit log)
+        // The real CLI run may drop state files (.import-state.json, audit log)
         // into the state dir, so a plain rmdir wouldn't clear it — recurse.
         $this->recursiveDelete($this->tempDir);
         parent::tearDown();

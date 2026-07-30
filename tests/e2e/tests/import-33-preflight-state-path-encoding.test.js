@@ -42,7 +42,7 @@ describe('Import: Preflight state path encoding', () => {
     });
 
     it('stores requested preflight path fields as base64 in state file', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
         const data = state.preflight?.data;
         assert.ok(data, 'Expected preflight.data in state');
 

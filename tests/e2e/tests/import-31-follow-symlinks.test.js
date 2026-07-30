@@ -213,7 +213,7 @@ describe('Import: Follow Symlinks', () => {
     });
 
     it('state shows complete', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete');
         assert.equal(state.follow_symlinks, true, 'follow_symlinks should be persisted in state');
     });
@@ -328,7 +328,7 @@ describe('Import: Follow Symlinks', () => {
 
     it('multiple symlinks to same target do not create duplicate index entries', () => {
         // After sort+dedup, each path should appear at most once
-        const remoteIndex = join(tempDir, 'pull/remote-index.jsonl');
+        const remoteIndex = join(tempDir, '.import-remote-index.jsonl');
         if (!existsSync(remoteIndex)) return;
 
         const lines = readFileSync(remoteIndex, 'utf-8').split('\n').filter(l => l.trim());

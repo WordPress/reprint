@@ -637,7 +637,7 @@ function run_local_activation(): array {
     // is a black box: the wizard reports the empty-schema SQLite as
     // "ok" and the user lands on the install wizard.
     $audit_tail = '';
-    $audit_log_file = '/internal/shared/reprint-state/audit.log';
+    $audit_log_file = '/internal/shared/reprint-state/.import-audit.log';
     if (is_file($audit_log_file)) {
         $size = filesize($audit_log_file);
         $offset = max(0, $size - 4000);

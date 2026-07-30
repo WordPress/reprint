@@ -64,7 +64,7 @@ describe('Import: Database Index Response Interruption', () => {
         );
 
         const state = JSON.parse(
-            readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'),
+            readFileSync(join(tempDir, '.import-state.json'), 'utf-8'),
         );
         assert.equal(
             state.active_resumable_command.completion_state,

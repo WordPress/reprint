@@ -28,7 +28,6 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/srv/htdocs';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
     }
 
@@ -67,7 +66,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
         $c->get_import_state()->preflight = array('data' => $preflightData);
-        $this->set($c, 'audit_log_file', $this->tempDir . '/audit.log');
+        $this->set($c, 'audit_log_file', $this->tempDir . '/.import-audit.log');
         return $c;
     }
 
@@ -139,7 +138,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     private function readState(): array
     {
-        return json_decode(file_get_contents($this->stateDir . '/pull/state.json'), true);
+        return json_decode(file_get_contents($this->stateDir . '/.import-state.json'), true);
     }
 
     public function testResolvePullOnlyFilesPrefixAddsDirectoriesOutsideWpContent(): void
@@ -268,7 +267,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     public function testRunAllowsSameOnlyPrefixesWhileFilesPullIsInProgress(): void
     {
-        file_put_contents($this->stateDir . '/pull/remote-index.jsonl', '');
+        file_put_contents($this->stateDir . '/.import-remote-index.jsonl', '');
         $this->writeFilesPullState(array(
             'files_pull_only_fingerprint' => $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
@@ -285,7 +284,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     public function testRunRecordsOnlyFingerprintForInProgressFilesPullState(): void
     {
-        file_put_contents($this->stateDir . '/pull/remote-index.jsonl', '');
+        file_put_contents($this->stateDir . '/.import-remote-index.jsonl', '');
         $this->writeFilesPullState(array(
             'files_pull_only_fingerprint' => null,
         ));

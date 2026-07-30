@@ -1,6 +1,6 @@
 /**
  * Test 25: State File Corruption via import.php
- * Tests importer behavior when pull/state.json is corrupted or contains
+ * Tests importer behavior when .import-state.json is corrupted or contains
  * unexpected data. Verifies the importer recovers gracefully.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -33,7 +33,7 @@ describe('Import: State Corruption', () => {
             tempDir = createTempDir('e2e-state-corrupt-json');
             mkdirSync(join(tempDir, 'pull'), { recursive: true });
             // Write invalid JSON to state file
-            writeFileSync(join(tempDir, 'pull/state.json'), '{invalid json here!!!');
+            writeFileSync(join(tempDir, '.import-state.json'), '{invalid json here!!!');
         });
 
         afterAll(() => {
@@ -47,7 +47,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0 (graceful recovery)\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, 'pull/state.json');
+            const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete');
         });
@@ -81,7 +81,7 @@ describe('Import: State Corruption', () => {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Preflight failed:\n${result.stderr}`);
-            const statePath = join(tempDir, 'pull/state.json');
+            const statePath = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(statePath, 'utf-8'));
             state.active_resumable_command.command_name = 'db-pull';
             state.active_resumable_command.completion_state = 'complete';
@@ -99,7 +99,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, 'pull/state.json');
+            const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.command_name, 'files-pull', 'Expected command to be updated');
             assert.equal(state.active_resumable_command.completion_state, 'complete');
@@ -115,7 +115,7 @@ describe('Import: State Corruption', () => {
                 secret: getSiteSecret(site),
             });
             assert.equal(result.exitCode, 0, `Preflight failed:\n${result.stderr}`);
-            const statePath = join(tempDir, 'pull/state.json');
+            const statePath = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(statePath, 'utf-8'));
             state.active_resumable_command.command_name = 'files-pull';
             state.active_resumable_command.completion_state = 'in_progress';
@@ -134,7 +134,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0 with --abort\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, 'pull/state.json');
+            const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.notEqual(state.active_resumable_command.completion_state, 'in_progress', 'Expected status to be cleared');
             assert.ok(!state.active_resumable_command.remote_cursor, 'Expected cursor to be cleared');
@@ -146,7 +146,7 @@ describe('Import: State Corruption', () => {
             });
             assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-            const stateFile = join(tempDir, 'pull/state.json');
+            const stateFile = join(tempDir, '.import-state.json');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete');
         });

@@ -28,7 +28,6 @@ class RemapResolveTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/srv/htdocs';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
         $this->root = realpath($this->fsRoot);
     }
@@ -85,7 +84,7 @@ class RemapResolveTest extends TestCase
 
     private function writeLocalIndex(): void
     {
-        file_put_contents($this->stateDir . '/pull/local-index.jsonl', "{}\n");
+        file_put_contents($this->stateDir . '/.import-index.jsonl', "{}\n");
     }
 
     // --- resolution: SOURCE TARGET → one source => target rule -------------

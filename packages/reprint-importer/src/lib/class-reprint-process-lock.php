@@ -8,7 +8,7 @@
  * Serializes local Reprint commands which share one state directory.
  *
  * Construction acquires the non-blocking exclusive lock at
- * `<state-dir>/process.lock`. The caller retains this object for the
+ * `<state-dir>/.reprint.lock`. The caller retains this object for the
  * complete command and calls close() when the command ends.
  */
 final class ReprintProcessLock
@@ -39,7 +39,7 @@ final class ReprintProcessLock
                 . $state_dir . '.'
             );
         }
-        $process_lock_path = rtrim($state_dir, '/') . '/process.lock';
+        $process_lock_path = rtrim($state_dir, '/') . '/.reprint.lock';
         $this->handle = fopen($process_lock_path, 'c+b');
         if (!is_resource($this->handle)) {
             throw new RuntimeException('Failed to open the Reprint process lock: ' . $process_lock_path . '.');

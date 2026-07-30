@@ -266,7 +266,7 @@ export function runImporter(url, outputDir, command, options = {}) {
     // Non-preflight commands require a prior preflight run.
     // Automatically run one if the state file doesn't already have preflight data.
     if (command !== 'preflight' && command !== 'preflight-assert' && options.skipPreflight !== true) {
-        const stateFile = join(outputDir, 'pull/state.json');
+        const stateFile = join(outputDir, '.import-state.json');
         let needsPreflight = true;
         try {
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
@@ -671,17 +671,17 @@ export function countJsonlLines(filePath) {
  * Read the audit log as a string.
  */
 export function readAuditLog(outputDir) {
-    const logPath = join(outputDir, 'audit.log');
+    const logPath = join(outputDir, '.import-audit.log');
     if (!existsSync(logPath)) return '';
     return readFileSync(logPath, 'utf-8');
 }
 
 /**
  * Assert that the import indexed at least minCount files.
- * Checks pull/local-index.jsonl line count.
+ * Checks .import-index.jsonl line count.
  */
 export function assertFileCount(outputDir, minCount = 3000) {
-    const indexPath = join(outputDir, 'pull/local-index.jsonl');
+    const indexPath = join(outputDir, '.import-index.jsonl');
     assert.ok(existsSync(indexPath), `Expected ${indexPath} to exist`);
     const count = countJsonlLines(indexPath);
     assert.ok(count >= minCount,
