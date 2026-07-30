@@ -56,13 +56,13 @@ class PhpBuiltinApplier implements RuntimeApplier
      */
     private function generate_cli_server_routing(array $options): string
     {
-        $wp_index = $options['wordpress_index'] ?? '';
+        $wordpress_index_php = $options['wordpress_index_php'] ?? '';
         $wp_core_dir = '';
-        if ($wp_index !== '') {
-            $real_wp_index = realpath($wp_index);
-            $wp_core_dir = dirname($real_wp_index !== false ? $real_wp_index : $wp_index);
+        if ($wordpress_index_php !== '') {
+            $real_wp_index = realpath($wordpress_index_php);
+            $wp_core_dir = dirname($real_wp_index !== false ? $real_wp_index : $wordpress_index_php);
         }
-        $escaped_wp_index = addslashes($wp_index);
+        $escaped_wp_index = addslashes($wordpress_index_php);
         $escaped_wp_core_dir = addslashes($wp_core_dir);
 
         $lines = [];

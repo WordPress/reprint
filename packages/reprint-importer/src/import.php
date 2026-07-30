@@ -4057,9 +4057,9 @@ class ImportClient
      * the applier writes the files the target server needs to fulfill those
      * requirements.
      *
-     * The effective filesystem root is --fs-root + the remote site's document_root
+     * The local document root is --fs-root + the remote site's document_root
      * prefix (from preflight). For example, if the remote document_root is
-     * /srv/htdocs and --fs-root is ./files, the effective filesystem root is
+     * /srv/htdocs and --fs-root is ./files, the local document root is
      * ./files/srv/htdocs. If the site was flattened with flat-docroot,
      * pass the flattened directory as --fs-root directly and the prefix
      * is not applied.
@@ -4092,19 +4092,19 @@ class ImportClient
         $preflight_data = $entry["data"];
         $webhost = $this->import_state()->webhost ?? "other";
 
-        // Resolve the effective filesystem root from either --flat-document-root
+        // Resolve the local document root from either --flat-document-root
         // (used as-is) or --fs-root (prefixed with the remote document_root).
         // Mutual exclusion is already enforced at the CLI level.
         $flat_document_root = $options["flat_document_root"] ?? null;
 
         if (!empty($flat_document_root)) {
             // --flat-document-root: used directly as the web root.
-            $effective_fs_root = rtrim($flat_document_root, "/");
+            $local_document_root = rtrim($flat_document_root, "/");
         } else {
             // --fs-root: the raw download directory. The remote site's
             // document_root tells us where the web root lived on the
             // source server. Files are downloaded preserving the full
-            // remote absolute path, so the effective filesystem root is --fs-root +
+            // remote absolute path, so the local document root is --fs-root +
             // document_root.
             $remote_doc_root = $preflight_data["runtime"]["document_root"] ?? "";
             if (is_string($remote_doc_root)) {
@@ -4114,14 +4114,14 @@ class ImportClient
             }
 
             if ($remote_doc_root !== "") {
-                $effective_fs_root = $this->filesystem_root . $remote_doc_root;
+                $local_document_root = $this->filesystem_root . $remote_doc_root;
             } else {
-                $effective_fs_root = $this->filesystem_root;
+                $local_document_root = $this->filesystem_root;
             }
 
-            if (!is_dir($effective_fs_root)) {
+            if (!is_dir($local_document_root)) {
                 throw new RuntimeException(
-                    "Effective filesystem root does not exist: {$effective_fs_root}\n" .
+                    "Local document root does not exist: {$local_document_root}\n" .
                     "The remote document_root was: {$remote_doc_root}\n" .
                     "If you used flat-docroot, pass the flattened directory " .
                     "with --flat-document-root instead of --fs-root."
@@ -4131,7 +4131,7 @@ class ImportClient
 
         // Resolve to absolute paths so generated files work from any cwd.
         $abs_output_dir = realpath($output_dir) ?: $output_dir;
-        $abs_fs_root = realpath($effective_fs_root) ?: $effective_fs_root;
+        $resolved_local_document_root = realpath($local_document_root) ?: $local_document_root;
 
         if (!is_dir($abs_output_dir)) {
             if (!mkdir($abs_output_dir, 0755, true)) {
@@ -4219,20 +4219,20 @@ class ImportClient
         $abspath = rtrim($paths_urls["abspath"] ?? "", "/");
         if (!empty($flat_document_root)) {
             // Flattened layout: index.php is at the top level.
-            $wordpress_index = $abs_fs_root . '/index.php';
+            $wordpress_index_php = $resolved_local_document_root . '/index.php';
         } elseif ($abspath !== "") {
             // Raw download: ABSPATH is relative to the download root,
-            // not the effective filesystem root (which is download_root + document_root).
-            $wordpress_index = realpath($this->filesystem_root . $abspath . '/index.php') ?: '';
+            // not the local document root (which is download_root + document_root).
+            $wordpress_index_php = realpath($this->filesystem_root . $abspath . '/index.php') ?: '';
         } else {
-            $wordpress_index = $abs_fs_root . '/index.php';
+            $wordpress_index_php = $resolved_local_document_root . '/index.php';
         }
 
         // Step 2: Runtime applier writes server-specific config files.
         $applier = runtime_applier_for($runtime);
         $applier_options = [];
-        if ($wordpress_index !== '') {
-            $applier_options['wordpress_index'] = $wordpress_index;
+        if ($wordpress_index_php !== '') {
+            $applier_options['wordpress_index_php'] = $wordpress_index_php;
         }
         if ($host !== null) {
             $applier_options['host'] = $host;
@@ -4254,11 +4254,11 @@ class ImportClient
             // Resolve {fs-root} in db_dir now that we have the real path.
             $manifest->sqlite['db_dir'] = resolve_runtime_placeholders(
                 $manifest->sqlite['db_dir'],
-                $abs_fs_root,
+                $resolved_local_document_root,
             );
         }
 
-        $summary = $applier->apply($manifest, $abs_fs_root, $abs_output_dir, $applier_options);
+        $summary = $applier->apply($manifest, $resolved_local_document_root, $abs_output_dir, $applier_options);
 
         if ($manifest->sqlite !== null) {
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
@@ -4269,7 +4269,7 @@ class ImportClient
         // depend on infrastructure (Memcached servers, multisite APIs)
         // not available outside the original hosting environment.
         foreach ($manifest->paths_to_remove as $rel_path) {
-            $full_path = $abs_fs_root . '/' . ltrim($rel_path, '/');
+            $full_path = $resolved_local_document_root . '/' . ltrim($rel_path, '/');
             if (!file_exists($full_path) && !is_link($full_path)) {
                 continue;
             }

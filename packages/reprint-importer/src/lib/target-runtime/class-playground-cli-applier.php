@@ -198,12 +198,12 @@ class PlaygroundCliApplier implements RuntimeApplier
     {
         $mounts = [];
 
-        $wordpress_index = $options['wordpress_index'] ?? '';
+        $wordpress_index_php = $options['wordpress_index_php'] ?? '';
         $wordpress_core_dir = '';
 
-        if ($wordpress_index !== '') {
+        if ($wordpress_index_php !== '') {
             // Resolve through any symlinks to get the real path.
-            $real_index = realpath($wordpress_index);
+            $real_index = realpath($wordpress_index_php);
             if ($real_index !== false) {
                 $wordpress_core_dir = dirname($real_index);
             }

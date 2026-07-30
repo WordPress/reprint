@@ -84,7 +84,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $applier = new \PlaygroundCliApplier();
         $applier->apply($manifest, $this->fsRoot, $this->outputDir, [
             'port' => 9400,
-            'wordpress_index' => $this->fsRoot . '/index.php',
+            'wordpress_index_php' => $this->fsRoot . '/index.php',
         ]);
 
         $runtime = file_get_contents($this->outputDir . '/runtime.php');
