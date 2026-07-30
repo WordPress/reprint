@@ -316,7 +316,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $downloadIndex = $reflection->getMethod('download_target_index');
+        $downloadIndex = $reflection->getMethod('download_remote_index');
         $result = $downloadIndex->invoke($client);
 
         $this->assertFalse(
@@ -558,7 +558,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             SuccessTestClient::class,
         );
 
-        $downloadIndex = $reflection->getMethod('download_target_index');
+        $downloadIndex = $reflection->getMethod('download_remote_index');
         $downloadIndex->invoke($client);
 
         $state = $this->readState();

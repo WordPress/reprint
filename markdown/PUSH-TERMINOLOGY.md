@@ -7,30 +7,28 @@ commit messages, or pull-request descriptions.
 ## Coordinate systems and relationship state
 
 Every path name states the machine whose coordinates it uses and whether it
-is filesystem-absolute, filesystem-root-relative, or document-root-relative.
+is absolute or relative to a named root.
 
 - A **state directory** is the caller-selected local directory containing
   Reprint state for one filesystem root. Use `$state_dir`.
-- The **filesystem root** is the local directory under which a pulled target
+- The **filesystem root** is the local directory under which a pulled remote
   filesystem is reconstructed and whose contents are compared, pulled, and
   pushed. Use `$filesystem_root`.
-- A **target** is the site addressed by the configured exporter API URL. It is
-  the source during pull and the destination during push.
 - The **remote Reprint API URL** is the configured URL used for Reprint
   requests. Use `$remote_reprint_api_url`.
-- The **target document root** is the absolute document root on the target
-  machine. Use `$target_document_root`.
+- The **push root** is the remote root selected by the receiving push session.
+  Use `$push_root`.
 
-The four domain path terms are:
+The domain path terms are:
 
 | Term | Meaning | Preferred name |
 | --- | --- | --- |
-| Target filesystem path | Absolute path on the target machine. | `$target_filesystem_path` |
-| Local filesystem path | Absolute path on the local machine. | `$local_filesystem_path` |
-| Target document path | Path relative to the target document root. | `$target_document_path` |
-| Filesystem-root-relative path | Path relative to the filesystem root. | `$filesystem_relative_path` |
+| Remote absolute path | Absolute path on the remote machine. | `$remote_absolute_path` |
+| Local absolute path | Absolute path on the local machine. | `$local_absolute_path` |
+| Local relative path | Path relative to the filesystem root. | `$local_relative_path` |
+| Push-root-relative path | Path relative to the push root. | `$push_root_relative_path` |
 
-An **absolute path** begins at `/`. A **document path** has no leading slash.
+An **absolute path** begins at `/`. A **relative path** has no leading slash.
 A **normalized path** has repeated separators and `.` or `..` segments removed
 lexically; it does not inspect the filesystem. A **resolved absolute path** is
 an absolute path whose existing symlinks `realpath()` resolved. An
@@ -42,36 +40,36 @@ retains a missing suffix. Do not call this a canonical path. Do not use a bare
 `$path`, `$local_path`, or `$remote_path` when more than one coordinate system
 is present.
 
-The pull conversion flow is target filesystem path → local filesystem path →
-filesystem-root-relative path. Push applies the reverse mapping from a
-filesystem-root-relative path to a target document path.
+The pull conversion flow is remote absolute path → local absolute path →
+local relative path. Push applies the reverse mapping from a
+local relative path to a push-root-relative path.
 
 ## Indexes and mappings
 
-- A **target index** is the last target filesystem state accepted by pull.
-  Its entries use target filesystem paths and target-observed metadata. Use
-  `$target_index_file`.
+- A **remote index** is the last remote filesystem state accepted by pull.
+  Its entries use remote absolute paths and remote-observed metadata. Use
+  `$remote_index_file`.
 - A **local index** is the locally accounted baseline. Its entries use
-  filesystem-root-relative paths and locally observed metadata. Use
+  local relative paths and locally observed metadata. Use
   `$local_index_file`.
 - A **fresh local index** is the current filesystem-root scan created while
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
 - The **index-update WAL** records completed pull mutations awaiting application
-  to the target and local indexes.
-- A **pull plan** lists target filesystem paths still scheduled for download or
-  deletion. A **push plan** pairs filesystem-root-relative paths with target
-  document paths.
+  to the remote and local indexes.
+- A **pull plan** lists remote absolute paths still scheduled for download or
+  deletion. A **push plan** pairs local relative paths with push-root-relative
+  paths.
 
-A **resolved path mapping** is an immutable mapping between target filesystem
-prefixes and local filesystem prefixes. A **pull mapping** converts a target
-filesystem path to a local filesystem path. A **push mapping** converts a
-filesystem-root-relative path to a target document path. An **addressable mapping**
-maps every relevant filesystem-root-relative path to exactly one target document path below the
-target document root; an **ambiguous mapping** has more than one target path,
+A **resolved path mapping** is an immutable mapping between remote absolute
+prefixes and local absolute prefixes. A **pull mapping** converts a remote
+absolute path to a local absolute path. A **push mapping** converts a
+local relative path to a push-root-relative path. An **addressable mapping**
+maps every relevant local relative path to exactly one push-root-relative path below the
+push root; an **ambiguous mapping** has more than one push-root-relative path,
 and an **unaddressable mapping** has none. An **identity mapping** leaves local
-and target document paths identical. `path-mapping.json` stores the resolved
+and push-root-relative paths identical. `path-mapping.json` stores the resolved
 path mapping.
 
 A state directory belongs to one filesystem root. Reusing its mapping state
@@ -163,7 +161,7 @@ Every local Reprint command workflow runs under the **Reprint process lock** at
 `<state-dir>/.reprint.lock`. Use `.reprint.lock` and `$process_lock`. The lock
 is non-blocking and state-directory-wide: pull, push, diff, and other local
 Reprint processes cannot run concurrently against the same state directory,
-even when their target or local-tree pairs differ.
+even when their remote Reprint API URL or filesystem-root pairs differ.
 
 The production CLI acquires the Reprint process lock before it prepares pair
 context, constructs `ImportClient`, or writes the command audit entry. It
@@ -232,7 +230,7 @@ paths. `sender.json` phases are `creating`, `starting_plan`,
 path-list cursor, receiver part limit, and request-sizing state. The index diff
 completes before local paths are sent. The index copy after a successful commit
 has no separate copy cursor and is repeated after interruption. After the index
-is saved or the target confirms removal, the sender clears the PushPlan
+is saved or the remote confirms removal, the sender clears the PushPlan
 cursor, then removes the entire plan directory and its exclusions file. It
 does not ask PushPlan to manage terminal cleanup; PushPlan only closes its open
 handles.
@@ -274,7 +272,7 @@ which a completed files-push publishes, and never changes it.
 Each JSONL change record has `command: "files-diff"`, an `action` of `push` or
 `delete`, and `path_b64`. A push record also has the local path `type`, `size`,
 and `ctime`; its type is `file`, `dir`, or `link`. These records form a local
-minimized push operation plan before target exclusions: descendants represent
+minimized push operation plan before remote exclusions: descendants represent
 a new non-empty directory, one deleted subtree root covers its descendants,
 and metadata-only changes to non-empty directories select no operation. The
 final record has `status: "complete"`, `local_paths_to_push`, and

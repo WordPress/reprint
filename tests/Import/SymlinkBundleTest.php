@@ -129,7 +129,7 @@ class SymlinkBundleTest extends TestCase
 
     private function place(\ImportClient $c, string $path): string
     {
-        return (new \ReflectionClass($c))->getMethod('map_target_filesystem_path_to_local_filesystem_path')->invoke($c, $path);
+        return (new \ReflectionClass($c))->getMethod('map_remote_absolute_path_to_local_absolute_path')->invoke($c, $path);
     }
 
     public function testEscapingTargetRoutesIntoBundle(): void
@@ -244,7 +244,7 @@ class SymlinkBundleTest extends TestCase
         $rc->getProperty('follow_symlinks')->setValue($c, true);
         $target = $this->root . '/wp-content/themes/x'; // realpath-clean, so it is its own cache key
         // Pretend the target subtree was followed + indexed.
-        $rc->getProperty('target_index_prefix_cache')->setValue($c, [$target => true]);
+        $rc->getProperty('remote_index_prefix_cache')->setValue($c, [$target => true]);
 
         $result = $rc->getMethod('map_symlink_target_for_local_mirror')->invoke(
             $c,
@@ -271,7 +271,7 @@ class SymlinkBundleTest extends TestCase
         $rc->getProperty('symlink_bundle_directory')->setValue($c, $this->root . '/.symlinks-bundle');
         $rc->getProperty('pull_only_files_with_path_prefixes')->setValue($c, ['/src/wp-content']);
         $rc->getProperty('follow_symlinks')->setValue($c, true);
-        $rc->getProperty('target_index_prefix_cache')->setValue($c, ['/opt/data' => true]);
+        $rc->getProperty('remote_index_prefix_cache')->setValue($c, ['/opt/data' => true]);
 
         $entry = json_encode([
             'path' => base64_encode('/src/wp-content/data'),
