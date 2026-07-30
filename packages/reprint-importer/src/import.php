@@ -12315,7 +12315,7 @@ if (
         $cyan  = $is_tty ? "\033[36m" : "";
         $reset = $is_tty ? "\033[0m" : "";
 
-        $repo = "adamziel/streaming-site-migration";
+        $repo = "WordPress/reprint";
         $zip_url = "https://github.com/{$repo}/releases/download/{$version}/reprint-exporter-wp.zip";
         $releases_url = "https://github.com/{$repo}/releases";
 
