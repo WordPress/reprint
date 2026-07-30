@@ -3425,14 +3425,14 @@ class ImportClient
      */
     private function extract_symlink_dirs_from_index(array $visited): array
     {
-        $targets = [];
+        $symlink_targets = [];
         if (!file_exists($this->remote_index_file)) {
-            return $targets;
+            return $symlink_targets;
         }
 
         $handle = fopen($this->remote_index_file, "r");
         if (!$handle) {
-            return $targets;
+            return $symlink_targets;
         }
 
         while (($line = fgets($handle)) !== false) {
@@ -3450,21 +3450,21 @@ class ImportClient
             if (!is_string($symlink_target_encoded) || $symlink_target_encoded === "") {
                 continue;
             }
-            $target = base64_decode($target_encoded);
-            if ($target === false || $target === "") {
+            $symlink_target = base64_decode($symlink_target_encoded);
+            if ($symlink_target === false || $symlink_target === "") {
                 continue;
             }
 
-            // If we've seen this target already, we can move on
+            // If we've seen this symlink target already, we can move on
             // to the next one.
-            if (isset($visited[$target])) {
+            if (isset($visited[$symlink_target])) {
                 continue;
             }
 
             // Check containment: skip if already under a visited root
             $contained = false;
             foreach ($visited as $root => $_) {
-                if (str_starts_with($target, $root . "/")) {
+                if (str_starts_with($symlink_target, $root . "/")) {
                     $contained = true;
                     break;
                 }
@@ -3473,11 +3473,11 @@ class ImportClient
                 continue;
             }
 
-            $targets[] = $target;
+            $symlink_targets[] = $symlink_target;
         }
         fclose($handle);
 
-        return array_values(array_unique($targets));
+        return array_values(array_unique($symlink_targets));
     }
 
     /**
@@ -3519,8 +3519,8 @@ class ImportClient
             if (empty($entry["intermediate"])) {
                 continue;
             }
-            $target_encoded = $entry["target"] ?? null;
-            if (!is_string($target_encoded) || $target_encoded === "") {
+            $symlink_target_encoded = $entry["target"] ?? null;
+            if (!is_string($symlink_target_encoded) || $symlink_target_encoded === "") {
                 continue;
             }
             $path_encoded = $entry["path"] ?? null;
