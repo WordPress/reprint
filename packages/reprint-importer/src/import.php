@@ -1967,14 +1967,19 @@ class ImportClient
                 $this->import_state()->mysql_database = null;
                 $this->save_state($this->state);
 
-                if ($this->sql_output_mode === "file") {
-                    $sql_file = $this->state_dir . "/db.sql";
-                    if (file_exists($sql_file)) {
-                        unlink($sql_file);
-                        $this->audit_log(
-                            "FILE DELETE | {$sql_file} | abort db-pull",
-                        );
-                    }
+                $sql_file = $this->state_dir . "/db.sql";
+                if (file_exists($sql_file)) {
+                    unlink($sql_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$sql_file} | abort db-pull",
+                    );
+                }
+                $sql_buffer_file = $this->state_dir . "/pull/sql-buffer";
+                if (file_exists($sql_buffer_file)) {
+                    unlink($sql_buffer_file);
+                    $this->audit_log(
+                        "FILE DELETE | {$sql_buffer_file} | abort db-pull",
+                    );
                 }
                 $tables_file = $this->state_dir . "/db-tables.jsonl";
                 if (file_exists($tables_file)) {

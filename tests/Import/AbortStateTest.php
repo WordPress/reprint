@@ -50,6 +50,7 @@ final class AbortStateTest extends TestCase
             'pull/fetch-list.jsonl',
             'pull/skipped-fetch-list.jsonl',
             'pull/volatile-files.json',
+            'pull/sql-buffer',
             'db.sql',
             'db-tables.jsonl',
             'pull/domains.json',
@@ -79,6 +80,42 @@ final class AbortStateTest extends TestCase
         }
     }
 
+    public function testDbPullAbortRemovesSqlArtifactsAfterRestoringMysqlMode(): void
+    {
+        $client = $this->client();
+        \write_current_import_state($client, [
+            'active_resumable_command' => [
+                'command_name' => 'db-pull',
+                'completion_state' => 'partial',
+                'current_stage' => 'sql',
+                'remote_cursor' => 'remote-cursor',
+            ],
+            'preflight' => [
+                'data' => ['ok' => true],
+                'http_code' => 200,
+            ],
+            'sql_output' => 'mysql',
+            'mysql_database' => 'stream_db',
+        ]);
+        $sqlFile = $this->stateDirectory . '/db.sql';
+        $sqlBufferFile = $this->stateDirectory . '/pull/sql-buffer';
+        file_put_contents($sqlFile, "stale dump\n");
+        file_put_contents($sqlBufferFile, 'partial statement');
+
+        $processLock = new \ReprintProcessLock($this->stateDirectory);
+        try {
+            $client->run([
+                'command' => 'db-pull',
+                'abort' => true,
+            ], $processLock);
+        } finally {
+            $processLock->close();
+        }
+
+        $this->assertFileDoesNotExist($sqlFile);
+        $this->assertFileDoesNotExist($sqlBufferFile);
+    }
+
     /** @return array<string,array{string,array<string>}> */
     public static function commandStateProvider(): array
     {
@@ -102,6 +139,7 @@ final class AbortStateTest extends TestCase
                     'db.sql',
                     'db-tables.jsonl',
                     'pull/domains.json',
+                    'pull/sql-buffer',
                 ],
             ],
             'db-index' => [
