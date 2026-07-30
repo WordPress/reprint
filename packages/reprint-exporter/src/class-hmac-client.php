@@ -12,35 +12,6 @@
  *   $headers = $client->get_auth_headers($request_body);
  *   // Add $headers to your HTTP request
  *
- * Usage with curl:
- *
- * ```php
- * // 1. First time: Generate and display a secret for the user
- * $secret = Site_Export_HMAC_Client::generate_secret();
- * echo "Please enter this secret in the Site Export plugin settings:\n";
- * echo $secret . "\n";
- *
- * // 2. For each request: Create client and sign requests
- * $client = new Site_Export_HMAC_Client($secret);
- *
- * // For GET requests:
- * $ch = curl_init('https://example.com/?reprint-api&endpoint=file_index&directory=/var/www/html');
- * $client->sign_curl_request($ch, '');
- * curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
- * $response = curl_exec($ch);
- *
- * // For POST requests with JSON body:
- * $body = json_encode(['paths' => ['/wp-content/uploads/image.jpg']]);
- * $ch = curl_init('https://example.com/?reprint-api&endpoint=file_fetch');
- * $client->sign_curl_request($ch, $body);
- * curl_setopt($ch, CURLOPT_POST, true);
- * curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
- * curl_setopt($ch, CURLOPT_HTTPHEADER, [
- *     'Content-Type: application/json',
- *     // Auth headers are added by sign_curl_request
- * ]);
- * $response = curl_exec($ch);
- * ```
  */
 class Site_Export_HMAC_Client {
 
@@ -56,11 +27,6 @@ class Site_Export_HMAC_Client {
 
     public function __construct(string $secret) {
         $this->secret = $secret;
-    }
-
-    /** Returns a hex-encoded random secret (64 chars = 256 bits by default). */
-    public static function generate_secret(int $length = 32): string {
-        return bin2hex(random_bytes($length));
     }
 
     /** @return string Hex-encoded 16-byte nonce. */
@@ -165,29 +131,5 @@ class Site_Export_HMAC_Client {
             $curl_headers[] = "{$name}: {$value}";
         }
         return $curl_headers;
-    }
-
-    /** Sets CURLOPT_HTTPHEADER with auth headers on a cURL handle. */
-    public function sign_curl_request($ch, string $body = ''): void {
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $this->get_curl_headers($body));
-    }
-
-    /** Returns a stream context with auth headers, for use with file_get_contents(). */
-    public function create_stream_context(string $body = '', string $method = 'GET', array $extra = []) {
-        $headers = $this->get_auth_headers($body);
-        $header_string = '';
-        foreach ($headers as $name => $value) {
-            $header_string .= "{$name}: {$value}\r\n";
-        }
-
-        $options = [
-            'http' => array_merge([
-                'method' => $method,
-                'header' => $header_string,
-                'content' => $body,
-            ], $extra['http'] ?? []),
-        ];
-
-        return stream_context_create($options);
     }
 }

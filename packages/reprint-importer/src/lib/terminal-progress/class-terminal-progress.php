@@ -77,16 +77,6 @@ class TerminalProgress
         $this->verbose_mode = $verbose_mode;
     }
 
-    public function is_tty(): bool
-    {
-        return $this->is_tty;
-    }
-
-    public function is_verbose(): bool
-    {
-        return $this->verbose_mode;
-    }
-
     /**
      * Set the output mode. Pipeline mode suppresses lifecycle messages,
      * adds a spinner/bar prefix to progress lines, and lets tick_spinner()

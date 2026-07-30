@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir, getDbName, createMysqlConnection,
+    getDbName, createMysqlConnection,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 

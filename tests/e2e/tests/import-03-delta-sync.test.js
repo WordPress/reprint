@@ -4,7 +4,7 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
@@ -25,12 +25,12 @@ describe('Import: Delta Sync', () => {
         await ensureSite(site);
         tempDir = createTempDir('e2e-import-delta');
         // Clean up any leftover test file
-        try { execSync(`sudo rm -f ${JSON.stringify(addedFile)}`); } catch (e) {}
+        try { execSync(`sudo rm -f ${JSON.stringify(addedFile)}`); } catch {}
     });
 
     afterAll(() => {
         cleanupTempDir(tempDir);
-        try { execSync(`sudo rm -f ${JSON.stringify(addedFile)}`); } catch (e) {}
+        try { execSync(`sudo rm -f ${JSON.stringify(addedFile)}`); } catch {}
     });
 
     function importUrl() {

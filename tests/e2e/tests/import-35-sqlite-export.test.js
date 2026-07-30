@@ -40,7 +40,7 @@ describe('Import: SQLite Export', () => {
                             ` -o "${pluginZip}"`,
                             { timeout: 120000 },
                         );
-                    } catch (e) {
+                    } catch {
                         // WordPress.org might not have it; try GitHub
                         execSync(
                             `curl -sfL "https://github.com/WordPress/sqlite-database-integration/archive/refs/heads/main.tar.gz"` +
@@ -63,7 +63,7 @@ describe('Import: SQLite Export', () => {
                             `unzip -qo "${pluginZip}" -d "${pluginsDir}"`,
                             { timeout: 30000 },
                         );
-                    } catch (e) {
+                    } catch {
                         // unzip not available — fall back to PHP's ZipArchive
                         execSync(
                             `php -r "\\$z = new ZipArchive;` +

@@ -250,14 +250,11 @@ function resolve_db_credentials(): array
 /**
  * Returns true when the current WordPress site uses the SQLite backend.
  *
- * Detection is based on the WP_SQLite_Driver class being loaded and
- * $wpdb->dbh being an instance of it. This is set up automatically by
- * the sqlite-database-integration plugin's db.php drop-in when WordPress
- * boots.
+ * The sqlite-database-integration plugin's db.php drop-in defines
+ * SQLITE_DB_DROPIN_VERSION and exposes its PDO handle through $GLOBALS['@pdo'].
  */
 function is_sqlite_site(): bool
 {
-    global $wpdb;
     // @TODO: Actually check for the WP_SQLite_Driver class being used here.
     return defined('SQLITE_DB_DROPIN_VERSION') && isset($GLOBALS['@pdo']);
 }
@@ -698,11 +695,6 @@ class GzipOutputStream
             echo $compressed;
         }
         flush();
-    }
-
-    public function flush(): void
-    {
-        $this->sync();
     }
 
     /**
@@ -2956,18 +2948,6 @@ function file_fetch_paths_should_gzip(array $paths): bool
         // 'no' — known binary. Skip; doesn't disqualify the batch.
     }
     return $any_compressible;
-}
-
-/**
- * Returns true if a path's basename suggests text content gzip will shrink.
- *
- * Files with no extension (`.htaccess`, `LICENSE`, `README`, dotfiles) are
- * treated as text by convention — that's almost always how they're stored
- * in WordPress installs.
- */
-function path_extension_is_compressible(string $path): bool
-{
-    return path_extension_compressibility($path) === 'yes';
 }
 
 /**

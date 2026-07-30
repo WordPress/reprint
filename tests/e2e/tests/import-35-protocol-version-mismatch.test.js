@@ -8,7 +8,7 @@
  */
 import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,

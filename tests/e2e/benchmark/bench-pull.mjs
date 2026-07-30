@@ -151,7 +151,6 @@ function runStage(stage, stateDir, extraArgs = [], { includeUrl = true, phpBinar
 
     const start = performance.now();
     let attempts = 0;
-    let lastErr = null;
 
     // Stages other than preflight may exit 2 to request resumption. Loop
     // until the command runs to completion (exit 0) or fatally fails.
@@ -169,7 +168,6 @@ function runStage(stage, stateDir, extraArgs = [], { includeUrl = true, phpBinar
             return { stage, elapsedMs, attempts, ok: true };
         } catch (e) {
             const exitCode = e.status === null ? -1 : (e.status || 1);
-            lastErr = e;
             if (exitCode === 2 && attempts < 50) {
                 continue;
             }

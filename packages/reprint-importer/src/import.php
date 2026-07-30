@@ -5386,7 +5386,6 @@ class ImportClient
         $sql_file_size = filesize($sql_file);
         $total_bytes_read = 0;
         $stmt_count = 0;
-        $skipped = 0;
         $save_every = 100;
         $stmts_since_save = 0;
 
@@ -6065,7 +6064,7 @@ class ImportClient
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
             if ($chunk_type === "metadata") {
-                $this->handle_metadata_chunk($chunk, $context);
+                $this->handle_metadata_chunk($chunk);
             } elseif ($chunk_type === "file") {
                 $this->handle_file_chunk($chunk, $context);
             } elseif ($chunk_type === "directory") {
@@ -6416,7 +6415,7 @@ class ImportClient
             } elseif ($chunk_type === "progress") {
                 $this->handle_progress($chunk, "index");
             } elseif ($chunk_type === "metadata") {
-                $this->handle_metadata_chunk($chunk, $context);
+                $this->handle_metadata_chunk($chunk);
             } elseif ($chunk_type === "completion") {
                 $complete =
                     ($chunk["headers"]["x-status"] ?? "") === "complete";
@@ -7671,7 +7670,6 @@ class ImportClient
                 $url = $this->build_url("sql_chunk", $cursor, $params);
 
                 $context = new StreamingContext();
-                $context->chunk_fingerprints = [];
                 $context->on_chunk = function ($chunk) use (
                     $mode,
                     &$cursor,
@@ -9035,15 +9033,11 @@ class ImportClient
     /**
      * Handle a metadata chunk from multipart response.
      */
-    private function handle_metadata_chunk(
-        array $chunk,
-        StreamingContext $context
-    ): void {
+    private function handle_metadata_chunk(array $chunk): void {
         $headers = $chunk["headers"];
         $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "", true);
 
         if ($filesystem_root) {
-            $context->filesystem_root = $filesystem_root;
             $this->audit_log("Filesystem root: {$filesystem_root}", false);
         }
     }
@@ -11512,10 +11506,6 @@ class StreamingContext
     public $file_handle = null;
     public $file_path = null;
     public $file_ctime = null;
-    public $filesystem_root = null;
-    public $chunk_fingerprints = [];
-    public $need_client_slice = false;
-    public $next_client_offset = 0;
     // Crash recovery: track bytes written for current file
     public $file_bytes_written = 0;
     // Last response stats from completion chunk
@@ -12317,7 +12307,6 @@ if (
 
         $repo = "WordPress/reprint";
         $zip_url = "https://github.com/{$repo}/releases/download/{$version}/reprint-exporter-wp.zip";
-        $releases_url = "https://github.com/{$repo}/releases";
 
         echo "{$bold}Install the RePrint Exporter Plugin{$reset}\n";
         echo "\n";

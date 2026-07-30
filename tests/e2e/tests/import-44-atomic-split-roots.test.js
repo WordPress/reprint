@@ -19,14 +19,14 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
-    existsSync, readFileSync, readdirSync,
+    existsSync, readdirSync,
     mkdirSync, writeFileSync,
 } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
     createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir,
+    getSiteUrl, getSiteDir,
     apiRequest,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';

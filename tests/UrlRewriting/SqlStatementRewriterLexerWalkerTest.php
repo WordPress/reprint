@@ -502,18 +502,21 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
      * couldn't tell whether the lexer walker actually fired or whether
      * the AST path produced the same output by coincidence — and in fact
      * a stray EOF token kept the walker from firing on the real
-     * benchmark even though all 26 indirect tests passed. Call the
-     * walker directly and assert it returns a non-null column_map for a
-     * canonical INSERT, plus the right table name and a column_map size
+     * benchmark even though all 26 indirect tests passed. Call the production
+     * tokenizer and walker directly and assert it returns a non-null column_map
+     * for a canonical INSERT, plus the right table name and a column_map size
      * that matches `<columns> × <rows>`.
      */
     private function invokeMapValuesToColumns(string $sql): ?array
     {
         $rewriter = $this->rewriter();
         $reflection = new \ReflectionClass(SqlStatementRewriter::class);
-        $method = $reflection->getMethod('map_values_to_columns');
+        $tokenizer = $reflection->getMethod('significant_tokens');
+        $tokenizer->setAccessible(true);
+        $tokens = $tokenizer->invoke(null, $sql);
+        $method = $reflection->getMethod('map_values_to_columns_from_tokens');
         $method->setAccessible(true);
-        return $method->invoke($rewriter, $sql);
+        return $method->invoke($rewriter, $tokens);
     }
 
     public function testWalkerEngagesOnCanonicalDumpedInsert(): void
