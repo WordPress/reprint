@@ -356,11 +356,11 @@ final class PushFilesSender
             }
         }
 
-        $resolved_filesystem_root = realpath($filesystem_root);
-        if ($resolved_filesystem_root === false) {
+        $resolved_local_filesystem_root = realpath($filesystem_root);
+        if ($resolved_local_filesystem_root === false) {
             throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
         }
-        $this->filesystem_root = rtrim($resolved_filesystem_root, '/');
+        $this->filesystem_root = rtrim($resolved_local_filesystem_root, '/');
         $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->plan_directory = $this->push_state_directory . '/plan';

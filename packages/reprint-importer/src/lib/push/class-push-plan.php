@@ -273,11 +273,11 @@ class PushPlan
     private function set_filesystem_root(string $filesystem_root): void
     {
         clearstatcache(true, $filesystem_root);
-        $resolved_filesystem_root = realpath($filesystem_root);
-        if ($resolved_filesystem_root === false || !is_dir($resolved_filesystem_root) || is_link($filesystem_root)) {
+        $resolved_local_filesystem_root = realpath($filesystem_root);
+        if ($resolved_local_filesystem_root === false || !is_dir($resolved_local_filesystem_root) || is_link($filesystem_root)) {
             throw new InvalidArgumentException("PushPlan requires the filesystem root to be a real directory.");
         }
-        $this->filesystem_root = rtrim($resolved_filesystem_root, "/");
+        $this->filesystem_root = rtrim($resolved_local_filesystem_root, "/");
     }
 
     /**

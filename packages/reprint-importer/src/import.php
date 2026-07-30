@@ -1847,15 +1847,15 @@ class ImportClient
                 'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
             );
         }
-        $resolved_filesystem_root = realpath($filesystem_root);
-        if ($resolved_filesystem_root === false) {
+        $resolved_local_filesystem_root = realpath($filesystem_root);
+        if ($resolved_local_filesystem_root === false) {
             throw new InvalidArgumentException(
                 'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
             );
         }
-        $resolved_filesystem_root = rtrim($resolved_filesystem_root, '/') ?: '/';
+        $resolved_local_filesystem_root = rtrim($resolved_local_filesystem_root, '/') ?: '/';
         $remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
-        $pair = hash('sha256', $remote_reprint_api_url . "\0" . $resolved_filesystem_root);
+        $pair = hash('sha256', $remote_reprint_api_url . "\0" . $resolved_local_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
         $push_state_directory = $state_dir . '/push/' . $pair;
         if (strpos($push_state_directory, '/') !== 0) {
@@ -1886,18 +1886,18 @@ class ImportClient
             );
         }
         if (
-            $resolved_filesystem_root === '/'
-            || path_is_within_root($push_state_directory, $resolved_filesystem_root)
+            $resolved_local_filesystem_root === '/'
+            || path_is_within_root($push_state_directory, $resolved_local_filesystem_root)
         ) {
             throw new InvalidArgumentException(
                 'The local push state directory ' . $push_state_directory
-                . ' must be outside the filesystem root ' . $resolved_filesystem_root . '.'
+                . ' must be outside the filesystem root ' . $resolved_local_filesystem_root . '.'
             );
         }
 
         return [
             'remote_reprint_api_url' => $remote_reprint_api_url,
-            'filesystem_root' => $resolved_filesystem_root,
+            'filesystem_root' => $resolved_local_filesystem_root,
             'pair' => $pair,
             'push_state_directory' => $push_state_directory,
         ];
