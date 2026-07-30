@@ -235,6 +235,11 @@ class PullFilterOptionTest extends TestCase
         );
     }
 
+    private function writeState(array $state): void
+    {
+        \write_current_import_state($this->makeClient(false), $state);
+    }
+
     public function testPullRejectsSkippedEarlierFilterBeforePersistingIt(): void
     {
         $client = $this->makeClient(false);
@@ -297,21 +302,18 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullResumesAfterFilesPullCompletedBeforePipelineStageWasMarked(): void
     {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "files-pull",
-                    "completion_state" => "complete",
-                    "current_stage" => null,
-                ],
-                "pull_pipeline" => [
-                    "started_by_command" => "pull",
-                    "last_completed_stage" => "preflight",
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "complete",
+                "current_stage" => null,
+            ],
+            "pull_pipeline" => [
+                "started_by_command" => "pull",
+                "last_completed_stage" => "preflight",
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
 
         $client = $this->makeClient(false);
 
@@ -331,21 +333,18 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullResumesSameUnfinishedPipelineWithoutConflict(): void
     {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "files-pull",
-                    "completion_state" => "in_progress",
-                    "current_stage" => "fetch",
-                ],
-                "pull_pipeline" => [
-                    "started_by_command" => "pull",
-                    "last_completed_stage" => "preflight",
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "in_progress",
+                "current_stage" => "fetch",
+            ],
+            "pull_pipeline" => [
+                "started_by_command" => "pull",
+                "last_completed_stage" => "preflight",
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
 
         $client = $this->makeClient(false);
 
@@ -364,21 +363,18 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullRefusesToClearCompletedCommandOwnedByDifferentUnfinishedPipeline(): void
     {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "db-pull",
-                    "completion_state" => "complete",
-                    "current_stage" => null,
-                ],
-                "pull_pipeline" => [
-                    "started_by_command" => "pull-db",
-                    "last_completed_stage" => null,
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "complete",
+                "current_stage" => null,
+            ],
+            "pull_pipeline" => [
+                "started_by_command" => "pull-db",
+                "last_completed_stage" => null,
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
         file_put_contents($this->stateDir . '/db.sql', "SELECT 1;\n");
 
         $client = $this->makeClient(false);
@@ -524,22 +520,19 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullFilesResumesAfterFilesPullCompletedBeforePipelineStageWasMarked(): void
     {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "files-pull",
-                    "completion_state" => "complete",
-                    "current_stage" => null,
-                ],
-                "pull_pipeline" => [
-                    "started_by_command" => "pull-files",
-                    "stage_sequence" => ["preflight", "files-pull"],
-                    "last_completed_stage" => "preflight",
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "complete",
+                "current_stage" => null,
+            ],
+            "pull_pipeline" => [
+                "started_by_command" => "pull-files",
+                "stage_sequence" => ["preflight", "files-pull"],
+                "last_completed_stage" => "preflight",
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
 
         $client = $this->makeClient(false);
 
@@ -555,17 +548,14 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullFilesAfterStandaloneFilesPullStartsFreshDelta(): void
     {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "files-pull",
-                    "completion_state" => "complete",
-                    "current_stage" => null,
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "complete",
+                "current_stage" => null,
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
 
         $client = $this->makeClient(false);
 
@@ -581,22 +571,19 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullAfterFilesPullCompletedBeforePipelineStageWasMarkedDoesNotStealIt(): void
     {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "files-pull",
-                    "completion_state" => "complete",
-                    "current_stage" => null,
-                ],
-                "pull_pipeline" => [
-                    "started_by_command" => "pull-files",
-                    "stage_sequence" => ["preflight", "files-pull"],
-                    "last_completed_stage" => "preflight",
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "complete",
+                "current_stage" => null,
+            ],
+            "pull_pipeline" => [
+                "started_by_command" => "pull-files",
+                "stage_sequence" => ["preflight", "files-pull"],
+                "last_completed_stage" => "preflight",
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
 
         $client = $this->makeClient(false);
 
@@ -675,22 +662,19 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullDbRejectsConflictingInProgressPullFiles(): void
     {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "files-pull",
-                    "completion_state" => "partial",
-                    "current_stage" => "fetch",
-                ],
-                "pull_pipeline" => [
-                    "started_by_command" => "pull-files",
-                    "stage_sequence" => ["preflight", "files-pull"],
-                    "last_completed_stage" => "preflight",
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "partial",
+                "current_stage" => "fetch",
+            ],
+            "pull_pipeline" => [
+                "started_by_command" => "pull-files",
+                "stage_sequence" => ["preflight", "files-pull"],
+                "last_completed_stage" => "preflight",
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
 
         $client = $this->makeClient(false);
 
@@ -714,22 +698,19 @@ class PullFilterOptionTest extends TestCase
     public function testPullDbResumesAfterDbPullCompletedBeforePipelineStageWasMarked(): void
     {
         file_put_contents($this->stateDir . '/db.sql', "SELECT 1;\n");
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "db-pull",
-                    "completion_state" => "complete",
-                    "current_stage" => null,
-                ],
-                "pull_pipeline" => [
-                    "started_by_command" => "pull-db",
-                    "stage_sequence" => ["preflight", "db-pull", "db-apply"],
-                    "last_completed_stage" => "preflight",
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "complete",
+                "current_stage" => null,
+            ],
+            "pull_pipeline" => [
+                "started_by_command" => "pull-db",
+                "stage_sequence" => ["preflight", "db-pull", "db-apply"],
+                "last_completed_stage" => "preflight",
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
 
         $client = $this->makeClient(false);
 
@@ -750,17 +731,14 @@ class PullFilterOptionTest extends TestCase
     public function testPullDbAfterStandaloneDbPullDownloadsFreshDump(): void
     {
         file_put_contents($this->stateDir . '/db.sql', "SELECT stale;\n");
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "db-pull",
-                    "completion_state" => "complete",
-                    "current_stage" => null,
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "db-pull",
+                "completion_state" => "complete",
+                "current_stage" => null,
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
 
         $client = $this->makeClient(false);
 
@@ -867,25 +845,22 @@ class PullFilterOptionTest extends TestCase
         // The deferred "skipped-earlier" tail belongs to a files-pull that
         // has finished. Once that lifecycle state is truthful, a completed
         // pull can delta re-pull without bypassing the mid-flight guard.
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "files-pull",
-                    "completion_state" => "complete",
-                    "current_stage" => null,
-                ],
-                "filter" => "skipped-earlier",
-                "pull_pipeline" => [
-                    "started_by_command" => "pull",
-                    "stage_sequence" => ["preflight", "files-pull", "db-pull", "db-apply"],
-                    "last_completed_stage" => "db-apply",
-                    "files_filter" => "essential-files",
-                    "skipped_pending" => true,
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "complete",
+                "current_stage" => null,
+            ],
+            "filter" => "skipped-earlier",
+            "pull_pipeline" => [
+                "started_by_command" => "pull",
+                "stage_sequence" => ["preflight", "files-pull", "db-pull", "db-apply"],
+                "last_completed_stage" => "db-apply",
+                "files_filter" => "essential-files",
+                "skipped_pending" => true,
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
 
         $client = $this->makeClient(false);
 
@@ -908,25 +883,22 @@ class PullFilterOptionTest extends TestCase
         // with filter=skipped-earlier. A new essential-files pull must still be
         // allowed: the filter-change guard must not treat the terminal tail as
         // a mid-flight sync.
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode([
-                "active_resumable_command" => [
-                    "command_name" => "files-pull",
-                    "completion_state" => "partial",
-                    "current_stage" => "fetch-skipped",
-                ],
-                "filter" => "skipped-earlier",
-                "pull_pipeline" => [
-                    "started_by_command" => "pull",
-                    "stage_sequence" => ["preflight", "files-pull", "db-pull", "db-apply"],
-                    "last_completed_stage" => "db-apply",
-                    "files_filter" => "essential-files",
-                    "skipped_pending" => true,
-                ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-            ]),
-        );
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "partial",
+                "current_stage" => "fetch-skipped",
+            ],
+            "filter" => "skipped-earlier",
+            "pull_pipeline" => [
+                "started_by_command" => "pull",
+                "stage_sequence" => ["preflight", "files-pull", "db-pull", "db-apply"],
+                "last_completed_stage" => "db-apply",
+                "files_filter" => "essential-files",
+                "skipped_pending" => true,
+            ],
+            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+        ]);
 
         $client = $this->makeClient(false);
 

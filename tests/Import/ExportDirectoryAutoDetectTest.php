@@ -62,10 +62,6 @@ class ExportDirectoryAutoDetectTest extends TestCase
     private function writeState(array $state): void
     {
         $defaults = [
-            'command' => null,
-            'status' => null,
-            'cursor' => null,
-            'stage' => null,
             'preflight' => [
                 'http_code' => 200,
                 'data' => [
@@ -102,10 +98,7 @@ class ExportDirectoryAutoDetectTest extends TestCase
             'max_allowed_packet' => null,
         ];
 
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode(array_replace_recursive($defaults, $state), JSON_PRETTY_PRINT),
-        );
+        \write_current_import_state($this->makeClient(), array_replace_recursive($defaults, $state));
     }
 
     private function makeClient(): \ImportClient

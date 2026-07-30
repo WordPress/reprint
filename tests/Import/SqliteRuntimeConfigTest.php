@@ -61,8 +61,6 @@ class SqliteRuntimeConfigTest extends TestCase
     private function writeState(array $state): void
     {
         $defaults = [
-            'command' => 'db-apply',
-            'status' => 'complete',
             'preflight' => [
                 'http_code' => 200,
                 'data' => [
@@ -94,9 +92,9 @@ class SqliteRuntimeConfigTest extends TestCase
             'max_allowed_packet' => null,
         ];
 
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode(array_replace_recursive($defaults, $state), JSON_PRETTY_PRINT),
+        \write_current_import_state(
+            new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot),
+            array_replace_recursive($defaults, $state)
         );
     }
 

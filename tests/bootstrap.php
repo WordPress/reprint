@@ -44,5 +44,21 @@ if (!class_exists('Site_Export_Push_Session', false)) {
     require_once __DIR__ . '/../packages/reprint-exporter/src/class-push-session.php';
 }
 
+/**
+ * Persist a complete current import-state schema for tests.
+ *
+ * @param ImportClient         $client  Client whose state directory receives the file.
+ * @param array<string, mixed> $changes Values to apply to a new ImportState.
+ */
+function write_current_import_state(ImportClient $client, array $changes): void
+{
+    $data = array_replace_recursive((new ImportState())->to_array(), $changes);
+    $state = ImportState::from_array($data);
+    $property = (new ReflectionClass(ImportClient::class))->getProperty('state');
+    $property->setAccessible(true);
+    $property->setValue($client, $state);
+    $client->save_import_state();
+}
+
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';

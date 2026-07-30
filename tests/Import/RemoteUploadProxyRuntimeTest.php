@@ -95,10 +95,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             'max_allowed_packet' => null,
         ];
 
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode(array_replace_recursive($defaults, $state), JSON_PRETTY_PRINT),
-        );
+        \write_current_import_state($this->makeClient(), array_replace_recursive($defaults, $state));
     }
 
     private function makeClient(): \ImportClient

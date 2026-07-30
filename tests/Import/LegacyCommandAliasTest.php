@@ -99,7 +99,7 @@ class LegacyCommandAliasTest extends TestCase
         ];
     }
 
-    public function testLegacyStateFieldsAreIgnored(): void
+    public function testRetiredStateShapeIsRejected(): void
     {
         file_put_contents(
             $this->stateDir . '/.import-state.json',
@@ -118,27 +118,12 @@ class LegacyCommandAliasTest extends TestCase
         $client = new \ImportClient('http://fake.invalid', $this->stateDir, $this->filesystem_root);
         $reflection = new \ReflectionClass($client);
         $loadState = $reflection->getMethod('load_state');
-        $state = $loadState->invoke($client)->to_array();
+        $loadState->setAccessible(true);
 
-        $this->assertArrayNotHasKey('command', $state);
-        $this->assertArrayNotHasKey('status', $state);
-        $this->assertArrayNotHasKey('cursor', $state);
-        $this->assertArrayNotHasKey('stage', $state);
-        $this->assertArrayNotHasKey('pull', $state);
-        $this->assertSame([
-            "command_name" => null,
-            "completion_state" => null,
-            "current_stage" => null,
-            "remote_cursor" => null,
-        ], $state["active_resumable_command"]);
-        $this->assertSame([
-            "started_by_command" => null,
-            "stage_sequence" => [],
-            "last_completed_stage" => null,
-            "files_filter" => null,
-            "skipped_pending" => false,
-            "has_completed_once" => false,
-        ], $state["pull_pipeline"]);
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('does not match the current state schema');
+
+        $loadState->invoke($client);
     }
 
 }

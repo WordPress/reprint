@@ -35,7 +35,6 @@ class FileBodyStreamingTest extends TestCase
         );
         $reflection = new \ReflectionClass($client);
         $reflection->getProperty('is_tty')->setValue($client, true);
-        $reflection->getProperty('state')->setValue($client, []);
 
         $handleFileChunk = $reflection->getMethod('handle_file_chunk');
         $context = new \StreamingContext();
@@ -107,7 +106,6 @@ class FileBodyStreamingTest extends TestCase
         );
         $reflection = new \ReflectionClass($client);
         $reflection->getProperty('is_tty')->setValue($client, true);
-        $reflection->getProperty('state')->setValue($client, []);
 
         $body = str_repeat('0123456789abcdef', 64 * 1024); // 1 MiB
         $halfwayPoint = (int) (strlen($body) / 2);

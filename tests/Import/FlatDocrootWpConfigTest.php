@@ -139,10 +139,7 @@ class FlatDocrootWpConfigTest extends TestCase
 
     private function writeState(array $state): void
     {
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode($state, JSON_PRETTY_PRINT),
-        );
+        \write_current_import_state($this->makeClient(), $state);
     }
 
     private function makeClient(): \ImportClient

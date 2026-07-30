@@ -101,7 +101,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
     /** Mirror FilesPullStateTest: load state + preserve-local, then set the --only file path prefixes. */
     private function prepareClient(array $pull_only_files_with_path_prefixes): array
     {
-        $defaults = [
+        $state = [
             "active_resumable_command" => [
                 "command_name" => "files-pull",
                 "completion_state" => "in_progress",
@@ -111,9 +111,9 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",
         ];
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode($defaults, JSON_PRETTY_PRINT),
+        \write_current_import_state(
+            new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root),
+            $state
         );
 
         $client = new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);

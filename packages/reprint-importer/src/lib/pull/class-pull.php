@@ -441,7 +441,7 @@ class Pull
                     $options['filter'] === 'essential-files' &&
                     $this->client->has_skipped_files_pending();
                 $this->client->set_pull_files_state($options['filter'], $skipped_pending);
-                $files_pulled = $this->client->state->files_pull_summary->files_pulled;
+                $files_pulled = $this->client->get_import_state()->files_pull_summary->files_pulled;
                 $pulled_label = $files_pulled === 1 ? 'file' : 'files';
                 $summary = sprintf(
                     '%s changed %s pulled',

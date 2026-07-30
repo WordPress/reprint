@@ -98,15 +98,12 @@ final class LocalIndexWalTest extends TestCase
                 'type' => 'file',
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
         );
-        file_put_contents(
-            $this->stateDirectory . '/.import-state.json',
-            json_encode([
-                'preflight' => [
-                    'data' => ['ok' => true],
-                    'http_code' => 200,
-                ],
-            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)
-        );
+        \write_current_import_state($this->client(), [
+            'preflight' => [
+                'data' => ['ok' => true],
+                'http_code' => 200,
+            ],
+        ]);
 
         $this->client()->run([
             'command' => $command,

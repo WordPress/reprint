@@ -172,12 +172,19 @@ PHP, var_export($requestsLog, true)));
             );
         }
 
-        file_put_contents($this->tempDir . '/state/.import-state.json', json_encode(array(
-            'preflight' => array(
-                'data' => $data,
-                'http_code' => 200,
+        \write_current_import_state(
+            new \ImportClient(
+                'http://fake.invalid/',
+                $this->tempDir . '/state',
+                $this->tempDir . '/fs'
             ),
-        ), JSON_PRETTY_PRINT));
+            array(
+                'preflight' => array(
+                    'data' => $data,
+                    'http_code' => 200,
+                ),
+            )
+        );
     }
 
     public function testOnlyOptionIsRecognizedAsRepeatableInBothForms(): void

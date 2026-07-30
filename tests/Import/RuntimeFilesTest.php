@@ -68,25 +68,10 @@ class RuntimeFilesTest extends TestCase
 
     private function writeState(array $state): void
     {
-        $defaults = [
-            "active_resumable_command" => [
-                "command_name" => null,
-                "completion_state" => null,
-                "current_stage" => null,
-                "remote_cursor" => null,
-            ],
+        \write_current_import_state($this->makeClient(), array_replace_recursive([
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
-            "remote_protocol_version" => null,
-            "remote_protocol_min_version" => null,
-            "version" => null,
             "follow_symlinks" => false,
-            "fs_root_nonempty_behavior" => "error",
-            "max_allowed_packet" => null,
-        ];
-        file_put_contents(
-            $this->stateDir . '/.import-state.json',
-            json_encode(array_merge($defaults, $state), JSON_PRETTY_PRINT),
-        );
+        ], $state));
     }
 
     private function callPrivate(\ImportClient $client, string $method, array $args = [])

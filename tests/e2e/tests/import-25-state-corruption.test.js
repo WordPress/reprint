@@ -76,13 +76,15 @@ describe('Import: State Corruption', () => {
 
         beforeAll(() => {
             tempDir = createTempDir('e2e-state-wrong-cmd');
-            // Write valid state but for a different command
-            writeFileSync(join(tempDir, '.import-state.json'), JSON.stringify({
-                active_resumable_command: {
-                    command_name: 'db-pull',
-                    completion_state: 'complete',
-                },
-            }));
+            const result = runImporter(importUrl(), tempDir, 'preflight', {
+                secret: getSiteSecret(site),
+            });
+            assert.equal(result.exitCode, 0, `Preflight failed:\n${result.stderr}`);
+            const statePath = join(tempDir, '.import-state.json');
+            const state = JSON.parse(readFileSync(statePath, 'utf-8'));
+            state.active_resumable_command.command_name = 'db-pull';
+            state.active_resumable_command.completion_state = 'complete';
+            writeFileSync(statePath, JSON.stringify(state));
         });
 
         afterAll(() => {
@@ -108,14 +110,16 @@ describe('Import: State Corruption', () => {
 
         beforeAll(() => {
             tempDir = createTempDir('e2e-state-restart');
-            // Write a partial state to simulate interrupted transfer
-            writeFileSync(join(tempDir, '.import-state.json'), JSON.stringify({
-                active_resumable_command: {
-                    command_name: 'files-pull',
-                    completion_state: 'in_progress',
-                    remote_cursor: 'some-old-cursor',
-                },
-            }));
+            const result = runImporter(importUrl(), tempDir, 'preflight', {
+                secret: getSiteSecret(site),
+            });
+            assert.equal(result.exitCode, 0, `Preflight failed:\n${result.stderr}`);
+            const statePath = join(tempDir, '.import-state.json');
+            const state = JSON.parse(readFileSync(statePath, 'utf-8'));
+            state.active_resumable_command.command_name = 'files-pull';
+            state.active_resumable_command.completion_state = 'in_progress';
+            state.active_resumable_command.remote_cursor = 'some-old-cursor';
+            writeFileSync(statePath, JSON.stringify(state));
         });
 
         afterAll(() => {
