@@ -2650,24 +2650,23 @@ final class Site_Export_Push_Session {
     /**
      * Acquires the cross-session lock for one create or bounded remove call.
      *
-     * The historical filename remains `push-create.lock`, but the lock covers
-     * creation and every bounded removal step so create cannot race a
-     * live-directory rename or an unfinished removal tombstone.
+     * The lock covers creation and every bounded removal step so create cannot
+     * race a live-directory rename or an unfinished removal tombstone.
      *
      * @param string $push_sessions_directory Canonical push sessions directory.
      * @param string $operation Current `create` or `remove` operation.
      * @return resource Exclusively locked create/remove handle.
      */
     private static function acquire_create_remove_lock(string $push_sessions_directory, string $operation) {
-        $create_remove_lock = @fopen($push_sessions_directory . '/push-create.lock', 'c+b');
+        $create_remove_lock = @fopen($push_sessions_directory . '/create-remove.lock', 'c+b');
         if ($create_remove_lock === false) {
-            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open push-create.lock for the ' . $operation . ' request.');
+            throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open create-remove.lock for the ' . $operation . ' request.');
         }
         if (!flock($create_remove_lock, LOCK_EX | LOCK_NB)) {
             fclose($create_remove_lock);
             throw new Site_Export_Push_Exception(
                 self::ERROR_LOCK_ACQUISITION_FAILURE,
-                'Another create or remove request holds push-create.lock. Retry the ' . $operation . ' request.'
+                'Another create or remove request holds create-remove.lock. Retry the ' . $operation . ' request.'
             );
         }
         return $create_remove_lock;
