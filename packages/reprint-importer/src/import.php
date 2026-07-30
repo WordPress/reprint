@@ -7060,7 +7060,7 @@ class ImportClient
     }
 
     /**
-     * Delete the local absolute path mapped from a remote absolute path.
+     * Remove the local mirror entry for a deletion reported by the remote index.
      */
     private function apply_remote_deletion_locally(string $remote_absolute_path): void
     {
