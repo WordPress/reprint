@@ -310,12 +310,6 @@ class ImportClient
     /** @var string Path to pull/domains.json — domains discovered in the SQL dump. */
     private $domains_file;
 
-    /** @var string Path to pull/sql-stats.json — SQL statement count for progress reporting. */
-    private $sql_stats_file;
-
-    /** @var string Path to pull/sql-buffer — partial SQL retained across process crashes. */
-    private $sql_buffer_file;
-
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
 
@@ -542,8 +536,6 @@ class ImportClient
         $this->audit_log_file = $this->state_dir . "/audit.log";
         $this->volatile_files_file = $this->pull_state_directory . "/volatile-files.json";
         $this->domains_file = $this->pull_state_directory . "/domains.json";
-        $this->sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
-        $this->sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
         $this->progress_file = $this->state_dir . "/progress.json";
 
         // Detect TTY for progress display. In stdout mode this is re-evaluated
@@ -5395,7 +5387,7 @@ class ImportClient
         $stmts_since_save = 0;
 
         // Load pre-computed statement count from db-pull for progress reporting
-        $sql_stats_file = $this->sql_stats_file;
+        $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
         $statements_total = null;
         if (file_exists($sql_stats_file)) {
             $stats = json_decode(file_get_contents($sql_stats_file), true);
@@ -7605,7 +7597,7 @@ class ImportClient
             // Each SQL chunk is appended to this file as it arrives; when the
             // query completes and executes, the file is truncated. If the process
             // dies at any point, the next run reloads whatever was accumulated.
-            $sql_buffer_file = $this->sql_buffer_file;
+            $sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
             if (file_exists($sql_buffer_file)) {
                 $sql_buffer = file_get_contents($sql_buffer_file);
                 $this->audit_log(
@@ -7629,7 +7621,7 @@ class ImportClient
             ? new \DomainCollector()
             : null;
         $domains_file = $this->domains_file;
-        $sql_stats_file = $this->sql_stats_file;
+        $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
         $sql_statements_counted = (int) ($this->import_state()->sql_statements_counted ?? 0);
 
         // Auto-detect the source site domain from the export URL so it
@@ -7967,7 +7959,7 @@ class ImportClient
                 $mysql_conn = null;
                 // Clean up buffer file — if we got here with an empty buffer,
                 // all queries were executed successfully.
-                $sql_buffer_file = $this->sql_buffer_file;
+                $sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
                 if ($pending === "" && file_exists($sql_buffer_file)) {
                     unlink($sql_buffer_file);
                 }

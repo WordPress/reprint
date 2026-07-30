@@ -51,8 +51,6 @@ final class ReprintProcessLockTest extends TestCase
             'skipped_fetch_list_file' => $this->root . '/state/pull/skipped-fetch-list.jsonl',
             'volatile_files_file' => $this->root . '/state/pull/volatile-files.json',
             'domains_file' => $this->root . '/state/pull/domains.json',
-            'sql_stats_file' => $this->root . '/state/pull/sql-stats.json',
-            'sql_buffer_file' => $this->root . '/state/pull/sql-buffer',
             'audit_log_file' => $this->root . '/state/audit.log',
             'progress_file' => $this->root . '/state/progress.json',
         ];
