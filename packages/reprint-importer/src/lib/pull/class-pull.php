@@ -292,15 +292,15 @@ class Pull
                 $state->current_file_bytes = null;
                 $state->diff = new FileDiffProgressState();
                 $state->index = new RemoteFileIndexCursorState();
-                $state->fetch = new DownloadListFetchProgressState();
-                $state->fetch_skipped = new DownloadListFetchProgressState();
+                $state->fetch = new FetchListProgressState();
+                $state->fetch_skipped = new FetchListProgressState();
                 $state->files_pull_summary = new FilesPullSummaryState();
                 $state->files_pull_only_fingerprint = null;
                 $this->client->save_import_state();
                 foreach ([
                     "{$state_dir}/.import-remote-index.jsonl",
-                    "{$state_dir}/.import-download-list.jsonl",
-                    "{$state_dir}/.import-download-list-skipped.jsonl",
+                    "{$state_dir}/.import-fetch-list.jsonl",
+                    "{$state_dir}/.import-fetch-list-skipped.jsonl",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -808,8 +808,8 @@ class Pull
             $state->current_file = null;
             $state->current_file_bytes = null;
             $state->diff = new FileDiffProgressState();
-            $state->fetch = new DownloadListFetchProgressState();
-            $state->fetch_skipped = new DownloadListFetchProgressState();
+            $state->fetch = new FetchListProgressState();
+            $state->fetch_skipped = new FetchListProgressState();
             $state->files_pull_summary = new FilesPullSummaryState();
         }
         if ($reset_file_selection_state) {
@@ -827,8 +827,8 @@ class Pull
         $paths = [];
         if ($reset_file_transfer_state) {
             $paths[] = $state_dir . "/.import-remote-index.jsonl";
-            $paths[] = $state_dir . "/.import-download-list.jsonl";
-            $paths[] = $state_dir . "/.import-download-list-skipped.jsonl";
+            $paths[] = $state_dir . "/.import-fetch-list.jsonl";
+            $paths[] = $state_dir . "/.import-fetch-list-skipped.jsonl";
         }
         if ($reset_db_state) {
             $paths[] = $state_dir . "/db.sql";
@@ -978,7 +978,7 @@ class Pull
         );
         if ($this->client->get_import_state()->pull_pipeline->skipped_pending) {
             $this->progress->print_line(
-                "{$dim}Deferred files remain. The skipped download list was preserved on disk for a follow-up sync.{$r}\n"
+                "{$dim}Deferred files remain. The skipped fetch list was preserved on disk for a follow-up sync.{$r}\n"
             );
         }
     }

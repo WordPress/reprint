@@ -104,9 +104,9 @@ describe('Import: --filter', () => {
                 'Expected test-data/hello.txt to exist');
         });
 
-        it('skipped download list remains on disk', () => {
-            assert.ok(existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
-                'Expected skipped download list to remain on disk');
+        it('skipped fetch list remains on disk', () => {
+            assert.ok(existsSync(join(tempDir, '.import-fetch-list-skipped.jsonl')),
+                'Expected skipped fetch list to remain on disk');
         });
 
         it('audit log shows essential files complete', () => {
@@ -133,9 +133,9 @@ describe('Import: --filter', () => {
             }
         });
 
-        it('skipped download list was cleaned up', () => {
-            assert.ok(!existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
-                'Expected skipped download list to be cleaned up');
+        it('skipped fetch list was cleaned up', () => {
+            assert.ok(!existsSync(join(tempDir, '.import-fetch-list-skipped.jsonl')),
+                'Expected skipped fetch list to be cleaned up');
         });
 
         it('state shows complete after skipped-earlier (not left in_progress)', () => {
@@ -206,8 +206,8 @@ describe('Import: --filter', () => {
         });
 
         it('skipped list remains on disk', () => {
-            assert.ok(existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
-                'Expected skipped download list to remain');
+            assert.ok(existsSync(join(tempDir, '.import-fetch-list-skipped.jsonl')),
+                'Expected skipped fetch list to remain');
         });
     });
 
@@ -233,9 +233,9 @@ describe('Import: --filter', () => {
                 `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
         });
 
-        it('no skipped download list was created', () => {
-            assert.ok(!existsSync(join(tempDir, '.import-download-list-skipped.jsonl')),
-                'Expected no skipped download list without --filter');
+        it('no skipped fetch list was created', () => {
+            assert.ok(!existsSync(join(tempDir, '.import-fetch-list-skipped.jsonl')),
+                'Expected no skipped fetch list without --filter');
         });
 
         it('uploads were downloaded normally', () => {

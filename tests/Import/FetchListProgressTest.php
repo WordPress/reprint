@@ -9,10 +9,10 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 /**
  * Verify that files_done and files_total progress counters are correct
  * across multiple invocations (exit-code-2 restarts), with and without
- * the essential-files filter (which splits the download list into a
+ * the essential-files filter (which splits the fetch list into a
  * main list and a skipped list).
  */
-class DownloadListProgressTest extends TestCase
+class FetchListProgressTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
@@ -21,7 +21,7 @@ class DownloadListProgressTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->tempDir = sys_get_temp_dir() . '/download-list-progress-test-' . uniqid();
+        $this->tempDir = sys_get_temp_dir() . '/fetch-list-progress-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
@@ -61,11 +61,11 @@ class DownloadListProgressTest extends TestCase
     }
 
     /**
-     * Build a download list JSONL file with N entries.
+     * Build a fetch list JSONL file with N entries.
      */
-    private function writeDownloadList(int $count, ?string $file = null): string
+    private function writeFetchList(int $count, ?string $file = null): string
     {
-        $file = $file ?? $this->stateDir . '/.import-download-list.jsonl';
+        $file = $file ?? $this->stateDir . '/.import-fetch-list.jsonl';
         $handle = fopen($file, 'w');
         for ($i = 0; $i < $count; $i++) {
             fwrite($handle, json_encode(["path" => base64_encode("/file-{$i}.txt")]) . "\n");
@@ -120,8 +120,8 @@ class DownloadListProgressTest extends TestCase
     private function readCounters(\ImportClient $client, \ReflectionClass $reflection): array
     {
         return [
-            'total' => $reflection->getProperty('download_list_total')->getValue($client),
-            'done' => $reflection->getProperty('download_list_done')->getValue($client),
+            'total' => $reflection->getProperty('fetch_list_total')->getValue($client),
+            'done' => $reflection->getProperty('fetch_list_done')->getValue($client),
         ];
     }
 
@@ -142,7 +142,7 @@ class DownloadListProgressTest extends TestCase
 
     public function testFreshDownloadShowsZeroDone()
     {
-        $listFile = $this->writeDownloadList(100);
+        $listFile = $this->writeFetchList(100);
 
         $this->writeState([
             "active_resumable_command" => [
@@ -154,7 +154,7 @@ class DownloadListProgressTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $method = $reflection->getMethod('download_files_from_list');
+        $method = $reflection->getMethod('fetch_files_from_list');
         try {
             $method->invoke($client, $listFile, 'fetch');
         } catch (\Exception $e) {
@@ -168,7 +168,7 @@ class DownloadListProgressTest extends TestCase
 
     public function testResumedDownloadReflectsOffset()
     {
-        $listFile = $this->writeDownloadList(100);
+        $listFile = $this->writeFetchList(100);
         $offset = $this->byteOffsetAfterLines($listFile, 40);
 
         $this->writeState([
@@ -189,7 +189,7 @@ class DownloadListProgressTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
 
         try {
-            $reflection->getMethod('download_files_from_list')
+            $reflection->getMethod('fetch_files_from_list')
                 ->invoke($client, $listFile, 'fetch');
         } catch (\Exception $e) {
             // Expected
@@ -202,7 +202,7 @@ class DownloadListProgressTest extends TestCase
 
     public function testDoneNeverExceedsTotal()
     {
-        $listFile = $this->writeDownloadList(50);
+        $listFile = $this->writeFetchList(50);
 
         // Offset past the end of the file
         $pastEnd = filesize($listFile) + 1000;
@@ -225,7 +225,7 @@ class DownloadListProgressTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
 
         try {
-            $reflection->getMethod('download_files_from_list')
+            $reflection->getMethod('fetch_files_from_list')
                 ->invoke($client, $listFile, 'fetch');
         } catch (\Exception $e) {
             // Expected
@@ -238,7 +238,7 @@ class DownloadListProgressTest extends TestCase
 
     public function testCountersStableAcrossInvocations()
     {
-        $listFile = $this->writeDownloadList(100);
+        $listFile = $this->writeFetchList(100);
         $offset30 = $this->byteOffsetAfterLines($listFile, 30);
         $offset60 = $this->byteOffsetAfterLines($listFile, 60);
 
@@ -254,7 +254,7 @@ class DownloadListProgressTest extends TestCase
 
         [$client1, $ref1] = $this->prepareClient();
         try {
-            $ref1->getMethod('download_files_from_list')->invoke($client1, $listFile, 'fetch');
+            $ref1->getMethod('fetch_files_from_list')->invoke($client1, $listFile, 'fetch');
         } catch (\Exception $e) {}
 
         $c1 = $this->readCounters($client1, $ref1);
@@ -273,7 +273,7 @@ class DownloadListProgressTest extends TestCase
 
         [$client2, $ref2] = $this->prepareClient();
         try {
-            $ref2->getMethod('download_files_from_list')->invoke($client2, $listFile, 'fetch');
+            $ref2->getMethod('fetch_files_from_list')->invoke($client2, $listFile, 'fetch');
         } catch (\Exception $e) {}
 
         $c2 = $this->readCounters($client2, $ref2);
@@ -286,9 +286,9 @@ class DownloadListProgressTest extends TestCase
 
     public function testSkippedListHasOwnCounters()
     {
-        $this->writeDownloadList(50);
-        $skippedList = $this->stateDir . '/.import-download-list-skipped.jsonl';
-        $this->writeDownloadList(200, $skippedList);
+        $this->writeFetchList(50);
+        $skippedList = $this->stateDir . '/.import-fetch-list-skipped.jsonl';
+        $this->writeFetchList(200, $skippedList);
         $offset20 = $this->byteOffsetAfterLines($skippedList, 20);
 
         $this->writeState([
@@ -303,7 +303,7 @@ class DownloadListProgressTest extends TestCase
         [$client, $reflection] = $this->prepareClient("skipped-earlier");
 
         try {
-            $reflection->getMethod('download_files_from_list')
+            $reflection->getMethod('fetch_files_from_list')
                 ->invoke($client, $skippedList, 'fetch_skipped');
         } catch (\Exception $e) {}
 
@@ -314,7 +314,7 @@ class DownloadListProgressTest extends TestCase
 
     public function testCountNewlinesMatchesLineCount()
     {
-        $listFile = $this->writeDownloadList(500);
+        $listFile = $this->writeFetchList(500);
 
         [$client, $reflection] = $this->prepareClient();
         $method = $reflection->getMethod('count_newlines');
@@ -327,7 +327,7 @@ class DownloadListProgressTest extends TestCase
 
     public function testPrepareFetchBatchReturnsEntryCount()
     {
-        $listFile = $this->writeDownloadList(10);
+        $listFile = $this->writeFetchList(10);
 
         $this->writeState([
             "active_resumable_command" => [
@@ -353,7 +353,7 @@ class DownloadListProgressTest extends TestCase
 
     public function testFilesDoneIncludesFilesImported()
     {
-        $listFile = $this->writeDownloadList(100);
+        $listFile = $this->writeFetchList(100);
         $offset40 = $this->byteOffsetAfterLines($listFile, 40);
 
         $this->writeState([
@@ -368,16 +368,16 @@ class DownloadListProgressTest extends TestCase
         [$client, $reflection] = $this->prepareClient();
 
         try {
-            $reflection->getMethod('download_files_from_list')
+            $reflection->getMethod('fetch_files_from_list')
                 ->invoke($client, $listFile, 'fetch');
         } catch (\Exception $e) {}
 
         // Simulate 5 files written in this invocation
         $reflection->getProperty('files_imported')->setValue($client, 5);
 
-        $done = $reflection->getProperty('download_list_done')->getValue($client);
+        $done = $reflection->getProperty('fetch_list_done')->getValue($client);
         $imported = $reflection->getProperty('files_imported')->getValue($client);
-        $total = $reflection->getProperty('download_list_total')->getValue($client);
+        $total = $reflection->getProperty('fetch_list_total')->getValue($client);
 
         // files_done as emitted in progress records = done + imported
         $filesDone = $done + $imported;

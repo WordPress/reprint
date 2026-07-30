@@ -92,11 +92,11 @@ describe('Import: Pull essential-files', { timeout: 180000 }, () => {
         assert.equal(state.pull_pipeline.skipped_pending, true);
     });
 
-    it('skipped download list remains on disk', () => {
-        const skippedList = join(tempDir, '.import-download-list-skipped.jsonl');
-        assert.ok(existsSync(skippedList), 'Expected skipped download list to exist');
+    it('skipped fetch list remains on disk', () => {
+        const skippedList = join(tempDir, '.import-fetch-list-skipped.jsonl');
+        assert.ok(existsSync(skippedList), 'Expected skipped fetch list to exist');
         assert.ok(readFileSync(skippedList, 'utf-8').trim().length > 0,
-            'Expected skipped download list to be non-empty');
+            'Expected skipped fetch list to be non-empty');
     });
 
     it('uploads were deferred from the fs-root', () => {

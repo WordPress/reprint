@@ -253,7 +253,7 @@ php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 
 The pipeline proceeds as usual through indexing and diffing, but skips uploads. When the essential
 files are done, the sync marks itself **complete**. The skipped file list stays on disk at
-`.import-download-list-skipped.jsonl`. At this point you can apply the database and bring the site online.
+`.import-fetch-list-skipped.jsonl`. At this point you can apply the database and bring the site online.
 
 ```bash
 # Step 2: download the uploads
@@ -562,10 +562,10 @@ structured file counters:
 
 | Field         | Type           | Description |
 |---------------|----------------|-------------|
-| `files_done`  | `int`          | Files already processed (cumulative across restarts). Derived from the download list byte offset plus the current batch's `files_imported`. |
-| `files_total` | `int`          | Total non-empty entries in the download list. Fixed once the diff phase completes. |
+| `files_done`  | `int`          | Files already processed (cumulative across restarts). Derived from the fetch list byte offset plus the current batch's `files_imported`. |
+| `files_total` | `int`          | Total non-empty entries in the fetch list. Fixed once the diff phase completes. |
 
-Both fields are emitted together only when the download list exists — they
+Both fields are emitted together only when the fetch list exists — they
 are absent during the index and diff phases. `files_done` grows monotonically
 up to `files_total` and survives exit-code-2 restarts.
 
@@ -608,7 +608,7 @@ If the JSON is invalid on load, the importer renames it to
   },
   "filter": "none",               // "none" | "essential-files" | "skipped-earlier"
   "fetch": {
-    "offset": 512,                // byte offset into download list
+    "offset": 512,                // byte offset into fetch list
     "next_offset": 1024,
     "batch_file": null,
     "cursor": "..."               // file_fetch cursor

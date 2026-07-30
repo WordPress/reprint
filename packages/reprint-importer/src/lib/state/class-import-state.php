@@ -125,9 +125,9 @@ class RemoteFileIndexCursorState
     }
 }
 
-class DownloadListFetchProgressState
+class FetchListProgressState
 {
-    /** @var int Current byte offset into the download-list file. */
+    /** @var int Current byte offset into the fetch-list file. */
     public int $offset = 0;
 
     /** @var int Next byte offset after the current batch. */
@@ -364,8 +364,8 @@ class ImportState
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
     public RemoteFileIndexCursorState $index;
-    public DownloadListFetchProgressState $fetch;
-    public DownloadListFetchProgressState $fetch_skipped;
+    public FetchListProgressState $fetch;
+    public FetchListProgressState $fetch_skipped;
     /** @var string|null Path to the file being written for crash recovery. */
     public ?string $current_file = null;
     /** @var int|null Expected bytes written to the current file. */
@@ -402,8 +402,8 @@ class ImportState
         $this->db_index = new DatabaseTableIndexState();
         $this->diff = new FileDiffProgressState();
         $this->index = new RemoteFileIndexCursorState();
-        $this->fetch = new DownloadListFetchProgressState();
-        $this->fetch_skipped = new DownloadListFetchProgressState();
+        $this->fetch = new FetchListProgressState();
+        $this->fetch_skipped = new FetchListProgressState();
         $this->files_pull_summary = new FilesPullSummaryState();
         $this->apply = new DatabaseApplyCommandState();
         $this->tuning = new AdaptiveTuningState();
@@ -431,8 +431,8 @@ class ImportState
         $state->db_index = self::database_table_index_from($data['db_index'] ?? []);
         $state->diff = self::file_diff_progress_from($data['diff'] ?? []);
         $state->index = self::remote_file_index_cursor_from($data['index'] ?? []);
-        $state->fetch = self::download_list_fetch_progress_from($data['fetch'] ?? []);
-        $state->fetch_skipped = self::download_list_fetch_progress_from($data['fetch_skipped'] ?? []);
+        $state->fetch = self::fetch_list_progress_from($data['fetch'] ?? []);
+        $state->fetch_skipped = self::fetch_list_progress_from($data['fetch_skipped'] ?? []);
         $state->current_file = isset($data['current_file']) ? (string) $data['current_file'] : null;
         $state->current_file_bytes = isset($data['current_file_bytes']) ? (int) $data['current_file_bytes'] : null;
         $state->sql_bytes = isset($data['sql_bytes']) ? (int) $data['sql_bytes'] : null;
@@ -516,9 +516,9 @@ class ImportState
         return $value instanceof RemoteFileIndexCursorState ? $value : RemoteFileIndexCursorState::from_array(is_array($value) ? $value : []);
     }
 
-    private static function download_list_fetch_progress_from($value): DownloadListFetchProgressState
+    private static function fetch_list_progress_from($value): FetchListProgressState
     {
-        return $value instanceof DownloadListFetchProgressState ? $value : DownloadListFetchProgressState::from_array(is_array($value) ? $value : []);
+        return $value instanceof FetchListProgressState ? $value : FetchListProgressState::from_array(is_array($value) ? $value : []);
     }
 
     private static function database_apply_command_from($value): DatabaseApplyCommandState

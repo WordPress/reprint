@@ -162,7 +162,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         // always look deleted-on-remote to the diff. The drains must not
         // delete them: that would recursively remove the very directories
         // the user asked to pull, while the matched children keep the
-        // download list empty — silent data loss.
+        // fetch list empty — silent data loss.
         $this->writeIndex('.import-index.jsonl',
             $this->indexLine('/wp-content/themes', 1000, 0, 'dir')
             . $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)

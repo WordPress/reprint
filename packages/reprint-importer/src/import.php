@@ -325,11 +325,11 @@ class ImportClient
      */
     private $remote_index_file;
 
-    /** @var string Path to .import-download-list.jsonl — files to download, computed by diffing remote vs local index. */
-    private $download_list_file;
+    /** @var string Path to .import-fetch-list.jsonl — files to download, computed by diffing remote vs local index. */
+    private $fetch_list_file;
 
-    /** @var string Path to .import-download-list-skipped.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
-    private $skipped_download_list_file;
+    /** @var string Path to .import-fetch-list-skipped.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
+    private $skipped_fetch_list_file;
 
     /** @var string Path to .import-audit.log — append-only log of every operation for debugging. */
     private $audit_log;
@@ -346,15 +346,15 @@ class ImportClient
     /** @var int Running count of files imported in the current invocation. */
     private $files_imported = 0;
 
-    /** @var int|null Total entries in the current download list.  Set once
-     *  at the start of download_files_from_list() by counting newlines. */
-    private $download_list_total = null;
+    /** @var int|null Total entries in the current fetch list.  Set once
+     *  at the start of fetch_files_from_list() by counting newlines. */
+    private $fetch_list_total = null;
 
     /** @var int|null Entries already processed (before the current offset)
-     *  in the download list.  Computed at list start and incremented after
+     *  in the fetch list.  Computed at list start and incremented after
      *  each batch completes.  This is the cumulative, restart-safe counter
      *  that consumers should display as "files done". */
-    private $download_list_done = null;
+    private $fetch_list_done = null;
 
     /**
      * @var ImportState Persistent import state loaded from / saved to $state_file.
@@ -560,10 +560,10 @@ class ImportClient
             $this->state_dir . "/.import-index-updates.wal";
         $this->remote_index_file =
             $this->state_dir . "/.import-remote-index.jsonl";
-        $this->download_list_file =
-            $this->state_dir . "/.import-download-list.jsonl";
-        $this->skipped_download_list_file =
-            $this->state_dir . "/.import-download-list-skipped.jsonl";
+        $this->fetch_list_file =
+            $this->state_dir . "/.import-fetch-list.jsonl";
+        $this->skipped_fetch_list_file =
+            $this->state_dir . "/.import-fetch-list-skipped.jsonl";
         $this->audit_log = $this->state_dir . "/.import-audit.log";
         $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
         $this->status_file = $this->state_dir . "/.import-status.json";
@@ -721,12 +721,12 @@ class ImportClient
         }
     }
 
-    /** True when the skipped-download list exists and still has entries. */
+    /** True when the skipped-fetch list exists and still has entries. */
     public function has_skipped_files_pending(): bool
     {
         return
-            file_exists($this->skipped_download_list_file) &&
-            filesize($this->skipped_download_list_file) > 0;
+            file_exists($this->skipped_fetch_list_file) &&
+            filesize($this->skipped_fetch_list_file) > 0;
     }
 
     /**
@@ -2077,21 +2077,21 @@ class ImportClient
             @unlink($this->remote_index_file);
             $this->audit_log("FILE DELETE | {$this->remote_index_file}");
         }
-        if (file_exists($this->download_list_file)) {
-            @unlink($this->download_list_file);
-            $this->audit_log("FILE DELETE | {$this->download_list_file}");
+        if (file_exists($this->fetch_list_file)) {
+            @unlink($this->fetch_list_file);
+            $this->audit_log("FILE DELETE | {$this->fetch_list_file}");
         }
-        if (file_exists($this->skipped_download_list_file)) {
-            @unlink($this->skipped_download_list_file);
-            $this->audit_log("FILE DELETE | {$this->skipped_download_list_file}");
+        if (file_exists($this->skipped_fetch_list_file)) {
+            @unlink($this->skipped_fetch_list_file);
+            $this->audit_log("FILE DELETE | {$this->skipped_fetch_list_file}");
         }
         if (file_exists($this->volatile_files_file)) {
             @unlink($this->volatile_files_file);
             $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
         }
         $this->import_state()->index = new RemoteFileIndexCursorState();
-        $this->import_state()->fetch = new DownloadListFetchProgressState();
-        $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
+        $this->import_state()->fetch = new FetchListProgressState();
+        $this->import_state()->fetch_skipped = new FetchListProgressState();
 
         $this->save_state($this->state);
     }
@@ -2219,7 +2219,7 @@ class ImportClient
             }
         }
 
-        $this->download_runtime_files();
+        $this->fetch_runtime_files();
     }
 
     /**
@@ -2231,7 +2231,7 @@ class ImportClient
      * failures are tolerated since the scripts may live on paths not
      * accessible to the web server process.
      */
-    private function download_runtime_files(): void
+    private function fetch_runtime_files(): void
     {
         $runtime_dir = $this->state_dir . "/runtime_files";
 
@@ -2739,8 +2739,8 @@ class ImportClient
         if ($current_status === "complete") {
             $this->remove_index_update_wal();
             $has_skipped =
-                file_exists($this->skipped_download_list_file) &&
-                filesize($this->skipped_download_list_file) > 0;
+                file_exists($this->skipped_fetch_list_file) &&
+                filesize($this->skipped_fetch_list_file) > 0;
 
             // --filter=skipped-earlier: download only the files that a prior
             // --filter=essential-files run skipped.  This is the only way to
@@ -2845,7 +2845,7 @@ class ImportClient
         if ($has_progress) {
             // Don't reset files_imported here — it counts files within
             // the current batch and is only reset when a batch completes
-            // (in download_files_from_list). Resetting it on entry would
+            // (in fetch_files_from_list). Resetting it on entry would
             // cause the progress counter to dip between pull retries.
             $index_size = $this->index_count();
 
@@ -2888,8 +2888,8 @@ class ImportClient
             $this->import_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
             $this->import_state()->diff = new FileDiffProgressState();
             $this->import_state()->index = new RemoteFileIndexCursorState();
-            $this->import_state()->fetch = new DownloadListFetchProgressState();
-            $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
+            $this->import_state()->fetch = new FetchListProgressState();
+            $this->import_state()->fetch_skipped = new FetchListProgressState();
             $this->import_state()->files_pull_summary = new FilesPullSummaryState();
             $this->save_state($this->state);
 
@@ -2980,7 +2980,7 @@ class ImportClient
         $stage = $this->import_state()->active_resumable_command->current_stage ?? "index";
 
         if ($stage === "index") {
-            $complete = $this->download_remote_index();
+            $complete = $this->fetch_remote_index();
             if (!$complete) {
                 $this->import_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state($this->state);
@@ -2997,16 +2997,16 @@ class ImportClient
             $this->sort_index_file($this->remote_index_file);
             $this->import_state()->active_resumable_command->current_stage = "diff";
             $this->import_state()->diff = new FileDiffProgressState();
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
+            if (file_exists($this->fetch_list_file)) {
+                @unlink($this->fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | clearing before diff stage",
+                    "FILE DELETE | {$this->fetch_list_file} | clearing before diff stage",
                 );
             }
-            if (file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
+            if (file_exists($this->skipped_fetch_list_file)) {
+                @unlink($this->skipped_fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | clearing before diff stage",
+                    "FILE DELETE | {$this->skipped_fetch_list_file} | clearing before diff stage",
                 );
             }
             $this->save_state($this->state);
@@ -3021,15 +3021,15 @@ class ImportClient
                 return;
             }
 
-            $has_downloads =
-                file_exists($this->download_list_file) &&
-                filesize($this->download_list_file) > 0;
+            $has_files_to_fetch =
+                file_exists($this->fetch_list_file) &&
+                filesize($this->fetch_list_file) > 0;
             $has_skipped =
-                file_exists($this->skipped_download_list_file) &&
-                filesize($this->skipped_download_list_file) > 0;
+                file_exists($this->skipped_fetch_list_file) &&
+                filesize($this->skipped_fetch_list_file) > 0;
 
             // Determine the first fetch stage to run.
-            if ($has_downloads) {
+            if ($has_files_to_fetch) {
                 $stage = "fetch";
             } elseif ($has_skipped) {
                 $stage = "fetch-skipped";
@@ -3041,14 +3041,14 @@ class ImportClient
 
             // In pull mode, finalize the scanning line with a checkmark
             // and start the download progress on a fresh line.
-            if ($has_downloads && $this->progress->is_mode('pipeline')) {
+            if ($has_files_to_fetch && $this->progress->is_mode('pipeline')) {
                 $green = "\033[32m";
                 $dim = "\033[2m";
                 $r = "\033[0m";
                 $scanned = number_format($this->index_entries_counted);
                 $this->progress->clear_progress_line();
                 $this->progress->print_line("  {$green}✓{$r} Scanned {$dim}— {$scanned} entries{$r}\n");
-                $total = $this->count_newlines($this->download_list_file);
+                $total = $this->count_newlines($this->fetch_list_file);
                 $this->progress->set_active_label(null);
                 $this->progress->show_progress_line(
                     "Downloading — 0 / " . number_format($total) . " files",
@@ -3056,23 +3056,23 @@ class ImportClient
                 );
             }
 
-            if (!$has_downloads && file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
+            if (!$has_files_to_fetch && file_exists($this->fetch_list_file)) {
+                @unlink($this->fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | no files to fetch",
+                    "FILE DELETE | {$this->fetch_list_file} | no files to fetch",
                 );
             }
-            if (!$has_skipped && file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
+            if (!$has_skipped && file_exists($this->skipped_fetch_list_file)) {
+                @unlink($this->skipped_fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | no skipped files to fetch",
+                    "FILE DELETE | {$this->skipped_fetch_list_file} | no skipped files to fetch",
                 );
             }
         }
 
         if ($stage === "fetch") {
-            $complete = $this->download_files_from_list(
-                $this->download_list_file,
+            $complete = $this->fetch_files_from_list(
+                $this->fetch_list_file,
                 "fetch",
             );
             if (!$complete) {
@@ -3080,18 +3080,18 @@ class ImportClient
                 $this->save_state($this->state);
                 return;
             }
-            $this->import_state()->fetch = new DownloadListFetchProgressState();
+            $this->import_state()->fetch = new FetchListProgressState();
 
-            if (file_exists($this->download_list_file)) {
-                @unlink($this->download_list_file);
+            if (file_exists($this->fetch_list_file)) {
+                @unlink($this->fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->download_list_file} | fetch complete",
+                    "FILE DELETE | {$this->fetch_list_file} | fetch complete",
                 );
             }
 
             $has_skipped =
-                file_exists($this->skipped_download_list_file) &&
-                filesize($this->skipped_download_list_file) > 0;
+                file_exists($this->skipped_fetch_list_file) &&
+                filesize($this->skipped_fetch_list_file) > 0;
 
             if ($has_skipped && $this->filter === "essential-files") {
                 // Essential files are done — mark the sync as complete.
@@ -3100,7 +3100,7 @@ class ImportClient
                 $this->import_state()->active_resumable_command->current_stage = null;
                 $this->save_state($this->state);
                 $this->audit_log(
-                    "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_download_list_file} — run with --filter=skipped-earlier to download them",
+                    "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_fetch_list_file} — run with --filter=skipped-earlier to download them",
                     true,
                 );
                 $stage = null;
@@ -3122,8 +3122,8 @@ class ImportClient
         }
 
         if ($stage === "fetch-skipped") {
-            $complete = $this->download_files_from_list(
-                $this->skipped_download_list_file,
+            $complete = $this->fetch_files_from_list(
+                $this->skipped_fetch_list_file,
                 "fetch_skipped",
             );
             if (!$complete) {
@@ -3132,16 +3132,16 @@ class ImportClient
                 return;
             }
             $this->import_state()->active_resumable_command->current_stage = null;
-            $this->import_state()->fetch_skipped = new DownloadListFetchProgressState();
+            $this->import_state()->fetch_skipped = new FetchListProgressState();
             // Tail fully fetched; clear the flag so a later skipped-earlier run
             // doesn't treat the now-empty tail as pending.
             $this->import_state()->pull_pipeline->skipped_pending = false;
             $this->save_state($this->state);
 
-            if (file_exists($this->skipped_download_list_file)) {
-                @unlink($this->skipped_download_list_file);
+            if (file_exists($this->skipped_fetch_list_file)) {
+                @unlink($this->skipped_fetch_list_file);
                 $this->audit_log(
-                    "FILE DELETE | {$this->skipped_download_list_file} | skipped files fetch complete",
+                    "FILE DELETE | {$this->skipped_fetch_list_file} | skipped files fetch complete",
                 );
             }
         }
@@ -3213,7 +3213,7 @@ class ImportClient
         $attempts = 0;
         $last_cursor = $this->import_state()->index->cursor ?? null;
         while (true) {
-            $complete = $this->download_remote_index();
+            $complete = $this->fetch_remote_index();
             if ($complete) {
                 break;
             }
@@ -3338,7 +3338,7 @@ class ImportClient
                 "message" => "Following symlink target: {$dir}",
             ], true);
 
-            // Reset the index cursor so download_remote_index starts fresh
+            // Reset the index cursor so fetch_remote_index starts fresh
             // for this directory, but appends to the existing index file.
             // Note we are not losing the previous cursor position. This code
             // runs only after the previous directory was fully indexed so
@@ -3350,7 +3350,7 @@ class ImportClient
             $last_cursor = null;
             while (true) {
                 try {
-                    $complete = $this->download_remote_index($dir);
+                $complete = $this->fetch_remote_index($dir);
                 } catch (RuntimeException $e) {
                     // We won't be able to follow every symlink. If
                     // the response seems like the remote server rejecting
@@ -3732,7 +3732,7 @@ class ImportClient
                 "message" => "Downloading table metadata",
             ]);
 
-            $this->download_db_index();
+            $this->fetch_database_index();
 
             // Interrupted response during db-index — state already saved, exit partial.
             if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
@@ -3757,7 +3757,7 @@ class ImportClient
             "message" => "Downloading SQL dump",
         ]);
 
-        $this->download_sql();
+        $this->fetch_sql();
 
         // Interrupted response during SQL download — state already saved, exit partial.
         if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
@@ -3874,12 +3874,12 @@ class ImportClient
      * plus pending downloads and their size.
      *
      * Reads .import-remote-index.jsonl for all indexed files and
-     * .import-download-list.jsonl for files not yet downloaded.
+     * .import-fetch-list.jsonl for files not yet downloaded.
      */
     private function run_files_stats(): void
     {
         $remote_index = $this->remote_index_file;
-        $download_list = $this->download_list_file;
+        $fetch_list = $this->fetch_list_file;
 
         // Single pass over the remote index to build a path→size map.
         // Duplicates (from overlapping symlink targets) are collapsed
@@ -3904,7 +3904,7 @@ class ImportClient
         $indexed_count = count($size_by_path);
         $indexed_bytes = array_sum($size_by_path);
 
-        // Walk the download list(s) to count pending files. The download
+        // Walk the fetch list(s) to count pending files. The download
         // list only stores paths, so look up sizes from the map above.
         // Files before the fetch byte offset have already been downloaded.
         $pending_count = 0;
@@ -3912,10 +3912,10 @@ class ImportClient
         $skipped_pending_count = 0;
         $skipped_pending_bytes = 0;
 
-        // Count pending in the main download list
+        // Count pending in the main fetch list
         $fetch_offset = $this->import_state()->fetch->offset ?? 0;
-        if (is_file($download_list)) {
-            $handle = fopen($download_list, "r");
+        if (is_file($fetch_list)) {
+            $handle = fopen($fetch_list, "r");
             if ($handle) {
                 // Seek past already-downloaded entries. The fetch offset
                 // is the byte position where the next batch starts, so
@@ -3944,9 +3944,9 @@ class ImportClient
             }
         }
 
-        // Count pending in the skipped download list (uploads filtered out by --filter=essential-files)
+        // Count pending in the skipped fetch list (uploads filtered out by --filter=essential-files)
         $skipped_offset = $this->import_state()->fetch_skipped->offset ?? 0;
-        $skipped_list = $this->skipped_download_list_file;
+        $skipped_list = $this->skipped_fetch_list_file;
         if (is_file($skipped_list)) {
             $handle = fopen($skipped_list, "r");
             if ($handle) {
@@ -4214,7 +4214,7 @@ class ImportClient
         // Resolve the path to WordPress's index.php. On standard hosts it
         // lives in the filesystem root. On WPCloud the ABSPATH is a different
         // directory (e.g. /wordpress/core/X.Y.Z) which maps to
-        // download_root + abspath when using --fs-root.
+        // filesystem root + ABSPATH when using --fs-root.
         $paths_urls = $preflight_data["database"]["wp"]["paths_urls"] ?? [];
         $abspath = rtrim($paths_urls["abspath"] ?? "", "/");
         if (!empty($flat_document_root)) {
@@ -4222,7 +4222,7 @@ class ImportClient
             $wordpress_index_php = $local_document_root . '/index.php';
         } elseif ($abspath !== "") {
             // Raw download: ABSPATH is relative to the download root,
-            // not the local document root (which is download_root + document_root).
+            // not the local document root (which is filesystem root + document root).
             $wordpress_index_php = realpath($this->filesystem_root . $abspath . '/index.php') ?: '';
         } else {
             $wordpress_index_php = $local_document_root . '/index.php';
@@ -4356,7 +4356,7 @@ class ImportClient
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
             rtrim($state_dir, "/") . "/.import-state.json";
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
-            rtrim($state_dir, "/") . "/.import-download-list-skipped.jsonl";
+            rtrim($state_dir, "/") . "/.import-fetch-list-skipped.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
@@ -4378,8 +4378,8 @@ class ImportClient
     private function should_enable_remote_upload_proxy(): bool
     {
         if (
-            file_exists($this->skipped_download_list_file) &&
-            filesize($this->skipped_download_list_file) > 0
+            file_exists($this->skipped_fetch_list_file) &&
+            filesize($this->skipped_fetch_list_file) > 0
         ) {
             return true;
         }
@@ -5935,7 +5935,7 @@ class ImportClient
         $this->import_state()->active_resumable_command->command_name = "db-index";
         $this->save_state($this->state);
 
-        $this->download_db_index();
+        $this->fetch_database_index();
         if (
             $this->import_state()->active_resumable_command->completion_state ===
             "partial"
@@ -5972,12 +5972,12 @@ class ImportClient
      * @param array|null $post_data Optional POST data
      * @param string|null $cursor Cursor for resumption within the current batch
      */
-    private function download_file_fetch(
+    private function fetch_file_batch(
         ?array $post_data,
         ?string $cursor,
         string $state_key = "fetch"
     ): bool {
-        $fetch_state = $this->get_download_list_fetch_state($state_key);
+        $fetch_state = $this->get_fetch_list_progress_state($state_key);
         $cursor = $cursor ?? $fetch_state->cursor;
         $complete = false;
         $chunks_since_save = 0;
@@ -6008,7 +6008,7 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
-        // Always send directory[] – see comment in download_remote_index().
+        // Always send directory[] – see comment in fetch_remote_index().
         $export_dirs = $this->get_export_directories();
         if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
@@ -6185,7 +6185,7 @@ class ImportClient
                     ) {
                         throw new RuntimeException('Failed to flush the index-update WAL.');
                     }
-                    $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
+                    $this->get_fetch_list_progress_state($state_key)->cursor = $cursor;
                     $this->save_state($this->state);
                     $chunks_since_save = 0;
                 }
@@ -6208,7 +6208,7 @@ class ImportClient
             // the last complete part; the next invocation truncates any later
             // bytes before resuming.
             $durable_cursor =
-                $this->get_download_list_fetch_state($state_key)->cursor;
+                $this->get_fetch_list_progress_state($state_key)->cursor;
             $this->assert_can_resume_after_interrupted_response(
                 "file_fetch",
                 $cursor_before,
@@ -6233,7 +6233,7 @@ class ImportClient
             $wall_time,
             $context->response_stats ?? [],
         );
-        $this->get_download_list_fetch_state($state_key)->cursor = $cursor;
+        $this->get_fetch_list_progress_state($state_key)->cursor = $cursor;
         $this->apply_index_update_wal();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
@@ -6256,7 +6256,7 @@ class ImportClient
     /**
      * Download the remote index stream and write to disk.
      */
-    private function download_remote_index(?string $list_dir_override = null): bool
+    private function fetch_remote_index(?string $list_dir_override = null): bool
     {
         $cursor = $this->import_state()->index->cursor;
 
@@ -6498,7 +6498,7 @@ class ImportClient
     }
 
     /**
-     * Diff local index against remote index and build download list.
+     * Diff local index against remote index and build fetch list.
      */
     private function diff_indexes_and_build_fetch_list(): bool
     {
@@ -6509,19 +6509,19 @@ class ImportClient
         $diff = $this->import_state()->diff;
         $remote_offset = $diff->remote_offset;
         $last_local_index_entry_path = $diff->local_after;
-        $download_mode = $remote_offset > 0 ? "a" : "w";
-        if ($download_mode === "w") {
+        $fetch_list_mode = $remote_offset > 0 ? "a" : "w";
+        if ($fetch_list_mode === "w") {
             $this->audit_log(
-                "FILE CREATE | {$this->download_list_file} | building download list",
+                "FILE CREATE | {$this->fetch_list_file} | building fetch list",
             );
         } else {
             $this->audit_log(
-                "FILE APPEND | {$this->download_list_file} | resuming download list build",
+                "FILE APPEND | {$this->fetch_list_file} | resuming fetch list build",
             );
         }
-        $download_handle = fopen($this->download_list_file, $download_mode);
-        if (!$download_handle) {
-            throw new RuntimeException("Failed to open download list file");
+        $fetch_list_handle = fopen($this->fetch_list_file, $fetch_list_mode);
+        if (!$fetch_list_handle) {
+            throw new RuntimeException("Failed to open fetch list file");
         }
 
         // When --filter=essential-files is active, uploads go to a separate
@@ -6529,19 +6529,19 @@ class ImportClient
         $skipped_handle = null;
         $uploads_basedir = null;
         if ($this->filter === "essential-files") {
-            if ($download_mode === "w") {
+            if ($fetch_list_mode === "w") {
                 $this->audit_log(
-                    "FILE CREATE | {$this->skipped_download_list_file} | building skipped download list (uploads)",
+                    "FILE CREATE | {$this->skipped_fetch_list_file} | building skipped fetch list (uploads)",
                 );
             } else {
                 $this->audit_log(
-                    "FILE APPEND | {$this->skipped_download_list_file} | resuming skipped download list build",
+                    "FILE APPEND | {$this->skipped_fetch_list_file} | resuming skipped fetch list build",
                 );
             }
-            $skipped_handle = fopen($this->skipped_download_list_file, $download_mode);
+            $skipped_handle = fopen($this->skipped_fetch_list_file, $fetch_list_mode);
             if (!$skipped_handle) {
-                fclose($download_handle);
-                throw new RuntimeException("Failed to open skipped download list file");
+                fclose($fetch_list_handle);
+                throw new RuntimeException("Failed to open skipped fetch list file");
             }
             $uploads_basedir = $this->get_uploads_basedir();
             $this->audit_log(
@@ -6551,7 +6551,7 @@ class ImportClient
 
         $remote_index_handle = fopen($this->remote_index_file, "r");
         if (!$remote_index_handle) {
-            fclose($download_handle);
+            fclose($fetch_list_handle);
             throw new RuntimeException("Failed to open remote index file");
         }
         if ($remote_offset > 0) {
@@ -6614,7 +6614,7 @@ class ImportClient
                     // Always re-download — this file is in our local index,
                     // meaning we synced it before; preserve-local does not
                     // protect files we own.
-                    $download_list_handle = (
+                    $fetch_list_handle = (
                         $skipped_handle !== null &&
                         $this->is_remote_absolute_path_in_uploads_directory(
                             $remote_index_entry["path"],
@@ -6622,10 +6622,10 @@ class ImportClient
                         )
                     )
                         ? $skipped_handle
-                        : $download_handle;
-                    $this->append_download_list(
+                        : $fetch_list_handle;
+                    $this->append_fetch_list(
                         $remote_index_entry["path"],
-                        $download_list_handle,
+                        $fetch_list_handle,
                     );
                 }
                 $last_local_index_entry_path = $local_index_entry["path"];
@@ -6639,7 +6639,7 @@ class ImportClient
                     $this->audit_log($skip_reason, true);
                     $this->emit_skip_progress($remote_index_entry["path"]);
                 } else {
-                    $download_list_handle = (
+                    $fetch_list_handle = (
                         $skipped_handle !== null &&
                         $this->is_remote_absolute_path_in_uploads_directory(
                             $remote_index_entry["path"],
@@ -6647,8 +6647,8 @@ class ImportClient
                         )
                     )
                         ? $skipped_handle
-                        : $download_handle;
-                    $this->append_download_list($remote_index_entry["path"], $download_list_handle);
+                        : $fetch_list_handle;
+                    $this->append_fetch_list($remote_index_entry["path"], $fetch_list_handle);
                 }
             }
 
@@ -6681,7 +6681,7 @@ class ImportClient
             fclose($local_index_handle);
         }
         fclose($remote_index_handle);
-        fclose($download_handle);
+        fclose($fetch_list_handle);
         if ($skipped_handle !== null) {
             fclose($skipped_handle);
         }
@@ -6697,7 +6697,7 @@ class ImportClient
     /**
      * Download files from a prepared list.
      *
-     * @param string $list_file   Path to the JSONL download list to process.
+     * @param string $list_file   Path to the JSONL fetch list to process.
      * @param string $state_key   Key in $this->state that holds fetch progress
      *                            (e.g. "fetch" or "fetch_skipped").
      */
@@ -6733,7 +6733,7 @@ class ImportClient
         return $count;
     }
 
-    private function download_files_from_list(
+    private function fetch_files_from_list(
         string $list_file,
         string $state_key
     ): bool {
@@ -6745,17 +6745,17 @@ class ImportClient
             return true;
         }
 
-        // Compute download list counters once at the start of each list.
+        // Compute fetch list counters once at the start of each list.
         // These survive across batches within one invocation and are
         // recomputed on restart from the state file's byte offset.
-        if ($this->download_list_total === null) {
-            $offset = $this->get_download_list_fetch_state($state_key)->offset;
-            $this->download_list_total = $this->count_newlines($list_file);
-            $this->download_list_done = $offset > 0
+        if ($this->fetch_list_total === null) {
+            $offset = $this->get_fetch_list_progress_state($state_key)->offset;
+            $this->fetch_list_total = $this->count_newlines($list_file);
+            $this->fetch_list_done = $offset > 0
                 ? $this->count_newlines($list_file, $offset)
                 : 0;
         }
-        $fetch_state = $this->get_download_list_fetch_state($state_key);
+        $fetch_state = $this->get_fetch_list_progress_state($state_key);
         $batch_file = $fetch_state->batch_file;
         $batch_offset = $fetch_state->offset;
         $next_offset = $fetch_state->next_offset;
@@ -6773,7 +6773,7 @@ class ImportClient
             $next_offset = $batch["next_offset"];
             $batch_entries = $batch["entries"];
             $cursor = null;
-            $this->set_download_list_fetch_state($state_key, DownloadListFetchProgressState::from_array([
+            $this->set_fetch_list_progress_state($state_key, FetchListProgressState::from_array([
                 "offset" => $batch_offset,
                 "next_offset" => $next_offset,
                 "batch_file" => $batch_file,
@@ -6791,7 +6791,7 @@ class ImportClient
             ),
         ];
 
-        $complete = $this->download_file_fetch($post_data, $cursor, $state_key);
+        $complete = $this->fetch_file_batch($post_data, $cursor, $state_key);
         if (!$complete) {
             return false;
         }
@@ -6804,14 +6804,14 @@ class ImportClient
         // Advance the done counter by the known batch size and reset
         // the per-batch file counter. files_imported counted files within
         // this batch; now that the batch is complete, those files are
-        // accounted for in download_list_done.
-        if ($this->download_list_done !== null) {
-            $this->download_list_done += $batch_entries;
+        // accounted for in fetch_list_done.
+        if ($this->fetch_list_done !== null) {
+            $this->fetch_list_done += $batch_entries;
         }
         $this->import_state()->files_pull_summary->files_pulled += $batch_entries;
         $this->files_imported = 0;
 
-        $this->set_download_list_fetch_state($state_key, DownloadListFetchProgressState::from_array([
+        $this->set_fetch_list_progress_state($state_key, FetchListProgressState::from_array([
             "offset" => $next_offset,
             "next_offset" => $next_offset,
             "batch_file" => null,
@@ -6822,7 +6822,7 @@ class ImportClient
         return $next_offset >= filesize($list_file);
     }
 
-    private function get_download_list_fetch_state(string $state_key): DownloadListFetchProgressState
+    private function get_fetch_list_progress_state(string $state_key): FetchListProgressState
     {
         if ($state_key === "fetch") {
             return $this->import_state()->fetch;
@@ -6833,7 +6833,7 @@ class ImportClient
         throw new InvalidArgumentException("Unknown fetch state key: {$state_key}");
     }
 
-    private function set_download_list_fetch_state(string $state_key, DownloadListFetchProgressState $state): void
+    private function set_fetch_list_progress_state(string $state_key, FetchListProgressState $state): void
     {
         if ($state_key === "fetch") {
             $this->import_state()->fetch = $state;
@@ -6849,7 +6849,7 @@ class ImportClient
     /**
      * Builds a JSON batch file listing the next set of paths to download.
      *
-     * Reads from the download list (.import-download-list.jsonl) starting at
+     * Reads from the fetch list (.import-fetch-list.jsonl) starting at
      * $offset, accumulating paths into a JSON array until the batch approaches
      * 80% of the server's max request size.  Always includes at least one path,
      * even if it alone exceeds the limit.
@@ -6857,8 +6857,8 @@ class ImportClient
      * The batch file is written to a temp file and intended to be uploaded as
      * the request body for the file_fetch endpoint.
      *
-     * @param string $list_file Path to the JSONL download list.
-     * @param int    $offset    Byte offset into the download list file.
+     * @param string $list_file Path to the JSONL fetch list.
+     * @param int    $offset    Byte offset into the fetch list file.
      * @return array|null {
      *     Prepared fetch batch, or null if no paths remain.
      *
@@ -6877,10 +6877,10 @@ class ImportClient
         $max_request = $this->get_max_request_bytes();
         $limit = (int) max(256 * 1024, $max_request * 0.8);
 
-        // Open the download list and seek to where the previous batch left off.
+        // Open the fetch list and seek to where the previous batch left off.
         $handle = fopen($list_file, "r");
         if (!$handle) {
-            throw new RuntimeException("Failed to open download list file");
+            throw new RuntimeException("Failed to open fetch list file");
         }
 
         if ($offset > 0) {
@@ -6902,9 +6902,9 @@ class ImportClient
             throw new RuntimeException("Failed to open fetch batch file");
         }
 
-        // Read lines from the download list (one JSON entry per line) and
+        // Read lines from the fetch list (one JSON entry per line) and
         // accumulate them into the JSON array until we approach the size limit.
-        // The download list supports two formats:
+        // The fetch list supports two formats:
         //   - A bare JSON string:   "/path/to/file"
         //   - A JSON object:        {"path": "<base64-encoded path>"}
         $bytes = 0;
@@ -6978,7 +6978,7 @@ class ImportClient
         fclose($handle);
         fclose($out);
 
-        // An empty batch (just "[]") means we've exhausted the download list.
+        // An empty batch (just "[]") means we've exhausted the fetch list.
         if ($bytes <= 2) {
             @unlink($tmp);
             return null;
@@ -7048,9 +7048,9 @@ class ImportClient
     }
 
     /**
-     * Append a path to the download list file.
+     * Append a path to the fetch list file.
      */
-    private function append_download_list(string $path, $handle): void
+    private function append_fetch_list(string $path, $handle): void
     {
         $line = json_encode(
             ["path" => base64_encode($path)],
@@ -7059,7 +7059,7 @@ class ImportClient
         if ($line !== false) {
             fwrite($handle, $line . "\n");
         }
-        $this->audit_log("Added to the download list: {$path}", false);
+        $this->audit_log("Added to the fetch list: {$path}", false);
     }
 
     /**
@@ -7519,7 +7519,7 @@ class ImportClient
     /**
      * Download SQL from remote.
      */
-    private function download_sql(): void
+    private function fetch_sql(): void
     {
         $cursor = $this->import_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
@@ -8225,7 +8225,7 @@ class ImportClient
     /**
      * Download table stats from the db_index endpoint.
      */
-    private function download_db_index(): void
+    private function fetch_database_index(): void
     {
         $cursor = $this->import_state()->active_resumable_command->remote_cursor ?? null;
         $complete = false;
@@ -9141,8 +9141,8 @@ class ImportClient
                 false,
             );
 
-            $files_done = ($this->download_list_done ?? 0) + $this->files_imported;
-            $files_total = $this->download_list_total;
+            $files_done = ($this->fetch_list_done ?? 0) + $this->files_imported;
+            $files_total = $this->fetch_list_total;
             $file_fraction = ($files_total !== null && $files_total > 0)
                 ? $files_done / $files_total
                 : null;
@@ -9157,8 +9157,8 @@ class ImportClient
                 "size" => $file_size,
                 "message" => $file_progress_message,
             ];
-            if ($this->download_list_total !== null) {
-                $progress_record["files_total"] = $this->download_list_total;
+            if ($this->fetch_list_total !== null) {
+                $progress_record["files_total"] = $this->fetch_list_total;
             }
             $this->output_progress($progress_record);
         }
@@ -10925,14 +10925,14 @@ class ImportClient
                             "heartbeat" => true,
                             "bytes_received" => $bytes_received,
                         ];
-                        // Only emit file counters when the download list has
+                        // Only emit file counters when the fetch list has
                         // been counted (fetch phase).  During indexing the
                         // list doesn't exist yet and emitting files_done:0
                         // without files_total confuses consumers.
-                        if ($this->download_list_total !== null) {
+                        if ($this->fetch_list_total !== null) {
                             $heartbeat["files_done"] =
-                                ($this->download_list_done ?? 0) + $this->files_imported;
-                            $heartbeat["files_total"] = $this->download_list_total;
+                                ($this->fetch_list_done ?? 0) + $this->files_imported;
+                            $heartbeat["files_total"] = $this->fetch_list_total;
                         }
                         fwrite($this->progress_fd, json_encode($heartbeat) . "\n");
                     }
@@ -12644,8 +12644,8 @@ if (
                 "  (filesystem root)/                              Downloaded files\n" .
                 "  .import-index.jsonl                     Local file index\n" .
                 "  .import-remote-index.jsonl              Remote index snapshot\n" .
-                "  .import-download-list.jsonl             Files pending download\n" .
-                "  .import-download-list-skipped.jsonl     Skipped files (when --filter=essential-files)\n" .
+                "  .import-fetch-list.jsonl             Files pending download\n" .
+                "  .import-fetch-list-skipped.jsonl     Skipped files (when --filter=essential-files)\n" .
                 "  .import-state.json                      Resumable state\n" .
                 "  .import-audit.log                       Audit log\n",
         ],
@@ -12700,7 +12700,7 @@ if (
                 "\n" .
                 "On the first run, builds the complete index. On subsequent runs,\n" .
                 "re-indexes and diffs against the prior snapshot to produce a\n" .
-                "download list of changed files.\n" .
+                "fetch list of changed files.\n" .
                 "\n" .
                 "When symlink-following is enabled, recursively discovers and indexes\n" .
                 "additional directories outside the primary roots.\n" .

@@ -93,7 +93,7 @@ class FileBodyStreamingTest extends TestCase
      * surface is double-counting (server resends bytes already on disk) or
      * truncation (resume re-opens with "wb" and wipes the partial file). This
      * test pins the contract: feed a part's first half, simulate a crash,
-     * reopen the file in append mode the way download_file_data() does on
+     * reopen the file in append mode the way fetch_file_batch() does on
      * resume, then feed the second half as a continuation part with
      * x-first-chunk=0. The result must be byte-identical to the source —
      * no gap, no duplication.
@@ -159,7 +159,7 @@ class FileBodyStreamingTest extends TestCase
         $this->assertSame($halfwayPoint, $context1->file_bytes_written,
             'file_bytes_written must reflect actual on-disk bytes; that is the value we will save into state for resume.');
 
-        // Mimic the crash + reopen path from download_file_data():
+        // Mimic the crash + reopen path from fetch_file_batch():
         // close the in-flight handle, then on the next request reopen the
         // tracked file in append mode using the previously-saved byte count.
         if ($context1->file_handle) {

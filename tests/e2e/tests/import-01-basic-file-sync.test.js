@@ -98,7 +98,7 @@ describe('Import: Basic File Sync', () => {
 
         // Transient files should be cleaned up
         assert.ok(!existsSync(join(tempDir, '.import-remote-index.jsonl')), 'Expected remote index to be deleted');
-        assert.ok(!existsSync(join(tempDir, '.import-download-list.jsonl')), 'Expected download list to be deleted');
+        assert.ok(!existsSync(join(tempDir, '.import-fetch-list.jsonl')), 'Expected fetch list to be deleted');
     });
 
     it('running after --abort performs a delta sync', () => {

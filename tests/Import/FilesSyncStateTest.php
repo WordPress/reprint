@@ -111,11 +111,11 @@ class FilesSyncStateTest extends TestCase
     }
 
     /**
-     * Read the download list file and return the list of paths.
+     * Read the fetch list file and return the list of paths.
      */
-    private function readDownloadList(): array
+    private function readFetchList(): array
     {
-        $file = $this->stateDir . '/.import-download-list.jsonl';
+        $file = $this->stateDir . '/.import-fetch-list.jsonl';
         if (!file_exists($file)) {
             return [];
         }
@@ -191,7 +191,7 @@ class FilesSyncStateTest extends TestCase
             "filter" => "essential-files",
         ]);
         file_put_contents(
-            $this->stateDir . '/.import-download-list-skipped.jsonl',
+            $this->stateDir . '/.import-fetch-list-skipped.jsonl',
             json_encode([
                 "path" => base64_encode('/wp-content/uploads/2024/01/photo.jpg'),
             ], JSON_UNESCAPED_SLASHES) . "\n",
@@ -215,7 +215,7 @@ class FilesSyncStateTest extends TestCase
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
         $this->assertNull($state["active_resumable_command"]["current_stage"]);
         $this->assertEquals("skipped-earlier", $state["filter"]);
-        $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-fetch-list-skipped.jsonl');
     }
 
     /**
@@ -295,7 +295,7 @@ class FilesSyncStateTest extends TestCase
     public function testSkippedEarlierAfterCompositePullAdoptsFilesPullState(): void
     {
         file_put_contents(
-            $this->stateDir . '/.import-download-list-skipped.jsonl',
+            $this->stateDir . '/.import-fetch-list-skipped.jsonl',
             $this->indexLine('/wp-content/uploads/2024/01/photo.jpg', 1000, 100),
         );
         $this->writeState([
@@ -338,7 +338,7 @@ class FilesSyncStateTest extends TestCase
 
     /**
      * In preserve-local mode, a file that is in the local index and changed
-     * remotely (different ctime) must be added to the download list.
+     * remotely (different ctime) must be added to the fetch list.
      *
      * Preserve-local protects pre-existing local files, not files we
      * previously synced. A changed file in the local index is ours to update.
@@ -371,7 +371,7 @@ class FilesSyncStateTest extends TestCase
         $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
         $diffMethod->invoke($client);
 
-        $downloads = $this->readDownloadList();
+        $downloads = $this->readFetchList();
         $this->assertContains(
             '/wp-content/themes/flavor/style.css',
             $downloads,
@@ -411,7 +411,7 @@ class FilesSyncStateTest extends TestCase
         $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
         $diffMethod->invoke($client);
 
-        $downloads = $this->readDownloadList();
+        $downloads = $this->readFetchList();
         $this->assertNotContains(
             '/wp-content/object-cache.php',
             $downloads,
@@ -421,7 +421,7 @@ class FilesSyncStateTest extends TestCase
 
     /**
      * handle_file_chunk must overwrite an existing local file in
-     * preserve-local mode when the file was placed in the download list
+     * preserve-local mode when the file was placed in the fetch list
      * by the diff stage (i.e., it's a file we previously synced that
      * changed remotely).
      *
@@ -469,7 +469,7 @@ class FilesSyncStateTest extends TestCase
         $this->assertEquals(
             'new content',
             file_get_contents($localFile),
-            "Fetch stage must overwrite existing files that were placed in the download list",
+            "Fetch stage must overwrite existing files that were placed in the fetch list",
         );
     }
 }

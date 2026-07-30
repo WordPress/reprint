@@ -103,11 +103,11 @@ class PullFilterFakeClient extends \ImportClient
         $this->files_sync_runs++;
         if ($this->create_skipped_list) {
             file_put_contents(
-                $this->state_dir . '/.import-download-list-skipped.jsonl',
+                $this->state_dir . '/.import-fetch-list-skipped.jsonl',
                 "{\"path\":\"" . base64_encode('/wp-content/uploads/2024/01/photo.jpg') . "\"}\n",
             );
         } else {
-            @unlink($this->state_dir . '/.import-download-list-skipped.jsonl');
+            @unlink($this->state_dir . '/.import-fetch-list-skipped.jsonl');
         }
 
         $state = $this->get_import_state();
@@ -817,7 +817,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertTrue($state["pull_pipeline"]["skipped_pending"]);
         $this->assertTrue($state["pull_pipeline"]["has_completed_once"]);
         $this->assertSame('essential-files', $state["filter"]);
-        $this->assertFileExists($this->stateDir . '/.import-download-list-skipped.jsonl');
+        $this->assertFileExists($this->stateDir . '/.import-fetch-list-skipped.jsonl');
     }
 
     public function testPullWithoutFilterRecordsFullDownloadMode(): void
@@ -837,7 +837,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertFalse($state["pull_pipeline"]["skipped_pending"]);
         $this->assertTrue($state["pull_pipeline"]["has_completed_once"]);
         $this->assertSame('none', $state["filter"]);
-        $this->assertFileDoesNotExist($this->stateDir . '/.import-download-list-skipped.jsonl');
+        $this->assertFileDoesNotExist($this->stateDir . '/.import-fetch-list-skipped.jsonl');
     }
 
     public function testPullDerivesFlatDocumentRootFromFlattenTo(): void
