@@ -658,7 +658,7 @@ class Pull
      *
      * php-builtin and playground-cli can run without a local MySQL server, so
      * pull imports into SQLite by default for those runtimes. nginx-fpm does
-     * not imply a database target because it is normally paired with an
+     * not imply a database target because it is normally used with an
      * externally managed server.
      */
     private function default_pull_target_options(array $options): array

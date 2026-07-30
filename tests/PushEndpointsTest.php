@@ -2573,7 +2573,8 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Runs the production files-diff CLI for the same pair a push CLI used.
+     * Runs files-diff for the same remote Reprint API URL and state directory
+     * a push CLI used.
      *
      * @return array{exit:int,stdout:string,stderr:string,output:string}
      */
@@ -2631,7 +2632,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(0, $initial['exit'], $initial['output']);
         $initial_result = $this->lastCliJsonLine($initial['stdout']);
         $this->assertSame('complete', $initial_result['status'] ?? null);
-        $push_state_directory = $this->filesPushStateDirectory($local_docroot, $state_directory);
+        $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $this->assertSame($initial_contents, file_get_contents($this->docroot . '/nested/multi-chunk.bin'));
         $this->assertSame('delete me later', file_get_contents($this->docroot . '/delete-later.txt'));
         $this->assertDirectoryExists($this->docroot . '/empty-directory');
@@ -2650,7 +2651,7 @@ final class PushEndpointsTest extends TestCase {
             JSON_THROW_ON_ERROR
         );
         $this->assertSame(
-            ['command', 'pair', 'status', 'phase', 'reason', 'detail', 'ts'],
+            ['command', 'status', 'phase', 'reason', 'detail', 'ts'],
             array_keys($progress)
         );
         $this->assertSame('complete', $progress['status']);
@@ -2664,9 +2665,7 @@ final class PushEndpointsTest extends TestCase {
             }
         ));
         $this->assertNotEmpty($files_push_lines);
-        foreach ($files_push_lines as $line) {
-            $this->assertStringContainsString('pair=' . $initial_result['pair'], $line);
-        }
+        $this->assertStringContainsString('COMPLETE files-push | phase=completing', $audit);
         preg_match_all('/PHASE files-push .* from=([^ ]+) \| to=([^ ]+)/', $audit, $phase_matches);
         $phase_transitions = array_map(
             static function (string $from, string $to): string {
@@ -2723,8 +2722,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(0, $this->countEndpointRequests('push_upload'));
         $partial_audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringContainsString(
-            'PARTIAL files-push | pair=' . $partial_result['pair']
-                . ' | phase=starting_plan | cause=time_limit',
+            'PARTIAL files-push | phase=starting_plan | cause=time_limit',
             $partial_audit
         );
 
@@ -2766,8 +2764,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('starting_plan', $interrupted_result['phase'] ?? null);
         $interrupted_audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringContainsString(
-            'INTERRUPTED files-push | pair=' . $interrupted_result['pair']
-                . ' | phase=starting_plan | signal=' . SIGTERM,
+            'INTERRUPTED files-push | phase=starting_plan | signal=' . SIGTERM,
             $interrupted_audit
         );
 
@@ -2820,7 +2817,7 @@ final class PushEndpointsTest extends TestCase {
         }
 
         $this->assertNotSame(0, $killed['exit']);
-        $push_state_directory = $this->filesPushStateDirectory($local_docroot, $state_directory);
+        $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $active_state = $this->loadActiveState($push_state_directory);
         $this->assertIsArray($active_state);
         $this->waitForPushLockRelease($active_state['push_session_id']);
@@ -2839,7 +2836,7 @@ final class PushEndpointsTest extends TestCase {
         $state_directory = $this->root . '/cli-failed-state';
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/value.txt', 'value after failure');
-        $push_state_directory = $this->filesPushStateDirectory($local_docroot, $state_directory);
+        $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $sender = $this->startSender(
             $this->filesPushSenderOptions($local_docroot, $push_state_directory)
         );
@@ -2872,7 +2869,8 @@ final class PushEndpointsTest extends TestCase {
         $this->assertFileExists($push_state_directory . '/sender.json');
         $failed_audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringContainsString(
-            'FAILED files-push | pair=' . $failed_result['pair'],
+            'FAILED files-push | phase=' . $failed_result['phase']
+                . ' | reason=lock_acquisition_failure',
             $failed_audit
         );
 
@@ -2889,7 +2887,7 @@ final class PushEndpointsTest extends TestCase {
         $state_directory = $this->root . '/cli-restart-state';
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/value.txt', 'before');
-        $push_state_directory = $this->filesPushStateDirectory($local_docroot, $state_directory);
+        $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $sender = $this->startSender(
             $this->filesPushSenderOptions($local_docroot, $push_state_directory)
         );
@@ -2913,7 +2911,8 @@ final class PushEndpointsTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
         $restart_audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringContainsString(
-            'RESTART files-push | pair=' . $restart_result['pair'],
+            'RESTART files-push | phase=' . $restart_result['phase']
+                . ' | reason=local_path_changed',
             $restart_audit
         );
 
@@ -3016,14 +3015,9 @@ final class PushEndpointsTest extends TestCase {
         $this->fail('No JSON line was found in CLI output: ' . $output);
     }
 
-    private function filesPushStateDirectory(
-        string $local_docroot,
-        string $state_directory
-    ): string {
-        $canonical_local_docroot = realpath($local_docroot);
-        $this->assertIsString($canonical_local_docroot);
-        $pair = hash('sha256', rtrim($this->remote_reprint_api_url, '?&') . "\0" . $canonical_local_docroot);
-        return $state_directory . '/push/' . $pair;
+    private function filesPushStateDirectory(string $state_directory): string
+    {
+        return $state_directory . '/push/' . md5(rtrim($this->remote_reprint_api_url, '?&'));
     }
 
     /** @return array<string,mixed> */
@@ -3535,7 +3529,7 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Seeds the pair's previous local index.
+     * Seeds the previous local index for one remote Reprint API URL.
      */
     private function seedPreviousLocalIndex(string $push_state_directory, string $index_path): void
     {
