@@ -289,4 +289,92 @@ class ImportSymlinkTest extends TestCase
         $this->assertTrue(is_link($filePath), 'File should be replaced with symlink');
         $this->assertEquals('target', readlink($filePath));
     }
+
+    /**
+     * In preserve-local mode, a symlink whose parent directory is
+     * site-owned (no symlinks in the path) should be created even when
+     * its target points through a symlinked shared directory.
+     *
+     * This is the WP Cloud Atomic theme layout: the per-site symlink
+     * lives at wp-content/themes/indice (site-owned) and points to
+     * ../../wordpress/themes/pub/indice (shared infrastructure reached
+     * through the /wordpress/ symlink).  The target path is validated
+     * by normalize_path (string-only, no symlink resolution), so it
+     * stays within the fs-root and passes.
+     */
+    public function testPreserveLocalAllowsSymlinkPointingThroughSharedDir()
+    {
+        $fsRoot = $this->tempDir . '/fs-root';
+
+        // Site-owned themes directory (no symlinks in path)
+        mkdir($fsRoot . '/wp-content/themes', 0755, true);
+
+        // Shared infrastructure: wordpress/ is a symlink
+        mkdir($fsRoot . '/wp-shared/themes/pub/indice', 0755, true);
+        symlink('wp-shared', $fsRoot . '/wordpress');
+
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $fsRoot);
+
+        $reflection = new \ReflectionClass($client);
+        $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
+        $behaviorProp->setValue($client, 'preserve-local');
+
+        $method = $reflection->getMethod('handle_symlink_chunk');
+
+        // Target points through the shared /wordpress/ symlink
+        $chunk = [
+            'headers' => [
+                'x-symlink-path' => base64_encode('/wp-content/themes/indice'),
+                'x-symlink-target' => base64_encode('../../wordpress/themes/pub/indice'),
+                'x-symlink-ctime' => '1234567890'
+            ]
+        ];
+
+        $method->invoke($client, $chunk);
+
+        $symlinkPath = $fsRoot . '/wp-content/themes/indice';
+        $this->assertTrue(is_link($symlinkPath), 'Symlink in site-owned dir should be created');
+        $this->assertEquals(
+            '../../wordpress/themes/pub/indice',
+            readlink($symlinkPath),
+        );
+    }
+
+    /**
+     * In preserve-local mode, a symlink whose parent IS a shared
+     * directory (reached through a symlink) should be blocked — both
+     * files and symlinks modify the shared directory equally.
+     */
+    public function testPreserveLocalBlocksSymlinkInsideSharedDir()
+    {
+        $fsRoot = $this->tempDir . '/fs-root';
+
+        mkdir($fsRoot . '/wp-shared/themes/pub', 0755, true);
+        symlink('wp-shared', $fsRoot . '/wordpress');
+
+        $client = new \ImportClient('http://fake.url', $this->tempDir, $fsRoot);
+
+        $reflection = new \ReflectionClass($client);
+        $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
+        $behaviorProp->setValue($client, 'preserve-local');
+
+        $method = $reflection->getMethod('handle_symlink_chunk');
+
+        // Parent path traverses /wordpress/ symlink → shared territory
+        $chunk = [
+            'headers' => [
+                'x-symlink-path' => base64_encode('/wordpress/themes/pub/indice'),
+                'x-symlink-target' => base64_encode('indice-1.0'),
+                'x-symlink-ctime' => '1234567890'
+            ]
+        ];
+
+        $method->invoke($client, $chunk);
+
+        $symlinkPath = $fsRoot . '/wordpress/themes/pub/indice';
+        $this->assertFalse(
+            is_link($symlinkPath),
+            'Symlink inside shared directory (through symlink) must be blocked',
+        );
+    }
 }

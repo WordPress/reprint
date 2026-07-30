@@ -472,6 +472,94 @@ class FilesSyncStateTest extends TestCase
             "Fetch stage must overwrite existing files that were placed in the download list",
         );
     }
+
+    // ---------------------------------------------------------------
+    // Symlink in site-owned dir (WP Cloud Atomic theme layout)
+    // ---------------------------------------------------------------
+
+    /**
+     * A symlink entry at a site-owned path (no symlinks in the parent
+     * chain) should be added to the download list in preserve-local
+     * mode, even when its target points through a shared directory.
+     *
+     * WP Cloud Atomic layout: wp-content/themes/indice is the per-site
+     * symlink (site-owned), pointing to ../../wordpress/themes/pub/indice
+     * (shared infrastructure).  The parent wp-content/themes/ has no
+     * symlinks in its path, so preserve-local allows it.
+     */
+    public function testDeltaDiffIncludesSymlinkInSiteOwnedDir()
+    {
+        // Site-owned directory — no symlinks in path
+        mkdir($this->fs_root . '/wp-content/themes', 0755, true);
+
+        // Shared infrastructure (not traversed for the symlink's parent)
+        mkdir($this->fs_root . '/wp-shared/themes/pub/indice', 0755, true);
+        symlink('wp-shared', $this->fs_root . '/wordpress');
+
+        $localIndex = $this->stateDir . '/.import-index.jsonl';
+        file_put_contents($localIndex, '');
+
+        $remoteIndex = $this->stateDir . '/.import-remote-index.jsonl';
+        file_put_contents($remoteIndex, $this->indexLine('/wp-content/themes/indice', 1000, 0, 'link'));
+
+        $this->writeState([
+            "command" => "files-pull",
+            "status" => "in_progress",
+            "stage" => "diff",
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $reflection->getMethod('diff_indexes_and_build_fetch_list')->invoke($client);
+
+        $downloads = $this->readDownloadList();
+        $this->assertContains(
+            '/wp-content/themes/indice',
+            $downloads,
+            "Symlink in site-owned directory must be added to the download list",
+        );
+    }
+
+    /**
+     * Entries whose parent path traverses a symlink should be blocked
+     * regardless of entry type — the parent directory is shared
+     * infrastructure.
+     */
+    public function testDeltaDiffSkipsEntriesInsideSharedDir()
+    {
+        mkdir($this->fs_root . '/wp-shared/themes/pub', 0755, true);
+        symlink('wp-shared', $this->fs_root . '/wordpress');
+
+        $localIndex = $this->stateDir . '/.import-index.jsonl';
+        file_put_contents($localIndex, '');
+
+        $remoteIndex = $this->stateDir . '/.import-remote-index.jsonl';
+        file_put_contents(
+            $remoteIndex,
+            $this->indexLine('/wordpress/themes/pub/indice', 1000, 0, 'link') .
+            $this->indexLine('/wordpress/themes/pub/indice/style.css', 1000, 500, 'file'),
+        );
+
+        $this->writeState([
+            "command" => "files-pull",
+            "status" => "in_progress",
+            "stage" => "diff",
+        ]);
+
+        [$client, $reflection] = $this->prepareClient();
+        $reflection->getMethod('diff_indexes_and_build_fetch_list')->invoke($client);
+
+        $downloads = $this->readDownloadList();
+        $this->assertNotContains(
+            '/wordpress/themes/pub/indice',
+            $downloads,
+            "Symlink inside shared directory must be skipped",
+        );
+        $this->assertNotContains(
+            '/wordpress/themes/pub/indice/style.css',
+            $downloads,
+            "File inside shared directory must be skipped",
+        );
+    }
 }
 
 /**
