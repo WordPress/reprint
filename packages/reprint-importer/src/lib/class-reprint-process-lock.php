@@ -8,7 +8,7 @@
  * Serializes local Reprint commands which share one state directory.
  *
  * Construction acquires the non-blocking exclusive lock at
- * `<state-directory>/.reprint.lock`. The caller retains this object for the
+ * `<state-dir>/.reprint/process.lock`. The caller retains this object for the
  * complete command and calls close() when the command ends.
  */
 final class ReprintProcessLock
@@ -19,37 +19,43 @@ final class ReprintProcessLock
     /**
      * Acquires the state directory's Reprint process lock.
      *
-     * The state directory is created when absent. Lock acquisition is
-     * non-blocking, so construction fails while another process owns it.
+     * The local Reprint state directory is created when absent. Lock
+     * acquisition is non-blocking, so construction fails while another
+     * process owns it.
      *
-     * @param string $state_directory Local Reprint state directory.
+     * @param string $state_dir Caller-selected state directory.
      *
      * @throws RuntimeException When the directory or lock cannot be created,
      *                          opened, or acquired.
      */
-    public function __construct(string $state_directory)
+    public function __construct(string $state_dir)
     {
+        $reprint_state_directory =
+            rtrim($state_dir, '/') . '/.reprint';
         if (
-            !is_dir($state_directory)
-            && !mkdir($state_directory, 0755, true)
-            && !is_dir($state_directory)
+            !is_dir($reprint_state_directory)
+            && !mkdir($reprint_state_directory, 0755, true)
+            && !is_dir($reprint_state_directory)
         ) {
             throw new RuntimeException(
                 'Failed to create the Reprint state directory: '
-                . $state_directory . '.'
+                . $reprint_state_directory . '.'
             );
         }
-        $lock_path = rtrim($state_directory, '/') . '/.reprint.lock';
-        $this->handle = fopen($lock_path, 'c+b');
+        $process_lock_path = $reprint_state_directory . '/process.lock';
+        $this->handle = fopen($process_lock_path, 'c+b');
         if (!is_resource($this->handle)) {
-            throw new RuntimeException('Failed to open the Reprint process lock: ' . $lock_path . '.');
+            throw new RuntimeException(
+                'Failed to open the Reprint process lock: '
+                . $process_lock_path . '.'
+            );
         }
         if (!flock($this->handle, LOCK_EX | LOCK_NB)) {
             fclose($this->handle);
             $this->handle = null;
             throw new RuntimeException(
                 'Another Reprint process is using the state directory: '
-                . rtrim($state_directory, '/') . '.'
+                . rtrim($state_dir, '/') . '.'
             );
         }
     }

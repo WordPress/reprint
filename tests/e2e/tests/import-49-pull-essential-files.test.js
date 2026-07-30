@@ -84,8 +84,8 @@ describe('Import: Pull essential-files', { timeout: 180000 }, () => {
     });
 
     it('state records deferred files in the pull metadata', () => {
-        const stateFile = join(tempDir, '.import-state.json');
-        assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
+        const stateFile = join(tempDir, '.reprint/pull/state.json');
+        assert.ok(existsSync(stateFile), 'Expected .reprint/pull/state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assertPullPipelineComplete(state);
         assert.equal(state.pull_pipeline.files_filter, 'essential-files');
@@ -93,7 +93,7 @@ describe('Import: Pull essential-files', { timeout: 180000 }, () => {
     });
 
     it('skipped fetch list remains on disk', () => {
-        const skippedList = join(tempDir, '.import-fetch-list-skipped.jsonl');
+        const skippedList = join(tempDir, '.reprint/pull/skipped-fetch-list.jsonl');
         assert.ok(existsSync(skippedList), 'Expected skipped fetch list to exist');
         assert.ok(readFileSync(skippedList, 'utf-8').trim().length > 0,
             'Expected skipped fetch list to be non-empty');

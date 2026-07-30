@@ -27,7 +27,7 @@
  *
  * Example:
  *
- *     $process_lock = new ReprintProcessLock($state_directory);
+ *     $process_lock = new ReprintProcessLock($state_dir);
  *     $sender = $first_run
  *         ? PushFilesSender::start($options, $process_lock)
  *         : PushFilesSender::resume($options, $process_lock);

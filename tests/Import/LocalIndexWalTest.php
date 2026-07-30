@@ -22,7 +22,7 @@ final class LocalIndexWalTest extends TestCase
             . bin2hex(random_bytes(6));
         $this->stateDirectory = $this->root . '/state';
         $this->fileRoot = $this->root . '/files';
-        mkdir($this->stateDirectory, 0700, true);
+        mkdir($this->stateDirectory . '/.reprint/pull', 0700, true);
         mkdir($this->fileRoot, 0700, true);
     }
 
@@ -44,7 +44,7 @@ final class LocalIndexWalTest extends TestCase
         );
         $reflection->getMethod('apply_local_index_wal')->invoke($client);
 
-        $localIndexWalPath = $this->stateDirectory . '/.import-local-index.wal';
+        $localIndexWalPath = $this->stateDirectory . '/.reprint/pull/local-index.wal';
         $this->assertFileExists($localIndexWalPath);
         $this->assertSame('', file_get_contents($localIndexWalPath));
         $this->assertSame(
@@ -66,7 +66,7 @@ final class LocalIndexWalTest extends TestCase
             'type' => 'file',
         ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
         file_put_contents(
-            $this->stateDirectory . '/.import-local-index.wal',
+            $this->stateDirectory . '/.reprint/pull/local-index.wal',
             $completeRecord . '{"op":"F","path":"'
         );
 
@@ -78,7 +78,7 @@ final class LocalIndexWalTest extends TestCase
         $this->assertSame(
             '',
             file_get_contents(
-                $this->stateDirectory . '/.import-local-index.wal'
+                $this->stateDirectory . '/.reprint/pull/local-index.wal'
             )
         );
     }
@@ -89,7 +89,7 @@ final class LocalIndexWalTest extends TestCase
     public function testAbortReplaysAndRemovesTheLocalIndexWal(string $command): void
     {
         file_put_contents(
-            $this->stateDirectory . '/.import-local-index.wal',
+            $this->stateDirectory . '/.reprint/pull/local-index.wal',
             json_encode([
                 'op' => 'F',
                 'path' => base64_encode('/site/aborted.txt'),
@@ -112,7 +112,7 @@ final class LocalIndexWalTest extends TestCase
 
         $this->assertSame('/site/aborted.txt', $this->firstIndexPath());
         $this->assertFileDoesNotExist(
-            $this->stateDirectory . '/.import-local-index.wal'
+            $this->stateDirectory . '/.reprint/pull/local-index.wal'
         );
     }
 
@@ -137,7 +137,7 @@ final class LocalIndexWalTest extends TestCase
     private function firstIndexPath(): string
     {
         $lines = file(
-            $this->stateDirectory . '/.import-index.jsonl',
+            $this->stateDirectory . '/.reprint/pull/local-index.jsonl',
             FILE_IGNORE_NEW_LINES
         );
         $this->assertIsArray($lines);

@@ -61,7 +61,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame($resolvedFilesystemRoot, $context['filesystem_root']);
         $this->assertSame($expectedPair, $context['pair']);
         $this->assertSame(
-            realpath($this->stateDirectory) . '/push/' . $expectedPair,
+            realpath($this->stateDirectory) . '/.reprint/push/' . $expectedPair,
             $context['push_state_directory']
         );
 
@@ -219,7 +219,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringContainsString( (string) realpath($this->localTree), $nestedStateError['error'] ?? '' );
 
         $this->assertNoSenderState($this->stateDirectory);
-        $this->assertFileDoesNotExist($this->stateDirectory . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDirectory . '/.reprint/pull/state.json');
     }
 
     public function testFilesPushMasksTheSharedSecretInOutputAndStateFiles(): void
@@ -236,7 +236,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame('files-push', $finalLine['command'] ?? null);
         $this->assertSame('failed', $finalLine['status'] ?? null);
         $this->assertSame(1, $result['exit']);
-        $this->assertFileDoesNotExist($this->stateDirectory . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDirectory . '/.reprint/pull/state.json');
     }
 
     public function testCorruptSenderStateUsesTheStructuredWorkflowErrorResult(): void
@@ -277,7 +277,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame('', $result['stderr']);
 
         $status = json_decode(
-            (string) file_get_contents($this->stateDirectory . '/.import-status.json'),
+            (string) file_get_contents($this->stateDirectory . '/.reprint/status.json'),
             true,
             512,
             JSON_THROW_ON_ERROR
@@ -287,7 +287,7 @@ final class FilesPushCommandTest extends TestCase
             array_keys($status)
         );
         $this->assertSame('error', $status['status']);
-        $audit = (string) file_get_contents($this->stateDirectory . '/.import-audit.log');
+        $audit = (string) file_get_contents($this->stateDirectory . '/.reprint/audit.log');
         $this->assertSame(1, substr_count($audit, 'ERROR files-push'));
         $this->assertStringContainsString('pair=' . $context['pair'], $audit);
     }
@@ -350,7 +350,7 @@ final class FilesPushCommandTest extends TestCase
 
     private function assertNoSenderState(string $stateDirectory): void
     {
-        $senderPaths = glob($stateDirectory . '/push/*/sender.json');
+        $senderPaths = glob($stateDirectory . '/.reprint/push/*/sender.json');
         $this->assertIsArray($senderPaths);
         $this->assertSame([], $senderPaths);
     }

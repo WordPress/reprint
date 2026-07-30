@@ -3,12 +3,12 @@
  *
  * When using --sql-output=mysql with short execution times, the server
  * may pause mid-query (x-query-complete: 0). The importer buffers the
- * partial SQL in memory and persists it to .sql-buffer on disk as each
+ * partial SQL in memory and persists it to .reprint/pull/sql-buffer on disk as each
  * chunk arrives. If the process dies at any point, the next run reloads
  * whatever was accumulated.
  *
  * This test forces many resume cycles with --max-exec=1, verifies the
- * database is correct after completion, and confirms .sql-buffer is
+ * database is correct after completion, and confirms .reprint/pull/sql-buffer is
  * cleaned up.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
@@ -79,9 +79,9 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
                 `counts=${JSON.stringify(comparison.rowCounts)}`);
         });
 
-        it('.sql-buffer is cleaned up after completion', () => {
-            assert.ok(!existsSync(join(tempDir, '.sql-buffer')),
-                'Expected .sql-buffer to be cleaned up after successful completion');
+        it('.reprint/pull/sql-buffer is cleaned up after completion', () => {
+            assert.ok(!existsSync(join(tempDir, '.reprint/pull/sql-buffer')),
+                'Expected .reprint/pull/sql-buffer to be cleaned up after successful completion');
         });
 
         it('no db.sql on disk', () => {
@@ -90,7 +90,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
         });
     });
 
-    describe('pre-seeded .sql-buffer is loaded on resume', () => {
+    describe('pre-seeded .reprint/pull/sql-buffer is loaded on resume', () => {
         let tempDir;
         const importDb = 'e2e_basic_import_36_seeded';
 
@@ -109,16 +109,16 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             await conn.end();
         });
 
-        it('loads .sql-buffer from disk and logs recovery', { timeout: 300000 }, () => {
+        it('loads .reprint/pull/sql-buffer from disk and logs recovery', { timeout: 300000 }, () => {
             // Run preflight so db-sync can proceed
             runImporter(importUrl(), tempDir, 'preflight', {
                 secret: getSiteSecret(site),
             });
 
-            // Seed a .sql-buffer file before running db-sync.
+            // Seed a .reprint/pull/sql-buffer file before running db-sync.
             // The content is a harmless SQL comment that won't affect execution
             // — the point is to verify the importer reads it and logs recovery.
-            const bufferFile = join(tempDir, '.sql-buffer');
+            const bufferFile = join(tempDir, '.reprint/pull/sql-buffer');
             writeFileSync(bufferFile, '-- pre-seeded buffer\n');
 
             // Run a fresh db-sync — the importer should detect the buffer file
@@ -132,12 +132,12 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
 
             // Verify recovery was logged
             const audit = readAuditLog(tempDir);
-            assert.ok(audit.includes('CRASH RECOVERY') && audit.includes('.sql-buffer'),
-                'Expected audit log to mention .sql-buffer crash recovery');
+            assert.ok(audit.includes('CRASH RECOVERY') && audit.includes('.reprint/pull/sql-buffer'),
+                'Expected audit log to mention .reprint/pull/sql-buffer crash recovery');
 
             // Buffer should be cleaned up
             assert.ok(!existsSync(bufferFile),
-                'Expected .sql-buffer to be removed after completion');
+                'Expected .reprint/pull/sql-buffer to be removed after completion');
         });
     });
 });

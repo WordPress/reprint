@@ -262,14 +262,20 @@ class ImportClient
     /** @var string Remote Reprint API URL. */
     public $remote_reprint_api_url;
 
-    /** @var string State directory for this filesystem root (.import-state.json, db.sql, etc.). */
+    /** @var string Caller-selected state directory for this filesystem root. */
     public $state_dir;
+
+    /** @var string Local Reprint state directory at <state-dir>/.reprint. */
+    private $reprint_state_directory;
+
+    /** @var string Pull state directory at <state-dir>/.reprint/pull. */
+    public $pull_state_directory;
 
     /** @var string Filesystem root where the remote filesystem is reconstructed. */
     public $filesystem_root;
 
-    /** @var string Path to .import-state.json — persists command, cursor, stage across invocations. */
-    private $state_file;
+    /** @var string Pull state file which persists command, cursor, and stage across invocations. */
+    private $pull_state_file;
 
     /**
      * @var float Monotonic timestamp of last progress JSON line emitted.
@@ -281,13 +287,13 @@ class ImportClient
     private $progress_throttle = 1.0;
 
     /**
-     * @var string Local index file .import-index.jsonl. It tracks each accounted
+     * @var string Local index file .reprint/pull/local-index.jsonl. It tracks each accounted
      * path's ctime, size, and type for the next remote-index comparison.
      */
     private $local_index_file;
 
     /**
-     * @var string Path to .import-local-index.wal — the append-only write-ahead
+     * @var string Path to .reprint/pull/local-index.wal — the append-only write-ahead
      * log for the current files-pull. Applied batches are cleared, but the file
      * remains until the lifecycle completes or is aborted.
      */
@@ -320,22 +326,31 @@ class ImportClient
     private $last_local_index_wal_type = null;
 
     /**
-     * @var string Remote index file .import-remote-index.jsonl, including
+     * @var string Remote index file .reprint/pull/remote-index.jsonl, including
      * directory `empty` fields when available.
      */
     private $remote_index_file;
 
-    /** @var string Path to .import-fetch-list.jsonl — files to download, computed by diffing remote vs local index. */
+    /** @var string Path to .reprint/pull/fetch-list.jsonl — files to download, computed by diffing remote vs local index. */
     private $fetch_list_file;
 
-    /** @var string Path to .import-fetch-list-skipped.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
+    /** @var string Path to .reprint/pull/skipped-fetch-list.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
     private $skipped_fetch_list_file;
 
-    /** @var string Path to .import-audit.log — append-only log of every operation for debugging. */
-    private $audit_log;
+    /** @var string Path to .reprint/audit.log — append-only log of every operation for debugging. */
+    private $audit_log_file;
 
-    /** @var string Path to .import-volatile-files.json — files the server marks as frequently-changing. */
+    /** @var string Path to .reprint/pull/volatile-files.json — files the server marks as frequently-changing. */
     private $volatile_files_file;
+
+    /** @var string Path to .reprint/pull/domains.json — domains discovered in the SQL dump. */
+    private $domains_file;
+
+    /** @var string Path to .reprint/pull/sql-stats.json — SQL statement count for progress reporting. */
+    private $sql_stats_file;
+
+    /** @var string Path to .reprint/pull/sql-buffer — partial SQL retained across process crashes. */
+    private $sql_buffer_file;
 
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
@@ -356,7 +371,7 @@ class ImportClient
      *  that consumers should display as "files done". */
     private $fetch_list_done = null;
 
-    /** @var ImportState Persistent import state loaded from / saved to $state_file. */
+    /** @var ImportState Persistent import state loaded from / saved to $pull_state_file. */
     private ImportState $state;
 
     /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
@@ -492,7 +507,7 @@ class ImportClient
     /** @var int|null Total number of pipeline steps. Set via --steps. */
     private $pipeline_steps = null;
 
-    /** @var string Path to .import-status.json — machine-readable status for external progress readers. */
+    /** @var string Path to .reprint/status.json — machine-readable status for external progress readers. */
     private $status_file;
 
     /** @var string SQL output mode: 'file' (default), 'stdout', or 'mysql'. */
@@ -549,19 +564,24 @@ class ImportClient
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->filesystem_root = rtrim($filesystem_root, "/");
-        $this->state_file = $this->state_dir . "/.import-state.json";
-        $this->local_index_file = $this->state_dir . "/.import-index.jsonl";
+        $this->reprint_state_directory = $this->state_dir . "/.reprint";
+        $this->pull_state_directory = $this->reprint_state_directory . "/pull";
+        $this->pull_state_file = $this->pull_state_directory . "/state.json";
+        $this->local_index_file = $this->pull_state_directory . "/local-index.jsonl";
         $this->local_index_wal_path =
-            $this->state_dir . "/.import-local-index.wal";
+            $this->pull_state_directory . "/local-index.wal";
         $this->remote_index_file =
-            $this->state_dir . "/.import-remote-index.jsonl";
+            $this->pull_state_directory . "/remote-index.jsonl";
         $this->fetch_list_file =
-            $this->state_dir . "/.import-fetch-list.jsonl";
+            $this->pull_state_directory . "/fetch-list.jsonl";
         $this->skipped_fetch_list_file =
-            $this->state_dir . "/.import-fetch-list-skipped.jsonl";
-        $this->audit_log = $this->state_dir . "/.import-audit.log";
-        $this->volatile_files_file = $this->state_dir . "/.import-volatile-files.json";
-        $this->status_file = $this->state_dir . "/.import-status.json";
+            $this->pull_state_directory . "/skipped-fetch-list.jsonl";
+        $this->audit_log_file = $this->reprint_state_directory . "/audit.log";
+        $this->volatile_files_file = $this->pull_state_directory . "/volatile-files.json";
+        $this->domains_file = $this->pull_state_directory . "/domains.json";
+        $this->sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
+        $this->sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
+        $this->status_file = $this->reprint_state_directory . "/status.json";
 
         // Detect TTY for progress display. In stdout mode this is re-evaluated
         // against STDERR in run() once we know the output mode.
@@ -574,6 +594,12 @@ class ImportClient
         if (!is_dir($this->state_dir)) {
             if (!mkdir($this->state_dir, 0755, true)) {
                 throw new RuntimeException("Failed to create directory: {$this->state_dir}");
+            }
+        }
+        if (!is_dir($this->pull_state_directory)) {
+            if (!mkdir($this->pull_state_directory, 0755, true)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem path in a CLI exception.
+                throw new RuntimeException("Failed to create directory: {$this->pull_state_directory}");
             }
         }
         if (!is_dir($this->filesystem_root)) {
@@ -645,7 +671,7 @@ class ImportClient
         $log_line = "[{$timestamp}] {$message}\n";
 
         // Always write to audit log
-        file_put_contents($this->audit_log, $log_line, FILE_APPEND);
+        file_put_contents($this->audit_log_file, $log_line, FILE_APPEND);
 
         // Output to console if verbose mode or if explicitly requested
         if ($to_console && $this->verbose_mode) {
@@ -955,7 +981,7 @@ class ImportClient
         }
 
         // files-diff and files-push use local push state and must not load
-        // or write the pull command's .import-state.json file.
+        // or write the pull command's .reprint/pull/state.json file.
         if ($command === "files-diff") {
             $this->run_files_diff($options);
             return;
@@ -1757,7 +1783,8 @@ class ImportClient
      *
      *     @type string $remote_reprint_api_url Remote Reprint API URL.
      *     @type string $filesystem_root  Resolved filesystem root being sent.
-     *     @type string $pair                 Target/filesystem-root pair key.
+     *     @type string $pair                 Pair key for the remote Reprint API URL
+     *                                        and resolved filesystem root.
      *     @type string $push_state_directory Local push state directory.
      * }
      * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
@@ -1809,7 +1836,8 @@ class ImportClient
      *
      *     @type string $remote_reprint_api_url Remote Reprint API URL.
      *     @type string $filesystem_root  Resolved filesystem root.
-     *     @type string $pair                 Target/filesystem-root pair key.
+     *     @type string $pair                 Pair key for the remote Reprint API URL
+     *                                        and resolved filesystem root.
      *     @type string $push_state_directory Local push state directory.
      * }
      * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
@@ -1852,7 +1880,8 @@ class ImportClient
         $remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
         $pair = hash('sha256', $remote_reprint_api_url . "\0" . $resolved_local_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
-        $push_state_directory = $state_dir . '/push/' . $pair;
+        $reprint_state_directory = rtrim($state_dir, '/') . '/.reprint';
+        $push_state_directory = $reprint_state_directory . '/push/' . $pair;
         if (strpos($push_state_directory, '/') !== 0) {
             $working_directory = getcwd();
             if ($working_directory === false) {
@@ -2010,7 +2039,7 @@ class ImportClient
                         "FILE DELETE | {$tables_file} | abort db-pull",
                     );
                 }
-                $domains_file = $this->state_dir . "/.import-domains.json";
+                $domains_file = $this->domains_file;
                 if (file_exists($domains_file)) {
                     unlink($domains_file);
                     $this->audit_log(
@@ -2950,14 +2979,14 @@ class ImportClient
         );
 
         $this->progress->show_lifecycle_line("{$label} complete: {$index_size} files indexed\n");
-        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
+        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
             "command" => "files-pull",
             "delta" => $is_delta,
             "files_indexed" => $index_size,
-            "audit_log" => $this->audit_log,
+            "audit_log" => $this->audit_log_file,
             "message" => "{$label} complete: {$index_size} files indexed",
         ], true);
 
@@ -3264,14 +3293,14 @@ class ImportClient
 
         $this->progress->show_lifecycle_line("files-index complete: {$count} entries indexed\n");
         $this->progress->show_lifecycle_line("Remote index: {$this->remote_index_file}\n");
-        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
+        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
             "command" => "files-index",
             "entries_indexed" => $count,
             "remote_index" => $this->remote_index_file,
-            "audit_log" => $this->audit_log,
+            "audit_log" => $this->audit_log_file,
             "message" => "files-index complete: {$count} entries indexed",
         ], true);
     }
@@ -3773,13 +3802,13 @@ class ImportClient
         } elseif ($this->sql_output_mode === "mysql") {
             $this->progress->show_lifecycle_line("SQL imported into {$this->mysql_database}\n");
         }
-        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
+        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
         $db_sync_complete = [
             "type" => "lifecycle",
             "event" => "complete",
             "command" => "db-pull",
             "sql_output_mode" => $this->sql_output_mode,
-            "audit_log" => $this->audit_log,
+            "audit_log" => $this->audit_log_file,
             "message" => "db-pull complete",
         ];
         if ($this->sql_output_mode === "file") {
@@ -3801,7 +3830,7 @@ class ImportClient
      */
     private function run_db_domains(): void
     {
-        $domains_file = $this->state_dir . "/.import-domains.json";
+        $domains_file = $this->domains_file;
         $sql_file = $this->state_dir . "/db.sql";
 
         if (file_exists($domains_file)) {
@@ -3868,8 +3897,8 @@ class ImportClient
      * Print file index statistics: total indexed files and their size,
      * plus pending downloads and their size.
      *
-     * Reads .import-remote-index.jsonl for all indexed files and
-     * .import-fetch-list.jsonl for files not yet downloaded.
+     * Reads .reprint/pull/remote-index.jsonl for all indexed files and
+     * .reprint/pull/fetch-list.jsonl for files not yet downloaded.
      */
     private function run_files_stats(): void
     {
@@ -4347,11 +4376,12 @@ class ImportClient
         }
 
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_BASEURL"] = $base_url;
-        $state_dir = realpath($this->state_dir) ?: $this->state_dir;
+        $pull_state_directory =
+            realpath($this->pull_state_directory) ?: $this->pull_state_directory;
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
-            rtrim($state_dir, "/") . "/.import-state.json";
+            rtrim($pull_state_directory, "/") . "/state.json";
         $manifest->constants["STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
-            rtrim($state_dir, "/") . "/.import-fetch-list-skipped.jsonl";
+            rtrim($pull_state_directory, "/") . "/skipped-fetch-list.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
@@ -5238,7 +5268,7 @@ class ImportClient
         }
 
         // Show discovered domains if available
-        $domains_file = $this->state_dir . "/.import-domains.json";
+        $domains_file = $this->domains_file;
         if (file_exists($domains_file)) {
             $domains = json_decode(file_get_contents($domains_file), true);
             if (is_array($domains) && !empty($domains)) {
@@ -5406,7 +5436,7 @@ class ImportClient
         $stmts_since_save = 0;
 
         // Load pre-computed statement count from db-pull for progress reporting
-        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
+        $sql_stats_file = $this->sql_stats_file;
         $statements_total = null;
         if (file_exists($sql_stats_file)) {
             $stats = json_decode(file_get_contents($sql_stats_file), true);
@@ -5949,14 +5979,14 @@ class ImportClient
 
         $this->progress->show_lifecycle_line("db-index complete: {$tables} tables\n");
         $this->progress->show_lifecycle_line("Table stats: {$tables_file}\n");
-        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log}\n");
+        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
             "command" => "db-index",
             "tables" => $tables,
             "tables_file" => $tables_file,
-            "audit_log" => $this->audit_log,
+            "audit_log" => $this->audit_log_file,
             "message" => "db-index complete: {$tables} tables",
         ], true);
     }
@@ -6144,7 +6174,7 @@ class ImportClient
              * early would make resume skip the missing suffix.
              *
              * On the closing callback, flush the file and local index WAL
-             * before storing the cursor in .import-state.json. If the response
+             * before storing the cursor in .reprint/pull/state.json. If the response
              * stops first, state retains the preceding cursor; resume truncates
              * the later bytes and requests the multipart part again.
              */
@@ -6858,7 +6888,7 @@ class ImportClient
     /**
      * Builds a JSON batch file listing the next set of paths to download.
      *
-     * Reads from the fetch list (.import-fetch-list.jsonl) starting at
+     * Reads from the fetch list (.reprint/pull/fetch-list.jsonl) starting at
      * $offset, accumulating paths into a JSON array until the batch approaches
      * 80% of the server's max request size.  Always includes at least one path,
      * even if it alone exceeds the limit.
@@ -7539,7 +7569,7 @@ class ImportClient
 
         $sql_handle = null;
         $mysql_conn = null;
-        $buffer_handle = null;
+        $sql_buffer_handle = null;
         $sql_bytes_written = 0;
         $sql_buffer = "";
 
@@ -7616,19 +7646,19 @@ class ImportClient
             // Each SQL chunk is appended to this file as it arrives; when the
             // query completes and executes, the file is truncated. If the process
             // dies at any point, the next run reloads whatever was accumulated.
-            $buffer_file = $this->state_dir . "/.sql-buffer";
-            if (file_exists($buffer_file)) {
-                $sql_buffer = file_get_contents($buffer_file);
+            $sql_buffer_file = $this->sql_buffer_file;
+            if (file_exists($sql_buffer_file)) {
+                $sql_buffer = file_get_contents($sql_buffer_file);
                 $this->audit_log(
-                    sprintf("CRASH RECOVERY | Restored %d bytes from .sql-buffer", strlen($sql_buffer)),
+                    sprintf("CRASH RECOVERY | Restored %d bytes from .reprint/pull/sql-buffer", strlen($sql_buffer)),
                     true,
                 );
             }
             // Open in write mode (truncate) if we loaded nothing, append if we
             // have a partial query to continue accumulating into.
-            $buffer_handle = fopen($buffer_file, $sql_buffer !== "" ? "a" : "w");
-            if (!$buffer_handle) {
-                throw new RuntimeException("Cannot open SQL buffer file: {$buffer_file}");
+            $sql_buffer_handle = fopen($sql_buffer_file, $sql_buffer !== "" ? "a" : "w");
+            if (!$sql_buffer_handle) {
+                throw new RuntimeException("Cannot open SQL buffer file: {$sql_buffer_file}");
             }
         }
 
@@ -7639,12 +7669,12 @@ class ImportClient
         $domain_collector = class_exists('DomainCollector')
             ? new \DomainCollector()
             : null;
-        $domains_file = $this->state_dir . "/.import-domains.json";
-        $sql_stats_file = $this->state_dir . "/.import-sql-stats.json";
+        $domains_file = $this->domains_file;
+        $sql_stats_file = $this->sql_stats_file;
         $sql_statements_counted = (int) ($this->import_state()->sql_statements_counted ?? 0);
 
         // Auto-detect the source site domain from the export URL so it
-        // always appears in .import-domains.json even if the SQL dump
+        // always appears in .reprint/pull/domains.json even if the SQL dump
         // hasn't been fully scanned yet.
         if ($domain_collector) {
             $parsed_url = parse_url($this->remote_reprint_api_url);
@@ -7693,7 +7723,7 @@ class ImportClient
                     &$complete,
                     &$sql_handle,
                     $mysql_conn,
-                    &$buffer_handle,
+                    &$sql_buffer_handle,
                     &$sql_buffer,
                     &$sql_bytes_written,
                     $context,
@@ -7780,9 +7810,9 @@ class ImportClient
                             case "mysql":
                                 // Append to disk immediately so the buffer survives
                                 // even if the process is killed mid-chunk.
-                                if ($buffer_handle) {
-                                    fwrite($buffer_handle, $data);
-                                    fflush($buffer_handle);
+                                if ($sql_buffer_handle) {
+                                    fwrite($sql_buffer_handle, $data);
+                                    fflush($sql_buffer_handle);
                                 }
 
                                 $sql_buffer .= $data;
@@ -7803,9 +7833,9 @@ class ImportClient
                                     } while ($mysql_conn->more_results() && $mysql_conn->next_result());
 
                                     // Query executed — truncate the buffer file and reset.
-                                    if ($buffer_handle) {
-                                        ftruncate($buffer_handle, 0);
-                                        rewind($buffer_handle);
+                                    if ($sql_buffer_handle) {
+                                        ftruncate($sql_buffer_handle, 0);
+                                        rewind($sql_buffer_handle);
                                     }
                                     $sql_buffer = "";
                                 }
@@ -7940,7 +7970,7 @@ class ImportClient
                     );
                     $this->audit_log(
                         sprintf(
-                            "DOMAINS DISCOVERED | %d unique domains saved to .import-domains.json",
+                            "DOMAINS DISCOVERED | %d unique domains saved to .reprint/pull/domains.json",
                             count($domains),
                         ),
                         false,
@@ -7969,9 +7999,9 @@ class ImportClient
             if ($sql_handle) {
                 fclose($sql_handle);
             }
-            if ($buffer_handle) {
-                fclose($buffer_handle);
-                $buffer_handle = null;
+            if ($sql_buffer_handle) {
+                fclose($sql_buffer_handle);
+                $sql_buffer_handle = null;
             }
             if ($mysql_conn) {
                 $pending = $sql_buffer;
@@ -7979,16 +8009,16 @@ class ImportClient
                 $mysql_conn = null;
                 // Clean up buffer file — if we got here with an empty buffer,
                 // all queries were executed successfully.
-                $buffer_file = $this->state_dir . "/.sql-buffer";
-                if ($pending === "" && file_exists($buffer_file)) {
-                    unlink($buffer_file);
+                $sql_buffer_file = $this->sql_buffer_file;
+                if ($pending === "" && file_exists($sql_buffer_file)) {
+                    unlink($sql_buffer_file);
                 }
                 if ($pending !== "") {
                     if ($caught_exception !== null) {
                         // An exception is already in flight (e.g. curl error,
                         // MySQL error). Don't mask it by throwing about the
                         // buffer — the buffer data is safely persisted in
-                        // .sql-buffer and will be recovered on the next run.
+                        // .reprint/pull/sql-buffer and will be recovered on the next run.
                         $this->audit_log(
                             "BUFFER NOT FLUSHED | " . strlen($pending) .
                             " bytes in SQL buffer during exception unwind" .
@@ -8522,7 +8552,7 @@ class ImportClient
 
     /**
      * Checks whether the remote index contains a remote absolute path or one
-     * of its descendants. Runs a memoized O(N) scan of .import-remote-index.jsonl.
+     * of its descendants. Runs a memoized O(N) scan of .reprint/pull/remote-index.jsonl.
      */
     private function remote_index_contains_remote_absolute_path_prefix(
         string $remote_absolute_path
@@ -11271,11 +11301,11 @@ class ImportClient
      */
     private function load_state(): ImportState
     {
-        if (!file_exists($this->state_file)) {
+        if (!file_exists($this->pull_state_file)) {
             return new ImportState();
         }
 
-        $contents = file_get_contents($this->state_file);
+        $contents = file_get_contents($this->pull_state_file);
         if ($contents === false) {
             return new ImportState();
         }
@@ -11286,8 +11316,8 @@ class ImportClient
                 "Warning: corrupt state file detected, renaming and starting fresh",
                 true,
             );
-            $corrupt_name = $this->state_file . ".corrupt." . time();
-            @rename($this->state_file, $corrupt_name);
+            $corrupt_name = $this->pull_state_file . ".corrupt." . time();
+            @rename($this->pull_state_file, $corrupt_name);
             return new ImportState();
         }
 
@@ -11323,13 +11353,13 @@ class ImportClient
         if ($json === false) {
             throw new RuntimeException("Failed to encode state: " . json_last_error_msg());
         }
-        $tmp_file = $this->state_file . '.tmp';
+        $tmp_file = $this->pull_state_file . '.tmp';
         $bytes = file_put_contents($tmp_file, $json);
         if ($bytes === false) {
             throw new RuntimeException("Failed to write state file: $tmp_file (disk full?)");
         }
-        if (!rename($tmp_file, $this->state_file)) {
-            throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->state_file}");
+        if (!rename($tmp_file, $this->pull_state_file)) {
+            throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->pull_state_file}");
         }
 
         $indexed = $this->index_count();
@@ -12600,13 +12630,13 @@ if (
                 "  skipped-earlier   Pull only files skipped by a prior essential-files run.\n" .
                 "\n" .
                 "Output files:\n" .
-                "  (filesystem root)/                              Downloaded files\n" .
-                "  .import-index.jsonl                     Local file index\n" .
-                "  .import-remote-index.jsonl              Remote index snapshot\n" .
-                "  .import-fetch-list.jsonl             Files pending download\n" .
-                "  .import-fetch-list-skipped.jsonl     Skipped files (when --filter=essential-files)\n" .
-                "  .import-state.json                      Resumable state\n" .
-                "  .import-audit.log                       Audit log\n",
+                "  (filesystem root)/                       Downloaded files\n" .
+                "  .reprint/pull/local-index.jsonl          Local index\n" .
+                "  .reprint/pull/remote-index.jsonl         Remote index\n" .
+                "  .reprint/pull/fetch-list.jsonl           Files pending download\n" .
+                "  .reprint/pull/skipped-fetch-list.jsonl   Files skipped by --filter=essential-files\n" .
+                "  .reprint/pull/state.json                 Resumable pull state\n" .
+                "  .reprint/audit.log                       Audit log\n",
         ],
         "files-diff" => [
             "level" => "low",
@@ -12655,7 +12685,7 @@ if (
             "description" =>
                 "Streams the full remote directory tree over HTTP and writes each\n" .
                 "entry (path, size, ctime, type, and directory emptiness) to\n" .
-                ".import-remote-index.jsonl.\n" .
+                ".reprint/pull/remote-index.jsonl.\n" .
                 "\n" .
                 "On the first run, builds the complete index. On subsequent runs,\n" .
                 "re-indexes and diffs against the prior snapshot to produce a\n" .
@@ -12711,7 +12741,7 @@ if (
             "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
                 "\n" .
-                "If .import-domains.json exists (cached by db-pull), it is read\n" .
+                "If .reprint/pull/domains.json exists (cached by db-pull), it is read\n" .
                 "directly. Otherwise, db.sql is scanned and the result is cached\n" .
                 "for future calls. No network calls.\n" .
                 "\n" .
@@ -12721,10 +12751,10 @@ if (
         ],
         "import-metadata" => [
             "level" => "low",
-            "short" => "Print local import lifecycle metadata as JSON",
+            "short" => "Print local pull lifecycle metadata as JSON",
             "usage" => "reprint import-metadata --state-dir=DIR",
             "description" =>
-                "Reads --state-dir/.import-state.json and prints metadata for\n" .
+                "Reads --state-dir/.reprint/pull/state.json and prints metadata for\n" .
                 "host integrations. No network calls are made.\n",
             "extra" =>
                 "Example:\n" .

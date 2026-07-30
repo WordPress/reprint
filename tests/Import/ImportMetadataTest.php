@@ -22,6 +22,7 @@ class ImportMetadataTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/.reprint/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
     }
 
@@ -94,7 +95,7 @@ class ImportMetadataTest extends TestCase
         $metadata = $this->readMetadata();
 
         $this->assertFalse($metadata['hasCompletedOnce']);
-        $this->assertFileDoesNotExist($this->stateDir . '/.import-state.json');
+        $this->assertFileDoesNotExist($this->stateDir . '/.reprint/pull/state.json');
         $this->assertNull($metadata['pullStage']);
     }
 

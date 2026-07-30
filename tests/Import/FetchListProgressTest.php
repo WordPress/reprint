@@ -25,6 +25,7 @@ class FetchListProgressTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/.reprint/pull', 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -65,7 +66,7 @@ class FetchListProgressTest extends TestCase
      */
     private function writeFetchList(int $count, ?string $file = null): string
     {
-        $file = $file ?? $this->stateDir . '/.import-fetch-list.jsonl';
+        $file = $file ?? $this->stateDir . '/.reprint/pull/fetch-list.jsonl';
         $handle = fopen($file, 'w');
         for ($i = 0; $i < $count; $i++) {
             fwrite($handle, json_encode(["path" => base64_encode("/file-{$i}.txt")]) . "\n");
@@ -270,7 +271,7 @@ class FetchListProgressTest extends TestCase
     public function testSkippedListHasOwnCounters()
     {
         $this->writeFetchList(50);
-        $skippedList = $this->stateDir . '/.import-fetch-list-skipped.jsonl';
+        $skippedList = $this->stateDir . '/.reprint/pull/skipped-fetch-list.jsonl';
         $this->writeFetchList(200, $skippedList);
         $offset20 = $this->byteOffsetAfterLines($skippedList, 20);
 

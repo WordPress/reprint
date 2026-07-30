@@ -28,6 +28,7 @@ class DeactivateHostPluginsTest extends TestCase
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/.reprint/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
     }
 

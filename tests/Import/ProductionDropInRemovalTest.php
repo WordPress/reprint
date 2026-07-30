@@ -26,6 +26,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->outputDir = $this->tempDir . '/runtime';
 
         mkdir($this->stateDir, 0755, true);
+        mkdir($this->stateDir . '/.reprint/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
         mkdir($this->outputDir, 0755, true);
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
@@ -301,7 +302,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->runApplyRuntime($client);
 
         // The audit log records every removal.
-        $auditLog = file_get_contents($this->stateDir . '/.import-audit.log');
+        $auditLog = file_get_contents($this->stateDir . '/.reprint/audit.log');
 
         $this->assertStringContainsString(
             'removed wp-content/object-cache.php (production-only)',
@@ -332,7 +333,7 @@ class ProductionDropInRemovalTest extends TestCase
 
         // Re-read the state file to verify paths_removed was persisted.
         $state = json_decode(
-            file_get_contents($this->stateDir . '/.import-state.json'),
+            file_get_contents($this->stateDir . '/.reprint/pull/state.json'),
             true,
         );
 
@@ -475,7 +476,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->loadClientState($client);
         $this->runApplyRuntime($client);
 
-        $auditLog = file_get_contents($this->stateDir . '/.import-audit.log');
+        $auditLog = file_get_contents($this->stateDir . '/.reprint/audit.log');
 
         $this->assertStringContainsString(
             'removed wp-content/plugins/sg-cachepress (production-only)',
@@ -497,7 +498,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->runApplyRuntime($client);
 
         $state = json_decode(
-            file_get_contents($this->stateDir . '/.import-state.json'),
+            file_get_contents($this->stateDir . '/.reprint/pull/state.json'),
             true,
         );
 

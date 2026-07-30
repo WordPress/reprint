@@ -83,7 +83,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('files-diff', $output);
         $this->assertStringContainsString('Low-level commands:', $output);
         $this->assertStringNotContainsString('Low-level commands (used by pull internally):', $output);
-        $this->assertStringNotContainsString('State is stored in --state-dir/.import-state.json', $output);
+        $this->assertStringNotContainsString('State is stored in --state-dir/.reprint/pull/state.json', $output);
         $this->assertStringNotContainsString('Use --abort to abort the current', $output);
     }
 }

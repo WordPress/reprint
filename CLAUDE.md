@@ -166,7 +166,7 @@ Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic 
 
 ### SQL Streaming Crash Recovery
 
-When the export server crashes mid-SQL-stream (`--sql-output=mysql` mode), the importer detects the transport failure (missing completion chunk, curl communication errors), saves the cursor, persists accumulated SQL in a `.sql-buffer` file, and exits with code 2 for automatic retry. The next run reloads the buffer and continues. The `finally` block avoids masking the original exception with a secondary buffer-related throw.
+When the export server crashes mid-SQL-stream (`--sql-output=mysql` mode), the importer detects the transport failure (missing completion chunk, curl communication errors), saves the cursor, persists accumulated SQL in `--state-dir/.reprint/pull/sql-buffer`, and exits with code 2 for automatic retry. The next run reloads the buffer and continues. The `finally` block avoids masking the original exception with a secondary buffer-related throw.
 
 ### Progress Tracking
 
@@ -239,11 +239,11 @@ Always consult these when working on the respective components.
 
 ### Progress Computation
 
-Progress is computed client-side by reading state files (all in `--state-dir`):
-- `.import-state.json`: Current command, status, cursor, stage
-- `.import-index.jsonl`: Local file index (line count = files indexed)
-- `.import-remote-index.jsonl`: Remote file index (for delta comparison)
-- `.import-fetch-list.jsonl`: Files pending download
+Progress is computed client-side by reading private state under `--state-dir/.reprint/` and caller-facing outputs under `--state-dir`:
+- `.reprint/pull/state.json`: Current command, status, cursor, stage
+- `.reprint/pull/local-index.jsonl`: Local file index (line count = files indexed)
+- `.reprint/pull/remote-index.jsonl`: Remote file index (for delta comparison)
+- `.reprint/pull/fetch-list.jsonl`: Files pending download
 - `db.sql`: SQL dump file size
 
 And from `--fs-root`:

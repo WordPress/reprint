@@ -221,7 +221,7 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
     });
 
     it('state stores path fields in base64 form', () => {
-        const statePath = join(tempDir, '.import-state.json');
+        const statePath = join(tempDir, '.reprint/pull/state.json');
         const state = JSON.parse(readFileSync(statePath, 'utf-8'));
 
         assert.equal(typeof state.diff.local_after, 'string', 'Expected diff.local_after to be persisted');

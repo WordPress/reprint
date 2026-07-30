@@ -22,25 +22,25 @@ function remote_upload_proxy_code(): string
 	if (!function_exists('curl_init')) return;
 
 	$proxy_enabled = false;
-	$skipped_file = STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE;
+	$skipped_fetch_list_file = STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_SKIPPED_FILE;
 	if (
-		is_string($skipped_file) &&
-		$skipped_file !== '' &&
-		file_exists($skipped_file) &&
-		filesize($skipped_file) > 0
+		is_string($skipped_fetch_list_file) &&
+		$skipped_fetch_list_file !== '' &&
+		file_exists($skipped_fetch_list_file) &&
+		filesize($skipped_fetch_list_file) > 0
 	) {
 		$proxy_enabled = true;
 	} else {
-		$state_file = STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE;
+		$pull_state_file = STREAMING_SITE_MIGRATION_REMOTE_UPLOAD_PROXY_STATE_FILE;
 		if (
-			is_string($state_file) &&
-			$state_file !== '' &&
-			is_readable($state_file)
+			is_string($pull_state_file) &&
+			$pull_state_file !== '' &&
+			is_readable($pull_state_file)
 		) {
-			$state = json_decode((string) file_get_contents($state_file), true);
-			if (is_array($state)) {
-				$command = $state['active_resumable_command']['command_name'] ?? null;
-				$status = $state['active_resumable_command']['completion_state'] ?? null;
+			$pull_state = json_decode((string) file_get_contents($pull_state_file), true);
+			if (is_array($pull_state)) {
+				$command = $pull_state['active_resumable_command']['command_name'] ?? null;
+				$status = $pull_state['active_resumable_command']['completion_state'] ?? null;
 				$proxy_enabled =
 					$command === 'files-pull' &&
 					$status !== null &&
