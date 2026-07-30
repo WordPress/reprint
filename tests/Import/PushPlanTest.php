@@ -5,6 +5,7 @@ declare(strict_types=1);
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/index-update-functions.php';
+require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push-path-mapping.php';
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push-plan.php';
 
 /**
@@ -12,8 +13,8 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push
  *
  * The plan diffs the fresh local index, whose directory entries carry an
  * `empty` boolean from the indexer, against the local index.
- * The tests pin the resulting local_paths_to_push JSONL, raw NUL-delimited
- * local paths to delete, cursor replay, and every transition among files,
+ * The tests pin the resulting paths-to-push JSONL, raw NUL-delimited local
+ * and target paths to delete, cursor replay, and every transition among files,
  * symlinks, empty directories, and non-empty directories.
  */
 final class PushPlanTest extends TestCase
@@ -25,6 +26,8 @@ final class PushPlanTest extends TestCase
 
     /** @var array<string,array<string,mixed>> Last tree shape created by materializeLocalTree(). */
     private array $materializedIndexEntries = [];
+
+    private PushPathMapping $pathMapping;
 
     protected function setUp(): void
     {
@@ -45,13 +48,15 @@ final class PushPlanTest extends TestCase
 
     public function testStartRequiresTheCallerToCreateThePlanDirectory(): void
     {
+        mkdir($this->localTreeRoot());
         $this->expectException(LogicException::class);
         $this->expectExceptionMessage('without its directory');
         PushPlan::start(
             $this->planDirectory(),
             $this->localTreeRoot(),
             $this->localIndexPath(),
-            $this->excludedPathsPath()
+            $this->excludedPathsPath(),
+            PushPathMapping::identity($this->localTreeRoot())
         );
     }
 
@@ -71,11 +76,11 @@ final class PushPlanTest extends TestCase
         $this->assertPathCounts(1, 0);
         $this->assertSame(
             ['second.txt'],
-            $this->listPaths($secondPlan->get_local_paths_to_push_path())
+            $this->listPaths($secondPlan->get_paths_to_push_path())
         );
         $this->assertSame(
             [],
-            $this->localPathsToDelete($secondPlan->get_local_paths_to_delete_path())
+            $this->localPathsToDelete($secondPlan->get_target_paths_to_delete_path())
         );
     }
 
@@ -104,24 +109,44 @@ final class PushPlanTest extends TestCase
                 'link',
                 'wp-content/themes/foo/style.css',
             ],
-            $this->listPaths($this->planPath('local_paths_to_push.jsonl'))
+            $this->listPaths($this->planPath('paths-to-push.jsonl'))
         );
-        $this->assertSame('', file_get_contents($this->planPath('local_paths_to_delete')));
+        $this->assertSame('', file_get_contents($this->planPath('local-paths-to-delete')));
+        $this->assertSame(
+            '',
+            file_get_contents($this->planPath('paths-to-delete'))
+        );
+        $this->assertFileExists(
+            $this->planPath('.local-index.next.jsonl')
+        );
+        $this->assertFileExists(
+            $this->planPath('paths-to-push.jsonl')
+        );
+        $this->assertFileExists(
+            $this->planPath('local-paths-to-delete')
+        );
+        $this->assertFileExists(
+            $this->planPath('paths-to-delete')
+        );
 
-        // Pin the local_paths_to_push representation: paths remain base64 in JSONL.
-        $pathsToPush = file_get_contents($this->planPath('local_paths_to_push.jsonl'));
+        // Pin the paths-to-push representation: both coordinates remain base64 in JSONL.
+        $pathsToPush = file_get_contents($this->planPath('paths-to-push.jsonl'));
         $this->assertIsString($pathsToPush);
         $firstLine = strtok($pathsToPush, "\n");
         $firstPath = json_decode($firstLine, true, 512, JSON_THROW_ON_ERROR);
         $this->assertSame(
             base64_encode('empty-directory'),
-            $firstPath['path_b64']
+            $firstPath['local_path_b64']
+        );
+        $this->assertSame(
+            base64_encode('empty-directory'),
+            $firstPath['target_path_b64']
         );
         $this->assertSame('dir', $firstPath['type']);
         $this->assertSame(0, $firstPath['size']);
         $this->assertIsInt($firstPath['ctime']);
         $plannedLines = file(
-            $this->planPath('local_paths_to_push.jsonl'),
+            $this->planPath('paths-to-push.jsonl'),
             FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES
         );
         $this->assertIsArray($plannedLines);
@@ -162,10 +187,10 @@ final class PushPlanTest extends TestCase
         $this->planToCompletion($plan);
 
         $this->assertPathCounts(3, 1);
-        $this->assertSame(['empty', 'full/child.txt', 'public.txt'], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame("gone.txt\0", file_get_contents($this->planPath('local_paths_to_delete')));
+        $this->assertSame(['empty', 'full/child.txt', 'public.txt'], $this->listPaths($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame("gone.txt\0", file_get_contents($this->planPath('local-paths-to-delete')));
 
-        $freshLocalIndexEntries = $this->indexEntries($this->planPath('fresh_local_index.jsonl'));
+        $freshLocalIndexEntries = $this->indexEntries($this->planPath('.local-index.next.jsonl'));
         $this->assertSame(
             ['empty', 'full', 'full/child.txt', 'private', 'private/current.txt', 'public.txt'],
             array_keys($freshLocalIndexEntries)
@@ -174,6 +199,49 @@ final class PushPlanTest extends TestCase
         $this->assertFalse($freshLocalIndexEntries['full']['empty']);
         $this->assertFalse($freshLocalIndexEntries['private']['empty']);
         $this->assertArrayNotHasKey('empty', $freshLocalIndexEntries['public.txt']);
+    }
+
+    public function testRemappedPlansUseTargetPathsForOperationsAndExclusions(): void
+    {
+        $this->saveLocalIndex($this->writeIndex([
+            'plugins/deleted.php' => [1, 3, 'file'],
+            'plugins/private/value.php' => [1, 3, 'file'],
+        ]));
+        $current = $this->writeIndex([
+            'plugins/added.php' => [2, 4, 'file'],
+            'plugins/private/value.php' => [2, 5, 'file'],
+        ]);
+        $mapping = $this->remappedPluginsPathMapping();
+
+        $plan = $this->startPlan(
+            $current,
+            ['wp-content/plugins/private'],
+            $mapping
+        );
+        $this->planToCompletion($plan);
+
+        $this->assertSame(
+            ['plugins/added.php'],
+            $this->listPaths($this->planPath('paths-to-push.jsonl'))
+        );
+        $this->assertSame(
+            ['wp-content/plugins/added.php'],
+            $this->listTargetPaths(
+                $this->planPath('paths-to-push.jsonl')
+            )
+        );
+        $this->assertSame(
+            ['plugins/deleted.php'],
+            $this->localPathsToDelete(
+                $this->planPath('local-paths-to-delete')
+            )
+        );
+        $this->assertSame(
+            ['wp-content/plugins/deleted.php'],
+            $this->localPathsToDelete(
+                $this->planPath('paths-to-delete')
+            )
+        );
     }
 
     public function testUnchangedIndexProducesEmptyPlans(): void
@@ -188,8 +256,8 @@ final class PushPlanTest extends TestCase
         $this->planToCompletion($plan);
 
         $this->assertPathCounts(0, 0);
-        $this->assertSame([], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame('', file_get_contents($this->planPath('local_paths_to_delete')));
+        $this->assertSame([], $this->listPaths($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame('', file_get_contents($this->planPath('local-paths-to-delete')));
     }
 
     public function testCtimeSizeOrTypeChangeEachMarksThePathChanged(): void
@@ -219,7 +287,7 @@ final class PushPlanTest extends TestCase
         $this->assertPathCounts(3, 0);
         $this->assertSame(
             ['ctime-bump.txt', 'size-bump.txt', 'type-swap'],
-            $this->listPaths($this->planPath('local_paths_to_push.jsonl'))
+            $this->listPaths($this->planPath('paths-to-push.jsonl'))
         );
     }
 
@@ -261,8 +329,8 @@ final class PushPlanTest extends TestCase
                 $this->planToCompletion($plan);
                 $message = $previousType . ' to ' . $currentType;
 
-                $this->assertSame($expectedPushes, $this->listPaths($this->planPath('local_paths_to_push.jsonl')), $message);
-                $this->assertSame($expectedDeletes, $this->localPathsToDelete($this->planPath('local_paths_to_delete')), $message);
+                $this->assertSame($expectedPushes, $this->listPaths($this->planPath('paths-to-push.jsonl')), $message);
+                $this->assertSame($expectedDeletes, $this->localPathsToDelete($this->planPath('local-paths-to-delete')), $message);
                 $this->assertPathCounts(count($expectedPushes), count($expectedDeletes), $message);
                 $this->removePlanDirectory();
             }
@@ -284,8 +352,8 @@ final class PushPlanTest extends TestCase
         $this->planToCompletion($plan);
 
         $this->assertPathCounts(0, 1);
-        $this->assertSame([], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame("gone\0", file_get_contents($this->planPath('local_paths_to_delete')));
+        $this->assertSame([], $this->listPaths($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame("gone\0", file_get_contents($this->planPath('local-paths-to-delete')));
     }
 
     public function testDeletedDirectoryPathCoversOnlyItsDescendants(): void
@@ -312,7 +380,7 @@ final class PushPlanTest extends TestCase
 
         $this->assertSame(
             "directory\0directory-sibling.txt\0",
-            file_get_contents($this->planPath('local_paths_to_delete'))
+            file_get_contents($this->planPath('local-paths-to-delete'))
         );
     }
 
@@ -342,9 +410,9 @@ final class PushPlanTest extends TestCase
         $this->assertPathCounts(3, 1);
         $this->assertSame(
             "directory\0",
-            file_get_contents($this->planPath('local_paths_to_delete'))
+            file_get_contents($this->planPath('local-paths-to-delete'))
         );
-        $this->assertCount(3, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
+        $this->assertCount(3, $this->listPaths($this->planPath('paths-to-push.jsonl')));
     }
 
     public function testReplacementRootSurvivesSiblingPaths(): void
@@ -362,8 +430,8 @@ final class PushPlanTest extends TestCase
         $this->planToCompletion($plan);
 
         $this->assertPathCounts(2, 1);
-        $this->assertSame(['a', 'a-other'], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame("a\0", file_get_contents($this->planPath('local_paths_to_delete')));
+        $this->assertSame(['a', 'a-other'], $this->listPaths($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame("a\0", file_get_contents($this->planPath('local-paths-to-delete')));
     }
 
     public function testDescendantChangesDoNotReplanAnUnchangedSibling(): void
@@ -383,8 +451,8 @@ final class PushPlanTest extends TestCase
         $this->planToCompletion($plan);
 
         $this->assertPathCounts(1, 1);
-        $this->assertSame(['a/new-child.txt'], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame("a/child.txt\0", file_get_contents($this->planPath('local_paths_to_delete')));
+        $this->assertSame(['a/new-child.txt'], $this->listPaths($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame("a/child.txt\0", file_get_contents($this->planPath('local-paths-to-delete')));
     }
 
     public function testNewChangedDeletedAndUnchangedPathsArePlannedTogether(): void
@@ -405,8 +473,8 @@ final class PushPlanTest extends TestCase
 
         $this->assertPathCounts(2, 1);
         // Output order follows decoded path order from the indexes.
-        $this->assertSame(['added.txt', 'changed.txt'], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame("deleted.txt\0", file_get_contents($this->planPath('local_paths_to_delete')));
+        $this->assertSame(['added.txt', 'changed.txt'], $this->listPaths($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame("deleted.txt\0", file_get_contents($this->planPath('local-paths-to-delete')));
     }
 
     public function testPathsThatNeedBase64SurvivePushAndDeletePlans(): void
@@ -425,8 +493,8 @@ final class PushPlanTest extends TestCase
         $this->planToCompletion($plan);
 
         $this->assertPathCounts(1, 1);
-        $this->assertSame([$newPath], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame($deletedPath . "\0", file_get_contents($this->planPath('local_paths_to_delete')));
+        $this->assertSame([$newPath], $this->listPaths($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame($deletedPath . "\0", file_get_contents($this->planPath('local-paths-to-delete')));
     }
 
     // ------------------------------------------------------------------
@@ -441,18 +509,18 @@ final class PushPlanTest extends TestCase
         $oldIndex = $this->writeIndex(['old.txt' => [1, 1, 'file']]);
         $plan = $this->startPlan($oldIndex);
         $this->planToCompletion($plan);
-        $this->assertGreaterThan(0, filesize($this->planPath('fresh_local_index.jsonl')));
-        $this->assertGreaterThan(0, filesize($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertGreaterThan(0, filesize($this->planPath('local_paths_to_delete')));
+        $this->assertGreaterThan(0, filesize($this->planPath('.local-index.next.jsonl')));
+        $this->assertGreaterThan(0, filesize($this->planPath('paths-to-push.jsonl')));
+        $this->assertGreaterThan(0, filesize($this->planPath('local-paths-to-delete')));
         $this->removePlanDirectory();
 
         $current = $this->writeIndex($this->manyFileEntries(2));
         $plan = $this->startPlan($current);
-        $this->assertCount(2, $this->indexEntries($this->planPath('fresh_local_index.jsonl')));
+        $this->assertCount(2, $this->indexEntries($this->planPath('.local-index.next.jsonl')));
         $this->assertSame('diffing', $this->planCursor()['phase']);
         $this->assertFileDoesNotExist($this->planPath('cursor.json'));
-        $this->assertSame(0, filesize($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame(0, filesize($this->planPath('local_paths_to_delete')));
+        $this->assertSame(0, filesize($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame(0, filesize($this->planPath('local-paths-to-delete')));
         $plan->close();
     }
 
@@ -465,16 +533,16 @@ final class PushPlanTest extends TestCase
         $this->assertTrue($this->nextPlanStep($plan));
 
         $this->assertPathCounts(1, 0);
-        $this->assertCount(1, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame(0, filesize($this->planPath('local_paths_to_delete')));
+        $this->assertCount(1, $this->listPaths($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame(0, filesize($this->planPath('local-paths-to-delete')));
         $plan->close();
 
         $resumedPlan = $this->resumePlan();
         $this->planToCompletion($resumedPlan);
 
         $this->assertPathCounts(2, 0);
-        $this->assertCount(2, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertCount(2, $this->indexEntries($this->planPath('fresh_local_index.jsonl')));
+        $this->assertCount(2, $this->listPaths($this->planPath('paths-to-push.jsonl')));
+        $this->assertCount(2, $this->indexEntries($this->planPath('.local-index.next.jsonl')));
     }
 
     public function testResumeDiscardsACompletedStepWhoseCursorWasNotStored(): void
@@ -494,7 +562,7 @@ final class PushPlanTest extends TestCase
         $this->assertPathCounts(2, 0);
         $this->assertSame(
             ['file-0000.txt', 'file-0001.txt'],
-            $this->listPaths($this->planPath('local_paths_to_push.jsonl'))
+            $this->listPaths($this->planPath('paths-to-push.jsonl'))
         );
     }
 
@@ -546,15 +614,20 @@ final class PushPlanTest extends TestCase
             'byte_offset_in_local_index',
             'byte_offset_in_local_paths_to_push',
             'byte_offset_in_local_paths_to_delete',
+            'byte_offset_in_target_paths_to_delete',
             'deleted_directory_path_b64',
         ], array_keys($cursor));
         $this->assertSame(
-            filesize($this->planPath('local_paths_to_push.jsonl')),
+            filesize($this->planPath('paths-to-push.jsonl')),
             $cursor['byte_offset_in_local_paths_to_push']
         );
         $this->assertSame(
-            filesize($this->planPath('local_paths_to_delete')),
+            filesize($this->planPath('local-paths-to-delete')),
             $cursor['byte_offset_in_local_paths_to_delete']
+        );
+        $this->assertSame(
+            filesize($this->planPath('paths-to-delete')),
+            $cursor['byte_offset_in_target_paths_to_delete']
         );
         $this->assertFileDoesNotExist($this->planPath('cursor.json'));
         $plan->close();
@@ -575,27 +648,27 @@ final class PushPlanTest extends TestCase
         $plan = $this->startPlan($current);
 
         $this->assertTrue($this->nextPlanStep($plan));
-        $firstPushBytes = filesize($this->planPath('local_paths_to_push.jsonl'));
-        $firstDeleteBytes = filesize($this->planPath('local_paths_to_delete'));
+        $firstPushBytes = filesize($this->planPath('paths-to-push.jsonl'));
+        $firstDeleteBytes = filesize($this->planPath('local-paths-to-delete'));
         $plan->close();
 
         $reopened = $this->resumePlan();
         $this->assertTrue($this->nextPlanStep($reopened));
         $this->assertSame(
             $firstPushBytes,
-            filesize($this->planPath('local_paths_to_push.jsonl'))
+            filesize($this->planPath('paths-to-push.jsonl'))
         );
         $this->assertGreaterThan(
             $firstDeleteBytes,
-            filesize($this->planPath('local_paths_to_delete'))
+            filesize($this->planPath('local-paths-to-delete'))
         );
 
         $this->planToCompletion($reopened);
 
         $this->assertPathCounts(3, 3);
-        $this->assertSame(array_keys($currentEntries), $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame(array_keys($localIndexEntries), $this->localPathsToDelete($this->planPath('local_paths_to_delete')));
-        $this->assertCount(3, $this->indexEntries($this->planPath('fresh_local_index.jsonl')));
+        $this->assertSame(array_keys($currentEntries), $this->listPaths($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame(array_keys($localIndexEntries), $this->localPathsToDelete($this->planPath('local-paths-to-delete')));
+        $this->assertCount(3, $this->indexEntries($this->planPath('.local-index.next.jsonl')));
     }
 
     public function testSavedOffsetsAndCompletedEofAreIdempotentAfterRestart(): void
@@ -607,9 +680,12 @@ final class PushPlanTest extends TestCase
 
         $reopened = $this->resumePlan();
         $this->assertFalse($this->nextPlanStep($reopened));
-        $freshLocalIndex = file_get_contents($this->planPath('fresh_local_index.jsonl'));
-        $pathsToPush = file_get_contents($this->planPath('local_paths_to_push.jsonl'));
-        $localPathsToDelete = file_get_contents($this->planPath('local_paths_to_delete'));
+        $freshLocalIndex = file_get_contents($this->planPath('.local-index.next.jsonl'));
+        $pathsToPush = file_get_contents($this->planPath('paths-to-push.jsonl'));
+        $localPathsToDelete = file_get_contents($this->planPath('local-paths-to-delete'));
+        $targetPathsToDelete = file_get_contents(
+            $this->planPath('paths-to-delete')
+        );
         $reopened->close();
 
         $replayedPlan = $this->resumePlan();
@@ -617,9 +693,13 @@ final class PushPlanTest extends TestCase
         $replayedPlan->close();
 
         $this->assertFalse($replayedEof);
-        $this->assertSame($freshLocalIndex, file_get_contents($this->planPath('fresh_local_index.jsonl')));
-        $this->assertSame($pathsToPush, file_get_contents($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame($localPathsToDelete, file_get_contents($this->planPath('local_paths_to_delete')));
+        $this->assertSame($freshLocalIndex, file_get_contents($this->planPath('.local-index.next.jsonl')));
+        $this->assertSame($pathsToPush, file_get_contents($this->planPath('paths-to-push.jsonl')));
+        $this->assertSame($localPathsToDelete, file_get_contents($this->planPath('local-paths-to-delete')));
+        $this->assertSame(
+            $targetPathsToDelete,
+            file_get_contents($this->planPath('paths-to-delete'))
+        );
     }
 
     public function testResumeUsesTheSuppliedExcludedPaths(): void
@@ -638,7 +718,7 @@ final class PushPlanTest extends TestCase
         $this->assertPathCounts(2, 0);
         $this->assertNotContains(
             'private/value.txt',
-            $this->listPaths($this->planPath('local_paths_to_push.jsonl'))
+            $this->listPaths($this->planPath('paths-to-push.jsonl'))
         );
     }
 
@@ -647,7 +727,11 @@ final class PushPlanTest extends TestCase
     // ------------------------------------------------------------------
 
     /** @param list<string> $excludedPaths */
-    private function startPlan(?string $treeDescriptionPath = null, array $excludedPaths = []): PushPlan
+    private function startPlan(
+        ?string $treeDescriptionPath = null,
+        array $excludedPaths = [],
+        ?PushPathMapping $pathMapping = null
+    ): PushPlan
     {
         if ($treeDescriptionPath === null) {
             $treeDescriptionPath = $this->tempDir . '/empty-tree.jsonl';
@@ -666,11 +750,14 @@ final class PushPlanTest extends TestCase
                 JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
             )
         );
+        $this->pathMapping = $pathMapping
+            ?? PushPathMapping::identity($this->localTreeRoot());
         $plan = PushPlan::start(
             $this->planDirectory(),
             $this->localTreeRoot(),
             $this->localIndexPath(),
-            $this->excludedPathsPath()
+            $this->excludedPathsPath(),
+            $this->pathMapping
         );
         $this->cursor = $plan->get_cursor();
         for ($step = 0; $step < 100; ++$step) {
@@ -689,6 +776,7 @@ final class PushPlanTest extends TestCase
             $this->localTreeRoot(),
             $this->localIndexPath(),
             $this->excludedPathsPath(),
+            $this->pathMapping,
             $this->cursor
         );
     }
@@ -703,7 +791,7 @@ final class PushPlanTest extends TestCase
         if (!is_dir(dirname($this->localIndexPath()))) {
             mkdir(dirname($this->localIndexPath()), 0755, true);
         }
-        copy($this->planPath('fresh_local_index.jsonl'), $this->localIndexPath());
+        copy($this->planPath('.local-index.next.jsonl'), $this->localIndexPath());
         $this->removePlanDirectory();
     }
 
@@ -745,12 +833,21 @@ final class PushPlanTest extends TestCase
     ): void {
         $this->assertCount(
             $localPathsToPushCount,
-            $this->listPaths($this->planPath('local_paths_to_push.jsonl')),
+            $this->listPaths($this->planPath('paths-to-push.jsonl')),
             $message
         );
-        $localPathsToDelete = file_get_contents($this->planPath('local_paths_to_delete'));
+        $localPathsToDelete = file_get_contents($this->planPath('local-paths-to-delete'));
         $this->assertIsString($localPathsToDelete);
         $this->assertSame($localPathsToDeleteCount, substr_count($localPathsToDelete, "\0"), $message);
+        $targetPathsToDelete = file_get_contents(
+            $this->planPath('paths-to-delete')
+        );
+        $this->assertIsString($targetPathsToDelete);
+        $this->assertSame(
+            $localPathsToDeleteCount,
+            substr_count($targetPathsToDelete, "\0"),
+            $message
+        );
     }
 
     private function planDirectory(): string
@@ -776,7 +873,7 @@ final class PushPlanTest extends TestCase
 
     private function excludedPathsPath(): string
     {
-        return $this->pushStateDirectory() . '/excluded_paths.json';
+        return $this->pushStateDirectory() . '/excluded-paths.json';
     }
 
     private function removePlanDirectory(): void
@@ -787,6 +884,45 @@ final class PushPlanTest extends TestCase
     private function localTreeRoot(): string
     {
         return $this->tempDir . '/local-tree-root';
+    }
+
+    private function remappedPluginsPathMapping(): PushPathMapping
+    {
+        $canonicalLocalTree = realpath($this->localTreeRoot());
+        $this->assertIsString($canonicalLocalTree);
+        $mappingFile = $this->tempDir . '/path-mapping.json';
+        file_put_contents(
+            $mappingFile,
+            json_encode([
+                'target_url_fingerprint' => str_repeat('1', 64),
+                'filesystem_root_b64' => base64_encode($canonicalLocalTree),
+                'local_tree_b64' => base64_encode($canonicalLocalTree),
+                'target_document_root_b64' =>
+                    base64_encode('/var/www/html'),
+                'prefix_rules' => [
+                    [
+                        'kind' => 'default',
+                        'remote_prefix_b64' =>
+                            base64_encode('/var/www/html'),
+                        'local_prefix_b64' =>
+                            base64_encode($canonicalLocalTree),
+                    ],
+                    [
+                        'kind' => 'remap',
+                        'remote_prefix_b64' => base64_encode(
+                            '/var/www/html/wp-content/plugins'
+                        ),
+                        'local_prefix_b64' => base64_encode(
+                            $canonicalLocalTree . '/plugins'
+                        ),
+                    ],
+                ],
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)
+        );
+        return PushPathMapping::from_file(
+            $mappingFile,
+            $this->localTreeRoot()
+        );
     }
 
     /**
@@ -954,7 +1090,23 @@ final class PushPlanTest extends TestCase
         $paths = [];
         foreach ($lines as $line) {
             $data = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-            $path = base64_decode($data['path_b64'], true);
+            $path = base64_decode($data['local_path_b64'], true);
+            $this->assertIsString($path);
+            $paths[] = $path;
+        }
+        return $paths;
+    }
+
+    /** @return list<string> */
+    private function listTargetPaths(string $file): array
+    {
+        $this->assertFileExists($file);
+        $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $this->assertIsArray($lines);
+        $paths = [];
+        foreach ($lines as $line) {
+            $data = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+            $path = base64_decode($data['target_path_b64'], true);
             $this->assertIsString($path);
             $paths[] = $path;
         }
@@ -971,7 +1123,7 @@ final class PushPlanTest extends TestCase
             return [];
         }
         $paths = explode("\0", $bytes);
-        $this->assertSame('', array_pop($paths), 'The local_paths_to_delete file must end after a NUL-terminated path.');
+        $this->assertSame('', array_pop($paths), 'The local-paths-to-delete file must end after a NUL-terminated path.');
         return $paths;
     }
 

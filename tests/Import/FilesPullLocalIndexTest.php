@@ -293,7 +293,8 @@ final class FilesPullLocalIndexTest extends TestCase
             [
                 'command' => 'files-diff',
                 'action' => 'delete',
-                'path_b64' => base64_encode('deleted.txt'),
+                'local_path_b64' => base64_encode('deleted.txt'),
+                'target_path_b64' => base64_encode('deleted.txt'),
             ],
         ], $records);
     }
@@ -543,7 +544,7 @@ final class FilesPullLocalIndexTest extends TestCase
         $this->assertSame( (int) $stat['size'], $entry['size']);
     }
 
-    /** @return array{command:string,action:string,path_b64:string,type:string,size:int,ctime:int} */
+    /** @return array{command:string,action:string,local_path_b64:string,target_path_b64:string,type:string,size:int,ctime:int} */
     private function expectedPushRecord(string $path): array
     {
         $stat = lstat($this->localTree . '/' . $path);
@@ -551,7 +552,8 @@ final class FilesPullLocalIndexTest extends TestCase
         return [
             'command' => 'files-diff',
             'action' => 'push',
-            'path_b64' => base64_encode($path),
+            'local_path_b64' => base64_encode($path),
+            'target_path_b64' => base64_encode($path),
             'type' => 'file',
             'size' => (int) $stat['size'],
             'ctime' => (int) $stat['ctime'],

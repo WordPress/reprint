@@ -80,6 +80,7 @@ require_once __DIR__ . '/lib/state/class-import-state.php';
 // Adaptive sizing for push request bodies
 require_once __DIR__ . '/lib/upload/class-push-request-sizer.php';
 require_once __DIR__ . '/lib/upload/class-multipart-push-stream-client.php';
+require_once __DIR__ . '/lib/push/class-push-path-mapping.php';
 require_once __DIR__ . '/lib/push/class-push-plan.php';
 require_once __DIR__ . '/lib/push/class-push-files-sender.php';
 
@@ -686,7 +687,7 @@ class ImportClient
         }
         $matching_directories = [];
         foreach ($mapping_files as $mapping_file) {
-            $mapping = self::read_path_mapping($mapping_file);
+            $mapping = PushPathMapping::read_file($mapping_file);
             if (
                 $match_target_url
                 &&
@@ -1619,7 +1620,13 @@ class ImportClient
                 $plan_directory,
                 $context['local_tree'],
                 $local_index_path,
-                $excluded_paths_path
+                $excluded_paths_path,
+                $context['path_mapping_path'] === null
+                    ? PushPathMapping::identity($context['local_tree'])
+                    : PushPathMapping::from_file(
+                        $context['path_mapping_path'],
+                        $context['local_tree']
+                    )
             );
             try {
                 while ($plan->next_step()) {
@@ -1631,13 +1638,14 @@ class ImportClient
 
             $local_paths_to_push_count = 0;
             foreach (
-                $plan->read_planned_local_paths_to_push()
+                $plan->read_planned_paths_to_push()
                 as $entry
             ) {
                 $line = json_encode([
                     'command' => 'files-diff',
                     'action' => 'push',
-                    'path_b64' => $entry['path_b64'],
+                    'local_path_b64' => $entry['local_path_b64'],
+                    'target_path_b64' => $entry['target_path_b64'],
                     'type' => $entry['type'],
                     'size' => $entry['size'],
                     'ctime' => $entry['ctime'],
@@ -1650,13 +1658,16 @@ class ImportClient
 
             $local_paths_to_delete_count = 0;
             foreach (
-                $plan->read_planned_local_paths_to_delete()
-                as $local_path_to_delete
+                $plan->read_planned_paths_to_delete()
+                as $path_to_delete
             ) {
                 $line = json_encode([
                     'command' => 'files-diff',
                     'action' => 'delete',
-                    'path_b64' => base64_encode($local_path_to_delete),
+                    'local_path_b64' =>
+                        base64_encode($path_to_delete['local_path']),
+                    'target_path_b64' =>
+                        base64_encode($path_to_delete['target_path']),
                 ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
                 if (fwrite($this->progress_fd, $line) !== strlen($line)) {
                     throw new RuntimeException('Failed to write the files-diff result.');
@@ -1759,6 +1770,7 @@ class ImportClient
             'docroot' => $context['local_tree'],
             'push_state_directory' => $context['push_state_directory'],
             'local_index_path' => $context['local_index_path'],
+            'path_mapping_path' => $context['path_mapping_path'],
             'base_url' => $context['target_url'],
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['force_http'] ?? false,
@@ -1955,8 +1967,9 @@ class ImportClient
      *     @type string $remote_state_directory State directory for the target relationship.
      *     @type string $push_state_directory   Local push state directory.
      *     @type string $local_index_path        Local index used by pull and push.
+     *     @type string|null $path_mapping_path   Persisted pull path mapping, when present.
      * }
-     * @phpstan-return array{target_url:string,local_tree:string,remote_state_directory:string,push_state_directory:string,local_index_path:string}
+     * @phpstan-return array{target_url:string,local_tree:string,remote_state_directory:string,push_state_directory:string,local_index_path:string,path_mapping_path:string|null}
      */
     public static function prepare_files_push_context(
         string $target_url,
@@ -1989,19 +2002,12 @@ class ImportClient
                 . '. Pass --force-http only for a target you trust.'
             );
         }
-        $path_mapping_file =
-            $context['remote_state_directory'] . '/path-mapping.json';
-        if (is_file($path_mapping_file)) {
-            $path_mapping = self::read_path_mapping($path_mapping_file);
-            foreach ($path_mapping['prefix_rules'] as $prefix_rule) {
-                if ($prefix_rule['kind'] === 'remap') {
-                    throw new RuntimeException(
-                        'files-push cannot use this local index because '
-                        . $path_mapping_file
-                        . ' contains remapped paths.'
-                    );
-                }
-            }
+        $path_mapping_file = $context['path_mapping_path'];
+        if ($path_mapping_file !== null) {
+            PushPathMapping::from_file(
+                $path_mapping_file,
+                $context['local_tree']
+            );
         }
         return $context;
     }
@@ -2021,8 +2027,9 @@ class ImportClient
      *     @type string $remote_state_directory State directory for the target relationship.
      *     @type string $push_state_directory   Local push state directory.
      *     @type string $local_index_path        Local index used by pull and push.
+     *     @type string|null $path_mapping_path   Persisted pull path mapping, when present.
      * }
-     * @phpstan-return array{target_url:string,local_tree:string,remote_state_directory:string,push_state_directory:string,local_index_path:string}
+     * @phpstan-return array{target_url:string,local_tree:string,remote_state_directory:string,push_state_directory:string,local_index_path:string,path_mapping_path:string|null}
      */
     public static function prepare_files_command_context(
         string $target_url,
@@ -2089,7 +2096,7 @@ class ImportClient
         }
         $path_mapping_file = $remote_state_directory . '/path-mapping.json';
         if (is_file($path_mapping_file)) {
-            $path_mapping = self::read_path_mapping($path_mapping_file);
+            $path_mapping = PushPathMapping::read_file($path_mapping_file);
             /** @var string $mapped_local_tree */
             $mapped_local_tree = base64_decode(
                 $path_mapping['local_tree_b64'],
@@ -2108,120 +2115,18 @@ class ImportClient
             }
         }
 
+        $path_mapping_path =
+            $remote_state_directory . '/path-mapping.json';
         return [
             'target_url' => $target_url,
             'local_tree' => $canonical_local_tree,
             'remote_state_directory' => $remote_state_directory,
             'push_state_directory' => $push_state_directory,
             'local_index_path' => $remote_state_directory . '/.local-index.jsonl',
+            'path_mapping_path' => is_file($path_mapping_path)
+                ? $path_mapping_path
+                : null,
         ];
-    }
-
-    /**
-     * Reads and validates one resolved path mapping.
-     *
-     * @return array {
-     *     @type string $target_url_fingerprint    Target URL fingerprint.
-     *     @type string $filesystem_root_b64       Pull filesystem root.
-     *     @type string $local_tree_b64            Canonical local tree.
-     *     @type string $target_document_root_b64  Target document root.
-     *     @type array  $prefix_rules              Resolved prefix rules.
-     * }
-     * @phpstan-return array{target_url_fingerprint:string,filesystem_root_b64:string,local_tree_b64:string,target_document_root_b64:string,prefix_rules:list<array{kind:'default'|'remap',remote_prefix_b64:string,local_prefix_b64:string}>}
-     */
-    private static function read_path_mapping(string $mapping_file): array
-    {
-        $json = file_get_contents($mapping_file);
-        if (!is_string($json)) {
-            throw new RuntimeException(
-                'Failed to read the path mapping: ' . $mapping_file . '.'
-            );
-        }
-        $mapping = json_decode(
-            $json,
-            true,
-            512,
-            JSON_THROW_ON_ERROR
-        );
-        if (!is_array($mapping)) {
-            throw new RuntimeException(
-                'The path mapping is not a JSON object: '
-                . $mapping_file
-                . '.'
-            );
-        }
-        foreach ([
-            'target_url_fingerprint',
-            'filesystem_root_b64',
-            'local_tree_b64',
-            'target_document_root_b64',
-        ] as $key) {
-            if (!isset($mapping[$key]) || !is_string($mapping[$key])) {
-                throw new RuntimeException(
-                    'The path mapping '
-                    . $mapping_file
-                    . ' has no string '
-                    . $key
-                    . '.'
-                );
-            }
-        }
-        foreach ([
-            'filesystem_root_b64',
-            'local_tree_b64',
-            'target_document_root_b64',
-        ] as $key) {
-            if (base64_decode($mapping[$key], true) === false) {
-                throw new RuntimeException(
-                    'The path mapping '
-                    . $mapping_file
-                    . ' has invalid base64 in '
-                    . $key
-                    . '.'
-                );
-            }
-        }
-        if (!isset($mapping['prefix_rules']) || !is_array($mapping['prefix_rules'])) {
-            throw new RuntimeException(
-                'The path mapping '
-                . $mapping_file
-                . ' has no prefix_rules array.'
-            );
-        }
-        foreach ($mapping['prefix_rules'] as $position => $prefix_rule) {
-            if (
-                !is_array($prefix_rule)
-                || !in_array(
-                    $prefix_rule['kind'] ?? null,
-                    ['default', 'remap'],
-                    true
-                )
-                || !isset(
-                    $prefix_rule['remote_prefix_b64'],
-                    $prefix_rule['local_prefix_b64']
-                )
-                || !is_string($prefix_rule['remote_prefix_b64'])
-                || !is_string($prefix_rule['local_prefix_b64'])
-                || base64_decode(
-                    $prefix_rule['remote_prefix_b64'],
-                    true
-                ) === false
-                || base64_decode(
-                    $prefix_rule['local_prefix_b64'],
-                    true
-                ) === false
-            ) {
-                throw new RuntimeException(
-                    'The path mapping '
-                    . $mapping_file
-                    . ' has an invalid prefix rule at position '
-                    . $position
-                    . '.'
-                );
-            }
-        }
-        /** @var array{target_url_fingerprint:string,filesystem_root_b64:string,local_tree_b64:string,target_document_root_b64:string,prefix_rules:list<array{kind:'default'|'remap',remote_prefix_b64:string,local_prefix_b64:string}>} $mapping */
-        return $mapping;
     }
 
     /** Removes endpoint aliases and authentication inputs which do not identify a target. */
@@ -8907,7 +8812,7 @@ class ImportClient
         ];
 
         if (is_file($this->path_mapping_file)) {
-            if (self::read_path_mapping($this->path_mapping_file) !== $mapping) {
+            if (PushPathMapping::read_file($this->path_mapping_file) !== $mapping) {
                 throw new RuntimeException(
                     'Cannot change the resolved path mapping in '
                     . $this->remote_state_directory
@@ -13214,7 +13119,9 @@ if (
                 "default-skipped paths include generated wp-content caches, version-\n" .
                 "control data, node_modules, package-manager caches, OS metadata, and\n" .
                 "editor scratch files.\n" .
-                "Paths remain base64 text in JSONL output so\n" .
+                "Each change reports local_path_b64 for local filesystem work and\n" .
+                "target_path_b64 for the corresponding target path. Paths remain\n" .
+                "base64 text in JSONL output so\n" .
                 "arbitrary filesystem names are preserved. No network calls are made\n" .
                 "and no secret is required. The state directory's .reprint.lock is\n" .
                 "held for the entire command.\n",
@@ -13236,6 +13143,8 @@ if (
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
                 "It does not require pull preflight.\n" .
+                "When files-pull stored a path mapping for this target and local tree,\n" .
+                "files-push reads local paths and addresses their mapped target paths.\n" .
                 "\n" .
                 "Each process runs one sender until it completes, reaches a caller time or\n" .
                 "memory boundary, or receives a signal handled by this PHP runtime.\n" .

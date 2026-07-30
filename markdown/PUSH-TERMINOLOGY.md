@@ -150,25 +150,36 @@ Use these names verbatim:
 | --- | --- |
 | Local index path | `local_index_path`, `$local_index_path` |
 | Active plan directory | `plan`, `$plan_directory` |
-| Plan-owned fresh local index | `fresh_local_index.jsonl`, `$fresh_local_index` |
+| Plan-owned fresh local index | `.local-index.next.jsonl`, `$fresh_local_index` |
 | Byte offset in the local index | `byte_offset_in_local_index`, `$byte_offset_in_local_index` |
-| Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
-| Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
+| Paths to push | `paths-to-push.jsonl`, `$local_paths_to_push` |
+| Target paths to delete | `paths-to-delete`, `$target_paths_to_delete` |
+| Local paths to delete | `local-paths-to-delete`, `$local_paths_to_delete` |
 | Local push state directory | `push_state_directory`, `$push_state_directory` |
 | PushPlan cursor | `push_plan_cursor`, `$push_plan_cursor`, `get_cursor()` |
-| Sender-owned excluded paths | `excluded_paths.json`, `$excluded_paths_path` |
+| Sender-owned excluded paths | `excluded-paths.json`, `$excluded_paths_path` |
 | Deleted directory path | `deleted_directory_path_b64`, `$deleted_directory_path` |
 | Active state | `sender.json`, `$state_path` |
-| Plan-owned committed local-index updates | `plan/local_index_updates.jsonl` |
+| Plan-owned committed local-index updates | `plan/local-index-updates.jsonl` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
-`sender.json` and `excluded_paths.json` live directly under the local push
+`sender.json` and `excluded-paths.json` live directly under the local push
 state directory. The sender creates `plan/` for one active plan and starts
 PushPlan with the local index path and sender-owned excluded paths.
-`fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
-`local_paths_to_delete`, and the post-commit `local_index_updates.jsonl` live
-inside `plan/`.
+`.local-index.next.jsonl`, `paths-to-push.jsonl`, `paths-to-delete`,
+`local-paths-to-delete`, and the post-commit `local-index-updates.jsonl` live
+inside `plan/`. Each paths-to-push record stores both `local_path_b64` and
+`target_path_b64`. `paths-to-delete` stores target paths for the request;
+`local-paths-to-delete` stores the paired local paths for the committed
+local-index update.
+
+`path-mapping.json` stores the target document root and the resolved remote and
+local prefix rules for one remote state directory. The first mapping is
+immutable. Push validates it before opening a push request, reads and stats
+`local_path_b64`, addresses the receiver with `target_path_b64`, and rewrites
+pulled symlink targets back into target coordinates. A relative symlink target
+outside the local tree is rejected when the symlink path itself is remapped.
 
 Completing files-pull creates the local index when it is missing. Each actual
 local mutation is recorded in `pull-index-updates.wal` with the local path and,
@@ -196,7 +207,7 @@ current local-index lookahead entry again after resume.
 
 The PushPlan cursor is stored in `sender.json`. During `indexing`, it contains
 the FileIndexProcessor cursor and the committed byte offset in
-`fresh_local_index.jsonl`. During `diffing`, it contains the index offsets,
+`.local-index.next.jsonl`. During `diffing`, it contains the index offsets,
 output offsets, and `deleted_directory_path_b64` while descendants of one
 deleted directory need no separate deletion. The exclusions have a maximum of
 100 paths. `sender.json` phases are `creating`, `starting_plan`,
@@ -205,7 +216,7 @@ deleted directory need no separate deletion. The exclusions have a maximum of
 `removing`, and `discarding_plan`. It stores the push session ID, selected
 path-list cursor, receiver part limit, and request-sizing state. The index diff
 completes before local paths are sent. After a successful commit, the sender
-writes `plan/local_index_updates.jsonl` from the committed path lists and
+writes `plan/local-index-updates.jsonl` from the committed path lists and
 applies it to the local index. The merge adds directory ancestors for each F
 update and removes the path and its descendants for each D update. If the local
 index does not exist, the same atomic merge creates it. Paths excluded by the
@@ -255,13 +266,13 @@ endpoint path and query as the file-only pull but omits URL user-info and
 to a bare site URL.
 
 Each JSONL change record has `command: "files-diff"`, an `action` of `push` or
-`delete`, and `path_b64`. A push record also has the local path `type`, `size`,
-and `ctime`; its type is `file`, `dir`, or `link`. These records form a local
-minimized push operation plan before target exclusions: descendants represent
-a new non-empty directory, one deleted subtree root covers its descendants,
-and metadata-only changes to non-empty directories select no operation. The
-final record has `status: "complete"`, `local_paths_to_push`, and
-`local_paths_to_delete`.
+`delete`, `local_path_b64`, and `target_path_b64`. A push record also has the
+local path `type`, `size`, and `ctime`; its type is `file`, `dir`, or `link`.
+These records form a local minimized push operation plan before target
+exclusions: descendants represent a new non-empty directory, one deleted
+subtree root covers its descendants, and metadata-only changes to non-empty
+directories select no operation. The final record has `status: "complete"`,
+`local_paths_to_push`, and `local_paths_to_delete`.
 
 files-diff persists nothing between runs. It runs one complete PushPlan in
 `files-diff-plan/` while its command holds the state-directory-wide Reprint
@@ -334,11 +345,11 @@ Use these names verbatim inside `PushFilesSender`:
 | Maximum file payload bytes | `$maximum_file_payload_bytes` |
 | Maximum delete-list payload bytes | `$maximum_delete_list_payload_bytes` |
 | Local I/O failure detail | `$local_io_failure_detail` |
-| Whether the local delete list is complete | `$local_delete_list_complete` |
+| Whether the target delete list is complete | `$target_delete_list_complete` |
 | Copy through a swap file | `copy_through_swap_file()`, `$source_path`, `$target_path` |
 | Open directory handle | `$directory_handle` |
 | Open local paths-to-push handle | `$local_paths_to_push_handle` |
-| Open local paths-to-delete handle | `$local_paths_to_delete_handle` |
+| Open target paths-to-delete handle | `$target_paths_to_delete_handle` |
 | Open local file handle | `$local_file_handle` |
 | Local path stat result | `$path_stat` |
 | File type bits | `$file_type_bits` |

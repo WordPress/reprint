@@ -1391,7 +1391,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
         $this->assertNull($this->loadActiveState($push_state_directory));
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
-        $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json');
+        $this->assertFileDoesNotExist($push_state_directory . '/excluded-paths.json');
         $this->assertFileExists($this->localIndexPath($push_state_directory));
     }
 
@@ -1463,7 +1463,7 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Sends one local path to delete and returns before reading the next one.
+     * Sends one target path to delete and returns before reading the next one.
      */
     public function testHighLevelSenderSendsOneDeletionListPartPerStep(): void
     {
@@ -1488,21 +1488,21 @@ final class PushEndpointsTest extends TestCase {
         }
         $this->assertIsArray($state);
 
-        $local_paths_to_delete_handle_property = new ReflectionProperty(
+        $target_paths_to_delete_handle_property = new ReflectionProperty(
             PushFilesSender::class,
-            'local_paths_to_delete_handle'
+            'target_paths_to_delete_handle'
         );
         $sender = $this->resumeSender(
             $this->senderOptions($local_docroot, $push_state_directory)
         );
         try {
             $this->assertTrue($sender->next_step());
-            $local_paths_to_delete_handle = $local_paths_to_delete_handle_property->getValue($sender);
-            $this->assertIsResource($local_paths_to_delete_handle);
-            $this->assertSame(14, ftell($local_paths_to_delete_handle));
+            $target_paths_to_delete_handle = $target_paths_to_delete_handle_property->getValue($sender);
+            $this->assertIsResource($target_paths_to_delete_handle);
+            $this->assertSame(14, ftell($target_paths_to_delete_handle));
 
             $this->assertTrue($sender->next_step());
-            $this->assertSame(28, ftell($local_paths_to_delete_handle));
+            $this->assertSame(28, ftell($target_paths_to_delete_handle));
         } finally {
             if ($sender->get_status() === 'continue') {
                 $sender->cancel();
@@ -1642,7 +1642,7 @@ final class PushEndpointsTest extends TestCase {
         file_put_contents($local_docroot . '/a.txt', 'a');
         file_put_contents($local_docroot . '/b.txt', 'bb');
         $push_state_directory = $this->root . '/bounded-index-state';
-        $fresh_local_index_path = $push_state_directory . '/plan/fresh_local_index.jsonl';
+        $fresh_local_index_path = $push_state_directory . '/plan/.local-index.next.jsonl';
         $options = $this->senderOptions($local_docroot, $push_state_directory);
         $plan_property = new ReflectionProperty(PushFilesSender::class, 'plan');
         $file_index_processor_property = new ReflectionProperty(PushPlan::class, 'file_index_processor');
@@ -1657,10 +1657,10 @@ final class PushEndpointsTest extends TestCase {
             $this->takeSenderStepsUntilPhase($sender, 'planning');
             $this->assertFileExists($fresh_local_index_path);
             $this->assertFileExists(
-                $push_state_directory . '/excluded_paths.json'
+                $push_state_directory . '/excluded-paths.json'
             );
             $this->assertFileDoesNotExist(
-                $push_state_directory . '/plan/excluded_paths.json'
+                $push_state_directory . '/plan/excluded-paths.json'
             );
             $this->assertFileDoesNotExist($push_state_directory . '/plan/cursor.json');
             $plan = $plan_property->getValue($sender);
@@ -1788,9 +1788,9 @@ final class PushEndpointsTest extends TestCase {
             'local_paths_to_push_handle'
         );
         $local_file_handle_property = new ReflectionProperty(PushFilesSender::class, 'local_file_handle');
-        $local_paths_to_delete_handle_property = new ReflectionProperty(
+        $target_paths_to_delete_handle_property = new ReflectionProperty(
             PushFilesSender::class,
-            'local_paths_to_delete_handle'
+            'target_paths_to_delete_handle'
         );
         $push_stream_client_property = new ReflectionProperty(PushFilesSender::class, 'push_stream_client');
         $curl_handle_property = new ReflectionProperty(MultipartPushStreamClient::class, 'curl_handle');
@@ -1852,28 +1852,28 @@ final class PushEndpointsTest extends TestCase {
             $sender->next_step();
             $first_delete_chunk = $this->senderResult($sender);
             $this->assertSame('pushing_deletes', $first_delete_chunk['phase']);
-            $local_paths_to_delete_handle = $local_paths_to_delete_handle_property->getValue($sender);
-            $this->assertIsResource($local_paths_to_delete_handle);
-            $local_paths_to_delete_position = ftell($local_paths_to_delete_handle);
-            $this->assertIsInt($local_paths_to_delete_position);
+            $target_paths_to_delete_handle = $target_paths_to_delete_handle_property->getValue($sender);
+            $this->assertIsResource($target_paths_to_delete_handle);
+            $target_paths_to_delete_position = ftell($target_paths_to_delete_handle);
+            $this->assertIsInt($target_paths_to_delete_position);
 
             $sender->next_step();
 
             $second_delete_chunk = $this->senderResult($sender);
             $this->assertSame('pushing_deletes', $second_delete_chunk['phase']);
             $this->assertSame(
-                $local_paths_to_delete_handle,
-                $local_paths_to_delete_handle_property->getValue($sender)
+                $target_paths_to_delete_handle,
+                $target_paths_to_delete_handle_property->getValue($sender)
             );
             $this->assertGreaterThan(
-                $local_paths_to_delete_position,
-                ftell($local_paths_to_delete_handle)
+                $target_paths_to_delete_position,
+                ftell($target_paths_to_delete_handle)
             );
         } finally {
             $this->closeSender($sender);
         }
-        $this->assertNull($local_paths_to_delete_handle_property->getValue($sender));
-        $this->assertFalse(is_resource($local_paths_to_delete_handle));
+        $this->assertNull($target_paths_to_delete_handle_property->getValue($sender));
+        $this->assertFalse(is_resource($target_paths_to_delete_handle));
     }
 
     /**
@@ -2061,7 +2061,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('local_path_changed', $result['reason']);
         $this->assertNull($this->loadActiveState($push_state_directory));
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
-        $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json');
+        $this->assertFileDoesNotExist($push_state_directory . '/excluded-paths.json');
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
     }
 
@@ -2107,7 +2107,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('local_path_changed', $result['reason']);
         $this->assertNull($this->loadActiveState($push_state_directory));
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
-        $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json');
+        $this->assertFileDoesNotExist($push_state_directory . '/excluded-paths.json');
         $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push/' . $push_session_id);
     }
 
@@ -2478,7 +2478,7 @@ final class PushEndpointsTest extends TestCase {
             }
         }
         $this->assertIsArray($state);
-        $deletions = (string) file_get_contents($push_state_directory . '/plan/local_paths_to_delete');
+        $deletions = (string) file_get_contents($push_state_directory . '/plan/paths-to-delete');
         $this->assertSame("delete-after-lost-response.txt\0", $deletions);
         $boundary = 'reprint-lost-delete-response';
         $delete_body = '--' . $boundary . "\r\n"
@@ -2626,6 +2626,133 @@ final class PushEndpointsTest extends TestCase {
         );
     }
 
+    public function testHighLevelSenderPushesRemappedPathsInTargetCoordinates(): void
+    {
+        $local_docroot = $this->root . '/remapped-push-local-docroot';
+        $local_plugins = $local_docroot . '/plugins/example';
+        $target_plugins = $this->docroot . '/wp-content/plugins/example';
+        mkdir($local_plugins, 0700, true);
+        mkdir($target_plugins, 0700, true);
+        file_put_contents($local_plugins . '/plugin.php', 'edited plugin');
+        file_put_contents($local_plugins . '/added.php', 'added plugin');
+        file_put_contents($local_docroot . '/theme.txt', 'target-root file');
+        symlink('../../theme.txt', $local_plugins . '/theme-link');
+        file_put_contents($target_plugins . '/plugin.php', 'old plugin');
+        file_put_contents($target_plugins . '/deleted.php', 'deleted plugin');
+
+        $push_state_directory = $this->root . '/remapped-push-state';
+        $local_index_fixture = $this->root . '/remapped-push-index.jsonl';
+        $this->writeIndex($local_index_fixture, [
+            'plugins/example/deleted.php' => [1, 14, 'file'],
+            'plugins/example/plugin.php' => [1, 10, 'file'],
+        ]);
+        $this->seedLocalIndex(
+            $push_state_directory,
+            $local_index_fixture
+        );
+        $canonical_local_docroot = realpath($local_docroot);
+        $canonical_target_docroot = realpath($this->docroot);
+        $this->assertIsString($canonical_local_docroot);
+        $this->assertIsString($canonical_target_docroot);
+        $path_mapping_path =
+            $this->root . '/remapped-push-path-mapping.json';
+        file_put_contents(
+            $path_mapping_path,
+            json_encode([
+                'target_url_fingerprint' => str_repeat('1', 64),
+                'filesystem_root_b64' => base64_encode(
+                    $canonical_local_docroot
+                ),
+                'local_tree_b64' => base64_encode(
+                    $canonical_local_docroot
+                ),
+                'target_document_root_b64' => base64_encode(
+                    $canonical_target_docroot
+                ),
+                'prefix_rules' => [
+                    [
+                        'kind' => 'default',
+                        'remote_prefix_b64' => base64_encode(
+                            $canonical_target_docroot
+                        ),
+                        'local_prefix_b64' => base64_encode(
+                            $canonical_local_docroot
+                        ),
+                    ],
+                    [
+                        'kind' => 'remap',
+                        'remote_prefix_b64' => base64_encode(
+                            $canonical_target_docroot
+                            . '/wp-content/plugins'
+                        ),
+                        'local_prefix_b64' => base64_encode(
+                            $canonical_local_docroot . '/plugins'
+                        ),
+                    ],
+                ],
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)
+        );
+
+        $options = $this->senderOptions(
+            $local_docroot,
+            $push_state_directory
+        );
+        $options['path_mapping_path'] = $path_mapping_path;
+        $sender = $this->startSender($options);
+        try {
+            for ($step = 0; $step < 200; ++$step) {
+                $has_more_steps = $sender->next_step();
+                $result = $this->senderResult($sender);
+                $this->assertNotSame(
+                    'failed',
+                    $result['status'],
+                    (string) json_encode($result)
+                );
+                if (!$has_more_steps) {
+                    break;
+                }
+            }
+        } finally {
+            $this->closeSender($sender);
+        }
+
+        $this->assertSame(
+            'complete',
+            $result['status'],
+            (string) json_encode($result)
+        );
+        $this->assertSame(
+            'edited plugin',
+            file_get_contents($target_plugins . '/plugin.php')
+        );
+        $this->assertSame(
+            'added plugin',
+            file_get_contents($target_plugins . '/added.php')
+        );
+        $this->assertFileDoesNotExist(
+            $target_plugins . '/deleted.php'
+        );
+        $this->assertSame(
+            '../../../theme.txt',
+            readlink($target_plugins . '/theme-link')
+        );
+        $this->assertSame(
+            'target-root file',
+            file_get_contents($this->docroot . '/theme.txt')
+        );
+        $local_index = (string) file_get_contents(
+            $this->localIndexPath($push_state_directory)
+        );
+        $this->assertStringContainsString(
+            base64_encode('plugins/example/plugin.php'),
+            $local_index
+        );
+        $this->assertStringNotContainsString(
+            base64_encode('wp-content/plugins/example/plugin.php'),
+            $local_index
+        );
+    }
+
     public function testCompletedFilesPushUpdatesTheLocalIndexForFilesDiff(): void
     {
         $local_docroot = $this->root . '/push-diff-local-docroot';
@@ -2659,7 +2786,8 @@ final class PushEndpointsTest extends TestCase {
             json_encode([
                 'command' => 'files-diff',
                 'action' => 'push',
-                'path_b64' => base64_encode('pushed.txt'),
+                'local_path_b64' => base64_encode('pushed.txt'),
+                'target_path_b64' => base64_encode('pushed.txt'),
                 'type' => 'file',
                 'size' => (int) $changed_stat['size'],
                 'ctime' => (int) $changed_stat['ctime'],

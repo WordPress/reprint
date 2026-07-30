@@ -104,8 +104,9 @@ final class FilesDiffCommandTest extends TestCase
 
         $recordsByActionAndPath = [];
         foreach ($records as $record) {
-            $path = base64_decode($record['path_b64'] ?? '', true);
+            $path = base64_decode($record['local_path_b64'] ?? '', true);
             $this->assertIsString($path);
+            $this->assertSame($record['local_path_b64'], $record['target_path_b64']);
             $recordsByActionAndPath[( $record['action'] ?? '' ) . ':' . $path] = $record;
         }
         $this->assertCount(6, $recordsByActionAndPath);
@@ -144,12 +145,14 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertSame([
             'command' => 'files-diff',
             'action' => 'delete',
-            'path_b64' => base64_encode('deleted.txt'),
+            'local_path_b64' => base64_encode('deleted.txt'),
+            'target_path_b64' => base64_encode('deleted.txt'),
         ], $recordsByActionAndPath['delete:deleted.txt']);
         $this->assertSame([
             'command' => 'files-diff',
             'action' => 'delete',
-            'path_b64' => base64_encode('swap'),
+            'local_path_b64' => base64_encode('swap'),
+            'target_path_b64' => base64_encode('swap'),
         ], $recordsByActionAndPath['delete:swap']);
         $this->assertSame('', $result['stderr']);
         $this->assertSame(
@@ -191,7 +194,8 @@ final class FilesDiffCommandTest extends TestCase
             [
                 'command' => 'files-diff',
                 'action' => 'delete',
-                'path_b64' => base64_encode($this->invalidBytePathInIndex),
+                'local_path_b64' => base64_encode($this->invalidBytePathInIndex),
+                'target_path_b64' => base64_encode($this->invalidBytePathInIndex),
             ],
         ], $records);
         $this->assertStringNotContainsString($invalidBytePathToPush, $result['stdout']);
@@ -364,7 +368,7 @@ final class FilesDiffCommandTest extends TestCase
         file_put_contents($localIndex, $lines);
     }
 
-    /** @return array{command:string,action:string,path_b64:string,type:string,size:int,ctime:int} */
+    /** @return array{command:string,action:string,local_path_b64:string,target_path_b64:string,type:string,size:int,ctime:int} */
     private function expectedPushRecord(string $path, string $type): array
     {
         $stat = lstat($this->localTree . '/' . $path);
@@ -372,7 +376,8 @@ final class FilesDiffCommandTest extends TestCase
         return [
             'command' => 'files-diff',
             'action' => 'push',
-            'path_b64' => base64_encode($path),
+            'local_path_b64' => base64_encode($path),
+            'target_path_b64' => base64_encode($path),
             'type' => $type,
             'size' => $type === 'dir' ? 0 : (int) $stat['size'],
             'ctime' => (int) $stat['ctime'],
