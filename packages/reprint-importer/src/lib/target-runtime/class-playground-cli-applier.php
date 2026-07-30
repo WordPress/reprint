@@ -142,10 +142,9 @@ class PlaygroundCliApplier implements RuntimeApplier
      * Rewrite host-side runtime helper files to VFS paths and return the
      * corresponding Playground mounts.
      *
-     * Some route handlers need importer metadata produced outside the mounted
-     * WordPress tree, for example the files-pull state used by the temporary
-     * remote uploads proxy. Playground can only see files that are mounted
-     * explicitly, so we map those constants to /tmp paths in the VM.
+     * Some route handlers need files produced outside the mounted WordPress
+     * tree. Playground can only see files that are mounted explicitly, so we
+     * map those constants to /tmp paths in the VM.
      *
      * @return string[]
      */
@@ -153,9 +152,9 @@ class PlaygroundCliApplier implements RuntimeApplier
     {
         $mounts = [];
         $runtime_file_mounts = [
-            'REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE'
+            'REPRINT_PULL_STATE_FILE'
                 => '/tmp/reprint/state.json',
-            'REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'
+            'REPRINT_PULL_SKIPPED_FETCH_LIST_FILE'
                 => '/tmp/reprint/skipped-fetch-list.jsonl',
         ];
 

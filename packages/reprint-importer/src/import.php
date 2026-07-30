@@ -4313,9 +4313,9 @@ class ImportClient
 
         $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
         $state_dir = realpath($this->state_dir) ?: $this->state_dir;
-        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
+        $manifest->constants["REPRINT_PULL_STATE_FILE"] =
             rtrim($state_dir, "/") . "/pull/state.json";
-        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
+        $manifest->constants["REPRINT_PULL_SKIPPED_FETCH_LIST_FILE"] =
             rtrim($state_dir, "/") . "/pull/skipped-fetch-list.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
