@@ -3,7 +3,7 @@
  * Reprint Web Wizard — WordPress.com → Playground handoff.
  *
  * 1. Sign in with WordPress.com (OAuth authorization-code flow).
- * 2. List the user's Atomic/WP.com sites.
+ * 2. List the user's WordPress.com and Pressable sites.
  * 3. Server enables the reprint exporter + rotates the HMAC secret
  *    via the WP.com REST API and returns {api_url, secret}.
  * 4. Browser navigates to a Playground URL with ?blueprint-url
@@ -16,6 +16,7 @@
  */
 
 require __DIR__ . '/bootstrap.php';
+require __DIR__ . '/lib/wpcom-reprint-api.php';
 
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
@@ -63,7 +64,7 @@ function action_sites(): void {
     $token = reprint_wpcom_token();
     if ($token === '') { http_response_code(401); echo json_encode(['error' => 'not_authenticated']); return; }
     $sites = wpcom_get([
-        'url' => 'https://public-api.wordpress.com/rest/v1.1/me/sites?filter=atomic,wpcom&fields=ID,URL,name,icon,is_wpcom_atomic',
+        'url' => 'https://public-api.wordpress.com/rest/v1.1/me/sites?filter=atomic,wpcom,jetpack&fields=ID,URL,name,icon,is_wpcom_atomic,jetpack,hosting_provider_guess',
         'token' => $token,
     ]);
     echo $sites;
@@ -129,83 +130,109 @@ function wpcom_post(string $url, string $token, array $body, string $encoding = 
 }
 
 /**
- * Enables the reprint exporter on the chosen site (sliding 60-min window),
- * then rotates the HMAC secret. Returns [api_url, secret].
+ * Enables the Reprint exporter on the chosen site, rotates the HMAC secret,
+ * and returns [api_url, secret, debug].
  *
- * Mirrors Studio's pull-reprint flow: enable → rotate → use.
+ * Jetpack hosts the exporter on Pressable and current Atomic sites. Older
+ * Atomic sites expose the original wpcomsh routes instead, so a missing
+ * Jetpack enable route falls back to that surface.
  *
  * `$site_url` is passed by the client from the already-loaded site list
  * — avoids an extra `/sites/<id>?fields=URL` round-trip that the
  * current token scope doesn't always cover.
+ *
+ * @return array {
+ *     Provisioned export credentials and diagnostics.
+ *
+ *     @type string $0 Export API URL.
+ *     @type string $1 HMAC secret.
+ *     @type array  $2 Provisioning diagnostics.
+ * }
+ * @phpstan-return array{0:string,1:string,2:array<string,mixed>}
  */
 function wpcom_provision_reprint(int $site_id, string $site_url, string $token): array {
-    // Step 1: set reprint_exporter_enabled=<timestamp> via /sites/<id>/settings.
-    // WP.com's settings endpoint whitelists keys and silently drops
-    // unknown ones with a 200 OK, so we verify that the key actually
-    // appears in the response's `updated` object — matching Studio's
-    // enableReprintExporter behavior in yangon/apps/cli/lib/api.ts.
-    $enabled = wpcom_post(
-        "https://public-api.wordpress.com/rest/v1.1/sites/{$site_id}/settings",
-        $token,
-        ['reprint_exporter_enabled' => time()],
-        'form'
-    );
-    if ($enabled['status'] >= 400) {
-        throw new RuntimeException("enable-export-api failed (HTTP {$enabled['status']}): " . substr((string)$enabled['body'], 0, 300));
+    // Jetpack's enable route opens the export window without rotating the
+    // secret. A missing route is the compatibility signal for wpcomsh.
+    $enable_probe_response = reprint_wpcom_bridge_post($site_id, $token, '/jetpack/v4/reprint/enable-export');
+    $export_api = reprint_wpcom_export_api($enable_probe_response);
+    $updated_settings = null;
+
+    if ($export_api['surface'] === 'wpcomsh') {
+        // wpcomsh gates ?reprint-api on a recent timestamp. WP.com's settings
+        // endpoint silently drops keys it does not whitelist, so verify that
+        // this site actually accepted the activation.
+        $wpcomsh_enable_response = wpcom_post(
+            "https://public-api.wordpress.com/rest/v1.1/sites/{$site_id}/settings",
+            $token,
+            ['reprint_exporter_enabled' => time()],
+            'form'
+        );
+        if ($wpcomsh_enable_response['status'] >= 400) {
+            throw new RuntimeException(
+                "The wpcomsh exporter activation request returned HTTP {$wpcomsh_enable_response['status']}: " .
+                substr((string) $wpcomsh_enable_response['body'], 0, 300)
+            );
+        }
+        $updated_settings = $wpcomsh_enable_response['json']['updated'] ?? null;
+        if (!is_array($updated_settings) || !array_key_exists('reprint_exporter_enabled', $updated_settings)) {
+            throw new RuntimeException(
+                'The site did not acknowledge the Reprint exporter activation. ' .
+                'The feature may not be available yet on this WordPress.com site. ' .
+                'Response: ' . substr((string) $wpcomsh_enable_response['body'], 0, 400)
+            );
+        }
     }
-    $updated = $enabled['json']['updated'] ?? null;
-    if (!is_array($updated) || !array_key_exists('reprint_exporter_enabled', $updated)) {
-        throw new RuntimeException(
-            'The site did not acknowledge the reprint exporter activation. ' .
-            'The feature may not be available yet on this WordPress.com site. ' .
-            'Response: ' . substr((string) $enabled['body'], 0, 400)
+
+    $rotate_response = reprint_wpcom_bridge_post($site_id, $token, $export_api['rotate_secret_path']);
+    $secret = reprint_wpcom_export_secret($rotate_response);
+
+    $legacy_secret_sync_response = null;
+    if ($export_api['surface'] === 'wpcomsh') {
+        // If the site also has the legacy reprint-exporter-wp plugin, it
+        // intercepts ?reprint-api first and reads `site_export_secret` instead
+        // of wpcomsh's `reprint_exporter_secret`. Mirror the rotated secret so
+        // either handler accepts the request. Other sites drop this unknown
+        // settings key.
+        $legacy_secret_sync_response = wpcom_post(
+            "https://public-api.wordpress.com/rest/v1.1/sites/{$site_id}/settings",
+            $token,
+            ['site_export_secret' => $secret],
+            'form'
         );
     }
 
-    // Step 2: rotate the HMAC secret via the Jetpack bridge.
-    $rotated = wpcom_post(
+    $provisioning_debug = [
+        'surface' => $export_api['surface'],
+        'enable_probe_raw' => (string) $enable_probe_response['body'],
+        'enable_updated' => $updated_settings,
+        'rotate_raw' => (string) $rotate_response['body'],
+        'legacy_sync_status' => $legacy_secret_sync_response['status'] ?? null,
+        'legacy_sync_updated' => $legacy_secret_sync_response['json']['updated'] ?? null,
+    ];
+    return [
+        rtrim($site_url, '/') . '/?' . $export_api['query_parameter'],
+        $secret,
+        $provisioning_debug,
+    ];
+}
+
+/**
+ * POSTs a path through the WordPress.com Jetpack REST bridge.
+ *
+ * @return array {
+ *     Response from wpcom_post().
+ *
+ *     @type int          $status Outer HTTP status.
+ *     @type string|false $body   Raw response body.
+ *     @type mixed        $json   Decoded response body.
+ * }
+ */
+function reprint_wpcom_bridge_post(int $site_id, string $token, string $path): array {
+    return wpcom_post(
         "https://public-api.wordpress.com/rest/v1.1/jetpack-blogs/{$site_id}/rest-api?http_envelope=1",
         $token,
-        ['path' => '/wpcomsh/v1/reprint/rotate-export-secret']
+        ['path' => $path]
     );
-    $env = $rotated['json'] ?? null;
-    if (!is_array($env) || ($env['code'] ?? 0) !== 200) {
-        throw new RuntimeException('rotate-export-secret failed: ' . substr((string)$rotated['body'], 0, 300));
-    }
-    // Jetpack bridge returns the inner response in `body`. WP.com sometimes
-    // hands it back as an object, sometimes as a JSON-encoded string —
-    // normalise both shapes.
-    $inner = $env['body'] ?? null;
-    if (is_string($inner)) {
-        $inner = json_decode($inner, true);
-    }
-    $secret = is_array($inner) ? ($inner['data']['secret'] ?? null) : null;
-    if (!$secret) {
-        throw new RuntimeException('No secret in rotate response: ' . substr((string)$rotated['body'], 0, 400));
-    }
-
-    // Belt-and-suspenders: if the site also has the legacy
-    // `reprint-exporter-wp` standalone plugin installed, that plugin
-    // intercepts ?reprint-api at plugin-load time and reads its secret
-    // from the `site_export_secret` option (NOT wpcomsh's
-    // `reprint_exporter_secret`). Writing the rotated value to both
-    // options means whichever handler fires first will accept us.
-    // The settings endpoint silently drops keys it doesn't whitelist,
-    // so this is a no-op on sites without the legacy plugin.
-    $legacy_sync = wpcom_post(
-        "https://public-api.wordpress.com/rest/v1.1/sites/{$site_id}/settings",
-        $token,
-        ['site_export_secret' => $secret],
-        'form'
-    );
-
-    $debug = [
-        'enable_updated' => $updated,
-        'rotate_raw' => (string) $rotated['body'],
-        'legacy_sync_status' => $legacy_sync['status'],
-        'legacy_sync_updated' => $legacy_sync['json']['updated'] ?? null,
-    ];
-    return [rtrim($site_url, '/') . '/?reprint-api', $secret, $debug];
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -213,10 +240,10 @@ function wpcom_provision_reprint(int $site_id, string $site_url, string $token):
 // ──────────────────────────────────────────────────────────────────────────
 
 /**
- * Server-side provisioning: enables the reprint exporter on the chosen
- * WP.com site and rotates the HMAC secret. Returns JSON with the
- * `api_url` (site ?reprint-api endpoint) and `secret` so the browser
- * can hand them to a Playground iframe that runs the actual import.
+ * Server-side provisioning: enables the Reprint exporter on the chosen
+ * WordPress.com or Pressable site and rotates the HMAC secret. Returns JSON
+ * with the `api_url` (the site's Jetpack or wpcomsh endpoint) and `secret` so
+ * the browser can hand them to a Playground iframe that runs the actual import.
  *
  * No phar invocation, no streaming, no artifact staging — that all
  * happens client-side now, inside Playground, where browser-class
@@ -509,7 +536,7 @@ function render_wizard(): void {
     <div class="logo"></div>
     <div>
       <h1>Reprint</h1>
-      <div class="subtitle">Clone a WordPress.com site into Playground</div>
+      <div class="subtitle">Clone a WordPress.com or Pressable site into Playground</div>
     </div>
     <?php if ($authed): ?>
       <div class="user-pill" id="user-pill"><span>Signed in to WordPress.com</span> · <a href="?action=logout">Not you?</a></div>
@@ -542,7 +569,7 @@ function render_wizard(): void {
   <!-- STEP 2 — Pick site -->
   <section class="card <?= $authed ? '' : 'hidden' ?>" id="card-2">
     <h2>Choose a site to clone</h2>
-    <p class="desc">Atomic sites can be cloned with reprint. Simple WordPress.com sites are listed for reference but are dimmed and not selectable — they don't run wpcomsh's export endpoint. The exporter is enabled on the site you pick for a rolling 60-minute window.</p>
+    <p class="desc">Atomic and Pressable sites can be cloned with Reprint. Other sites are listed for reference but are dimmed and not selectable. The exporter is enabled on the site you pick for a rolling 60-minute window.</p>
     <input type="search" id="site-filter" placeholder="Filter by name or URL…" autocomplete="off" class="hidden">
     <div class="site-list" id="site-list"><p class="desc" id="sites-loading">Loading your sites…</p></div>
     <p class="desc site-count hidden" id="site-count" style="margin:10px 0 0;display:flex;align-items:center;gap:8px">
@@ -559,6 +586,12 @@ function render_wizard(): void {
       <span class="subtitle" id="start-hint"></span>
     </div>
     <script>
+      function reprintSourceHost(site) {
+        if (site.is_wpcom_atomic) return 'Atomic';
+        if (site.hosting_provider_guess === 'pressable') return 'Pressable';
+        return null;
+      }
+
       // Synchronous cache hydrate. Placed AFTER all referenced
       // elements (site-list, site-filter, site-count, site-count-text)
       // so getElementById always succeeds. Renders minimal-HTML rows
@@ -572,23 +605,23 @@ function render_wizard(): void {
           const sites = parsed && parsed.sites;
           if (!Array.isArray(sites) || !sites.length) return;
           const sorted = sites.slice().sort((a, b) =>
-            (b.is_wpcom_atomic ? 1 : 0) - (a.is_wpcom_atomic ? 1 : 0));
+            (reprintSourceHost(b) ? 1 : 0) - (reprintSourceHost(a) ? 1 : 0));
           const esc = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
           document.getElementById('site-list').innerHTML = sorted.map((s) => {
-            const atomic = !!s.is_wpcom_atomic;
+            const sourceHost = reprintSourceHost(s);
             const icon = s.icon && s.icon.img
               ? '<img src="' + esc(s.icon.img) + '" alt="">'
               : '<div class="site-icon">' + esc((s.name || '?')[0]) + '</div>';
-            const reason = atomic ? ''
-              : '<div class="reason">Reprint requires Atomic hosting — Simple WordPress.com sites can\'t be cloned.</div>';
-            return '<div class="site ' + (atomic ? '' : 'disabled') + '" data-pending="1">'
+            const reason = sourceHost ? ''
+              : '<div class="reason">Reprint export is available on Atomic and Pressable sites.</div>';
+            return '<div class="site ' + (sourceHost ? '' : 'disabled') + '" data-pending="1">'
               + icon
               + '<div>'
               +   '<div class="site-title">' + esc(s.name || s.URL || 'Untitled') + '</div>'
               +   '<div class="site-url">' + esc(s.URL) + '</div>'
               +   reason
               + '</div>'
-              + '<span class="badge">' + (atomic ? 'Atomic' : 'Simple') + '</span>'
+              + '<span class="badge">' + (sourceHost || (s.jetpack ? 'Jetpack' : 'Simple')) + '</span>'
               + '</div>';
           }).join('');
           document.getElementById('site-filter').classList.remove('hidden');
@@ -666,7 +699,7 @@ let selectedSiteUrl = null;
 var ALL_SITES = [];
 function sitesFingerprint(sites) {
   return (sites || [])
-    .map(s => `${s.ID}|${s.URL}|${s.name}|${s.is_wpcom_atomic ? 1 : 0}|${s.icon?.img || ''}`)
+    .map(s => `${s.ID}|${s.URL}|${s.name}|${s.is_wpcom_atomic ? 1 : 0}|${s.hosting_provider_guess || ''}|${s.jetpack ? 1 : 0}|${s.icon?.img || ''}`)
     .sort()
     .join('::');
 }
@@ -713,19 +746,18 @@ function sitesFingerprint(sites) {
 // ALL_SITES is hoisted above the loadSites IIFE — declaring it again
 // here would shadow the assignment.
 function renderSites(sites) {
-  // Atomic sites first (those are the importable ones), Simple sites
-  // last so they don't crowd the picker. Within each group, keep the
-  // server-given order (recently active first).
+  // Supported hosts first so other connected Jetpack and Simple sites do not
+  // crowd the picker. Keep the server-given order within each group.
   ALL_SITES = (sites || []).slice().sort((a, b) => {
-    const aA = a.is_wpcom_atomic ? 1 : 0;
-    const bA = b.is_wpcom_atomic ? 1 : 0;
-    return bA - aA;
+    const aSupported = reprintSourceHost(a) ? 1 : 0;
+    const bSupported = reprintSourceHost(b) ? 1 : 0;
+    return bSupported - aSupported;
   });
   const list = $('#site-list');
   const filter = $('#site-filter');
   const count = $('#site-count');
   if (!ALL_SITES.length) {
-    list.innerHTML = '<p class="desc">No Atomic or WordPress.com sites found on this account.</p>';
+    list.innerHTML = '<p class="desc">No WordPress.com or Pressable sites found on this account.</p>';
     return;
   }
   filter.classList.remove('hidden');
@@ -769,12 +801,12 @@ function applySiteFilter() {
 function renderSiteRow(s) {
   const el = document.createElement('div');
   el.className = 'site';
-  const isAtomic = !!s.is_wpcom_atomic;
-  if (!isAtomic) el.classList.add('disabled');
+  const sourceHost = reprintSourceHost(s);
+  if (!sourceHost) el.classList.add('disabled');
   if (s.ID === selectedSiteId) el.classList.add('selected');
   el.dataset.siteId = s.ID;
-  const reason = isAtomic ? '' :
-    `<div class="reason">Reprint requires Atomic hosting — Simple WordPress.com sites can't be cloned.</div>`;
+  const reason = sourceHost ? '' :
+    `<div class="reason">Reprint export is available on Atomic and Pressable sites.</div>`;
   el.innerHTML = `
     ${s.icon && s.icon.img ? `<img src="${s.icon.img}" alt="">` : `<div class="site-icon">${(s.name||'?')[0]}</div>`}
     <div>
@@ -782,9 +814,9 @@ function renderSiteRow(s) {
       <div class="site-url">${(s.URL || '').replace(/</g,'&lt;')}</div>
       ${reason}
     </div>
-    <span class="badge">${isAtomic ? 'Atomic' : 'Simple'}</span>`;
-  if (!isAtomic) {
-    el.title = 'Reprint requires Atomic hosting';
+    <span class="badge">${sourceHost || (s.jetpack ? 'Jetpack' : 'Simple')}</span>`;
+  if (!sourceHost) {
+    el.title = 'Reprint requires Atomic or Pressable hosting';
     return el;
   }
   el.addEventListener('click', () => {
@@ -807,7 +839,7 @@ $('#start-btn')?.addEventListener('click', async () => {
   $('#retry-btn').classList.add('hidden');
 
   setPhase('provision', 'active', 'Enabling exporter & rotating secret…');
-  logLine('Calling /sites/' + selectedSiteId + '/settings + rotate-export-secret on wp.com…');
+  logLine('Enabling the exporter and rotating the secret for site ' + selectedSiteId + ' on wp.com…');
 
   let provisioned;
   try {

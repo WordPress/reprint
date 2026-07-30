@@ -20,6 +20,9 @@
             <directory>UploadsProxy</directory>
             <exclude>UploadsProxy/fixtures</exclude>
         </testsuite>
+        <testsuite name="Reprint UI Tests">
+            <file>ReprintUiProvisioningTest.php</file>
+        </testsuite>
         <testsuite name="URL Rewriting Tests">
             <directory>UrlRewriting</directory>
         </testsuite>
