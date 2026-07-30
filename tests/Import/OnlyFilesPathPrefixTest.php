@@ -326,7 +326,7 @@ class OnlyFilesPathPrefixTest extends TestCase
             ))),
         ));
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content'));
-        $this->set($c, 'remap_rules', array(
+        $this->set($c, 'resolved_path_mappings', array(
             '/var/www/html/wp-admin' => '/srv/htdocs/wp-admin',
         ));
         $dirs = $this->call($c, 'get_export_directories');

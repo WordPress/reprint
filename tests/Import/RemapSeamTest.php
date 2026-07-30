@@ -62,7 +62,7 @@ class RemapSeamTest extends TestCase
     private function clientWithRules(array $rules): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
-        $this->set($c, 'remap_rules', $rules);
+        $this->set($c, 'resolved_path_mappings', $rules);
         return $c;
     }
 
