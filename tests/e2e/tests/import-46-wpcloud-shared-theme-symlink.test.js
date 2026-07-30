@@ -125,15 +125,15 @@ describe('Import: Shared theme symlink remains working', () => {
         );
     });
 
-    it('files-sync completes', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull completes', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--follow-symlinks'],
         });
         assert.equal(
             result.exitCode,
             0,
-            `files-sync failed:\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+            `files-pull failed:\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
         );
     });
 

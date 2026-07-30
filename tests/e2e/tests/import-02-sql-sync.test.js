@@ -1,6 +1,6 @@
 /**
  * Test 02: SQL Sync via import.php
- * Tests db-sync and db-index commands produce correct output.
+ * Tests db-pull and db-index commands produce correct output.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -39,8 +39,8 @@ describe('Import: SQL Sync', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('db-sync completes and produces db.sql', () => {
-        const result = runImporter(importUrl(), tempDir, 'db-sync', {
+    it('db-pull completes and produces db.sql', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -93,8 +93,8 @@ describe('Import: SQL Sync', () => {
         }
     });
 
-    it('re-running db-sync without --abort fails with useful message', () => {
-        const result = runImporter(importUrl(), tempDir, 'db-sync', {
+    it('re-running db-pull without --abort fails with useful message', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-pull', {
             secret: getSiteSecret(site),
         });
         assert.notEqual(result.exitCode, 0, 'Expected non-zero exit code');

@@ -143,8 +143,8 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
         execSync(`sudo rm -rf ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)} 2>/dev/null || true`);
     });
 
-    it('initial files-sync completes', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('initial files-pull completes', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -154,13 +154,13 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
         applyDeltaRemoteChanges();
 
         // Abort previous completion so we can run a delta
-        const abort = runImporter(importUrl(), tempDir, 'files-sync', {
+        const abort = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--abort'],
         });
         assert.equal(abort.exitCode, 0);
 
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
@@ -241,8 +241,8 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
         }
     });
 
-    it('subsequent files-sync still works with encoded state paths', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('subsequent files-pull still works with encoded state paths', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);

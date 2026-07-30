@@ -186,8 +186,8 @@ describe('Import: SQLite Export', () => {
         assert.equal(response.json.database.can_query, true);
     });
 
-    it('db-sync produces valid MySQL dump from SQLite source', () => {
-        const result = runImporter(importUrl(), tempDir, 'db-sync', {
+    it('db-pull produces valid MySQL dump from SQLite source', () => {
+        const result = runImporter(importUrl(), tempDir, 'db-pull', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0,

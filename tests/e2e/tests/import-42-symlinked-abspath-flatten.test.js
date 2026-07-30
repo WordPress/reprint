@@ -1,5 +1,5 @@
 /**
- * Test 42: flat-document-root when ABSPATH goes through a symlink
+ * Test 42: flat-docroot when ABSPATH goes through a symlink
  *
  * Simulates a WordPress.com Atomic-like environment where ABSPATH is
  * accessed through a symlink. On Atomic, /wordpress is a symlink, so
@@ -13,7 +13,7 @@
  *
  * Before the fix, the exporter reported the unresolved symlink path as
  * abspath. The importer would download files under the resolved real path
- * but flat-document-root would look at the unresolved symlink path in
+ * but flat-docroot would look at the unresolved symlink path in
  * fs-root and fail.
  *
  * The fix: the exporter now applies realpath() to ABSPATH, matching the
@@ -95,12 +95,12 @@ require ABSPATH . 'wp-blog-header.php';
         );
     });
 
-    it('files-sync completes with follow_symlinks', () => {
-        const result = runImporter(importUrl(), tempDir, 'files-sync', {
+    it('files-pull completes with follow_symlinks', () => {
+        const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
             extraArgs: ['--follow-symlinks'],
         });
-        assert.equal(result.exitCode, 0, `files-sync failed:\n${result.stderr}`);
+        assert.equal(result.exitCode, 0, `files-pull failed:\n${result.stderr}`);
     });
 
     it('WP core files exist at the resolved path in fs-root', () => {
@@ -123,18 +123,18 @@ require ABSPATH . 'wp-blog-header.php';
         );
     });
 
-    describe('flat-document-root', () => {
+    describe('flat-docroot', () => {
         let flattenTo;
 
         beforeAll(() => {
             flattenTo = join(tempDir, 'flattened');
-            const result = runImporter(importUrl(), tempDir, 'flat-document-root', {
+            const result = runImporter(importUrl(), tempDir, 'flat-docroot', {
                 secret: getSiteSecret(site),
                 extraArgs: [`--flatten-to=${flattenTo}`],
             });
             assert.equal(
                 result.exitCode, 0,
-                `flat-document-root failed:\n${result.stderr}\n${result.stdout}`,
+                `flat-docroot failed:\n${result.stderr}\n${result.stdout}`,
             );
         });
 

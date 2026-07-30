@@ -7,10 +7,9 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * Smoke test: old command names (files-sync, db-sync, flat-document-root)
- * must continue to work via the alias table.
+ * Smoke test: command aliases must continue to work through the alias table.
  */
-class LegacyCommandAliasTest extends TestCase
+class CommandAliasTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
@@ -54,13 +53,13 @@ class LegacyCommandAliasTest extends TestCase
     }
 
     /**
-     * Old command names must be accepted by run() without throwing
-     * "Invalid command". We can't actually complete the sync (no server),
+     * Command aliases must be accepted by run() without throwing
+     * "Invalid command". We can't actually complete the pull (no server),
      * but we verify the command is recognized and dispatched.
      *
-     * @dataProvider legacyCommandProvider
+     * @dataProvider commandAliasProvider
      */
-    public function testLegacyCommandNameIsAccepted(string $legacy_name, string $canonical_name): void
+    public function testCommandAliasIsAccepted(string $alias, string $canonical_name): void
     {
         $client = new \ImportClient('http://fake.invalid', $this->stateDir, $this->filesystem_root);
 
@@ -73,14 +72,14 @@ class LegacyCommandAliasTest extends TestCase
         );
 
         try {
-            $client->run(["command" => $legacy_name]);
+            $client->run(["command" => $alias]);
         } catch (\Exception $e) {
             // Expected: network errors, missing preflight fields, etc.
             // The key assertion is that we did NOT get "Invalid command".
             $this->assertStringNotContainsString(
                 "Invalid command",
                 $e->getMessage(),
-                "Legacy command '{$legacy_name}' should be accepted, not rejected as invalid",
+                "Command alias '{$alias}' should be accepted, not rejected as invalid",
             );
             return;
         }
@@ -89,7 +88,7 @@ class LegacyCommandAliasTest extends TestCase
         $this->assertTrue(true);
     }
 
-    public static function legacyCommandProvider(): array
+    public static function commandAliasProvider(): array
     {
         return [
             'files-sync → files-pull' => ['files-sync', 'files-pull'],
