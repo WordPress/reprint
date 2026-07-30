@@ -4,13 +4,11 @@
  *
  * Registered redirect URI for our WP.com app. Exchanges the authorization
  * code for an access token (server-side, using the client secret stored
- * in wp_options), parks the token in the session, and bounces back to
+ * in wp_options), stores the token in an encrypted cookie, and bounces back to
  * the wizard.
  */
 
 require __DIR__ . '/reprint-ui/bootstrap.php';
-
-reprint_session_start();
 
 // Abort on OAuth error responses so the user sees something useful.
 if (!empty($_GET['error'])) {
@@ -78,7 +76,7 @@ if (!is_array($data) || empty($data['access_token'])) {
 }
 
 // Park the token in an encrypted, HttpOnly cookie. Nothing about this
-// session ever touches the database or session storage on disk.
+// token ever touches the database or server-side session storage.
 reprint_cookie_set('rp_tok', [
     'token'   => (string) $data['access_token'],
     'blog_id' => isset($data['blog_id']) ? (int) $data['blog_id'] : null,

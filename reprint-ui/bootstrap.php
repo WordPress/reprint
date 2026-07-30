@@ -14,15 +14,6 @@ if (!defined('REPRINT_UI_URL_BASE')) {
 }
 
 /**
- * No-op kept for call-site compatibility. State is held in signed,
- * encrypted, HttpOnly cookies — see reprint_cookie_get/set/clear. We
- * deliberately avoid PHP sessions so nothing about the user (OAuth
- * tokens, OAuth state nonces, blog IDs) is ever persisted server-side
- * — not in /tmp session files and not in MySQL.
- */
-function reprint_session_start(): void {}
-
-/**
  * Returns a 32-byte symmetric key used to encrypt cookie payloads.
  * Derived from the WP.com client secret (already stored in wp_options
  * for OAuth) so it survives PHP-FPM restarts without any new server
@@ -157,4 +148,3 @@ function reprint_find_wp_load(): ?string {
     }
     return null;
 }
-

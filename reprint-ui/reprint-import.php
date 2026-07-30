@@ -631,9 +631,6 @@ function run_local_activation(): array {
     require_once __DIR__ . '/lib/playground-uploads-proxy.php';
     $mu = reprint_playground_uploads_proxy_code($source_origin);
     file_put_contents('/wordpress/wp-content/mu-plugins/0-reprint-playground-glue.php', $mu);
-    // Old name from the previous activation; remove if present so we
-    // don't double-register the uploads proxy.
-    @unlink('/wordpress/wp-content/mu-plugins/0-reprint-uploads-proxy.php');
 
     // Pull the tail of the audit log so the JS can show *why* the
     // import failed when it did. Without this, a partial db-apply
