@@ -10,9 +10,8 @@ use function Reprint\Importer\write_index_entry;
  * Internal bounded local-index and change planner.
  *
  * PushPlan builds a path-sorted fresh local index, then diffs it against the
- * local index at the caller-supplied path. It writes durable lists of local
- * paths to push and local paths to delete without accumulating an index or
- * path list in memory.
+ * local index at the caller-supplied path. It writes durable local and target
+ * path coordinates without accumulating an index or path list in memory.
  *
  * PushFilesSender or the files-diff command owns the caller-visible lifecycle,
  * lock, top-level phase, result, and terminal behavior. PushPlan owns
@@ -61,7 +60,7 @@ use function Reprint\Importer\write_index_entry;
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
  * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
  * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
- * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_path_b64:string|null}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,byte_offset_in_target_paths_to_delete:int,deleted_directory_path_b64:string|null}
  * @phpstan-type CompleteCursor array{phase:'complete'}
  * @phpstan-type PushPlanCursor IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
  */
@@ -82,6 +81,9 @@ class PushPlan
     /** @var string Raw NUL-delimited local paths to delete. */
     private string $local_paths_to_delete;
 
+    /** @var string Raw NUL-delimited target paths to delete. */
+    private string $target_paths_to_delete;
+
     /** @var string Plan-owned fresh local index. */
     private string $fresh_local_index;
 
@@ -90,6 +92,9 @@ class PushPlan
 
     /** @var list<string> Decoded excluded paths. */
     private array $excluded_paths = [];
+
+    /** @var PushPathMapping Local-to-target path mapping for this relationship. */
+    private PushPathMapping $path_mapping;
 
     /** @var PushPlanCursor Current cursor returned to the caller. */
     private array $cursor;
@@ -123,6 +128,8 @@ class PushPlan
     private $local_paths_to_push_handle = null;
     /** @var resource|null */
     private $local_paths_to_delete_handle = null;
+    /** @var resource|null */
+    private $target_paths_to_delete_handle = null;
     /**
      * Starts a push plan by opening a fresh local index traversal.
      *
@@ -130,19 +137,22 @@ class PushPlan
      * @param string $local_tree_root              Canonical local tree root.
      * @param string $local_index_path             Local index this plan diffs against.
      * @param string $excluded_paths_path          Excluded paths file.
+     * @param PushPathMapping $path_mapping        Validated local-to-target mapping.
      * @return self Open plan positioned at the initial indexing cursor.
      */
     public static function start(
         string $plan_directory,
         string $local_tree_root,
         string $local_index_path,
-        string $excluded_paths_path
+        string $excluded_paths_path,
+        PushPathMapping $path_mapping
     ): self {
         $plan = new self(
             $plan_directory,
             $local_tree_root,
             $local_index_path,
-            $excluded_paths_path
+            $excluded_paths_path,
+            $path_mapping
         );
         $plan->excluded_paths = $plan->load_excluded_paths();
         $plan->fresh_local_index_handle = fopen($plan->fresh_local_index, "w+b");
@@ -174,6 +184,7 @@ class PushPlan
      * @param string $local_tree_root     Canonical local tree root.
      * @param string $local_index_path    Local index this plan diffs against.
      * @param string $excluded_paths_path Excluded paths file.
+     * @param PushPathMapping $path_mapping Validated local-to-target mapping.
      * @phpstan-param PushPlanCursor $cursor Cursor previously returned by get_cursor().
      * @return self Open plan positioned at its last durable cursor.
      */
@@ -182,13 +193,15 @@ class PushPlan
         string $local_tree_root,
         string $local_index_path,
         string $excluded_paths_path,
+        PushPathMapping $path_mapping,
         array $cursor
     ): self {
         $plan = new self(
             $plan_directory,
             $local_tree_root,
             $local_index_path,
-            $excluded_paths_path
+            $excluded_paths_path,
+            $path_mapping
         );
         $plan->cursor = $cursor;
         if ($cursor["phase"] !== "complete") {
@@ -215,26 +228,24 @@ class PushPlan
     /**
      * Returns the JSONL local paths to push list.
      */
-    public function get_local_paths_to_push_path(): string
+    public function get_paths_to_push_path(): string
     {
         return $this->local_paths_to_push;
     }
 
-    /**
-     * Returns the raw NUL-delimited path list produced for local deletions.
-     */
-    public function get_local_paths_to_delete_path(): string
+    /** Returns the raw NUL-delimited target deletion list. */
+    public function get_target_paths_to_delete_path(): string
     {
-        return $this->local_paths_to_delete;
+        return $this->target_paths_to_delete;
     }
 
     /**
-     * Reads the completed local paths-to-push list.
+     * Reads the completed paths-to-push list.
      *
      * @return Generator Completed plan entries.
-     * @phpstan-return Generator<int,array{path_b64:string,type:'file'|'dir'|'link',size:int,ctime:int},mixed,void>
+     * @phpstan-return Generator<int,array{local_path_b64:string,target_path_b64:string,type:'file'|'dir'|'link',size:int,ctime:int},mixed,void>
      */
-    public function read_planned_local_paths_to_push(): Generator
+    public function read_planned_paths_to_push(): Generator
     {
         $local_paths_to_push_handle = fopen($this->local_paths_to_push, 'rb');
         if (!is_resource($local_paths_to_push_handle)) {
@@ -249,7 +260,7 @@ class PushPlan
                     }
                     return;
                 }
-                /** @var array{path_b64:string,type:'file'|'dir'|'link',size:int,ctime:int} $entry */
+                /** @var array{local_path_b64:string,target_path_b64:string,type:'file'|'dir'|'link',size:int,ctime:int} $entry */
                 $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
                 yield $entry;
             }
@@ -259,30 +270,49 @@ class PushPlan
     }
 
     /**
-     * Reads the completed local paths-to-delete list.
+     * Reads the completed local and target deletion coordinates together.
      *
-     * @return Generator Completed local paths to delete.
-     * @phpstan-return Generator<int,string,mixed,void>
+     * @phpstan-return Generator<int,array{local_path:string,target_path:string},mixed,void>
      */
-    public function read_planned_local_paths_to_delete(): Generator
+    public function read_planned_paths_to_delete(): Generator
     {
         $local_paths_to_delete_handle = fopen($this->local_paths_to_delete, 'rb');
         if (!is_resource($local_paths_to_delete_handle)) {
             throw new RuntimeException('Failed to open the completed local paths-to-delete list.');
         }
+        $target_paths_to_delete_handle = fopen($this->target_paths_to_delete, 'rb');
+        if (!is_resource($target_paths_to_delete_handle)) {
+            fclose($local_paths_to_delete_handle);
+            throw new RuntimeException('Failed to open the completed target paths-to-delete list.');
+        }
         try {
             while (true) {
                 $local_path_to_delete = stream_get_line($local_paths_to_delete_handle, 1048576, "\0");
-                if ($local_path_to_delete === false) {
-                    if (!feof($local_paths_to_delete_handle)) {
-                        throw new RuntimeException('Failed to read the completed local paths-to-delete list.');
-                    }
+                $target_path_to_delete = stream_get_line($target_paths_to_delete_handle, 1048576, "\0");
+                if (
+                    $local_path_to_delete === false
+                    && $target_path_to_delete === false
+                    && feof($local_paths_to_delete_handle)
+                    && feof($target_paths_to_delete_handle)
+                ) {
                     return;
                 }
-                yield $local_path_to_delete;
+                if (
+                    $local_path_to_delete === false
+                    || $target_path_to_delete === false
+                ) {
+                    throw new RuntimeException(
+                        'The completed local and target deletion lists have different lengths.'
+                    );
+                }
+                yield [
+                    'local_path' => $local_path_to_delete,
+                    'target_path' => $target_path_to_delete,
+                ];
             }
         } finally {
             fclose($local_paths_to_delete_handle);
+            fclose($target_paths_to_delete_handle);
         }
     }
 
@@ -293,12 +323,14 @@ class PushPlan
      * @param string $local_tree_root              Canonical local tree root.
      * @param string $local_index_path    Local index this plan diffs against.
      * @param string $excluded_paths_path Excluded paths file.
+     * @param PushPathMapping $path_mapping Validated local-to-target mapping.
      */
     private function __construct(
         string $plan_directory,
         string $local_tree_root,
         string $local_index_path,
-        string $excluded_paths_path
+        string $excluded_paths_path,
+        PushPathMapping $path_mapping
     ) {
         $plan_directory = rtrim($plan_directory, "/");
         if (!is_dir($plan_directory)) {
@@ -307,10 +339,12 @@ class PushPlan
         $this->plan_directory = $plan_directory;
         $this->set_local_tree_root($local_tree_root);
         $this->local_index_path = $local_index_path;
-        $this->local_paths_to_push = $plan_directory . "/local_paths_to_push.jsonl";
-        $this->local_paths_to_delete = $plan_directory . "/local_paths_to_delete";
-        $this->fresh_local_index = $plan_directory . "/fresh_local_index.jsonl";
+        $this->local_paths_to_push = $plan_directory . "/paths-to-push.jsonl";
+        $this->local_paths_to_delete = $plan_directory . "/local-paths-to-delete";
+        $this->target_paths_to_delete = $plan_directory . "/paths-to-delete";
+        $this->fresh_local_index = $plan_directory . "/.local-index.next.jsonl";
         $this->excluded_paths_path = $excluded_paths_path;
+        $this->path_mapping = $path_mapping;
     }
 
     /**
@@ -382,6 +416,10 @@ class PushPlan
         $this->local_paths_to_delete_handle = $this->open_and_truncate_and_seek(
             $this->local_paths_to_delete,
             $cursor["byte_offset_in_local_paths_to_delete"]
+        );
+        $this->target_paths_to_delete_handle = $this->open_and_truncate_and_seek(
+            $this->target_paths_to_delete,
+            $cursor["byte_offset_in_target_paths_to_delete"]
         );
         $this->fresh_local_index_handle = fopen($this->fresh_local_index, "rb");
         if (!is_resource($this->fresh_local_index_handle)) {
@@ -500,6 +538,7 @@ class PushPlan
             "byte_offset_in_local_index" => 0,
             "byte_offset_in_local_paths_to_push" => 0,
             "byte_offset_in_local_paths_to_delete" => 0,
+            "byte_offset_in_target_paths_to_delete" => 0,
             "deleted_directory_path_b64" => null,
         ];
         $this->open_plan_files();
@@ -724,7 +763,13 @@ class PushPlan
 
         if (
             ( $local_paths_to_push_changed && !fflush($this->local_paths_to_push_handle) )
-            || ( $local_paths_to_delete_changed && !fflush($this->local_paths_to_delete_handle) )
+            || (
+                $local_paths_to_delete_changed
+                && (
+                    !fflush($this->local_paths_to_delete_handle)
+                    || !fflush($this->target_paths_to_delete_handle)
+                )
+            )
         ) {
             throw new RuntimeException("Failed to flush a push-plan output.");
         }
@@ -742,6 +787,7 @@ class PushPlan
                 "byte_offset_in_local_index" => $byte_offset_in_local_index,
                 "byte_offset_in_local_paths_to_push" => ftell($this->local_paths_to_push_handle),
                 "byte_offset_in_local_paths_to_delete" => ftell($this->local_paths_to_delete_handle),
+                "byte_offset_in_target_paths_to_delete" => ftell($this->target_paths_to_delete_handle),
                 "deleted_directory_path_b64" =>
                     $this->deleted_directory_path === null
                         ? null
@@ -772,9 +818,13 @@ class PushPlan
         if (is_resource($this->local_paths_to_delete_handle)) {
             fclose($this->local_paths_to_delete_handle);
         }
+        if (is_resource($this->target_paths_to_delete_handle)) {
+            fclose($this->target_paths_to_delete_handle);
+        }
         $this->local_index_handle = null;
         $this->local_paths_to_push_handle = null;
         $this->local_paths_to_delete_handle = null;
+        $this->target_paths_to_delete_handle = null;
         $this->fresh_local_index_entry = null;
         $this->fresh_local_index_entry_loaded = false;
         $this->local_index_lookahead_entry = null;
@@ -853,9 +903,12 @@ class PushPlan
      */
     private function append_local_path_to_push(array $entry): void
     {
+        $target_path = $this->path_mapping
+            ->local_path_to_target_path($entry["path"]);
         $line = json_encode(
             [
-                "path_b64" => base64_encode($entry["path"]),
+                "local_path_b64" => base64_encode($entry["path"]),
+                "target_path_b64" => base64_encode($target_path),
                 "type" => $entry["type"],
                 "size" => $entry["size"],
                 "ctime" => $entry["ctime"],
@@ -868,15 +921,30 @@ class PushPlan
     }
 
     /**
-     * Appends one path to the NUL-delimited list of local paths to delete.
+     * Appends one local path and its target coordinate to their deletion lists.
      *
      * @param string $path Raw filesystem path selected for deletion.
      */
     private function append_local_path_to_delete(string $path): void
     {
-        $path_with_nul = $path . "\0";
-        if (fwrite($this->local_paths_to_delete_handle, $path_with_nul) !== strlen($path_with_nul)) {
+        $local_path_with_nul = $path . "\0";
+        if (
+            fwrite(
+                $this->local_paths_to_delete_handle,
+                $local_path_with_nul
+            ) !== strlen($local_path_with_nul)
+        ) {
             throw new RuntimeException("Short write on local paths to delete {$this->local_paths_to_delete}, is the disk full?");
+        }
+        $target_path_with_nul = $this->path_mapping
+            ->local_path_to_target_path($path) . "\0";
+        if (
+            fwrite(
+                $this->target_paths_to_delete_handle,
+                $target_path_with_nul
+            ) !== strlen($target_path_with_nul)
+        ) {
+            throw new RuntimeException("Short write on target paths to delete {$this->target_paths_to_delete}, is the disk full?");
         }
     }
 
@@ -888,16 +956,18 @@ class PushPlan
      * or contains an excluded descendant. The last case prevents deleting or
      * replacing a directory from removing an excluded descendant with it.
      *
-     * @param string $path Raw filesystem path considered for push or deletion.
+     * @param string $path Local path considered for push or deletion.
      * @return bool Whether operating on the path could change an excluded path.
      */
     private function path_conflicts_with_excluded_paths(string $path): bool
     {
+        $target_path =
+            $this->path_mapping->local_path_to_target_path($path);
         foreach ($this->excluded_paths as $excluded_path) {
             if (
-                $path === $excluded_path
-                || strpos($path, $excluded_path . "/") === 0
-                || strpos($excluded_path, $path . "/") === 0
+                $target_path === $excluded_path
+                || strpos($target_path, $excluded_path . "/") === 0
+                || strpos($excluded_path, $target_path . "/") === 0
             ) {
                 return true;
             }

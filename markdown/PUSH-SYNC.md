@@ -130,6 +130,15 @@ files-pull also refuses to start while the same target and local tree have an
 unfinished files-push, so the local index cannot change while PushPlan is
 between processes.
 
+Each remote state directory stores its target document root and resolved
+remote-to-local prefix rules in `path-mapping.json`. The first mapping is
+immutable. Push validates that the inverse mapping is addressable before it
+opens a push request. Push plans use `local_path_b64` for local index, stat,
+and read work, and `target_path_b64` for target exclusions, status, upload,
+and deletion work. A symlink target which pull rewrote into local coordinates
+is rewritten into target coordinates before upload. A relative target outside
+the local tree is rejected when its symlink path itself is remapped.
+
 `PushPlan` builds a path-sorted fresh local index and diffs it against the
 local index at the path supplied by its caller. The indexer marks physical
 emptiness while it observes each directory, so a completed index distinguishes
@@ -141,9 +150,9 @@ revalidating the same serialized record.
 A push plan is an internal part of the sender lifecycle:
 
 1. `PushFilesSender::start()` enters `creating`. `push_create` returns at most
-   100 target exclusions, which the sender stores in `excluded_paths.json`.
+   100 target exclusions, which the sender stores in `excluded-paths.json`.
 2. The sender starts PushPlan with the local index path and sender-owned
-   exclusions, opens `plan/fresh_local_index.jsonl`, and starts one
+   exclusions, opens `plan/.local-index.next.jsonl`, and starts one
    `FileIndexProcessor`.
 3. Each `indexing` step advances one traversal event, appends its JSONL entry
    when applicable, flushes those bytes, and updates the traversal cursor and
@@ -151,11 +160,12 @@ A push plan is an internal part of the sender lifecycle:
    index diff.
 4. Each `diffing` step compares at most one path from the fresh index or local
    index. It writes files, symlinks, and empty directories to
-   `plan/local_paths_to_push.jsonl` and raw NUL-delimited paths to
-   `plan/local_paths_to_delete`.
+   `plan/paths-to-push.jsonl`, raw NUL-delimited target paths to
+   `plan/paths-to-delete`, and the paired local paths to
+   `plan/local-paths-to-delete`.
 5. The sender closes the completed plan before it consumes those two files.
 6. After the receiver commit succeeds, the sender writes
-   `plan/local_index_updates.jsonl` from the committed push and delete lists and
+   `plan/local-index-updates.jsonl` from the committed push and delete lists and
    applies those updates to the local index. The merge adds directory ancestors
    for each F update and removes the path and its descendants for each D update.
    If the index does not exist, the same atomic merge creates it. Finally the
@@ -312,7 +322,7 @@ none. The one state-directory-wide Reprint process lock prevents concurrent
 pull, push, diff, and other local Reprint processes from using that site state,
 regardless of their target URL or local tree.
 
-The local index and active push files use the same target/local-tree hash:
+The local index and active push files use the same target hash:
 
 ```text
 <state-dir>/remote-<hash>/
@@ -322,13 +332,14 @@ The local index and active push files use the same target/local-tree hash:
   pull-plan.jsonl                     files pending download
   pull-index-updates.wal              completed pull operations
   push/
-  excluded_paths.json                 sender-owned target exclusions
-  sender.json                         active push state
-  plan/
-    fresh_local_index.jsonl           plan-owned fresh local index
-    local_paths_to_push.jsonl         local paths to push
-    local_paths_to_delete             raw NUL-delimited local paths to delete
-    local_index_updates.jsonl         committed updates, created after commit
+    excluded-paths.json               sender-owned target exclusions
+    sender.json                       active push state
+    plan/
+      .local-index.next.jsonl         plan-owned fresh local index
+      paths-to-push.jsonl             paired local and target paths to push
+      paths-to-delete                 raw NUL-delimited target paths to delete
+      local-paths-to-delete           paired local paths for index updates
+      local-index-updates.jsonl       committed updates, created after commit
 ```
 
 The sender has an explicit start/step/cancel/close lifecycle.
@@ -351,7 +362,7 @@ During PushPlan's internal `indexing` phase, the plan retains one
 `FileIndexProcessor` and the open fresh local index across steps. A
 newly opened plan truncates that file to the byte offset stored with the
 processor cursor before continuing. The sender lazily opens
-`local_paths_to_push.jsonl`, `local_paths_to_delete`, and the current local file.
+`paths-to-push.jsonl`, `paths-to-delete`, and the current local file.
 It retains those handles across `next_step()` calls, lets each handle advance
 with the work, and seeks only when a newly opened or receiver-confirmed offset
 differs. It closes each handle when its phase or file ends and closes any
@@ -368,7 +379,7 @@ stable.
 
 `sender.json` contains no copied receiver cursor. It stores the push session
 and phase, the PushPlan cursor, the next byte offset in
-`local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
+`paths-to-push.jsonl`, the receiver part limit, and learned request-body
 sizing state. Its phases are `creating`, `starting_plan`, `planning`,
 `pushing_paths`, `pushing_deletes`, `committing`,
 `updating_local_index`, `completing`, `removing`, and
@@ -396,7 +407,7 @@ After all local paths are pushed, a newly opened sender reads
 `work_deletes_bytes` and `work_deletes_complete` from `push_status`. Successful
 uploads retain those values in memory for later deletion steps. Those
 receiver-owned values are the only work-delete cursor; `sender.json` does not
-duplicate it. Each uploaded deletion-list part contains one complete local path.
+duplicate it. Each uploaded deletion-list part contains one complete target path.
 The sender trusts this completed, immutable plan without consulting the fresh
 local index or live local tree again. If a deleted path reappears after planning,
 the current push may delete it on the target and the next push will send it.
@@ -411,7 +422,7 @@ the live tree at commit time.
 
 Repeated `push_commit` calls drive the receiver to `complete`. Only then does
 the sender enter `updating_local_index`. It writes F/D updates from the
-committed push and delete lists to `plan/local_index_updates.jsonl`, then
+committed push and delete lists to `plan/local-index-updates.jsonl`, then
 applies them to the local index. The merge adds directory ancestors for
 each F update and removes the path and its descendants for each D update.
 Other branches remain unchanged. Target-excluded paths do not enter the local
@@ -519,14 +530,15 @@ it is missing. Each applied WAL batch updates only the paths that pull changed,
 so local additions, edits, and deletions left elsewhere stay in the diff.
 
 Output is JSONL. Each selected current file, symlink, or empty directory has
-`action: "push"`, `path_b64`, `type`, `size`, and `ctime`; its type is `file`,
-`dir`, or `link`. Each selected local deletion has `action: "delete"` and
-`path_b64`. Type transitions may emit both actions for one path. This is a
-local minimized push operation plan before target exclusions, not a
-path-for-path filesystem log: descendants represent a new non-empty directory,
-one deleted subtree root covers its descendants, and metadata-only changes to
-non-empty directories select no operation. Base64 keeps arbitrary filesystem
-path bytes representable. The final record carries `status: "complete"` with
+`action: "push"`, `local_path_b64`, `target_path_b64`, `type`, `size`, and
+`ctime`; its type is `file`, `dir`, or `link`. Each selected local deletion has
+`action: "delete"`, `local_path_b64`, and `target_path_b64`. Type transitions
+may emit both actions for one local path. This is a local minimized push
+operation plan before target exclusions, not a path-for-path filesystem log:
+descendants represent a new non-empty directory, one deleted subtree root
+covers its descendants, and metadata-only changes to non-empty directories
+select no operation. Base64 keeps arbitrary filesystem path bytes
+representable. The final record carries `status: "complete"` with
 `local_paths_to_push` and `local_paths_to_delete` counts.
 
 files-diff persists nothing between runs. The whole plan runs in one process,

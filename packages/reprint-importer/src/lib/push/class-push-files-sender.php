@@ -123,8 +123,8 @@ use function Reprint\Importer\write_local_index_update;
  *
  * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'dir'|'link',size:int,ctime:int}
  * @phpstan-type LocalPathStat array{type:'file'|'dir'|'link'|'unsupported',size:int,ctime:int}
- * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
- * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
+ * @phpstan-type LocalPathToPush array{local_path:string,target_path:string,target_path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
+ * @phpstan-type TargetPathToDelete array{target_path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
  * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'updating_local_index'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
@@ -140,6 +140,9 @@ final class PushFilesSender
 
     /** @var string Local index updated by successful pulls and pushes. */
     private string $local_index_path;
+
+    /** @var PushPathMapping Validated local-to-target path mapping. */
+    private PushPathMapping $path_mapping;
 
     /** @var string Path where the serialized sender state is stored. */
     private string $state_path;
@@ -159,17 +162,17 @@ final class PushFilesSender
     /** @var int|null Current byte offset of the retained local paths-to-push handle. */
     private ?int $local_paths_to_push_byte_offset = null;
 
-    /** @var resource|null Open local_paths_to_delete list retained while pushing deleted paths. */
-    private $local_paths_to_delete_handle = null;
+    /** @var resource|null Open target deletion list retained while pushing deleted paths. */
+    private $target_paths_to_delete_handle = null;
 
     /** @var int|null Current byte offset of the retained deletion-list handle. */
-    private ?int $local_paths_to_delete_byte_offset = null;
+    private ?int $target_paths_to_delete_byte_offset = null;
 
-    /** @var LocalPathToDelete|null Current local path to delete retained until it is sent. */
-    private ?array $local_path_to_delete = null;
+    /** @var TargetPathToDelete|null Current target path to delete retained until it is sent. */
+    private ?array $target_path_to_delete = null;
 
     /** @var bool Whether the retained deletion-list handle reached EOF. */
-    private bool $local_delete_list_complete = false;
+    private bool $target_delete_list_complete = false;
 
     /** @var resource|null Open local file retained while pushing its chunks. */
     private $local_file_handle = null;
@@ -237,6 +240,7 @@ final class PushFilesSender
      *     @type string                  $docroot                Required local document-root directory.
      *     @type string                  $push_state_directory    Required local push state directory.
      *     @type string                  $local_index_path        Required local index used by pull and push.
+     *     @type string|null             $path_mapping_path       Persisted pull path mapping, when present.
      *     @type string                  $base_url                Required exporter API URL.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
      *     @type bool                    $allow_http              Explicit plain-HTTP opt-in. Default false.
@@ -319,6 +323,7 @@ final class PushFilesSender
                     $sender->docroot,
                     $sender->local_index_path,
                     $sender->excluded_paths_path,
+                    $sender->path_mapping,
                     $state['push_plan_cursor']
                 );
             }
@@ -379,8 +384,20 @@ final class PushFilesSender
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->plan_directory = $this->push_state_directory . '/plan';
         $this->local_index_path = $local_index_path;
+        $path_mapping_path = $options['path_mapping_path'] ?? null;
+        if ($path_mapping_path !== null && !is_string($path_mapping_path)) {
+            throw new InvalidArgumentException(
+                'path_mapping_path must be a string or null.'
+            );
+        }
+        $this->path_mapping = $path_mapping_path === null
+            ? PushPathMapping::identity($this->docroot)
+            : PushPathMapping::from_file(
+                $path_mapping_path,
+                $this->docroot
+            );
         $this->state_path = $this->push_state_directory . '/sender.json';
-        $this->excluded_paths_path = $this->push_state_directory . '/excluded_paths.json';
+        $this->excluded_paths_path = $this->push_state_directory . '/excluded-paths.json';
         $this->request_sizer_options = $request_sizer_options;
         $this->push_stream_client_options = $push_stream_client_options;
     }
@@ -510,12 +527,12 @@ final class PushFilesSender
         $this->receiver_confirmed_file_byte_offset = null;
         $this->receiver_confirmed_deleted_paths_byte_offset = null;
         $this->receiver_confirmed_deleted_paths_complete = null;
-        $this->local_delete_list_complete = false;
+        $this->target_delete_list_complete = false;
         $this->local_path_to_push = null;
-        $this->local_path_to_delete = null;
+        $this->target_path_to_delete = null;
         $this->close_local_file_handle();
         $this->close_local_paths_to_push_handle();
-        $this->close_local_paths_to_delete_handle();
+        $this->close_target_paths_to_delete_handle();
     }
 
     /**
@@ -532,7 +549,7 @@ final class PushFilesSender
         }
         $this->close_local_file_handle();
         $this->close_local_paths_to_push_handle();
-        $this->close_local_paths_to_delete_handle();
+        $this->close_target_paths_to_delete_handle();
         if (isset($this->push_stream_client)) {
             $this->push_stream_client->close();
         }
@@ -605,7 +622,8 @@ final class PushFilesSender
             $this->plan_directory,
             $this->docroot,
             $this->local_index_path,
-            $this->excluded_paths_path
+            $this->excluded_paths_path,
+            $this->path_mapping
         );
         $this->state['push_plan_cursor'] = $this->plan->get_cursor();
         $this->state['phase'] = 'planning';
@@ -650,8 +668,8 @@ final class PushFilesSender
 
         // Keep the planned-path list open across calls while this phase is active.
         if (!is_resource($this->local_paths_to_push_handle)) {
-            $local_paths_to_push_path = $this->plan->get_local_paths_to_push_path();
-            $this->local_paths_to_push_handle = fopen($local_paths_to_push_path, 'rb');
+            $paths_to_push_path = $this->plan->get_paths_to_push_path();
+            $this->local_paths_to_push_handle = fopen($paths_to_push_path, 'rb');
             if (!is_resource($this->local_paths_to_push_handle)) {
                 $this->fail('local_io_error', 'Could not open the local paths to push.');
                 return;
@@ -694,7 +712,9 @@ final class PushFilesSender
         }
 
         $planned_local_path_type_size_and_ctime = $local_path_to_push['planned_local_path_type_size_and_ctime'];
-        $local_path_type_size_and_ctime = $this->stat_local_path($local_path_to_push['path']);
+        $local_path_type_size_and_ctime = $this->stat_local_path(
+            $local_path_to_push['local_path']
+        );
 
         // A path which disappeared belongs in a newly generated plan, not this upload-only session.
         if ($local_path_type_size_and_ctime === null) {
@@ -740,7 +760,7 @@ final class PushFilesSender
         } else {
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
                 'push_session_id' => $this->state['push_session_id'],
-                'path_b64' => $local_path_to_push['path_b64'],
+                'path_b64' => $local_path_to_push['target_path_b64'],
             ], ['accepted']);
             if ($this->handle_request_failure($request_result)) {
                 return;
@@ -775,12 +795,16 @@ final class PushFilesSender
 
         // Directory and symlink values each fit in one MIME part and need no byte cursor.
         if ($local_path_type_size_and_ctime['type'] === 'dir') {
-            $directory_is_empty = $this->directory_is_empty($local_path_to_push['path']);
+            $directory_is_empty = $this->directory_is_empty(
+                $local_path_to_push['local_path']
+            );
             if ($directory_is_empty === null) {
-                $this->fail('local_io_error', 'Could not read the local directory to push: ' . base64_encode($local_path_to_push['path']) . '.');
+                $this->fail('local_io_error', 'Could not read the local directory to push: ' . base64_encode($local_path_to_push['local_path']) . '.');
                 return;
             }
-            $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
+            $local_path_type_size_and_ctime_after_read = $this->stat_local_path(
+                $local_path_to_push['local_path']
+            );
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
                 $this->start_removing_push_session_after_local_change();
@@ -798,13 +822,17 @@ final class PushFilesSender
             }
             $upload_part = [
                 'type' => $multipart_part_type,
-                'path' => $local_path_to_push['path'],
+                'path' => $local_path_to_push['target_path'],
                 'payload' => '',
             ];
             $upload_completes_local_path = true;
         } elseif ($local_path_type_size_and_ctime['type'] === 'link') {
-            $symlink_target = @readlink($this->docroot . '/' . $local_path_to_push['path']);
-            $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
+            $symlink_target = @readlink(
+                $this->docroot . '/' . $local_path_to_push['local_path']
+            );
+            $local_path_type_size_and_ctime_after_read = $this->stat_local_path(
+                $local_path_to_push['local_path']
+            );
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
                 $this->start_removing_push_session_after_local_change();
@@ -816,13 +844,26 @@ final class PushFilesSender
                 return;
             }
             if ($symlink_target === false) {
-                $this->fail('local_io_error', 'Could not read the local symlink target to push: ' . base64_encode($local_path_to_push['path']) . '.');
+                $this->fail('local_io_error', 'Could not read the local symlink target to push: ' . base64_encode($local_path_to_push['local_path']) . '.');
+                return;
+            }
+            try {
+                $target_symlink_target = $this->path_mapping
+                    ->local_symlink_target_to_target(
+                        $local_path_to_push['local_path'],
+                        $symlink_target
+                    );
+            } catch (RuntimeException $exception) {
+                $this->fail(
+                    'unaddressable_symlink_target',
+                    $exception->getMessage()
+                );
                 return;
             }
             $upload_part = [
                 'type' => $multipart_part_type,
-                'path' => $local_path_to_push['path'],
-                'target' => $symlink_target,
+                'path' => $local_path_to_push['target_path'],
+                'target' => $target_symlink_target,
                 'payload' => '',
             ];
             $upload_completes_local_path = true;
@@ -831,7 +872,7 @@ final class PushFilesSender
         // A file contributes at most one bounded chunk during this call and remains open for the next.
         if ($local_path_type_size_and_ctime['type'] === 'file') {
             $maximum_file_payload_bytes = $this->push_stream_client->next_file_body_bytes(
-                $local_path_to_push['path'],
+                $local_path_to_push['target_path'],
                 $local_path_type_size_and_ctime['size'],
                 $file_byte_offset
             );
@@ -840,7 +881,7 @@ final class PushFilesSender
                     $this->upload_request_stage = 'finishing';
                     return;
                 }
-                $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.');
+                $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one MIME part for target path ' . base64_encode($local_path_to_push['target_path']) . '.');
                 return;
             }
 
@@ -849,18 +890,18 @@ final class PushFilesSender
                 $local_io_failure_detail = null;
                 if (!is_resource($this->local_file_handle)) {
                     $this->local_file_handle = fopen(
-                        $this->docroot . '/' . $local_path_to_push['path'],
+                        $this->docroot . '/' . $local_path_to_push['local_path'],
                         'rb'
                     );
                 }
 
                 if (!is_resource($this->local_file_handle)) {
-                    $local_io_failure_detail = 'Could not open the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
+                    $local_io_failure_detail = 'Could not open the local file to push: ' . base64_encode($local_path_to_push['local_path']) . '.';
                 } else {
                     if ($this->local_file_byte_offset !== $file_byte_offset) {
                         if (fseek($this->local_file_handle, $file_byte_offset) !== 0) {
                             $this->close_local_file_handle();
-                            $local_io_failure_detail = 'Could not seek to the receiver-confirmed cursor in the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
+                            $local_io_failure_detail = 'Could not seek to the receiver-confirmed cursor in the local file to push: ' . base64_encode($local_path_to_push['local_path']) . '.';
                         } else {
                             $this->local_file_byte_offset = $file_byte_offset;
                         }
@@ -873,7 +914,9 @@ final class PushFilesSender
                     }
                 }
 
-                $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
+                $local_path_type_size_and_ctime_after_read = $this->stat_local_path(
+                    $local_path_to_push['local_path']
+                );
                 if ($local_path_type_size_and_ctime_after_read === null) {
                     $this->close_local_file_handle();
                     $this->close_local_paths_to_push_handle();
@@ -892,14 +935,14 @@ final class PushFilesSender
                 }
                 if (!is_string($payload) || ( $payload === '' && $file_byte_offset < $local_path_type_size_and_ctime['size'] )) {
                     $this->close_local_file_handle();
-                    $this->fail('local_io_error', 'Could not read the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.');
+                    $this->fail('local_io_error', 'Could not read the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['local_path']) . '.');
                     return;
                 }
             }
 
             $upload_part = [
                 'type' => $multipart_part_type,
-                'path' => $local_path_to_push['path'],
+                'path' => $local_path_to_push['target_path'],
                 'total_bytes' => $local_path_type_size_and_ctime['size'],
                 'offset' => $file_byte_offset,
                 'payload' => $payload,
@@ -933,7 +976,7 @@ final class PushFilesSender
             if ($this->status !== 'continue') {
                 return;
             }
-            $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.');
+            $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one MIME part for target path ' . base64_encode($local_path_to_push['target_path']) . '.');
             return;
         }
 
@@ -964,7 +1007,7 @@ final class PushFilesSender
         }
 
         // Select one complete path at the tentative or target-confirmed list position.
-        if ($this->local_path_to_delete === null && !$this->local_delete_list_complete) {
+        if ($this->target_path_to_delete === null && !$this->target_delete_list_complete) {
             if ($this->upload_request_stage !== 'closed') {
                 $delete_list_byte_offset = $this->next_delete_list_byte_offset ?? 0;
             } else {
@@ -984,7 +1027,7 @@ final class PushFilesSender
                 }
                 $delete_list_byte_offset = $this->receiver_confirmed_deleted_paths_byte_offset;
                 if ($this->receiver_confirmed_deleted_paths_complete) {
-                    $this->close_local_paths_to_delete_handle();
+                    $this->close_target_paths_to_delete_handle();
                     $this->receiver_confirmed_deleted_paths_byte_offset = null;
                     $this->receiver_confirmed_deleted_paths_complete = null;
                     $this->state['phase'] = 'committing';
@@ -1003,31 +1046,35 @@ final class PushFilesSender
                     $this->upload_request_stage = 'finishing';
                     return;
                 }
-                $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one local path to delete.');
+                $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one target path to delete.');
                 return;
             }
 
             // Keep the completed deletion plan open while successive calls consume it.
-            if (!is_resource($this->local_paths_to_delete_handle)) {
-                $local_paths_to_delete_path = $this->plan->get_local_paths_to_delete_path();
-                $this->local_paths_to_delete_handle = fopen($local_paths_to_delete_path, 'rb');
-                if (!is_resource($this->local_paths_to_delete_handle)) {
-                    $this->fail('local_io_error', 'Could not open the local paths to delete.');
+            if (!is_resource($this->target_paths_to_delete_handle)) {
+                $target_paths_to_delete_path =
+                    $this->plan->get_target_paths_to_delete_path();
+                $this->target_paths_to_delete_handle = fopen(
+                    $target_paths_to_delete_path,
+                    'rb'
+                );
+                if (!is_resource($this->target_paths_to_delete_handle)) {
+                    $this->fail('local_io_error', 'Could not open the target paths to delete.');
                     return;
                 }
             }
-            if ($this->local_paths_to_delete_byte_offset !== $delete_list_byte_offset) {
-                if (fseek($this->local_paths_to_delete_handle, $delete_list_byte_offset) !== 0) {
-                    $this->close_local_paths_to_delete_handle();
-                    $this->fail('local_io_error', 'Could not seek to the receiver-confirmed cursor in the local paths to delete.');
+            if ($this->target_paths_to_delete_byte_offset !== $delete_list_byte_offset) {
+                if (fseek($this->target_paths_to_delete_handle, $delete_list_byte_offset) !== 0) {
+                    $this->close_target_paths_to_delete_handle();
+                    $this->fail('local_io_error', 'Could not seek to the receiver-confirmed cursor in the target paths to delete.');
                     return;
                 }
-                $this->local_paths_to_delete_byte_offset = $delete_list_byte_offset;
+                $this->target_paths_to_delete_byte_offset = $delete_list_byte_offset;
             }
 
             try {
-                $this->local_path_to_delete = $this->read_next_local_path_to_delete(
-                    $this->local_paths_to_delete_handle,
+                $this->target_path_to_delete = $this->read_next_target_path_to_delete(
+                    $this->target_paths_to_delete_handle,
                     $delete_list_byte_offset,
                     $maximum_delete_list_payload_bytes
                 );
@@ -1038,20 +1085,21 @@ final class PushFilesSender
                 $this->fail('local_io_error', $exception->getMessage());
                 return;
             }
-            if ($this->local_path_to_delete === null) {
-                $this->local_delete_list_complete = true;
+            if ($this->target_path_to_delete === null) {
+                $this->target_delete_list_complete = true;
             } else {
-                $this->local_paths_to_delete_byte_offset = $this->local_path_to_delete['next_delete_list_byte_offset'];
+                $this->target_paths_to_delete_byte_offset = $this->target_path_to_delete['next_delete_list_byte_offset'];
             }
         }
 
         // EOF becomes the empty part which marks the deletion list complete.
-        if ($this->local_path_to_delete === null) {
+        if ($this->target_path_to_delete === null) {
             $delete_list_byte_offset = $this->next_delete_list_byte_offset ?? 0;
             $payload = '';
         } else {
-            $delete_list_byte_offset = $this->local_path_to_delete['delete_list_byte_offset'];
-            $payload = $this->local_path_to_delete['path'] . "\0";
+            $delete_list_byte_offset = $this->target_path_to_delete['delete_list_byte_offset'];
+            $payload =
+                $this->target_path_to_delete['target_path'] . "\0";
             $maximum_delete_list_payload_bytes = $this->push_stream_client->next_delete_body_bytes(
                 $delete_list_byte_offset
             );
@@ -1060,7 +1108,7 @@ final class PushFilesSender
                     $this->upload_request_stage = 'finishing';
                     return;
                 }
-                $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one local path to delete.');
+                $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one target path to delete.');
                 return;
             }
         }
@@ -1079,7 +1127,7 @@ final class PushFilesSender
         $part_sent = $this->push_stream_client->send_part([
             'type' => 'delete-list',
             'offset' => $delete_list_byte_offset,
-            'complete' => $this->local_delete_list_complete,
+            'complete' => $this->target_delete_list_complete,
             'payload' => $payload,
         ]);
 
@@ -1087,7 +1135,7 @@ final class PushFilesSender
         // An empty request which cannot fit the part cannot make progress.
         if (!$part_sent) {
             if ($this->push_stream_client->has_sent_parts()) {
-                $this->local_path_to_delete = null;
+                $this->target_path_to_delete = null;
                 $this->upload_request_stage = 'finishing';
                 return;
             }
@@ -1101,8 +1149,8 @@ final class PushFilesSender
 
         // Keep the next list position tentative until the target confirms the request.
         $this->next_delete_list_byte_offset = $delete_list_byte_offset + strlen($payload);
-        $this->local_path_to_delete = null;
-        if ($this->local_delete_list_complete || $this->push_stream_client->should_finish_request()) {
+        $this->target_path_to_delete = null;
+        if ($this->target_delete_list_complete || $this->push_stream_client->should_finish_request()) {
             $this->upload_request_stage = 'finishing';
         }
     }
@@ -1128,12 +1176,12 @@ final class PushFilesSender
             $this->receiver_confirmed_file_byte_offset = $this->next_file_byte_offset ?? 0;
         } elseif ($request_had_parts && $request_phase === 'pushing_deletes') {
             $this->receiver_confirmed_deleted_paths_byte_offset = $this->next_delete_list_byte_offset ?? 0;
-            $this->receiver_confirmed_deleted_paths_complete = $this->local_delete_list_complete;
+            $this->receiver_confirmed_deleted_paths_complete = $this->target_delete_list_complete;
         }
         $this->upload_request_stage = 'closed';
         $this->next_file_byte_offset = null;
         $this->next_delete_list_byte_offset = null;
-        $this->local_delete_list_complete = false;
+        $this->target_delete_list_complete = false;
         if (!$request_failed) {
             $this->state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
             if ($this->state !== $this->state_before_upload_request) {
@@ -1180,15 +1228,15 @@ final class PushFilesSender
     /**
      * Closes the deleted-path list when that phase or this lifecycle ends.
      */
-    private function close_local_paths_to_delete_handle(): void
+    private function close_target_paths_to_delete_handle(): void
     {
-        if (is_resource($this->local_paths_to_delete_handle)) {
-            fclose($this->local_paths_to_delete_handle);
+        if (is_resource($this->target_paths_to_delete_handle)) {
+            fclose($this->target_paths_to_delete_handle);
         }
-        $this->local_paths_to_delete_handle = null;
-        $this->local_paths_to_delete_byte_offset = null;
-        $this->local_path_to_delete = null;
-        $this->local_delete_list_complete = false;
+        $this->target_paths_to_delete_handle = null;
+        $this->target_paths_to_delete_byte_offset = null;
+        $this->target_path_to_delete = null;
+        $this->target_delete_list_complete = false;
     }
 
     /**
@@ -1223,7 +1271,7 @@ final class PushFilesSender
     {
         try {
             $local_index_updates_path =
-                $this->plan_directory . '/local_index_updates.jsonl';
+                $this->plan_directory . '/local-index-updates.jsonl';
             $local_index_updates_handle =
                 fopen($local_index_updates_path, 'wb');
             if (!is_resource($local_index_updates_handle)) {
@@ -1239,22 +1287,24 @@ final class PushFilesSender
                  * directories and derives their empty state.
                  */
                 foreach (
-                    $this->plan->read_planned_local_paths_to_delete()
-                    as $local_path_to_delete
+                    $this->plan->read_planned_paths_to_delete()
+                    as $path_to_delete
                 ) {
                     write_local_index_update($local_index_updates_handle, [
                         'op' => 'D',
-                        'path' => base64_encode($local_path_to_delete),
+                        'path' => base64_encode(
+                            $path_to_delete['local_path']
+                        ),
                     ]);
                 }
 
                 foreach (
-                    $this->plan->read_planned_local_paths_to_push()
+                    $this->plan->read_planned_paths_to_push()
                     as $local_path_to_push
                 ) {
                     write_local_index_update($local_index_updates_handle, [
                         'op' => 'F',
-                        'path' => $local_path_to_push['path_b64'],
+                        'path' => $local_path_to_push['local_path_b64'],
                         'ctime' => $local_path_to_push['ctime'],
                         'size' => $local_path_to_push['size'],
                         'type' => $local_path_to_push['type'],
@@ -1406,19 +1456,23 @@ final class PushFilesSender
         if (!is_int($next_local_paths_to_push_byte_offset)) {
             throw new RuntimeException('Failed to determine the next byte offset in the local paths to push.');
         }
-        /** @var array{path_b64:string,type:'file'|'dir'|'link',size:int,ctime:int} $decoded_local_path */
+        /** @var array{local_path_b64:string,target_path_b64:string,type:'file'|'dir'|'link',size:int,ctime:int} $decoded_local_path */
         $decoded_local_path = json_decode(
             $line,
             true,
             512,
             JSON_THROW_ON_ERROR
         );
-        $path_b64 = $decoded_local_path['path_b64'];
-        /** @var string $path */
-        $path = base64_decode($path_b64);
+        $local_path_b64 = $decoded_local_path['local_path_b64'];
+        $target_path_b64 = $decoded_local_path['target_path_b64'];
+        /** @var string $local_path */
+        $local_path = base64_decode($local_path_b64);
+        /** @var string $target_path */
+        $target_path = base64_decode($target_path_b64);
         return [
-            'path' => $path,
-            'path_b64' => $path_b64,
+            'local_path' => $local_path,
+            'target_path' => $target_path,
+            'target_path_b64' => $target_path_b64,
             'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
             'planned_local_path_type_size_and_ctime' => [
                 'type' => $decoded_local_path['type'],
@@ -1429,37 +1483,37 @@ final class PushFilesSender
     }
 
     /**
-     * Reads one complete local path to delete within the next part limit.
+     * Reads one complete target path to delete within the next part limit.
      *
-     * @param resource $local_paths_to_delete_handle Open local paths-to-delete file.
+     * @param resource $target_paths_to_delete_handle Open target paths-to-delete file.
      * @param int      $delete_list_byte_offset      Byte offset at the start of the path.
      * @param int      $maximum_delete_list_payload_bytes Maximum bytes available for the path and NUL delimiter.
-     * @return LocalPathToDelete|null One local path to delete, or null at EOF.
+     * @return TargetPathToDelete|null One target path to delete, or null at EOF.
      *
      * @throws LengthException When the next complete path does not fit.
      * @throws RuntimeException When the deletion list cannot be read.
      */
-    private function read_next_local_path_to_delete(
-        $local_paths_to_delete_handle,
+    private function read_next_target_path_to_delete(
+        $target_paths_to_delete_handle,
         int $delete_list_byte_offset,
         int $maximum_delete_list_payload_bytes
     ): ?array {
-        $path = stream_get_line($local_paths_to_delete_handle, $maximum_delete_list_payload_bytes, "\0");
-        if ($path === false) {
-            if (feof($local_paths_to_delete_handle)) {
+        $target_path = stream_get_line($target_paths_to_delete_handle, $maximum_delete_list_payload_bytes, "\0");
+        if ($target_path === false) {
+            if (feof($target_paths_to_delete_handle)) {
                 return null;
             }
-            throw new RuntimeException('Could not read the next local path to delete.');
+            throw new RuntimeException('Could not read the next target path to delete.');
         }
-        $next_delete_list_byte_offset = ftell($local_paths_to_delete_handle);
+        $next_delete_list_byte_offset = ftell($target_paths_to_delete_handle);
         if (!is_int($next_delete_list_byte_offset)) {
-            throw new RuntimeException('Could not determine the next byte offset in the local paths to delete.');
+            throw new RuntimeException('Could not determine the next byte offset in the target paths to delete.');
         }
-        if ($next_delete_list_byte_offset !== $delete_list_byte_offset + strlen($path) + 1) {
-            throw new LengthException('The current request-body budget cannot fit one complete local path to delete.');
+        if ($next_delete_list_byte_offset !== $delete_list_byte_offset + strlen($target_path) + 1) {
+            throw new LengthException('The current request-body budget cannot fit one complete target path to delete.');
         }
         return [
-            'path' => $path,
+            'target_path' => $target_path,
             'delete_list_byte_offset' => $delete_list_byte_offset,
             'next_delete_list_byte_offset' => $next_delete_list_byte_offset,
         ];

@@ -336,9 +336,11 @@ final class FilesPushCommandTest extends TestCase
         $this->assertFileDoesNotExist($this->stateDirectory . '/.import-state.json');
     }
 
-    public function testFilesPushRefusesPersistedRemapsBeforeStartingSender(): void
+    public function testFilesPushAcceptsAValidatedPersistedRemap(): void
     {
         $targetUrl = 'https://example.test/?reprint-api=1';
+        $canonicalLocalTree = realpath($this->localTree);
+        $this->assertIsString($canonicalLocalTree);
         $context = ImportClient::prepare_files_command_context(
             $targetUrl,
             $this->stateDirectory,
@@ -350,15 +352,68 @@ final class FilesPushCommandTest extends TestCase
             $context['remote_state_directory'] . '/path-mapping.json',
             json_encode([
                 'target_url_fingerprint' => hash('sha256', $targetUrl),
-                'filesystem_root_b64' => base64_encode($context['local_tree']),
-                'local_tree_b64' => base64_encode($context['local_tree']),
+                'filesystem_root_b64' => base64_encode($canonicalLocalTree),
+                'local_tree_b64' => base64_encode($canonicalLocalTree),
+                'target_document_root_b64' => base64_encode('/var/www/html'),
+                'prefix_rules' => [
+                    [
+                        'kind' => 'default',
+                        'remote_prefix_b64' =>
+                            base64_encode('/var/www/html'),
+                        'local_prefix_b64' =>
+                            base64_encode($canonicalLocalTree),
+                    ],
+                    [
+                        'kind' => 'remap',
+                        'remote_prefix_b64' =>
+                            base64_encode('/var/www/html/wp-content'),
+                        'local_prefix_b64' =>
+                            base64_encode($canonicalLocalTree . '/content'),
+                    ],
+                ],
+            ], JSON_THROW_ON_ERROR)
+        );
+
+        $pushContext = ImportClient::prepare_files_push_context(
+            $targetUrl,
+            $this->stateDirectory,
+            $this->localTree,
+            ['secret' => 'token', 'force_http' => false]
+        );
+
+        $this->assertSame(
+            $context['remote_state_directory'] . '/path-mapping.json',
+            $pushContext['path_mapping_path']
+        );
+        $this->assertDirectoryDoesNotExist(
+            $context['push_state_directory']
+        );
+    }
+
+    public function testFilesPushRejectsAnUnaddressableMappingBeforeStartingSender(): void
+    {
+        $targetUrl = 'https://example.test/?reprint-api=1';
+        $canonicalLocalTree = realpath($this->localTree);
+        $this->assertIsString($canonicalLocalTree);
+        $context = ImportClient::prepare_files_command_context(
+            $targetUrl,
+            $this->stateDirectory,
+            $this->localTree,
+            'files-push'
+        );
+        mkdir($context['remote_state_directory'], 0700, true);
+        file_put_contents(
+            $context['remote_state_directory'] . '/path-mapping.json',
+            json_encode([
+                'target_url_fingerprint' => hash('sha256', $targetUrl),
+                'filesystem_root_b64' => base64_encode($canonicalLocalTree),
+                'local_tree_b64' => base64_encode($canonicalLocalTree),
                 'target_document_root_b64' => base64_encode('/var/www/html'),
                 'prefix_rules' => [[
                     'kind' => 'remap',
-                    'remote_prefix_b64' =>
-                        base64_encode('/var/www/html/wp-content'),
+                    'remote_prefix_b64' => base64_encode('/opt/plugins'),
                     'local_prefix_b64' =>
-                        base64_encode($context['local_tree'] . '/content'),
+                        base64_encode($canonicalLocalTree . '/plugins'),
                 ]],
             ], JSON_THROW_ON_ERROR)
         );
@@ -370,10 +425,75 @@ final class FilesPushCommandTest extends TestCase
                 $this->localTree,
                 ['secret' => 'token', 'force_http' => false]
             );
-            $this->fail('Expected files-push to reject the persisted remap.');
+            $this->fail(
+                'Expected files-push to reject the unaddressable mapping.'
+            );
         } catch (\RuntimeException $error) {
             $this->assertStringContainsString(
-                'contains remapped paths',
+                'outside the target document root',
+                $error->getMessage()
+            );
+        }
+
+        $this->assertDirectoryDoesNotExist(
+            $context['push_state_directory']
+        );
+    }
+
+    public function testFilesPushRejectsAnAmbiguousMappingBeforeStartingSender(): void
+    {
+        $targetUrl = 'https://example.test/?reprint-api=1';
+        $canonicalLocalTree = realpath($this->localTree);
+        $this->assertIsString($canonicalLocalTree);
+        $context = ImportClient::prepare_files_command_context(
+            $targetUrl,
+            $this->stateDirectory,
+            $this->localTree,
+            'files-push'
+        );
+        mkdir($context['remote_state_directory'], 0700, true);
+        file_put_contents(
+            $context['remote_state_directory'] . '/path-mapping.json',
+            json_encode([
+                'target_url_fingerprint' => hash('sha256', $targetUrl),
+                'filesystem_root_b64' => base64_encode($canonicalLocalTree),
+                'local_tree_b64' => base64_encode($canonicalLocalTree),
+                'target_document_root_b64' =>
+                    base64_encode('/var/www/html'),
+                'prefix_rules' => [
+                    [
+                        'kind' => 'remap',
+                        'remote_prefix_b64' =>
+                            base64_encode('/var/www/html/plugins'),
+                        'local_prefix_b64' => base64_encode(
+                            $canonicalLocalTree . '/plugins'
+                        ),
+                    ],
+                    [
+                        'kind' => 'remap',
+                        'remote_prefix_b64' =>
+                            base64_encode('/var/www/html/mu-plugins'),
+                        'local_prefix_b64' => base64_encode(
+                            $canonicalLocalTree . '/plugins'
+                        ),
+                    ],
+                ],
+            ], JSON_THROW_ON_ERROR)
+        );
+
+        try {
+            ImportClient::prepare_files_push_context(
+                $targetUrl,
+                $this->stateDirectory,
+                $this->localTree,
+                ['secret' => 'token', 'force_http' => false]
+            );
+            $this->fail(
+                'Expected files-push to reject the ambiguous mapping.'
+            );
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString(
+                'maps to more than one remote prefix',
                 $error->getMessage()
             );
         }
