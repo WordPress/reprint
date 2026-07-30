@@ -101,7 +101,17 @@ class FilesSyncStateTest extends TestCase
      */
     private function readState(): array
     {
-        $contents = file_get_contents($this->stateDir . '/.import-state.json');
+        $stateFile = $this->stateDir . '/.import-state.json';
+        $relationshipStateFiles = glob(
+            $this->stateDir . '/remote-*/pull-state.json'
+        );
+        if (
+            is_array($relationshipStateFiles)
+            && count($relationshipStateFiles) === 1
+        ) {
+            $stateFile = $relationshipStateFiles[0];
+        }
+        $contents = file_get_contents($stateFile);
         return json_decode($contents, true);
     }
 
@@ -163,10 +173,7 @@ class FilesSyncStateTest extends TestCase
         $stateProperty = $reflection->getProperty('state');
         $loadState = $reflection->getMethod('load_state');
         $stateProperty->setValue($client, $loadState->invoke($client));
-        $reflection->getMethod('configure_remote_state_directory')->invoke(
-            $client,
-            $this->fs_root
-        );
+        $client->prepare_files_pull_options([]);
 
         $ttyProperty = $reflection->getProperty('is_tty');
         $ttyProperty->setValue($client, false);

@@ -13,6 +13,7 @@ import {
     assertTreesMatch,
     assertFileCount, assertSiteMirror,
     fsRootDir,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -66,8 +67,8 @@ describe('Import: Symlinks', () => {
         });
 
         it('sync completed without error despite symlinks', () => {
-            const stateFile = join(tempDir, '.import-state.json');
-            assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
+            const stateFile = getPullStatePath(tempDir);
+            assert.ok(existsSync(stateFile), 'Expected pull-state.json to exist');
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete', 'Expected status to be complete');
         });

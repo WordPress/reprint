@@ -16,6 +16,7 @@ import {
     assertSiteMirror, createMysqlConnection,
     compareDatabases, getDbName,
     fsRootDir,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -53,7 +54,7 @@ describe('Import: Full Round-Trip', () => {
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const stateFile = join(tempDir, '.import-state.json');
+        const stateFile = getPullStatePath(tempDir);
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete');
     });

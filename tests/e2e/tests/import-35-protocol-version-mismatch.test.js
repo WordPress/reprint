@@ -9,24 +9,23 @@
 import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, copyFileSync } from 'node:fs';
-import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Protocol Version Mismatch', () => {
     const site = 'basic';
     let tempDir;
-    const stateFileName = '.import-state.json';
 
     function importUrl() {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     function stateFilePath() {
-        return join(tempDir, stateFileName);
+        return getPullStatePath(tempDir);
     }
 
     function readState() {

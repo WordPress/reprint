@@ -13,6 +13,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, readAuditLog,
     fsRootDir,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -116,7 +117,7 @@ INSERT INTO wp_secret_table VALUES (1, 'top secret');
         });
 
         it('state shows complete', () => {
-            const stateFile = join(tempDir, '.import-state.json');
+            const stateFile = getPullStatePath(tempDir);
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete');
         });

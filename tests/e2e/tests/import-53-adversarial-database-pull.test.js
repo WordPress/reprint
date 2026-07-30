@@ -9,13 +9,13 @@
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir, getDbName,
     compareDatabases, createMysqlConnection, assertPullPipelineComplete,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -91,7 +91,7 @@ describe('Import: Adversarial database pull', { timeout: 300000 }, () => {
                 `${result.stdout.slice(-4000)}`,
         );
         const importState = JSON.parse(
-            readFileSync(join(tempDir, '.import-state.json'), 'utf-8'),
+            readFileSync(getPullStatePath(tempDir), 'utf-8'),
         );
         assertPullPipelineComplete(importState, 'pull-db');
 

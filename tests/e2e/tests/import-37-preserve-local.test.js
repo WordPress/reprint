@@ -41,6 +41,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     readAuditLog,
     fsRootDir,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { buildAtomicHostingFixture, unlockSharedDir } from '../lib/atomic-hosting-fixture.js';
@@ -161,7 +162,7 @@ describe('Import: --preserve-local', () => {
         });
 
         it('state shows complete with preserve_local persisted', () => {
-            const stateFile = join(tempDir, '.import-state.json');
+            const stateFile = getPullStatePath(tempDir);
             const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete');
             assert.equal(state.fs_root_nonempty_behavior, 'preserve-local');
@@ -334,7 +335,7 @@ describe('Import: --preserve-local', () => {
         });
 
         it('state preserves preserve_local across resume cycles', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
             assert.equal(state.fs_root_nonempty_behavior, 'preserve-local');
         });
     });

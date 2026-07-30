@@ -141,7 +141,17 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     private function readState(): array
     {
-        return json_decode(file_get_contents($this->stateDir . '/.import-state.json'), true);
+        $stateFile = $this->stateDir . '/.import-state.json';
+        $relationshipStateFiles = glob(
+            $this->stateDir . '/remote-*/pull-state.json'
+        );
+        if (
+            is_array($relationshipStateFiles)
+            && count($relationshipStateFiles) === 1
+        ) {
+            $stateFile = $relationshipStateFiles[0];
+        }
+        return json_decode(file_get_contents($stateFile), true);
     }
 
     private function remoteStateDirectory(): string

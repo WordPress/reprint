@@ -154,7 +154,7 @@ final class IndexUpdateWalTest extends TestCase
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
         );
         file_put_contents(
-            $this->stateDirectory . '/.import-state.json',
+            $remoteStateDirectory . '/pull-state.json',
             json_encode([
                 'preflight' => [
                     'data' => [
@@ -165,6 +165,27 @@ final class IndexUpdateWalTest extends TestCase
                     ],
                     'http_code' => 200,
                 ],
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)
+        );
+        $filesystemRoot = realpath($this->fileRoot);
+        $localTree = realpath($this->fileRoot . '/site');
+        $this->assertIsString($filesystemRoot);
+        $this->assertIsString($localTree);
+        file_put_contents(
+            $remoteStateDirectory . '/path-mapping.json',
+            json_encode([
+                'target_url_fingerprint' => hash(
+                    'sha256',
+                    'https://example.com/'
+                ),
+                'filesystem_root_b64' => base64_encode($filesystemRoot),
+                'local_tree_b64' => base64_encode($localTree),
+                'target_document_root_b64' => base64_encode('/site'),
+                'prefix_rules' => [[
+                    'kind' => 'default',
+                    'remote_prefix_b64' => base64_encode('/site'),
+                    'local_prefix_b64' => base64_encode($localTree),
+                ]],
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)
         );
 

@@ -15,6 +15,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     fsRootDir, assertPullPipelineComplete, compareDatabases, createMysqlConnection, getDbName,
     getRemoteStateDirectory,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -85,8 +86,8 @@ describe('Import: Pull essential-files', { timeout: 180000 }, () => {
     });
 
     it('state records deferred files in the pull metadata', () => {
-        const stateFile = join(tempDir, '.import-state.json');
-        assert.ok(existsSync(stateFile), 'Expected .import-state.json to exist');
+        const stateFile = getPullStatePath(tempDir);
+        assert.ok(existsSync(stateFile), 'Expected pull-state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assertPullPipelineComplete(state);
         assert.equal(state.pull_pipeline.files_filter, 'essential-files');

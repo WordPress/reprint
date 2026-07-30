@@ -30,6 +30,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     fsRootDir,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -77,7 +78,7 @@ require ABSPATH . 'wp-blog-header.php';
         });
         assert.equal(result.exitCode, 0, `preflight failed:\n${result.stderr}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
         const pathsUrls = state.preflight?.data?.database?.wp?.paths_urls;
         assert.ok(pathsUrls, 'Expected paths_urls in preflight data');
 
@@ -104,7 +105,7 @@ require ABSPATH . 'wp-blog-header.php';
     });
 
     it('WP core files exist at the resolved path in fs-root', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
         const abspath = state.preflight?.data?.database?.wp?.paths_urls?.abspath;
         assert.ok(abspath, 'abspath not found in state');
 

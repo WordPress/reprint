@@ -74,7 +74,12 @@ class ImportMetadataTest extends TestCase
      */
     private function readMetadata(): array
     {
-        $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client = new \ImportClient(
+            'http://example.invalid',
+            $this->stateDir,
+            $this->fsRoot,
+            'import-metadata'
+        );
 
         ob_start();
         $client->run(['command' => 'import-metadata']);
@@ -138,6 +143,28 @@ class ImportMetadataTest extends TestCase
 
         $this->assertTrue($metadata['hasCompletedOnce']);
         $this->assertSame('db-apply', $metadata['pullStage']);
+    }
+
+    public function testImportMetadataReadsTheOnlyRelationshipPullState(): void
+    {
+        $this->writeState([
+            'pull_pipeline' => [
+                'stage_sequence' => ['preflight', 'files-pull'],
+                'last_completed_stage' => 'files-pull',
+                'has_completed_once' => true,
+            ],
+        ]);
+        $remoteStateDirectory = $this->stateDir . '/remote-one';
+        mkdir($remoteStateDirectory);
+        rename(
+            $this->stateDir . '/.import-state.json',
+            $remoteStateDirectory . '/pull-state.json'
+        );
+
+        $metadata = $this->readMetadata();
+
+        $this->assertTrue($metadata['hasCompletedOnce']);
+        $this->assertSame('files-pull', $metadata['pullStage']);
     }
 
     /**

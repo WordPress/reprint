@@ -13,6 +13,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch,
     fsRootDir, getRemoteStateDirectory,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -97,7 +98,7 @@ describe('Import: Delta Sync with Deletions', () => {
     });
 
     it('state shows complete after delta', () => {
-        const stateFile = join(tempDir, '.import-state.json');
+        const stateFile = getPullStatePath(tempDir);
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete');
     });

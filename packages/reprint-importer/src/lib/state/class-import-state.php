@@ -353,7 +353,6 @@ class ImportState
     /** @var string|null User-Agent that worked during preflight. */
     public ?string $user_agent = null;
     public ?int $max_allowed_packet = null;
-    public ?string $files_remap_fingerprint = null;
     public ?string $files_pull_only_fingerprint = null;
     public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
@@ -405,7 +404,6 @@ class ImportState
         $state->filter = isset($data['filter']) ? (string) $data['filter'] : 'none';
         $state->user_agent = isset($data['user_agent']) ? (string) $data['user_agent'] : null;
         $state->max_allowed_packet = isset($data['max_allowed_packet']) ? (int) $data['max_allowed_packet'] : null;
-        $state->files_remap_fingerprint = isset($data['files_remap_fingerprint']) ? (string) $data['files_remap_fingerprint'] : null;
         $state->files_pull_only_fingerprint = isset($data['files_pull_only_fingerprint']) ? (string) $data['files_pull_only_fingerprint'] : null;
         $state->files_pull_summary = self::files_pull_summary_from($data['files_pull_summary'] ?? []);
         $state->db_index = self::database_table_index_from($data['db_index'] ?? []);
@@ -447,7 +445,6 @@ class ImportState
             'filter' => $this->filter,
             'user_agent' => $this->user_agent,
             'max_allowed_packet' => $this->max_allowed_packet,
-            'files_remap_fingerprint' => $this->files_remap_fingerprint,
             'files_pull_only_fingerprint' => $this->files_pull_only_fingerprint,
             'files_pull_summary' => $this->files_pull_summary->to_array(),
             'db_index' => $this->db_index->to_array(),

@@ -16,6 +16,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     fsRootDir, PHP_BINARY,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -71,7 +72,7 @@ describe('Import: Playground CLI runtime', () => {
         assert.equal(result.exitCode, 0,
             `files-sync failed (exit ${result.exitCode})\nstderr: ${result.stderr}`);
 
-        const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete');
     });
 

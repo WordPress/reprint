@@ -32,6 +32,7 @@ import {
     writeTestHooks, removeTestHooks,
     writeHookState, clearHookState,
     fsRootDir,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -143,7 +144,7 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         const localPath = join(importedRoot, fileRel);
         const serializedLocalPath = `base64:${Buffer.from(localPath).toString('base64')}`;
-        const stateFile = join(tempDir, '.import-state.json');
+        const stateFile = getPullStatePath(tempDir);
         assert.ok(existsSync(stateFile), 'Expected import state file to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.notEqual(
@@ -166,7 +167,7 @@ describe('Import: Mid-file Body Resume', { timeout: 180000 }, () => {
         assert.equal(result.exitCode, 0,
             `Expected resume to complete\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
 
-        const stateFile = join(tempDir, '.import-state.json');
+        const stateFile = getPullStatePath(tempDir);
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.equal(state.active_resumable_command.completion_state, 'complete', `Expected status=complete after resume, got ${state.active_resumable_command.completion_state}`);
     });

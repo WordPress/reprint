@@ -18,6 +18,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, readAuditLog,
     fsRootDir, getRemoteStateDirectory,
+    getPullStatePath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -80,7 +81,7 @@ describe('Import: --filter', () => {
         });
 
         it('state shows complete with filter persisted', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
             assert.equal(state.active_resumable_command.command_name, 'files-pull');
             assert.equal(state.active_resumable_command.completion_state, 'complete');
             assert.equal(state.filter, 'essential-files');
@@ -148,7 +149,7 @@ describe('Import: --filter', () => {
             // Regression: the skipped-earlier fetch must mark the sync
             // complete. If it leaves status="in_progress", the filter-change
             // guard blocks the next delta re-pull below.
-            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
             assert.equal(state.active_resumable_command.completion_state, 'complete',
                 `Expected completion_state=complete after skipped-earlier, got ${state.active_resumable_command?.completion_state}`);
         });
@@ -198,7 +199,7 @@ describe('Import: --filter', () => {
         });
 
         it('state preserves filter across resume cycles', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, '.import-state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(getPullStatePath(tempDir), 'utf-8'));
             assert.equal(state.filter, 'essential-files');
             assert.equal(state.active_resumable_command.completion_state, 'complete');
         });

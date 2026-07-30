@@ -714,12 +714,13 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 URL in a state directory:
 
 ```text
-<state-dir>/remote-<sha256(target URL with user-info and SECRET_KEY removed)>/.local-index.jsonl
+<state-dir>/remote-<sha256(target URL with user-info, SECRET_KEY, and site-export-api removed)>/.local-index.jsonl
 ```
 
-URL user-info and `SECRET_KEY` do not affect the hash; changing any other query
-parameter selects a different local index and push-state directory. Use a
-different state directory for a different local document root.
+URL user-info, `SECRET_KEY`, and the `site-export-api` endpoint alias do not
+affect the hash; changing any other query parameter selects a different local
+index and push-state directory. Use a different state directory for a different
+local document root.
 
 files-pull records each local path it changes through
 `remote-<hash>/pull-index-updates.wal`, except paths skipped by the local

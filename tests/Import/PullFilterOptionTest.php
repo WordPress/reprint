@@ -232,8 +232,18 @@ class PullFilterOptionTest extends TestCase
 
     private function readState(): array
     {
+        $stateFile = $this->stateDir . '/.import-state.json';
+        $relationshipStateFiles = glob(
+            $this->stateDir . '/remote-*/pull-state.json'
+        );
+        if (
+            is_array($relationshipStateFiles)
+            && count($relationshipStateFiles) === 1
+        ) {
+            $stateFile = $relationshipStateFiles[0];
+        }
         return json_decode(
-            file_get_contents($this->stateDir . '/.import-state.json'),
+            file_get_contents($stateFile),
             true,
         );
     }
@@ -312,7 +322,10 @@ class PullFilterOptionTest extends TestCase
                     "started_by_command" => "pull",
                     "last_completed_stage" => "preflight",
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
 
@@ -346,7 +359,10 @@ class PullFilterOptionTest extends TestCase
                     "started_by_command" => "pull",
                     "last_completed_stage" => "preflight",
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
 
@@ -379,7 +395,10 @@ class PullFilterOptionTest extends TestCase
                     "started_by_command" => "pull-db",
                     "last_completed_stage" => null,
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
         file_put_contents($this->stateDir . '/db.sql', "SELECT 1;\n");
@@ -540,7 +559,10 @@ class PullFilterOptionTest extends TestCase
                     "stage_sequence" => ["preflight", "files-pull"],
                     "last_completed_stage" => "preflight",
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
 
@@ -566,7 +588,10 @@ class PullFilterOptionTest extends TestCase
                     "completion_state" => "complete",
                     "current_stage" => null,
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
 
@@ -597,7 +622,10 @@ class PullFilterOptionTest extends TestCase
                     "stage_sequence" => ["preflight", "files-pull"],
                     "last_completed_stage" => "preflight",
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
 
@@ -691,7 +719,10 @@ class PullFilterOptionTest extends TestCase
                     "stage_sequence" => ["preflight", "files-pull"],
                     "last_completed_stage" => "preflight",
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
 
@@ -730,7 +761,10 @@ class PullFilterOptionTest extends TestCase
                     "stage_sequence" => ["preflight", "db-pull", "db-apply"],
                     "last_completed_stage" => "preflight",
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
 
@@ -761,7 +795,10 @@ class PullFilterOptionTest extends TestCase
                     "completion_state" => "complete",
                     "current_stage" => null,
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
 
@@ -890,7 +927,10 @@ class PullFilterOptionTest extends TestCase
                     "files_filter" => "essential-files",
                     "skipped_pending" => true,
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
 
@@ -931,7 +971,10 @@ class PullFilterOptionTest extends TestCase
                     "files_filter" => "essential-files",
                     "skipped_pending" => true,
                 ],
-                "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+                "preflight" => ["http_code" => 200, "data" => [
+                    "ok" => true,
+                    "runtime" => ["document_root" => ""],
+                ]],
             ]),
         );
 
