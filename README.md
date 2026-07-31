@@ -517,9 +517,9 @@ Reprint uses `$STATE_DIR` exactly as supplied. Consumers that want the state
 hidden can choose a directory named `.reprint`; Reprint does not append that
 name itself. Shared command progress and the audit log live directly in the
 state directory. Pull-owned state lives in `pull/`, while remote-specific push
-state lives in `push/<md5-of-trimmed-remote-reprint-api-url>/`. Shared and pull
-filenames do not begin with a dot or repeat the scope supplied by their parent
-directory.
+state lives in
+`remotes/<md5-of-trimmed-remote-reprint-api-url>/push/`. Shared and pull filenames
+do not begin with a dot or repeat the scope supplied by their parent directory.
 
 `pull/state.json` and `progress.json` are written atomically:
 a `.tmp` file is written first and then renamed to its final name so readers

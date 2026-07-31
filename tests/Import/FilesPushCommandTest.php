@@ -54,7 +54,10 @@ final class FilesPushCommandTest extends TestCase
         );
         $trimmedRemoteReprintApiUrl = rtrim($remoteReprintApiUrl, '?&');
         $expectedPushStateDirectory =
-            realpath($this->stateDirectory) . '/push/' . md5($trimmedRemoteReprintApiUrl);
+            realpath($this->stateDirectory)
+            . '/remotes/'
+            . md5($trimmedRemoteReprintApiUrl)
+            . '/push';
 
         $this->assertSame($trimmedRemoteReprintApiUrl, $context['remote_reprint_api_url']);
         $this->assertSame(realpath($this->localTree), $context['filesystem_root']);
@@ -82,7 +85,10 @@ final class FilesPushCommandTest extends TestCase
             $differentQuery['push_state_directory']
         );
         $this->assertSame(
-            realpath($otherStateDirectory) . '/push/' . md5($trimmedRemoteReprintApiUrl),
+            realpath($otherStateDirectory)
+                . '/remotes/'
+                . md5($trimmedRemoteReprintApiUrl)
+                . '/push',
             $differentFilesystemRootContext['push_state_directory']
         );
     }
@@ -354,7 +360,7 @@ final class FilesPushCommandTest extends TestCase
 
     private function assertNoSenderState(string $stateDirectory): void
     {
-        $senderPaths = glob($stateDirectory . '/push/*/sender.json');
+        $senderPaths = glob($stateDirectory . '/remotes/*/push/sender.json');
         $this->assertIsArray($senderPaths);
         $this->assertSame([], $senderPaths);
     }

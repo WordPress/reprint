@@ -85,8 +85,8 @@ The local machine keeps these files **per remote Reprint API URL**, overwritten
 after each successful commit. The state directory already selects one
 filesystem root:
 
-    <state-dir>/push/<md5-of-trimmed-remote-reprint-api-url>/previous_local_index.jsonl
-    <state-dir>/push/<md5-of-trimmed-remote-reprint-api-url>/previously_pushed_rows.jsonl   (phase two)
+    <state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push/previous_local_index.jsonl
+    <state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push/previously_pushed_rows.jsonl   (phase two)
 
 The previous local index records the local path type, size, and ctime as the
 completing push observed them. Besides planning the next push, it feeds the
@@ -285,7 +285,7 @@ prevents concurrent pull, push, diff, and other local Reprint processes from
 using that site state, regardless of their remote Reprint API URLs.
 
 An active push keeps these files under
-`<state-dir>/push/<md5-of-trimmed-remote-reprint-api-url>/`:
+`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push/`:
 
 ```text
 previous_local_index.jsonl          index saved after the previous commit
@@ -417,7 +417,9 @@ write `pull/state.json`, show a plan, ask for confirmation, transfer a
 database, retry a failed request, or start a replacement sender after a
 `restart` outcome.
 
-The local push state directory is `<state-dir>/push/` followed by:
+The local push state directory is
+`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash
+directory name is:
 
 ```text
 md5(rtrim(<remote-reprint-api-url>, "?&"))
