@@ -136,13 +136,13 @@ async function provisionDatabase() {
     await conn.end();
 }
 
-function runStage(stage, stateDir, extraArgs = [], { includeUrl = true, phpBinary = PHP_BINARY, env = {} } = {}) {
+function runStage(stage, stateDir, extraArgs = [], { phpBinary = PHP_BINARY, env = {} } = {}) {
     const url = `${getSiteUrl(SITE)}&directory=${getSiteDir(SITE)}`;
     const importerPath = stage === 'preflight' ? PREFLIGHT_IMPORTER_PATH : IMPORTER_PATH;
     const args = [
         importerPath,
         stage,
-        ...(includeUrl ? [url] : []),
+        url,
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
         `--secret=${getSiteSecret(SITE)}`,
@@ -629,15 +629,14 @@ async function main() {
         { name: 'files-pull', extra: [] },
         { name: 'db-pull', extra: [] },
         { name: 'db-apply', extra: dbApplyArgs },
-        // apply-runtime is local-only; it doesn't take a remote URL.
-        { name: 'apply-runtime', extra: runtimeArgs, includeUrl: false },
+        { name: 'apply-runtime', extra: runtimeArgs },
     ];
 
     const results = [];
-    for (const { name, extra, includeUrl } of stages) {
+    for (const { name, extra } of stages) {
         if (!shouldRun(name)) continue;
         console.log(`-> ${name}`);
-        const r = runStage(name, stateDir, extra, { includeUrl });
+        const r = runStage(name, stateDir, extra);
         results.push(r);
         console.log(`   ${r.ok ? 'ok' : 'FAIL'} in ${fmtMs(r.elapsedMs)} (attempts=${r.attempts})`);
         if (!r.ok) {

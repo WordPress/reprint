@@ -24,7 +24,6 @@ class OnlyCliParseTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/only-cli-' . uniqid();
         mkdir($this->tempDir . '/state', 0755, true);
-        mkdir($this->tempDir . '/state/pull', 0755, true);
         mkdir($this->tempDir . '/fs', 0755, true);
     }
 
@@ -42,8 +41,8 @@ class OnlyCliParseTest extends TestCase
             $this->serverPipes = array();
         }
 
-        // The real CLI run may drop state files (pull/state.json, audit log)
-        // into the state dir, so a plain rmdir wouldn't clear it — recurse.
+        // The real CLI run may write remote pull state and an audit log into
+        // the state directory, so a plain rmdir wouldn't clear it — recurse.
         $this->recursiveDelete($this->tempDir);
         parent::tearDown();
     }
@@ -152,7 +151,10 @@ PHP, var_export($requestsLog, true)));
         return $requests;
     }
 
-    private function writePreflightState(bool $includeRoots = false): void
+    private function writePreflightState(
+        string $remoteReprintApiUrl,
+        bool $includeRoots = false
+    ): void
     {
         $data = array(
             'ok' => true,
@@ -175,7 +177,7 @@ PHP, var_export($requestsLog, true)));
 
         \write_current_pull_state(
             new \ImportClient(
-                'http://fake.invalid/',
+                $remoteReprintApiUrl,
                 $this->tempDir . '/state',
                 $this->tempDir . '/fs'
             ),
@@ -217,7 +219,7 @@ PHP, var_export($requestsLog, true)));
         // succeed because :wp-content: is resolvable. Preserving both values
         // forces resolution of :abspath:, which this preflight intentionally
         // omits.
-        $this->writePreflightState();
+        $this->writePreflightState('http://fake.invalid/?site-export-api');
 
         $output = $this->runCli(array(
             'files-pull',
@@ -304,14 +306,13 @@ PHP, var_export($requestsLog, true)));
 
     public function testRepeatedOnlyOptionsAreUsedByFilesPull(): void
     {
-        $this->writePreflightState(true);
-
         $requestsLog = $this->tempDir . '/requests.jsonl';
-        $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
+        $remoteReprintApiUrl = $this->startDirectoryCaptureServer($requestsLog);
+        $this->writePreflightState($remoteReprintApiUrl, true);
 
         $output = $this->runCli(array(
             'files-pull',
-            $remoteUrl,
+            $remoteReprintApiUrl,
             '--only',
             ':wp-content:/plugins',
             '--only',
@@ -344,7 +345,7 @@ PHP, var_export($requestsLog, true)));
     {
         // --abort runs after --only resolution, avoiding a network request while
         // still proving the CLI did not split the SOURCE at the comma.
-        $this->writePreflightState();
+        $this->writePreflightState('http://fake.invalid/?site-export-api');
 
         $output = $this->runCli(array(
             'files-pull',

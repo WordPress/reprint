@@ -56,7 +56,42 @@ class CliHelpTest extends TestCase
     {
         $output = $this->runHelp('import-metadata');
 
-        $this->assertStringContainsString('Usage: reprint pull-metadata --state-dir=DIR', $output);
+        $this->assertStringContainsString(
+            'Usage: reprint pull-metadata <remote-reprint-api-url> --state-dir=DIR',
+            $output
+        );
+    }
+
+    public function testApplyRuntimeHelpRequiresTheRemoteReprintApiUrlWhichSelectsState(): void
+    {
+        $output = $this->runHelp('apply-runtime');
+
+        $this->assertStringContainsString(
+            'Usage: reprint apply-runtime <remote-reprint-api-url>',
+            $output
+        );
+        $this->assertStringContainsString('no network calls are made', $output);
+    }
+
+    public function testPullMetadataRejectsAnInvocationWithoutARemoteReprintApiUrl(): void
+    {
+        $entry = __DIR__ . '/../../importer/import.php';
+        $stateDirectory =
+            sys_get_temp_dir() . '/pull-metadata-missing-remote-' . uniqid('', true);
+        $command =
+            escapeshellarg(PHP_BINARY)
+            . ' '
+            . escapeshellarg($entry)
+            . ' pull-metadata --state-dir='
+            . escapeshellarg($stateDirectory)
+            . ' 2>&1';
+        $output = shell_exec($command) ?? '';
+
+        $this->assertStringContainsString(
+            'Error: <remote-reprint-api-url> is required',
+            $output
+        );
+        $this->assertDirectoryDoesNotExist($stateDirectory);
     }
 
     public function testFilesPushHelpShowsOnlyItsCommandOptions(): void

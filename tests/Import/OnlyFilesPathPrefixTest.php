@@ -19,6 +19,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
+    private $pullStateDirectory;
     private $fsRoot;
 
     protected function setUp(): void
@@ -26,9 +27,15 @@ class OnlyFilesPathPrefixTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/only-files-prefix-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
+        $remoteReprintApiUrl = 'https://src.example/export.php';
+        $this->pullStateDirectory =
+            $this->stateDir
+            . '/remotes/'
+            . md5(rtrim($remoteReprintApiUrl, '?&'))
+            . '/pull';
         $this->fsRoot = $this->tempDir . '/srv/htdocs';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
+        mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->fsRoot, 0755, true);
     }
 
@@ -139,7 +146,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     private function readState(): array
     {
-        return json_decode(file_get_contents($this->stateDir . '/pull/state.json'), true);
+        return json_decode(file_get_contents($this->pullStateDirectory . '/state.json'), true);
     }
 
     public function testResolvePullOnlyFilesPrefixAddsDirectoriesOutsideWpContent(): void
@@ -268,7 +275,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     public function testRunAllowsSameOnlyPrefixesWhileFilesPullIsInProgress(): void
     {
-        file_put_contents($this->stateDir . '/pull/remote-index.next.jsonl', '');
+        file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
         $this->writeFilesPullState(array(
             'files_pull_only_fingerprint' => $this->onlyFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
@@ -285,7 +292,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     public function testRunRecordsOnlyFingerprintForInProgressFilesPullState(): void
     {
-        file_put_contents($this->stateDir . '/pull/remote-index.next.jsonl', '');
+        file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
         $this->writeFilesPullState(array(
             'files_pull_only_fingerprint' => null,
         ));

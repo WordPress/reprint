@@ -12,7 +12,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
     assertRemoteIndexEntryCount, assertSiteMirror,
-    fsRootDir,
+    fsRootDir, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -56,7 +56,7 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
     });
 
     it('state shows complete', () => {
-        const stateFile = join(tempDir, 'pull/state.json');
+        const stateFile = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
         assert.ok(existsSync(stateFile), 'Expected state file to exist');
 
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
@@ -64,7 +64,7 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
     });
 
     it('accounted for at least 3000 remote index entries', () => {
-        assertRemoteIndexEntryCount(tempDir);
+        assertRemoteIndexEntryCount(tempDir, importUrl());
     });
 
     it('imported files form a valid WordPress site mirror', () => {

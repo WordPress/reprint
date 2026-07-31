@@ -18,6 +18,7 @@ class FilesPullStateTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
+    private $pullStateDirectory;
     private $filesystem_root;
 
     protected function setUp(): void
@@ -25,8 +26,10 @@ class FilesPullStateTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/import-state-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
+        $this->pullStateDirectory =
+            $this->stateDir . '/remotes/' . md5('http://fake.url') . '/pull';
         $this->filesystem_root = $this->tempDir . '/fs-root';
-        mkdir($this->stateDir . '/pull', 0755, true);
+        mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -79,7 +82,7 @@ class FilesPullStateTest extends TestCase
      */
     private function readState(): array
     {
-        $contents = file_get_contents($this->stateDir . '/pull/state.json');
+        $contents = file_get_contents($this->pullStateDirectory . '/state.json');
         return json_decode($contents, true);
     }
 
@@ -101,12 +104,12 @@ class FilesPullStateTest extends TestCase
      */
     private function readFetchList(): array
     {
-        $file = $this->stateDir . '/pull/fetch-list.jsonl';
-        if (!file_exists($file)) {
+        $fetchListFilePath = $this->pullStateDirectory . '/fetch-list.jsonl';
+        if (!file_exists($fetchListFilePath)) {
             return [];
         }
         $paths = [];
-        foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        foreach (file($fetchListFilePath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
             $data = json_decode($line, true);
             if (isset($data["path"])) {
                 $paths[] = base64_decode($data["path"]);
@@ -177,7 +180,7 @@ class FilesPullStateTest extends TestCase
             "filter" => "essential-files",
         ]);
         file_put_contents(
-            $this->stateDir . '/pull/skipped-fetch-list.jsonl',
+            $this->pullStateDirectory . '/skipped-fetch-list.jsonl',
             json_encode([
                 "path" => base64_encode('/wp-content/uploads/2024/01/photo.jpg'),
             ], JSON_UNESCAPED_SLASHES) . "\n",
@@ -201,7 +204,7 @@ class FilesPullStateTest extends TestCase
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
         $this->assertNull($state["active_resumable_command"]["current_stage"]);
         $this->assertEquals("skipped-earlier", $state["filter"]);
-        $this->assertFileDoesNotExist($this->stateDir . '/pull/skipped-fetch-list.jsonl');
+        $this->assertFileDoesNotExist($this->pullStateDirectory . '/skipped-fetch-list.jsonl');
     }
 
     /**
@@ -209,7 +212,7 @@ class FilesPullStateTest extends TestCase
      */
     public function testAbortClearsCompletedStatus()
     {
-        $remoteIndexFile = $this->stateDir . '/pull/remote-index.jsonl';
+        $remoteIndexFile = $this->pullStateDirectory . '/remote-index.jsonl';
         file_put_contents($remoteIndexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
@@ -239,7 +242,7 @@ class FilesPullStateTest extends TestCase
      */
     public function testAbortThenRerunStartsFresh()
     {
-        $remoteIndexFile = $this->stateDir . '/pull/remote-index.jsonl';
+        $remoteIndexFile = $this->pullStateDirectory . '/remote-index.jsonl';
         file_put_contents($remoteIndexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
@@ -281,7 +284,7 @@ class FilesPullStateTest extends TestCase
     public function testSkippedEarlierAfterCompositePullAdoptsFilesPullState(): void
     {
         file_put_contents(
-            $this->stateDir . '/pull/skipped-fetch-list.jsonl',
+            $this->pullStateDirectory . '/skipped-fetch-list.jsonl',
             $this->indexLine('/wp-content/uploads/2024/01/photo.jpg', 1000, 100),
         );
         $this->writeState([
@@ -332,11 +335,11 @@ class FilesPullStateTest extends TestCase
     public function testDeltaDiffRedownloadsChangedIndexedFile()
     {
         // Remote index: file synced at ctime 1000
-        $remoteIndexFile = $this->stateDir . '/pull/remote-index.jsonl';
+        $remoteIndexFile = $this->pullStateDirectory . '/remote-index.jsonl';
         file_put_contents($remoteIndexFile, $this->indexLine('/wp-content/themes/flavor/style.css', 1000, 200));
 
         // Next remote index: same file at ctime 2000 (changed)
-        $nextRemoteIndexFile = $this->stateDir . '/pull/remote-index.next.jsonl';
+        $nextRemoteIndexFile = $this->pullStateDirectory . '/remote-index.next.jsonl';
         file_put_contents($nextRemoteIndexFile, $this->indexLine('/wp-content/themes/flavor/style.css', 2000, 250));
 
         // The file exists locally (downloaded during the initial sync)
@@ -372,11 +375,11 @@ class FilesPullStateTest extends TestCase
     public function testDeltaDiffSkipsPreExistingLocalFile()
     {
         // Remote index: empty (file was never synced by us)
-        $remoteIndexFile = $this->stateDir . '/pull/remote-index.jsonl';
+        $remoteIndexFile = $this->pullStateDirectory . '/remote-index.jsonl';
         file_put_contents($remoteIndexFile, '');
 
         // Next remote index: file exists on remote
-        $nextRemoteIndexFile = $this->stateDir . '/pull/remote-index.next.jsonl';
+        $nextRemoteIndexFile = $this->pullStateDirectory . '/remote-index.next.jsonl';
         file_put_contents($nextRemoteIndexFile, $this->indexLine('/wp-content/object-cache.php', 1000, 500));
 
         // The file exists locally (pre-existing, e.g. hosting drop-in)

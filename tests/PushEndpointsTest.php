@@ -2642,7 +2642,9 @@ final class PushEndpointsTest extends TestCase {
         $this->assertFileExists($push_state_directory . '/previous_local_index.jsonl');
         $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
-        $this->assertFileDoesNotExist($state_directory . '/pull/state.json');
+        $this->assertFileDoesNotExist(
+            dirname($push_state_directory) . '/pull/state.json'
+        );
 
         $progress = json_decode(
             (string) file_get_contents($state_directory . '/progress.json'),

@@ -18,6 +18,7 @@ import {
     readAuditLog,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -181,7 +182,7 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
                     }
                 }
 
-                const stateFile = join(tempDir, 'pull/state.json');
+                const stateFile = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
                 assert.ok(existsSync(stateFile), 'Expected state file to exist');
                 const state = JSON.parse(readFileSync(stateFile, 'utf8'));
                 assert.equal(state.active_resumable_command.completion_state, 'complete',
@@ -194,7 +195,10 @@ describe('Import: SQL Stream Crash Recovery', { timeout: 300000 }, () => {
                     `Expected ${mode} mode to retry the interrupted REST request`,
                 );
 
-                assert.ok(!existsSync(join(tempDir, 'pull/sql-buffer')),
+                assert.ok(!existsSync(join(
+                    pullStateDirectory(tempDir, importUrl()),
+                    'sql-buffer',
+                )),
                     'Expected pull/sql-buffer to be absent after successful completion');
             } finally {
                 cleanupTempDir(tempDir);

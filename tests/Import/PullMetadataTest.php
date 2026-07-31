@@ -11,6 +11,7 @@ class PullMetadataTest extends TestCase
     private string $tempDir;
     private string $stateDir;
     private string $fsRoot;
+    private string $pullStateDirectory;
 
     /**
      * Creates an isolated state directory for each metadata scenario.
@@ -21,8 +22,12 @@ class PullMetadataTest extends TestCase
         $this->tempDir = sys_get_temp_dir() . '/reprint-pull-metadata-' . uniqid('', true);
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/fs-root';
+        $this->pullStateDirectory =
+            $this->stateDir
+            . '/remotes/'
+            . md5('http://example.invalid')
+            . '/pull';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
     }
 
@@ -62,10 +67,13 @@ class PullMetadataTest extends TestCase
     /**
      * Writes pull state directly so each test can model one lifecycle shape.
      */
-    private function writeState(array $state): void
+    private function writeState(
+        array $state,
+        string $remoteReprintApiUrl = 'http://example.invalid'
+    ): void
     {
         \write_current_pull_state(
-            new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot),
+            new \ImportClient($remoteReprintApiUrl, $this->stateDir, $this->fsRoot),
             $state
         );
     }
@@ -73,9 +81,12 @@ class PullMetadataTest extends TestCase
     /**
      * Runs the metadata command and returns its decoded JSON response.
      */
-    private function readMetadata(string $command = 'pull-metadata'): array
+    private function readMetadata(
+        string $command = 'pull-metadata',
+        string $remoteReprintApiUrl = 'http://example.invalid'
+    ): array
     {
-        $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
+        $client = new \ImportClient($remoteReprintApiUrl, $this->stateDir, $this->fsRoot);
 
         ob_start();
         $client->run(['command' => $command]);
@@ -106,7 +117,7 @@ class PullMetadataTest extends TestCase
         $metadata = $this->readMetadata();
 
         $this->assertFalse($metadata['hasCompletedOnce']);
-        $this->assertFileDoesNotExist($this->stateDir . '/pull/state.json');
+        $this->assertFileDoesNotExist($this->pullStateDirectory . '/state.json');
         $this->assertNull($metadata['pullStage']);
         $this->assertSame([
             'homeUrl' => null,
@@ -212,5 +223,33 @@ class PullMetadataTest extends TestCase
 
         $this->assertTrue($metadata['hasCompletedOnce']);
         $this->assertNull($metadata['pullStage']);
+    }
+
+    /**
+     * Verifies each remote Reprint API URL reads only its own pull state.
+     */
+    public function testPullMetadataReadsTheSelectedRemoteStateDirectory(): void
+    {
+        $firstRemoteReprintApiUrl = 'https://first.example/?reprint-api';
+        $secondRemoteReprintApiUrl = 'https://second.example/?reprint-api';
+        $this->writeState([
+            'pull_pipeline' => [
+                'last_completed_stage' => 'files-pull',
+            ],
+        ], $firstRemoteReprintApiUrl);
+        $this->writeState([
+            'pull_pipeline' => [
+                'last_completed_stage' => 'db-apply',
+            ],
+        ], $secondRemoteReprintApiUrl);
+
+        $this->assertSame(
+            'files-pull',
+            $this->readMetadata('pull-metadata', $firstRemoteReprintApiUrl)['pullStage']
+        );
+        $this->assertSame(
+            'db-apply',
+            $this->readMetadata('pull-metadata', $secondRemoteReprintApiUrl)['pullStage']
+        );
     }
 }

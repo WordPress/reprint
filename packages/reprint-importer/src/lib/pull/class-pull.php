@@ -278,6 +278,7 @@ class Pull
             // recorded that stage as complete. Clear the direct command
             // checkpoint first so the stage computes a fresh delta.
             $state_dir = $this->client->state_dir;
+            $pull_state_directory = $this->client->pull_state_directory;
             if ($state_command === 'files-pull' && in_array('files-pull', $stages, true)) {
                 // Keep the remote index, but clear transient files-pull state
                 // so this pipeline downloads a next remote index and compares
@@ -298,9 +299,9 @@ class Pull
                 $state->files_pull_only_fingerprint = null;
                 $this->client->save_state();
                 foreach ([
-                    "{$state_dir}/pull/remote-index.next.jsonl",
-                    "{$state_dir}/pull/fetch-list.jsonl",
-                    "{$state_dir}/pull/skipped-fetch-list.jsonl",
+                    "{$pull_state_directory}/remote-index.next.jsonl",
+                    "{$pull_state_directory}/fetch-list.jsonl",
+                    "{$pull_state_directory}/skipped-fetch-list.jsonl",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -320,7 +321,7 @@ class Pull
                 foreach ([
                     "{$state_dir}/db.sql",
                     "{$state_dir}/db-tables.jsonl",
-                    "{$state_dir}/pull/domains.json",
+                    "{$pull_state_directory}/domains.json",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -768,6 +769,7 @@ class Pull
     private function prepare_repull(string $command): void
     {
         $state_dir = $this->client->state_dir;
+        $pull_state_directory = $this->client->pull_state_directory;
         switch ($command) {
             case 'pull':
                 $reset_file_transfer_state = true;
@@ -826,14 +828,14 @@ class Pull
 
         $paths = [];
         if ($reset_file_transfer_state) {
-            $paths[] = $state_dir . "/pull/remote-index.next.jsonl";
-            $paths[] = $state_dir . "/pull/fetch-list.jsonl";
-            $paths[] = $state_dir . "/pull/skipped-fetch-list.jsonl";
+            $paths[] = $pull_state_directory . "/remote-index.next.jsonl";
+            $paths[] = $pull_state_directory . "/fetch-list.jsonl";
+            $paths[] = $pull_state_directory . "/skipped-fetch-list.jsonl";
         }
         if ($reset_db_state) {
             $paths[] = $state_dir . "/db.sql";
             $paths[] = $state_dir . "/db-tables.jsonl";
-            $paths[] = $state_dir . "/pull/domains.json";
+            $paths[] = $pull_state_directory . "/domains.json";
         }
 
         foreach ($paths as $path) {

@@ -22,7 +22,6 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         $this->outputDir = $this->tempDir . '/runtime';
 
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->fsRoot, 0755, true);
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
     }
@@ -142,6 +141,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
 
     public function testApplyRuntimeAddsProxyWhenSkippedUploadsRemain(): void
     {
+        $client = $this->makeClient();
         $this->writeState([
             'active_resumable_command' => [
                 'command_name' => 'db-apply',
@@ -150,24 +150,30 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             'filter' => 'essential-files',
         ]);
         file_put_contents(
-            $this->stateDir . '/pull/skipped-fetch-list.jsonl',
+            $client->pull_state_directory . '/skipped-fetch-list.jsonl',
             json_encode(['path' => '/wp-content/uploads/2024/01/photo.jpg']) . "\n",
         );
 
-        $client = $this->makeClient();
         $this->loadClientState($client);
         $runtime = $this->runApplyRuntime($client);
+        $resolvedPullStateDirectory =
+            realpath($client->pull_state_directory)
+            ?: $client->pull_state_directory;
 
         $this->assertStringContainsString(
             "REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL",
             $runtime,
         );
         $this->assertStringContainsString(
-            "REPRINT_PULL_STATE_FILE",
+            "define('REPRINT_PULL_STATE_FILE', '"
+                . $resolvedPullStateDirectory
+                . "/state.json');",
             $runtime,
         );
         $this->assertStringContainsString(
-            "REPRINT_PULL_SKIPPED_FETCH_LIST_FILE",
+            "define('REPRINT_PULL_SKIPPED_FETCH_LIST_FILE', '"
+                . $resolvedPullStateDirectory
+                . "/skipped-fetch-list.jsonl');",
             $runtime,
         );
         $this->assertStringContainsString(

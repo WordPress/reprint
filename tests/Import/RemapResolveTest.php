@@ -18,6 +18,7 @@ class RemapResolveTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
+    private $pullStateDirectory;
     private $fsRoot;
     private $root; // realpath of fsRoot (targets are rooted under it)
 
@@ -26,9 +27,15 @@ class RemapResolveTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/remap-resolve-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
+        $remoteReprintApiUrl = 'https://src.example/export.php';
+        $this->pullStateDirectory =
+            $this->stateDir
+            . '/remotes/'
+            . md5(rtrim($remoteReprintApiUrl, '?&'))
+            . '/pull';
         $this->fsRoot = $this->tempDir . '/srv/htdocs';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
+        mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->fsRoot, 0755, true);
         $this->root = realpath($this->fsRoot);
     }
@@ -85,7 +92,7 @@ class RemapResolveTest extends TestCase
 
     private function writeRemoteIndex(): void
     {
-        file_put_contents($this->stateDir . '/pull/remote-index.jsonl', "{}\n");
+        file_put_contents($this->pullStateDirectory . '/remote-index.jsonl', "{}\n");
     }
 
     // --- resolution: SOURCE TARGET → one source => target rule -------------

@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    assertPullPipelineComplete,
+    assertPullPipelineComplete, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -61,7 +61,10 @@ describe('Import: Pull start-runtime none', { timeout: 180000 }, () => {
     });
 
     it('marks the pull complete and generates playground runtime files', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+            'utf-8',
+        ));
         assertPullPipelineComplete(state);
         assert.equal(state.active_resumable_command.completion_state, 'complete');
 

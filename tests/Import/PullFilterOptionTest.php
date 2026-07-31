@@ -103,11 +103,11 @@ class PullFilterFakeClient extends \ImportClient
         $this->files_pull_runs++;
         if ($this->create_skipped_list) {
             file_put_contents(
-                $this->state_dir . '/pull/skipped-fetch-list.jsonl',
+                $this->pull_state_directory . '/skipped-fetch-list.jsonl',
                 "{\"path\":\"" . base64_encode('/wp-content/uploads/2024/01/photo.jpg') . "\"}\n",
             );
         } else {
-            @unlink($this->state_dir . '/pull/skipped-fetch-list.jsonl');
+            @unlink($this->pull_state_directory . '/skipped-fetch-list.jsonl');
         }
 
         $state = $this->get_state();
@@ -183,6 +183,7 @@ class PullFilterOptionTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
+    private $pullStateDirectory;
     private $filesystem_root;
 
     protected function setUp(): void
@@ -190,9 +191,14 @@ class PullFilterOptionTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/pull-filter-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
+        $remoteReprintApiUrl = 'http://fake.invalid';
+        $this->pullStateDirectory =
+            $this->stateDir
+            . '/remotes/'
+            . md5(rtrim($remoteReprintApiUrl, '?&'))
+            . '/pull';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -231,7 +237,7 @@ class PullFilterOptionTest extends TestCase
     private function readState(): array
     {
         return json_decode(
-            file_get_contents($this->stateDir . '/pull/state.json'),
+            file_get_contents($this->pullStateDirectory . '/state.json'),
             true,
         );
     }
@@ -262,7 +268,7 @@ class PullFilterOptionTest extends TestCase
             ob_end_clean();
         }
 
-        $this->assertFileDoesNotExist($this->stateDir . '/pull/state.json');
+        $this->assertFileDoesNotExist($this->pullStateDirectory . '/state.json');
     }
 
     public function testPullDoesNotAdvancePastFailedPreflight(): void
@@ -420,7 +426,7 @@ class PullFilterOptionTest extends TestCase
             ob_end_clean();
         }
 
-        $this->assertFileDoesNotExist($this->stateDir . '/pull/state.json');
+        $this->assertFileDoesNotExist($this->pullStateDirectory . '/state.json');
     }
 
     public function testPullFilesSummaryReportsNoChangedFilesPulled(): void
@@ -775,7 +781,7 @@ class PullFilterOptionTest extends TestCase
             ob_end_clean();
         }
 
-        $this->assertFileDoesNotExist($this->stateDir . '/pull/state.json');
+        $this->assertFileDoesNotExist($this->pullStateDirectory . '/state.json');
     }
 
     public function testPullWithEssentialFilesPersistsDeferredFilesState(): void
@@ -796,7 +802,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertTrue($state["pull_pipeline"]["skipped_pending"]);
         $this->assertTrue($state["pull_pipeline"]["has_completed_once"]);
         $this->assertSame('essential-files', $state["filter"]);
-        $this->assertFileExists($this->stateDir . '/pull/skipped-fetch-list.jsonl');
+        $this->assertFileExists($this->pullStateDirectory . '/skipped-fetch-list.jsonl');
     }
 
     public function testPullWithoutFilterRecordsFullDownloadMode(): void
@@ -816,7 +822,7 @@ class PullFilterOptionTest extends TestCase
         $this->assertFalse($state["pull_pipeline"]["skipped_pending"]);
         $this->assertTrue($state["pull_pipeline"]["has_completed_once"]);
         $this->assertSame('none', $state["filter"]);
-        $this->assertFileDoesNotExist($this->stateDir . '/pull/skipped-fetch-list.jsonl');
+        $this->assertFileDoesNotExist($this->pullStateDirectory . '/skipped-fetch-list.jsonl');
     }
 
     public function testPullDerivesFlatDocumentRootFromFlattenTo(): void

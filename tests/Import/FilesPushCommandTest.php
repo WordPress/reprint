@@ -122,7 +122,7 @@ final class FilesPushCommandTest extends TestCase
 
         $rewriteUrlWithForceHttpSource = $this->runCli([
             'db-apply',
-            '-',
+            'https://example.test/?reprint-api=1',
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->localTree,
             '--rewrite-url',
@@ -227,7 +227,11 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringContainsString( (string) realpath($this->localTree), $nestedStateError['error'] ?? '' );
 
         $this->assertNoSenderState($this->stateDirectory);
-        $this->assertFileDoesNotExist($this->stateDirectory . '/pull/state.json');
+        $this->assertFileDoesNotExist(
+            $this->pullStateFileForRemoteReprintApiUrl(
+                'https://example.test/?reprint-api=1'
+            )
+        );
     }
 
     public function testFilesPushMasksTheSharedSecretInOutputAndStateFiles(): void
@@ -244,7 +248,9 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame('files-push', $finalLine['command'] ?? null);
         $this->assertSame('failed', $finalLine['status'] ?? null);
         $this->assertSame(1, $result['exit']);
-        $this->assertFileDoesNotExist($this->stateDirectory . '/pull/state.json');
+        $this->assertFileDoesNotExist(
+            $this->pullStateFileForRemoteReprintApiUrl($remoteReprintApiUrl)
+        );
     }
 
     public function testCorruptSenderStateUsesTheStructuredWorkflowErrorResult(): void
@@ -363,6 +369,16 @@ final class FilesPushCommandTest extends TestCase
         $senderPaths = glob($stateDirectory . '/remotes/*/push/sender.json');
         $this->assertIsArray($senderPaths);
         $this->assertSame([], $senderPaths);
+    }
+
+    private function pullStateFileForRemoteReprintApiUrl(
+        string $remoteReprintApiUrl
+    ): string
+    {
+        return $this->stateDirectory
+            . '/remotes/'
+            . md5(rtrim($remoteReprintApiUrl, '?&'))
+            . '/pull/state.json';
     }
 
     private function readTree(string $path): string

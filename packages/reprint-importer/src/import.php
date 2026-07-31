@@ -232,6 +232,9 @@ class ImportClient
     /** @var string Caller-selected state directory for this filesystem root. */
     public $state_dir;
 
+    /** @var string Pull state directory for this remote Reprint API URL. */
+    public $pull_state_directory;
+
     /** @var string Filesystem root where the remote filesystem is reconstructed. */
     public $filesystem_root;
 
@@ -518,18 +521,22 @@ class ImportClient
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->filesystem_root = rtrim($filesystem_root, "/");
-        $this->pull_state_file = $this->state_dir . "/pull/state.json";
-        $this->remote_index_file = $this->state_dir . "/pull/remote-index.jsonl";
+        $this->pull_state_directory = self::remote_state_directory_path(
+            $this->remote_reprint_api_url,
+            $this->state_dir
+        ) . "/pull";
+        $this->pull_state_file = $this->pull_state_directory . "/state.json";
+        $this->remote_index_file = $this->pull_state_directory . "/remote-index.jsonl";
         $this->remote_index_wal_path =
-            $this->state_dir . "/pull/remote-index.wal";
+            $this->pull_state_directory . "/remote-index.wal";
         $this->next_remote_index_file =
-            $this->state_dir . "/pull/remote-index.next.jsonl";
+            $this->pull_state_directory . "/remote-index.next.jsonl";
         $this->fetch_list_file =
-            $this->state_dir . "/pull/fetch-list.jsonl";
+            $this->pull_state_directory . "/fetch-list.jsonl";
         $this->skipped_fetch_list_file =
-            $this->state_dir . "/pull/skipped-fetch-list.jsonl";
+            $this->pull_state_directory . "/skipped-fetch-list.jsonl";
         $this->audit_log_file = $this->state_dir . "/audit.log";
-        $this->volatile_files_file = $this->state_dir . "/pull/volatile-files.json";
+        $this->volatile_files_file = $this->pull_state_directory . "/volatile-files.json";
         $this->progress_file = $this->state_dir . "/progress.json";
 
         // Detect TTY for progress display. In stdout mode this is re-evaluated
@@ -540,9 +547,9 @@ class ImportClient
         $this->pull = new Pull($this, $this->progress);
 
         // Create directories
-        if (!is_dir($this->state_dir . "/pull")) {
-            if (!mkdir($this->state_dir . "/pull", 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->state_dir}/pull");
+        if (!is_dir($this->pull_state_directory)) {
+            if (!mkdir($this->pull_state_directory, 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->pull_state_directory}");
             }
         }
         if (!is_dir($this->filesystem_root)) {
@@ -698,7 +705,7 @@ class ImportClient
     {
         // Mask the remote URL (argv[2]) to avoid logging secrets embedded in query strings.
         $masked = $argv;
-        if (isset($masked[2]) && $command !== 'apply-runtime') {
+        if (isset($masked[2])) {
             $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
             if ($command === 'files-push') {
                 $masked[2] = self::mask_url_credentials($masked[2]);
@@ -1812,10 +1819,11 @@ class ImportClient
             );
         }
         $resolved_local_filesystem_root = rtrim($resolved_local_filesystem_root, '/') ?: '/';
-        $remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
         // Resolve an absolute physical path even when its final components do not exist.
-        $remote_state_directory =
-            $state_dir . '/remotes/' . md5($remote_reprint_api_url);
+        $remote_state_directory = self::remote_state_directory_path(
+            $remote_reprint_api_url,
+            $state_dir
+        );
         $push_state_directory = $remote_state_directory . '/push';
         if (strpos($push_state_directory, '/') !== 0) {
             $working_directory = getcwd();
@@ -1855,6 +1863,17 @@ class ImportClient
         }
 
         return $push_state_directory;
+    }
+
+    /** Returns `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`. */
+    private static function remote_state_directory_path(
+        string $remote_reprint_api_url,
+        string $state_dir
+    ): string {
+        return
+            rtrim($state_dir, '/')
+            . '/remotes/'
+            . md5(rtrim($remote_reprint_api_url, '?&'));
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
@@ -1969,7 +1988,7 @@ class ImportClient
                         "FILE DELETE | {$tables_file} | abort db-pull",
                     );
                 }
-                $domains_file = $this->state_dir . "/pull/domains.json";
+                $domains_file = $this->pull_state_directory . "/domains.json";
                 if (file_exists($domains_file)) {
                     unlink($domains_file);
                     $this->audit_log(
@@ -3767,7 +3786,7 @@ class ImportClient
      */
     private function run_db_domains(): void
     {
-        $domains_file = $this->state_dir . "/pull/domains.json";
+        $domains_file = $this->pull_state_directory . "/domains.json";
         $sql_file = $this->state_dir . "/db.sql";
 
         if (file_exists($domains_file)) {
@@ -4345,11 +4364,13 @@ class ImportClient
         }
 
         $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
-        $state_dir = realpath($this->state_dir) ?: $this->state_dir;
+        $pull_state_directory =
+            realpath($this->pull_state_directory)
+            ?: $this->pull_state_directory;
         $manifest->constants["REPRINT_PULL_STATE_FILE"] =
-            rtrim($state_dir, "/") . "/pull/state.json";
+            rtrim($pull_state_directory, "/") . "/state.json";
         $manifest->constants["REPRINT_PULL_SKIPPED_FETCH_LIST_FILE"] =
-            rtrim($state_dir, "/") . "/pull/skipped-fetch-list.jsonl";
+            rtrim($pull_state_directory, "/") . "/skipped-fetch-list.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
@@ -5236,7 +5257,7 @@ class ImportClient
         }
 
         // Show discovered domains if available
-        $domains_file = $this->state_dir . "/pull/domains.json";
+        $domains_file = $this->pull_state_directory . "/domains.json";
         if (file_exists($domains_file)) {
             $domains = json_decode(file_get_contents($domains_file), true);
             if (is_array($domains) && !empty($domains)) {
@@ -5403,7 +5424,7 @@ class ImportClient
         $stmts_since_save = 0;
 
         // Load pre-computed statement count from db-pull for progress reporting
-        $sql_stats_file = $this->state_dir . "/pull/sql-stats.json";
+        $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
         $statements_total = null;
         if (file_exists($sql_stats_file)) {
             $stats = json_decode(file_get_contents($sql_stats_file), true);
@@ -7653,7 +7674,7 @@ class ImportClient
             // Each SQL chunk is appended to this file as it arrives; when the
             // query completes and executes, the file is truncated. If the process
             // dies at any point, the next run reloads whatever was accumulated.
-            $sql_buffer_file = $this->state_dir . "/pull/sql-buffer";
+            $sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
             if (file_exists($sql_buffer_file)) {
                 $sql_buffer = file_get_contents($sql_buffer_file);
                 $this->audit_log(
@@ -7676,8 +7697,8 @@ class ImportClient
         $domain_collector = class_exists('DomainCollector')
             ? new \DomainCollector()
             : null;
-        $domains_file = $this->state_dir . "/pull/domains.json";
-        $sql_stats_file = $this->state_dir . "/pull/sql-stats.json";
+        $domains_file = $this->pull_state_directory . "/domains.json";
+        $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
         $sql_statements_counted = (int) ($this->get_state()->sql_statements_counted ?? 0);
 
         // Auto-detect the source site domain from the export URL so it
@@ -8015,7 +8036,7 @@ class ImportClient
                 $mysql_conn = null;
                 // Clean up buffer file — if we got here with an empty buffer,
                 // all queries were executed successfully.
-                $sql_buffer_file = $this->state_dir . "/pull/sql-buffer";
+                $sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
                 if ($pending === "" && file_exists($sql_buffer_file)) {
                     unlink($sql_buffer_file);
                 }
@@ -12627,11 +12648,16 @@ if (
                 "\n" .
                 "Output files:\n" .
                 "  (filesystem root)/                       Downloaded files\n" .
-                "  pull/remote-index.jsonl         Remote index\n" .
-                "  pull/remote-index.next.jsonl    Next remote index\n" .
-                "  pull/fetch-list.jsonl           Files pending download\n" .
-                "  pull/skipped-fetch-list.jsonl   Files skipped by --filter=essential-files\n" .
-                "  pull/state.json                 Resumable pull state\n" .
+                "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/remote-index.jsonl\n" .
+                "                                           Remote index\n" .
+                "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/remote-index.next.jsonl\n" .
+                "                                           Next remote index\n" .
+                "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/fetch-list.jsonl\n" .
+                "                                           Files pending download\n" .
+                "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/skipped-fetch-list.jsonl\n" .
+                "                                           Files skipped by --filter=essential-files\n" .
+                "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json\n" .
+                "                                           Resumable pull state\n" .
                 "  audit.log                       Audit log\n",
         ],
         "files-diff" => [
@@ -12681,7 +12707,7 @@ if (
             "description" =>
                 "Streams the full remote directory tree over HTTP and writes each\n" .
                 "entry (path, size, ctime, type, and directory emptiness) to\n" .
-                "pull/remote-index.next.jsonl.\n" .
+                "<remote-state-directory>/pull/remote-index.next.jsonl.\n" .
                 "\n" .
                 "On the first run, builds the complete index. On subsequent runs,\n" .
                 "re-indexes and diffs against the prior snapshot to produce a\n" .
@@ -12737,24 +12763,25 @@ if (
             "description" =>
                 "Prints domains found in the SQL dump, one per line.\n" .
                 "\n" .
-                "If pull/domains.json exists (cached by db-pull), it is read\n" .
+                "If <remote-state-directory>/pull/domains.json exists (cached by db-pull), it is read\n" .
                 "directly. Otherwise, db.sql is scanned and the result is cached\n" .
                 "for future calls. No network calls.\n" .
                 "\n" .
                 "Example:\n" .
-                "  reprint db-domains - --state-dir=/path/to/state\n",
+                "  reprint db-domains https://example.com --state-dir=/path/to/state\n",
             "extra" => null,
         ],
         "pull-metadata" => [
             "level" => "low",
             "short" => "Print local pull metadata for host integrations as JSON",
-            "usage" => "reprint pull-metadata --state-dir=DIR",
+            "usage" => "reprint pull-metadata <remote-reprint-api-url> --state-dir=DIR",
             "description" =>
-                "Reads --state-dir/pull/state.json and prints pull lifecycle and\n" .
-                "source-site metadata for host integrations. No network calls are made.\n",
+                "Reads <remote-state-directory>/pull/state.json and prints pull\n" .
+                "lifecycle and source-site metadata for host integrations. The remote\n" .
+                "Reprint API URL selects the state; no network calls are made.\n",
             "extra" =>
                 "Example:\n" .
-                "  reprint pull-metadata --state-dir=./state | jq '.hasCompletedOnce'\n",
+                "  reprint pull-metadata https://example.com --state-dir=./state | jq '.hasCompletedOnce'\n",
         ],
         "db-apply" => [
             "level" => "low",
@@ -12765,12 +12792,12 @@ if (
                 "database credentials to state for use by apply-runtime.\n",
             "extra" =>
                 "MySQL example:\n" .
-                "  reprint db-apply - --state-dir=./state --fs-root=./files \\\n" .
+                "  reprint db-apply https://example.com --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-user=root --target-db=wp_new \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n" .
                 "\n" .
                 "SQLite example:\n" .
-                "  reprint db-apply - --state-dir=./state --fs-root=./files \\\n" .
+                "  reprint db-apply https://example.com --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-engine=sqlite --target-sqlite-path=/path/to/db.sqlite \\\n" .
                 "    --rewrite-url https://old.com https://new.com\n",
         ],
@@ -12795,6 +12822,9 @@ if (
         "apply-runtime" => [
             "level" => "low",
             "short" => "Generate server config and prepare the site to run locally",
+            "usage" =>
+                "reprint apply-runtime <remote-reprint-api-url> --state-dir=DIR " .
+                "(--fs-root=DIR|--flat-document-root=DIR) [options]",
             "description" =>
                 "Generates server configuration (runtime.php, nginx.conf or start.sh)\n" .
                 "from preflight data and removes production-only drop-ins and mu-plugins\n" .
@@ -12803,7 +12833,8 @@ if (
                 "If db-apply was run first, embeds the target database credentials\n" .
                 "into runtime.php automatically.\n" .
                 "\n" .
-                "Does not require a remote URL — reads only from local state.\n" .
+                "The remote Reprint API URL selects the state used to generate the\n" .
+                "runtime configuration; no network calls are made.\n" .
                 "\n" .
                 "Pass --fs-root for the raw download directory (the remote document_root\n" .
                 "path is appended automatically), or --flat-document-root for a directory\n" .
@@ -12840,11 +12871,11 @@ if (
                 "\n" .
                 "Examples:\n" .
                 "  # From raw download directory:\n" .
-                "  reprint apply-runtime --state-dir=./state \\\n" .
+                "  reprint apply-runtime https://example.com --state-dir=./state \\\n" .
                 "    --fs-root=./files --output-dir=./runtime --runtime=php-builtin\n" .
                 "\n" .
                 "  # From flattened layout:\n" .
-                "  reprint apply-runtime --state-dir=./state \\\n" .
+                "  reprint apply-runtime https://example.com --state-dir=./state \\\n" .
                 "    --flat-document-root=./flat --output-dir=./runtime --runtime=php-builtin\n" .
                 "\n" .
                 "  bash ./runtime/start.sh\n",
@@ -12884,24 +12915,19 @@ if (
         exit(0);
     }
 
-    // apply-runtime and pull-metadata don't need a remote URL. Other
-    // local-only commands (db-domains, db-apply, etc.) still accept it for
-    // CLI consistency and backward compatibility with existing callers.
-    $local_only_commands = ["apply-runtime", "pull-metadata"];
-    $is_local_only = in_array($command, $local_only_commands, true);
-
-    if ($is_local_only) {
-        $remote_reprint_api_url = "-";
-        $option_start_index = 2; // options start right after the command
-    } else {
-        $remote_reprint_api_url = $argv[2] ?? null;
-        if (!$remote_reprint_api_url) {
-            fwrite(STDERR, "Error: <remote-reprint-api-url> is required\n");
-            fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
-            exit(1);
-        }
-        $option_start_index = 3;
+    // Every command which reads or writes state names the remote Reprint API
+    // URL whose remote state directory it uses. Local commands use the URL to
+    // select state without making a network request.
+    $remote_reprint_api_url = $argv[2] ?? null;
+    if (
+        !$remote_reprint_api_url
+        || strpos($remote_reprint_api_url, '-') === 0
+    ) {
+        fwrite(STDERR, "Error: <remote-reprint-api-url> is required\n");
+        fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
+        exit(1);
     }
+    $option_start_index = 3;
 
     [$state_dir, $filesystem_root, $options] = _cli_parse_options(
         $argv, $argc, $option_start_index, $option_defs

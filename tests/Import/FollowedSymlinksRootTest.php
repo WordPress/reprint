@@ -279,7 +279,7 @@ class FollowedSymlinksRootTest extends TestCase
             'type' => 'link',
             'intermediate' => true,
         ]);
-        file_put_contents($this->stateDir . '/pull/remote-index.next.jsonl', $entry . "\n");
+        file_put_contents($c->pull_state_directory . '/remote-index.next.jsonl', $entry . "\n");
 
         $rc->getMethod('recreate_intermediate_symlinks')->invoke($c);
 

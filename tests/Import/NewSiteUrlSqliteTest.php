@@ -101,10 +101,17 @@ class NewSiteUrlSqliteTest extends TestCase
     /**
      * Write the pull state file that db-apply expects.
      */
-    private function writeState(array $extra = []): void
+    private function writeState(
+        string $remoteReprintApiUrl,
+        array $extra = []
+    ): void
     {
         \write_current_pull_state(
-            new \ImportClient('http://example.invalid', $this->tempDir, $this->tempDir),
+            new \ImportClient(
+                $remoteReprintApiUrl,
+                $this->tempDir,
+                $this->tempDir . '/fs-root'
+            ),
             $extra
         );
     }
@@ -145,7 +152,7 @@ class NewSiteUrlSqliteTest extends TestCase
 
         // Prepare db.sql
         file_put_contents($this->tempDir . '/db.sql', $this->buildSqlDump($oldUrl));
-        $this->writeState();
+        $this->writeState($exportUrl);
 
         // Run db-apply via ImportClient
         $client = new \ImportClient(
@@ -205,7 +212,7 @@ class NewSiteUrlSqliteTest extends TestCase
 
         // Build dump with HTTPS siteurl — note that the export URL uses HTTP
         file_put_contents($this->tempDir . '/db.sql', $this->buildSqlDump($httpsUrl));
-        $this->writeState();
+        $this->writeState($exportUrl);
 
         $client = new \ImportClient(
             $exportUrl,
@@ -271,7 +278,7 @@ class NewSiteUrlSqliteTest extends TestCase
         );
 
         file_put_contents($this->tempDir . '/db.sql', $sql);
-        $this->writeState([
+        $this->writeState($exportUrl, [
             'preflight' => [
                 'data' => [
                     'database' => ['wp' => ['table_prefix' => 'wp_']],
@@ -312,6 +319,7 @@ class NewSiteUrlSqliteTest extends TestCase
 
     public function testSqliteDbApplyPreservesArbitraryBase64Bytes(): void
     {
+        $remoteReprintApiUrl = 'https://old-site.example.com/?reprint-api';
         $bytes = '';
         for ($i = 0; $i <= 255; $i++) {
             $bytes .= chr($i);
@@ -337,10 +345,10 @@ class NewSiteUrlSqliteTest extends TestCase
         );
 
         file_put_contents($this->tempDir . '/db.sql', implode("\n", $stmts) . "\n");
-        $this->writeState();
+        $this->writeState($remoteReprintApiUrl);
 
         $client = new \ImportClient(
-            'https://old-site.example.com/?reprint-api',
+            $remoteReprintApiUrl,
             $this->tempDir,
             $this->tempDir . '/fs-root',
         );
@@ -367,6 +375,7 @@ class NewSiteUrlSqliteTest extends TestCase
 
     public function testSqlitePragmasDoNotChangeProgressCounters(): void
     {
+        $remoteReprintApiUrl = 'https://old-site.example.com/?reprint-api';
         $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
         $drop = "DROP TABLE IF EXISTS `wp_options`;";
         $create = "CREATE TABLE `wp_options` ("
@@ -386,10 +395,10 @@ class NewSiteUrlSqliteTest extends TestCase
         $sql = implode("\n", [$drop, $create, $insert]);
 
         file_put_contents($this->tempDir . '/db.sql', $sql);
-        $this->writeState();
+        $this->writeState($remoteReprintApiUrl);
 
         $client = new \ImportClient(
-            'https://old-site.example.com/?reprint-api',
+            $remoteReprintApiUrl,
             $this->tempDir,
             $this->tempDir . '/fs-root',
         );
@@ -404,7 +413,10 @@ class NewSiteUrlSqliteTest extends TestCase
             'target_db' => 'wp_test',
         ]);
 
-        $state = json_decode(file_get_contents($this->tempDir . '/pull/state.json'), true);
+        $state = json_decode(
+            file_get_contents($client->pull_state_directory . '/state.json'),
+            true
+        );
         $this->assertSame('complete', $state['active_resumable_command']['completion_state']);
         $this->assertSame(3, $state['apply']['statements_executed']);
         $this->assertSame(strlen($sql), $state['apply']['bytes_read']);

@@ -159,32 +159,32 @@ development. There are no compatibility aliases or migration paths.
 
 The **state directory** is the caller-supplied `<state-dir>`; use `$state_dir`.
 Reprint uses it exactly as supplied and does not append `.reprint`. A consumer
-may choose `.reprint` or any other private directory name. The **pull state
-directory** is `<state-dir>/pull`; use `$pull_state_directory`. Filenames
-inside the state directory do not begin with a dot or repeat the scope supplied
-by their parent directories. A **remote state directory** contains state for
-one remote Reprint API URL. It is
+may choose `.reprint` or any other private directory name. A **remote state
+directory** contains state for one remote Reprint API URL. It is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`; use
-`$remote_state_directory`.
+`$remote_state_directory`. The **pull state directory** is
+`<remote-state-directory>/pull`; use `$pull_state_directory`. Filenames inside
+the state directory do not begin with a dot or repeat the scope supplied by
+their parent directories.
 
 ```text
 <state-dir>/
 ├── process.lock
 ├── progress.json
 ├── audit.log
-├── pull/
-│   ├── state.json
-│   ├── remote-index.jsonl
-│   ├── remote-index.wal
-│   ├── remote-index.next.jsonl
-│   ├── fetch-list.jsonl
-│   ├── skipped-fetch-list.jsonl
-│   ├── volatile-files.json
-│   ├── domains.json
-│   ├── sql-stats.json
-│   └── sql-buffer
 └── remotes/
     └── <md5-of-trimmed-remote-reprint-api-url>/
+        ├── pull/
+        │   ├── state.json
+        │   ├── remote-index.jsonl
+        │   ├── remote-index.wal
+        │   ├── remote-index.next.jsonl
+        │   ├── fetch-list.jsonl
+        │   ├── skipped-fetch-list.jsonl
+        │   ├── volatile-files.json
+        │   ├── domains.json
+        │   ├── sql-stats.json
+        │   └── sql-buffer
         └── push/
 ```
 
@@ -211,6 +211,9 @@ Use these path names:
 
 Caller-facing outputs such as `db.sql`, `db-tables.jsonl`, generated runtime
 files, and database files remain directly under the state directory.
+Commands which read or write remote state receive the remote Reprint API URL
+even when they make no network request. The URL selects the remote state
+directory.
 
 ## Local Reprint process lock
 
@@ -233,7 +236,8 @@ push-session and commit locks.
 ## Pull remote index WAL
 
 Call the single pull-side write-ahead log the **remote index WAL**. It lives at
-`<state-dir>/pull/remote-index.wal`; use `pull/remote-index.wal`,
+`<remote-state-directory>/pull/remote-index.wal`; use
+`pull/remote-index.wal`,
 `$remote_index_wal_path`, and `$remote_index_wal_handle`.
 Applied batch records are cleared, but the empty WAL remains as a marker until
 files-pull completes. A retained WAL is consumed only while resuming or
@@ -367,7 +371,8 @@ directory for a different filesystem root; the filesystem root does not
 participate in the directory name. `files-push` chooses `start` or `resume`
 only from whether `sender.json` exists there. The receiver-confirmed upload
 positions remain receiver-owned; they are not a files-push cursor and are not
-copied into `pull/state.json` or `progress.json`.
+copied into `<remote-state-directory>/pull/state.json` or the state-directory-wide
+`progress.json`.
 
 Files-push lifecycle lines use these command-first names verbatim: `START
 files-push`, `RESUME files-push`, `PHASE files-push`, `PARTIAL files-push`,

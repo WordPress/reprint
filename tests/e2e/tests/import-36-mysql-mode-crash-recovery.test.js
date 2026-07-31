@@ -19,7 +19,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     getDbName, compareDatabases, createMysqlConnection,
-    readAuditLog,
+    readAuditLog, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -80,7 +80,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
         });
 
         it('pull/sql-buffer is cleaned up after completion', () => {
-            assert.ok(!existsSync(join(tempDir, 'pull/sql-buffer')),
+            assert.ok(!existsSync(join(pullStateDirectory(tempDir, importUrl()), 'sql-buffer')),
                 'Expected pull/sql-buffer to be cleaned up after successful completion');
         });
 
@@ -118,7 +118,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             // Seed a pull/sql-buffer file before running db-pull.
             // The content is a harmless SQL comment that won't affect execution
             // — the point is to verify the importer reads it and logs recovery.
-            const bufferFile = join(tempDir, 'pull/sql-buffer');
+            const bufferFile = join(pullStateDirectory(tempDir, importUrl()), 'sql-buffer');
             writeFileSync(bufferFile, '-- pre-seeded buffer\n');
 
             // Run a fresh db-pull — the importer should detect the buffer file
