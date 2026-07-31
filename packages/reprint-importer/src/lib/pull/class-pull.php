@@ -98,7 +98,10 @@ class Pull
     /**
      * Run the pull pipeline.
      */
-    public function run(array $options): void
+    public function run(
+        array $options,
+        bool $resume_pipeline = false
+    ): void
     {
         $this->normalize_url();
         $this->progress->set_mode('pipeline');
@@ -109,48 +112,18 @@ class Pull
             'pull',
             $this->stages($options),
             $options,
-            'Pulling'
+            'Pulling',
+            $resume_pipeline
         );
-    }
-
-    /**
-     * Handle --abort for high-level pull commands.
-     *
-     * File pipelines keep downloaded site files in place. The database
-     * pipeline removes stale database artifacts so the next pull-db fetches
-     * and applies a fresh dump.
-     */
-    public function abort(string $command = 'pull'): void
-    {
-        $state = $this->client->get_import_state();
-        if (
-            $command === 'pull-files'
-            || (
-                $command === 'pull'
-                && $state->active_resumable_command->command_name === 'files-pull'
-            )
-        ) {
-            $this->client->clear_files_pull_progress();
-        }
-        $this->prepare_repull($command);
-        $label = $command === 'pull' ? 'Pull' : $command;
-        $message = "{$label} state cleared.";
-        $message .= $command === 'pull-db'
-            ? " Database artifacts will be downloaded again."
-            : " Downloaded files are preserved.";
-        $this->progress->show_lifecycle_line("{$message}\n");
-        $this->client->output_progress([
-            "type" => "lifecycle",
-            "event" => "aborted",
-            "command" => $command,
-            "message" => $message,
-        ], true);
     }
 
     /**
      * Run only the file stages from the pull pipeline.
      */
-    public function run_pull_files(array $options): void
+    public function run_pull_files(
+        array $options,
+        bool $resume_pipeline = false
+    ): void
     {
         $this->normalize_url();
         $this->progress->set_mode('pipeline');
@@ -169,14 +142,18 @@ class Pull
             'pull-files',
             ['preflight', 'files-pull'],
             $options,
-            'Pulling files from'
+            'Pulling files from',
+            $resume_pipeline
         );
     }
 
     /**
      * Run only the database stages from the pull pipeline.
      */
-    public function run_pull_db(array $options): void
+    public function run_pull_db(
+        array $options,
+        bool $resume_pipeline = false
+    ): void
     {
         $this->normalize_url();
         $this->progress->set_mode('pipeline');
@@ -189,7 +166,8 @@ class Pull
             'pull-db',
             ['preflight', 'db-pull', 'db-apply'],
             $options,
-            'Pulling database from'
+            'Pulling database from',
+            $resume_pipeline
         );
     }
 
@@ -211,122 +189,19 @@ class Pull
         string $command,
         array $stages,
         array $options,
-        string $title
+        string $title,
+        bool $resume_pipeline
     ): void {
         $state = $this->client->get_import_state();
-        $pull_pipeline = $state->pull_pipeline->started_by_command;
-        $pull_stage = $state->pull_pipeline->last_completed_stage;
-        $stage_sequence = $state->pull_pipeline->stage_sequence;
-        if (!is_array($stage_sequence) || $stage_sequence === []) {
-            $stage_sequence = $stages;
-        }
-        $pipeline_final_stage = $stage_sequence[count($stage_sequence) - 1] ?? null;
-        $state_command = $state->active_resumable_command->command_name;
-        $state_status = $state->active_resumable_command->completion_state;
-        $completed_stage = $pull_pipeline === $command ? $pull_stage : null;
-        $completed_pipeline =
-            $pull_pipeline !== null &&
-            $pull_stage !== null &&
-            $pipeline_final_stage !== null &&
-            $pull_stage === $pipeline_final_stage;
-
-        if ($completed_pipeline) {
-            $this->prepare_repull($command);
+        if ($resume_pipeline) {
+            $stages = $state->pull_pipeline->stage_sequence;
+            $completed_stage = $state->pull_pipeline->last_completed_stage;
+        } else {
+            // A completed standalone command is not this pipeline's
+            // checkpoint. Start every selected stage fresh rather than
+            // allowing that historical checkpoint to skip its matching stage.
+            $this->client->prepare_fresh_pull_pipeline($command, $stages);
             $completed_stage = null;
-            $pull_pipeline = null;
-            $pull_stage = null;
-            $state_command = null;
-            $state_status = null;
-        }
-
-        $pipeline_has_resume_state =
-            $pull_pipeline !== null &&
-            (
-                $pull_stage !== null ||
-                $state_command !== null ||
-                $state_status !== null
-            );
-
-        if ($pipeline_has_resume_state && $pull_pipeline !== $command) {
-            throw new RuntimeException(
-                "Another command is already in progress: {$pull_pipeline}. " .
-                "Rerun {$pull_pipeline} to resume it. Only use --abort if you want to discard " .
-                "that pipeline's resume state before running {$command}."
-            );
-        }
-
-        $has_direct_command_state = !$pipeline_has_resume_state && $state_status !== null;
-        if (
-            $has_direct_command_state &&
-            $state_status !== 'complete' &&
-            in_array($state_command, ['files-pull', 'db-pull', 'db-apply'], true) &&
-            !in_array($state_command, $stages, true)
-        ) {
-            throw new RuntimeException(
-                "Another command is already in progress: {$state_command}. " .
-                "Rerun {$state_command} to resume it. Only use --abort if you want to discard " .
-                "that command's resume state before running {$command}."
-            );
-        }
-
-        if ($has_direct_command_state && $state_status === 'complete') {
-            // Users can run lower-level commands directly, e.g.
-            // `reprint files-pull` or `reprint db-pull`, without going through
-            // this pull pipeline. Those commands save their own completion
-            // state in active_resumable_command. That state must not make a
-            // high-level command skip its matching stage: the pipeline has not
-            // recorded that stage as complete. Clear the direct command
-            // checkpoint first so the stage computes a fresh delta.
-            $state_dir = $this->client->state_dir;
-            if ($state_command === 'files-pull' && in_array('files-pull', $stages, true)) {
-                // Keep the local file index, but clear transient files-pull
-                // download state so this pipeline computes a fresh
-                // remote-vs-local delta.
-                $state = $this->client->get_import_state();
-                $state->active_resumable_command->command_name = null;
-                $state->active_resumable_command->completion_state = null;
-                $state->active_resumable_command->remote_cursor = null;
-                $state->active_resumable_command->current_stage = null;
-                $state->consecutive_interrupted_responses = 0;
-                $state->current_file = null;
-                $state->current_file_bytes = null;
-                $state->diff = new FileDiffProgressState();
-                $state->index = new RemoteFileIndexCursorState();
-                $state->fetch = new FetchListProgressState();
-                $state->fetch_skipped = new FetchListProgressState();
-                $state->files_pull_summary = new FilesPullSummaryState();
-                $state->files_pull_only_fingerprint = null;
-                $this->client->save_import_state();
-                foreach ([
-                    "{$state_dir}/pull/remote-index.jsonl",
-                    "{$state_dir}/pull/fetch-list.jsonl",
-                    "{$state_dir}/pull/skipped-fetch-list.jsonl",
-                ] as $path) {
-                    if (file_exists($path)) {
-                        @unlink($path);
-                    }
-                }
-            } elseif ($state_command === 'db-pull' && in_array('db-pull', $stages, true)) {
-                // Discard database dump artifacts from any previous runs.
-                $state = $this->client->get_import_state();
-                $state->active_resumable_command->command_name = null;
-                $state->active_resumable_command->completion_state = null;
-                $state->active_resumable_command->remote_cursor = null;
-                $state->active_resumable_command->current_stage = null;
-                $state->consecutive_interrupted_responses = 0;
-                $state->sql_bytes = null;
-                $state->db_index = new DatabaseTableIndexState();
-                $this->client->save_import_state();
-                foreach ([
-                    "{$state_dir}/db.sql",
-                    "{$state_dir}/db-tables.jsonl",
-                    "{$state_dir}/pull/domains.json",
-                ] as $path) {
-                    if (file_exists($path)) {
-                        @unlink($path);
-                    }
-                }
-            }
         }
 
         $total = count($stages);
@@ -755,94 +630,6 @@ class Pull
             $separator = strpos($url, '?') === false ? '?' : '&';
             $this->client->remote_reprint_api_url = $url . $separator . 'site-export-api';
         }
-    }
-
-    /**
-     * Reset sub-command state for a delta re-pull.
-     *
-     * Keeps preflight data in place, then clears only the checkpoint groups
-     * owned by the high-level command being restarted. Keeping that ownership
-     * map here prevents callers from having to know which file/database state
-     * belongs to which pipeline.
-     */
-    private function prepare_repull(string $command): void
-    {
-        $state_dir = $this->client->state_dir;
-        switch ($command) {
-            case 'pull':
-                $reset_file_transfer_state = true;
-                $reset_file_selection_state = false;
-                $reset_db_state = true;
-                break;
-
-            case 'pull-files':
-                $reset_file_transfer_state = true;
-                $reset_file_selection_state = true;
-                $reset_db_state = false;
-                break;
-
-            case 'pull-db':
-                $reset_file_transfer_state = false;
-                $reset_file_selection_state = false;
-                $reset_db_state = true;
-                break;
-
-            default:
-                throw new InvalidArgumentException("Unknown pull command: {$command}");
-        }
-
-
-        $state = $this->client->get_import_state();
-        $state->pull_pipeline->started_by_command = $command;
-        $state->pull_pipeline->stage_sequence = [];
-        $state->pull_pipeline->last_completed_stage = null;
-        $state->pull_pipeline->files_filter = null;
-        $state->pull_pipeline->skipped_pending = false;
-        $state->pull_pipeline->has_completed_once = true;
-        $state->active_resumable_command->command_name = null;
-        $state->active_resumable_command->completion_state = null;
-        $state->active_resumable_command->remote_cursor = null;
-        $state->active_resumable_command->current_stage = null;
-        $state->consecutive_interrupted_responses = 0;
-        if ($reset_file_transfer_state) {
-            $state->current_file = null;
-            $state->current_file_bytes = null;
-            $state->diff = new FileDiffProgressState();
-            $state->fetch = new FetchListProgressState();
-            $state->fetch_skipped = new FetchListProgressState();
-            $state->files_pull_summary = new FilesPullSummaryState();
-        }
-        if ($reset_file_selection_state) {
-            $state->index = new RemoteFileIndexCursorState();
-            $state->files_pull_only_fingerprint = null;
-        }
-        if ($reset_db_state) {
-            $state->sql_bytes = null;
-            $state->db_index = new DatabaseTableIndexState();
-            $state->apply = new DatabaseApplyCommandState();
-            $state->sql_output = null;
-        }
-        $this->client->save_import_state();
-
-        $paths = [];
-        if ($reset_file_transfer_state) {
-            $paths[] = $state_dir . "/pull/remote-index.jsonl";
-            $paths[] = $state_dir . "/pull/fetch-list.jsonl";
-            $paths[] = $state_dir . "/pull/skipped-fetch-list.jsonl";
-        }
-        if ($reset_db_state) {
-            $paths[] = $state_dir . "/db.sql";
-            $paths[] = $state_dir . "/db-tables.jsonl";
-            $paths[] = $state_dir . "/pull/domains.json";
-        }
-
-        foreach ($paths as $path) {
-            if (file_exists($path)) {
-                @unlink($path);
-            }
-        }
-
-        $this->client->audit_log(strtoupper($command) . " | prepared for delta re-pull", true);
     }
 
     /**

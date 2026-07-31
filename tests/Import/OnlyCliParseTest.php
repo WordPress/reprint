@@ -4,6 +4,8 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/../../importer/import.php';
+
 /**
  * --only reuses the existing `value-or-next` option type (like --new-site-url),
  * but is repeatable because commas are valid path bytes. The parser lives
@@ -226,7 +228,6 @@ PHP, var_export($requestsLog, true)));
             ':abspath:/wp-admin',
             '--only',
             ':wp-content:',
-            '--abort',
             '--state-dir=' . $this->tempDir . '/state',
             '--fs-root=' . $this->tempDir . '/fs',
         ));
@@ -340,23 +341,181 @@ PHP, var_export($requestsLog, true)));
         ), $fileIndexRequest['directory'] ?? null);
     }
 
-    public function testOnlyOptionKeepsCommaInsideSourcePath(): void
+    public function testFreshFilesIndexReplacesStaleIndexAfterStateReset(): void
     {
-        // --abort runs after --only resolution, avoiding a network request while
-        // still proving the CLI did not split the SOURCE at the comma.
+        $this->writePreflightState(true);
+        $this->writeStateAtCleanupInterruptionBoundary(
+            'files-index',
+            'index',
+        );
+        $remoteIndex = $this->tempDir
+            . '/state/pull/remote-index.jsonl';
+        file_put_contents($remoteIndex, "stale remote index\n");
+
+        $requestsLog = $this->tempDir . '/fresh-file-requests.jsonl';
+        $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
+        $output = $this->runCli(array(
+            'files-index',
+            $remoteUrl,
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+        ));
+
+        $this->assertStringNotContainsString(
+            '"status":"error"',
+            $output,
+        );
+        $this->assertSame('', file_get_contents($remoteIndex));
+        $this->assertContains(
+            'file_index',
+            array_column(
+                $this->capturedRequests($requestsLog),
+                'endpoint',
+            ),
+        );
+    }
+
+    public function testFreshDatabasePullReplacesStaleDownloadArtifacts(): void
+    {
         $this->writePreflightState();
+        $this->writeStateAtCleanupInterruptionBoundary(
+            'db-pull',
+            'db-index',
+        );
+        $artifacts = array(
+            $this->tempDir . '/state/db.sql',
+            $this->tempDir . '/state/db-tables.jsonl',
+            $this->tempDir . '/state/pull/domains.json',
+            $this->tempDir . '/state/pull/sql-buffer',
+            $this->tempDir . '/state/pull/sql-stats.json',
+        );
+        foreach ($artifacts as $artifact) {
+            file_put_contents($artifact, "stale download\n");
+        }
+
+        $requestsLog = $this->tempDir . '/fresh-db-requests.jsonl';
+        $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
+        $output = $this->runCli(array(
+            'db-pull',
+            $remoteUrl,
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+        ));
+
+        $this->assertStringNotContainsString(
+            '"status":"error"',
+            $output,
+        );
+        $this->assertSame('', file_get_contents($artifacts[0]));
+        $this->assertSame('', file_get_contents($artifacts[1]));
+        $this->assertFileDoesNotExist($artifacts[3]);
+        $this->assertFileDoesNotExist($artifacts[4]);
+        if (file_exists($artifacts[2])) {
+            $this->assertStringNotContainsString(
+                'stale download',
+                file_get_contents($artifacts[2]),
+            );
+        }
+        $this->assertSame(
+            array('db_index', 'sql_chunk'),
+            array_column(
+                $this->capturedRequests($requestsLog),
+                'endpoint',
+            ),
+        );
+    }
+
+    public function testFreshMysqlPullDoesNotRestoreStaleSqlBuffer(): void
+    {
+        if (!class_exists(\mysqli::class)) {
+            $this->markTestSkipped('The mysqli extension is unavailable.');
+        }
+
+        $this->writePreflightState();
+        $this->writeStateAtCleanupInterruptionBoundary(
+            'db-pull',
+            'db-index',
+        );
+        $sqlBuffer = $this->tempDir . '/state/pull/sql-buffer';
+        file_put_contents($sqlBuffer, "stale partial query\n");
+
+        $requestsLog = $this->tempDir . '/fresh-mysql-requests.jsonl';
+        $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
+        $mysqlPort = $this->findUnusedPort();
+        $output = $this->runCli(array(
+            'db-pull',
+            $remoteUrl,
+            '--sql-output=mysql',
+            '--mysql-host=127.0.0.1',
+            '--mysql-port=' . $mysqlPort,
+            '--mysql-user=root',
+            '--mysql-database=reprint',
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+        ));
+
+        $this->assertStringContainsString('mysqli', strtolower($output));
+        $this->assertFileDoesNotExist($sqlBuffer);
+        $this->assertContains(
+            'db_index',
+            array_column(
+                $this->capturedRequests($requestsLog),
+                'endpoint',
+            ),
+        );
+    }
+
+    public function testAbortIgnoresOnlyResolutionWithoutNetworkRequest(): void
+    {
+        $this->writePreflightState();
+        $requestsLog = $this->tempDir . '/abort-requests.jsonl';
+        $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
 
         $output = $this->runCli(array(
             'files-pull',
-            'http://fake.invalid/?site-export-api',
+            $remoteUrl,
             '--only',
-            ':wp-content:/plugins,custom',
+            ':missing-token:/plugins',
             '--abort',
             '--state-dir=' . $this->tempDir . '/state',
             '--fs-root=' . $this->tempDir . '/fs',
         ));
 
         $this->assertStringContainsString('"status":"aborted"', $output);
-        $this->assertStringNotContainsString('path "custom"', $output);
+        $this->assertStringNotContainsString('Cannot resolve token', $output);
+        $this->assertSame(array(), $this->capturedRequests($requestsLog));
+    }
+
+    /**
+     * Write the durable checkpoint saved before fixed artifact cleanup.
+     */
+    private function writeStateAtCleanupInterruptionBoundary(
+        string $command,
+        ?string $stage
+    ): void {
+        // Fresh-start preparation saves this checkpoint before deleting fixed
+        // transient artifacts. A process may stop between those actions.
+        $statePath = $this->tempDir . '/state/pull/state.json';
+        $state = json_decode(
+            file_get_contents($statePath),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        $state['active_resumable_command'] = array(
+            'command_name' => $command,
+            'completion_state' => 'in_progress',
+            'current_stage' => $stage,
+            'remote_cursor' => null,
+        );
+        file_put_contents(
+            $statePath,
+            json_encode(
+                $state,
+                JSON_PRETTY_PRINT |
+                    JSON_UNESCAPED_SLASHES |
+                    JSON_THROW_ON_ERROR,
+            ),
+        );
     }
 }

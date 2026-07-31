@@ -311,6 +311,7 @@ class PullFilterOptionTest extends TestCase
             ],
             "pull_pipeline" => [
                 "started_by_command" => "pull",
+                "stage_sequence" => ["preflight", "files-pull", "db-pull", "db-apply"],
                 "last_completed_stage" => "preflight",
             ],
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
@@ -342,6 +343,7 @@ class PullFilterOptionTest extends TestCase
             ],
             "pull_pipeline" => [
                 "started_by_command" => "pull",
+                "stage_sequence" => ["preflight", "files-pull", "db-pull", "db-apply"],
                 "last_completed_stage" => "preflight",
             ],
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
@@ -372,6 +374,7 @@ class PullFilterOptionTest extends TestCase
             ],
             "pull_pipeline" => [
                 "started_by_command" => "pull-db",
+                "stage_sequence" => ["preflight", "db-pull", "db-apply"],
                 "last_completed_stage" => null,
             ],
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
@@ -388,9 +391,9 @@ class PullFilterOptionTest extends TestCase
             ]);
             $this->fail('Expected pull to refuse a different unfinished pipeline');
         } catch (\RuntimeException $e) {
-            $this->assertStringContainsString('Another command is already in progress: pull-db', $e->getMessage());
-            $this->assertStringContainsString('Rerun pull-db to resume it', $e->getMessage());
-            $this->assertStringContainsString('Only use --abort if you want to discard', $e->getMessage());
+            $this->assertStringContainsString('pull-db owns unfinished import state', $e->getMessage());
+            $this->assertStringContainsString('`reprint pull-db`', $e->getMessage());
+            $this->assertStringContainsString('`reprint pull-db --abort`', $e->getMessage());
         } finally {
             ob_end_clean();
         }
@@ -596,7 +599,7 @@ class PullFilterOptionTest extends TestCase
             ]);
             $this->fail('Expected pull to reject an in-progress pull-files pipeline');
         } catch (\RuntimeException $e) {
-            $this->assertStringContainsString('Another command is already in progress: pull-files', $e->getMessage());
+            $this->assertStringContainsString('pull-files owns unfinished import state', $e->getMessage());
         } finally {
             ob_end_clean();
         }
@@ -687,7 +690,7 @@ class PullFilterOptionTest extends TestCase
             ]);
             $this->fail('Expected pull-db to reject an in-progress pull-files command');
         } catch (\RuntimeException $e) {
-            $this->assertStringContainsString('Another command is already in progress: pull-files', $e->getMessage());
+            $this->assertStringContainsString('pull-files owns unfinished import state', $e->getMessage());
         } finally {
             ob_end_clean();
         }
@@ -732,6 +735,14 @@ class PullFilterOptionTest extends TestCase
     public function testPullDbAfterStandaloneDbPullDownloadsFreshDump(): void
     {
         file_put_contents($this->stateDir . '/db.sql', "SELECT stale;\n");
+        foreach ([
+            'db-tables.jsonl',
+            'pull/domains.json',
+            'pull/sql-buffer',
+            'pull/sql-stats.json',
+        ] as $artifact) {
+            file_put_contents($this->stateDir . '/' . $artifact, "stale\n");
+        }
         $this->writeState([
             "active_resumable_command" => [
                 "command_name" => "db-pull",
@@ -739,6 +750,20 @@ class PullFilterOptionTest extends TestCase
                 "current_stage" => null,
             ],
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
+            "db_index" => [
+                "file" => $this->stateDir . '/db-tables.jsonl',
+                "tables" => 1,
+                "rows_estimated" => 10,
+                "bytes" => 100,
+                "updated_at" => "1234567890",
+            ],
+            "sql_bytes" => 100,
+            "sql_statements_counted" => 5,
+            "sql_output" => "mysql",
+            "mysql_host" => "database.example",
+            "mysql_port" => 3307,
+            "mysql_user" => "database_user",
+            "mysql_database" => "database_name",
         ]);
 
         $client = $this->makeClient(false);
@@ -756,6 +781,18 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame("SELECT 1;\n", file_get_contents($this->stateDir . '/db.sql'));
         $this->assertSame('pull-db', $state["pull_pipeline"]["started_by_command"]);
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
+        $this->assertSame(( new \DatabaseTableIndexState() )->to_array(), $state["db_index"]);
+        $this->assertNull($state["sql_bytes"]);
+        $this->assertSame(0, $state["sql_statements_counted"]);
+        $this->assertSame('file', $state["sql_output"]);
+        $this->assertNull($state["mysql_host"]);
+        $this->assertNull($state["mysql_port"]);
+        $this->assertNull($state["mysql_user"]);
+        $this->assertNull($state["mysql_database"]);
+        $this->assertFileDoesNotExist($this->stateDir . '/db-tables.jsonl');
+        $this->assertFileDoesNotExist($this->stateDir . '/pull/domains.json');
+        $this->assertFileDoesNotExist($this->stateDir . '/pull/sql-buffer');
+        $this->assertFileDoesNotExist($this->stateDir . '/pull/sql-stats.json');
     }
 
     public function testInvalidPullDbOptionsFailBeforeStateIsPersisted(): void
@@ -878,12 +915,10 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame('essential-files', $state["filter"]);
     }
 
-    public function testRepullAfterInterruptedSkippedEarlierTailIsNotBlocked(): void
+    public function testCompletedPullCannotStealInterruptedSkippedEarlierTail(): void
     {
-        // An interrupted skipped-earlier tail leaves completion_state="partial"
-        // with filter=skipped-earlier. A new essential-files pull must still be
-        // allowed: the filter-change guard must not treat the terminal tail as
-        // a mid-flight sync.
+        // The completed pipeline is historical. Once a standalone
+        // skipped-earlier tail starts, files-pull owns that unfinished work.
         $this->writeState([
             "active_resumable_command" => [
                 "command_name" => "files-pull",
@@ -902,16 +937,30 @@ class PullFilterOptionTest extends TestCase
         ]);
 
         $client = $this->makeClient(false);
+        $rawState = file_get_contents($this->stateDir . '/pull/state.json');
 
-        ob_start();
-        $client->run([
-            "command" => "pull",
-            "filter" => "essential-files",
-            "runtime" => "none",
-        ]);
-        ob_end_clean();
+        $caught = null;
+        try {
+            ob_start();
+            $client->run([
+                "command" => "pull",
+                "filter" => "essential-files",
+                "runtime" => "none",
+            ]);
+        } catch (\RuntimeException $error) {
+            $caught = $error;
+        } finally {
+            ob_end_clean();
+        }
 
-        $state = $this->readState();
-        $this->assertSame('essential-files', $state["filter"]);
+        $this->assertInstanceOf(\RuntimeException::class, $caught);
+        $this->assertStringContainsString(
+            'files-pull owns unfinished import state',
+            $caught->getMessage(),
+        );
+        $this->assertSame(
+            $rawState,
+            file_get_contents($this->stateDir . '/pull/state.json'),
+        );
     }
 }

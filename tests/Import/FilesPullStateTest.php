@@ -219,10 +219,7 @@ class FilesPullStateTest extends TestCase
             ],
         ]);
 
-        [$client, $reflection] = $this->prepareClient();
-
-        $abortMethod = $reflection->getMethod('handle_abort');
-        $abortMethod->invoke($client, 'files-pull');
+        $this->abortFilesPull();
 
         $state = $this->readState();
         $this->assertNotEquals(
@@ -250,8 +247,7 @@ class FilesPullStateTest extends TestCase
         ]);
 
         // Step 1: abort
-        [$client, $reflection] = $this->prepareClient();
-        $reflection->getMethod('handle_abort')->invoke($client, 'files-pull');
+        $this->abortFilesPull();
 
         // Step 2: new client, try run_files_pull
         [$client2, $reflection2] = $this->prepareClient();
@@ -457,6 +453,28 @@ class FilesPullStateTest extends TestCase
             file_get_contents($localFile),
             "Fetch stage must overwrite existing files that were placed in the fetch list",
         );
+    }
+
+    /**
+     * Abort files-pull through the public command lifecycle.
+     */
+    private function abortFilesPull(): void
+    {
+        $client = $this->makeClient();
+        $processLock = new \ReprintProcessLock($this->stateDir);
+        ob_start();
+        try {
+            $client->run(
+                [
+                    'command' => 'files-pull',
+                    'abort' => true,
+                ],
+                $processLock,
+            );
+        } finally {
+            ob_end_clean();
+            $processLock->close();
+        }
     }
 }
 
