@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\Remote\RemoteExportApiClient;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
@@ -14,22 +15,13 @@ class DiagnoseHttpErrorTest extends TestCase
 {
     private function diagnose(int $http_code, ?string $body = null, ?string $redirect_url = null, bool $has_secret = true): array
     {
-        $client = new \ImportClient(
+        $client = new RemoteExportApiClient(
             'http://example.com',
-            sys_get_temp_dir(),
-            sys_get_temp_dir(),
+            $has_secret ? new \stdClass() : null,
+            static function (): void {},
+            static function (): void {},
         );
-
-        $ref = new \ReflectionClass(\ImportClient::class);
-
-        if ($has_secret) {
-            $hmac = $ref->getProperty('hmac_client');
-            // Any truthy object — we just need it non-null.
-            $hmac->setValue($client, new \stdClass());
-        }
-
-        $method = $ref->getMethod('diagnose_http_error');
-        return $method->invoke($client, $http_code, $body, $redirect_url);
+        return $client->diagnose_http_error($http_code, $body, $redirect_url);
     }
 
     // ── Redirects ────────────────────────────────────────────────
@@ -246,21 +238,21 @@ class DiagnoseHttpErrorTest extends TestCase
 
     // ── error_code is stored on instance ─────────────────────────
 
-    public function testFormatDiagnosedErrorStoresCodeOnInstance()
+    public function testFormatDiagnosedErrorStoresCodeOnTransport()
     {
-        $client = new \ImportClient(
+        $client = new RemoteExportApiClient(
             'http://example.com',
-            sys_get_temp_dir(),
-            sys_get_temp_dir(),
+            new \stdClass(),
+            static function (): void {},
+            static function (): void {},
         );
 
-        $ref = new \ReflectionClass(\ImportClient::class);
-        $diagnose = $ref->getMethod('diagnose_http_error');
+        $ref = new \ReflectionClass($client);
         $format = $ref->getMethod('format_diagnosed_error');
 
-        $diagnosis = $diagnose->invoke($client, 404, '');
+        $diagnosis = $client->diagnose_http_error(404, '');
         $format->invoke($client, $diagnosis);
 
-        $this->assertSame('NOT_FOUND', $client->last_error_code);
+        $this->assertSame('NOT_FOUND', $client->get_last_error_code());
     }
 }

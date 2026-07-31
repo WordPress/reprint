@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
+use Reprint\Importer\Remote\RemoteExportApiClient;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
@@ -60,16 +61,21 @@ class AcceptEncodingTest extends TestCase
      */
     public function testAcceptEncodingExcludesBrotli(): void
     {
-        $client = new \ImportClient(
+        $client = new RemoteExportApiClient(
             'http://fake.url',
-            $this->tempDir . '/state',
-            $this->tempDir . '/fs-root'
+            null,
+            static function (): void {},
+            static function (): void {},
         );
 
         $method = new ReflectionMethod($client, 'get_base_headers');
         $method->setAccessible(true);
 
-        $headers = $method->invoke($client, 'application/json');
+        $headers = $method->invoke(
+            $client,
+            'application/json',
+            RemoteExportApiClient::USER_AGENTS[0],
+        );
 
         $encoding_header = null;
         foreach ($headers as $header) {

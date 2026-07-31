@@ -4,6 +4,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Protocol\MultipartStreamParser;
+use Reprint\Importer\Remote\RemoteExportApiClient;
 use Reprint\Importer\StreamingContext;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
@@ -47,9 +48,7 @@ class FileBodyStreamingTest extends TestCase
             $handleFileChunk->invoke($client, $chunk, $context);
         };
 
-        $currentChunk = null;
-        $makeHandler = $reflection->getMethod('make_chunk_handler');
-        $handler = $makeHandler->invokeArgs($client, [$context, &$currentChunk]);
+        $handler = $this->makeTransportHandler($context->on_chunk);
         $parser = new MultipartStreamParser('BOUNDARY', $handler);
 
         $body = str_repeat('0123456789abcdef', 64 * 1024);
@@ -123,9 +122,7 @@ class FileBodyStreamingTest extends TestCase
         $context1->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context1): void {
             $handleFileChunk->invoke($client, $chunk, $context1);
         };
-        $currentChunk1 = null;
-        $makeHandler = $reflection->getMethod('make_chunk_handler');
-        $handler1 = $makeHandler->invokeArgs($client, [$context1, &$currentChunk1]);
+        $handler1 = $this->makeTransportHandler($context1->on_chunk);
         $parser1 = new MultipartStreamParser('BOUNDARY', $handler1);
 
         $multipart1 = $this->buildMultipart('BOUNDARY', [
@@ -175,8 +172,7 @@ class FileBodyStreamingTest extends TestCase
         $context2->on_chunk = function (array $chunk) use ($client, $handleFileChunk, $context2): void {
             $handleFileChunk->invoke($client, $chunk, $context2);
         };
-        $currentChunk2 = null;
-        $handler2 = $makeHandler->invokeArgs($client, [$context2, &$currentChunk2]);
+        $handler2 = $this->makeTransportHandler($context2->on_chunk);
         $parser2 = new MultipartStreamParser('BOUNDARY', $handler2);
 
         // Pass 2: continuation part for the same file. x-first-chunk=0 is the
@@ -332,6 +328,24 @@ class FileBodyStreamingTest extends TestCase
         }
         $out .= "--{$boundary}--\r\n";
         return $out;
+    }
+
+    private function makeTransportHandler(callable $onChunk): callable
+    {
+        $remoteApiClient = new RemoteExportApiClient(
+            'http://fake.url',
+            null,
+            static function (): void {},
+            static function (): void {},
+        );
+        $reflection = new \ReflectionClass($remoteApiClient);
+        $makeHandler = $reflection->getMethod('make_chunk_handler');
+        $currentChunk = null;
+        $sawCompletion = false;
+        return $makeHandler->invokeArgs(
+            $remoteApiClient,
+            [$onChunk, &$currentChunk, &$sawCompletion],
+        );
     }
 
     private function recursiveDelete(string $dir): void
