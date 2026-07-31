@@ -46,9 +46,9 @@ local relative path to a push-root-relative path.
 
 ## Indexes and mappings
 
-- A **local index** is the pull baseline stored locally after remote operations
-  are applied. Its entries use remote absolute paths and remote-observed
-  metadata. Use `$local_index_file`.
+- A **remote index** records remote absolute paths and remote-observed type,
+  size, and ctime for pull operations already accounted for in the filesystem
+  root. Use `$remote_index_file`.
 - A **next remote index** is the snapshot of the remote paths selected for the
   current pull. Its entries use remote absolute paths and remote-observed
   metadata. Use `$next_remote_index_file`.
@@ -56,8 +56,8 @@ local relative path to a push-root-relative path.
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
-- The **local index WAL** records completed pull mutations awaiting application
-  to the local index.
+- The **remote index WAL** records completed pull mutations awaiting application
+  to the remote index.
 - A **pull plan** lists remote absolute paths still scheduled for download or
   deletion. A **push plan** maps local relative paths to push-root-relative
   paths.
@@ -171,8 +171,8 @@ by their parent directories.
 ├── audit.log
 ├── pull/
 │   ├── state.json
-│   ├── local-index.jsonl
-│   ├── local-index.wal
+│   ├── remote-index.jsonl
+│   ├── remote-index.wal
 │   ├── remote-index.next.jsonl
 │   ├── fetch-list.jsonl
 │   ├── skipped-fetch-list.jsonl
@@ -191,8 +191,8 @@ Use these path names:
 | State directory | `$state_dir` |
 | Pull state directory | `$pull_state_directory` |
 | Pull state file | `$pull_state_file` |
-| Local index file | `$local_index_file` |
-| Local index WAL | `$local_index_wal_path` |
+| Remote index file | `$remote_index_file` |
+| Remote index WAL | `$remote_index_wal_path` |
 | Next remote index file | `$next_remote_index_file` |
 | Fetch list file | `$fetch_list_file` |
 | Skipped fetch list file | `$skipped_fetch_list_file` |
@@ -225,11 +225,11 @@ its caller supplies none. `PushFilesSender::start()` and
 `close()` does not release it. This local lock is separate from the receiver's
 push-session and commit locks.
 
-## Pull local index WAL
+## Pull remote index WAL
 
-Call the single pull-side write-ahead log the **local index WAL**. It lives at
-`<state-dir>/pull/local-index.wal`; use `pull/local-index.wal`,
-`$local_index_wal_path`, and `$local_index_wal_handle`.
+Call the single pull-side write-ahead log the **remote index WAL**. It lives at
+`<state-dir>/pull/remote-index.wal`; use `pull/remote-index.wal`,
+`$remote_index_wal_path`, and `$remote_index_wal_handle`.
 Applied batch records are cleared, but the empty WAL remains as a marker until
 files-pull completes. A retained WAL is consumed only while resuming or
 aborting the interrupted files-pull, including through a high-level pull

@@ -44,7 +44,7 @@ class PullStateTest extends TestCase
         $state->active_resumable_command->completion_state = 'complete';
         $state->pull_pipeline->started_by_command = 'pull';
         $state->diff->next_remote_index_byte_offset = 123;
-        $state->diff->last_consumed_local_index_entry_path = '/wp-content/index.php';
+        $state->diff->last_consumed_remote_index_entry_path = '/wp-content/index.php';
         $state->sql_statements_counted = 99;
 
         $array = $state->to_array();
@@ -53,7 +53,7 @@ class PullStateTest extends TestCase
         $this->assertSame('complete', $array['active_resumable_command']['completion_state']);
         $this->assertSame('pull', $array['pull_pipeline']['started_by_command']);
         $this->assertSame(123, $array['diff']['next_remote_index_byte_offset']);
-        $this->assertSame('/wp-content/index.php', $array['diff']['last_consumed_local_index_entry_path']);
+        $this->assertSame('/wp-content/index.php', $array['diff']['last_consumed_remote_index_entry_path']);
         $this->assertSame(99, $array['sql_statements_counted']);
     }
 
@@ -90,14 +90,13 @@ class PullStateTest extends TestCase
     public function testStateRejectsDiffFieldsFromThePreviousSchema(): void
     {
         $data = (new \PullState())->to_array();
-        $data['diff'] = [
-            'remote_offset' => 123,
-            'local_after' => '/wp-content/index.php',
-        ];
+        unset($data['diff']['last_consumed_remote_index_entry_path']);
+        $data['diff']['last_consumed_local_index_entry_path'] =
+            '/wp-content/index.php';
 
         $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessage(
-            'missing last_consumed_local_index_entry_path, next_remote_index_byte_offset; unexpected local_after, remote_offset'
+            'missing last_consumed_remote_index_entry_path; unexpected last_consumed_local_index_entry_path'
         );
 
         \PullState::from_array($data);
