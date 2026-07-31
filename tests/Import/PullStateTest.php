@@ -6,11 +6,11 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
-class ImportStateTest extends TestCase
+class PullStateTest extends TestCase
 {
     public function testStateHydratesDocumentedNestedObjects(): void
     {
-        $data = (new \ImportState())->to_array();
+        $data = (new \PullState())->to_array();
         $data['active_resumable_command'] = [
             'command_name' => 'files-pull',
             'completion_state' => 'partial',
@@ -28,7 +28,7 @@ class ImportStateTest extends TestCase
         $data['apply']['statements_executed'] = 12;
         $data['apply']['bytes_read'] = 34;
         $data['apply']['target_engine'] = 'sqlite';
-        $state = \ImportState::from_array($data);
+        $state = \PullState::from_array($data);
 
         $this->assertSame('files-pull', $state->active_resumable_command->command_name);
         $this->assertSame('partial', $state->active_resumable_command->completion_state);
@@ -39,7 +39,7 @@ class ImportStateTest extends TestCase
 
     public function testStateRoundTripsToPersistedArraySchema(): void
     {
-        $state = new \ImportState();
+        $state = new \PullState();
         $state->active_resumable_command->command_name = 'db-pull';
         $state->active_resumable_command->completion_state = 'complete';
         $state->pull_pipeline->started_by_command = 'pull';
@@ -55,7 +55,7 @@ class ImportStateTest extends TestCase
 
     public function testStateObjectsDoNotExposeArrayOffsetMutation(): void
     {
-        $state = new \ImportState();
+        $state = new \PullState();
 
         $this->assertNotInstanceOf(\ArrayAccess::class, $state);
         $this->assertNotInstanceOf(\ArrayAccess::class, $state->active_resumable_command);
@@ -63,24 +63,24 @@ class ImportStateTest extends TestCase
 
     public function testStateRejectsAnIncompleteSchema(): void
     {
-        $data = (new \ImportState())->to_array();
+        $data = (new \PullState())->to_array();
         unset($data['webhost']);
 
         $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessage('missing webhost');
 
-        \ImportState::from_array($data);
+        \PullState::from_array($data);
     }
 
     public function testStateRejectsUnexpectedFields(): void
     {
-        $data = (new \ImportState())->to_array();
+        $data = (new \PullState())->to_array();
         $data['status'] = 'complete';
 
         $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessage('unexpected status');
 
-        \ImportState::from_array($data);
+        \PullState::from_array($data);
     }
 
     public function testStatePathRejectsInvalidBase64(): void

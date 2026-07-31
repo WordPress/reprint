@@ -93,7 +93,7 @@ class SqliteRuntimeConfigTest extends TestCase
             'max_allowed_packet' => null,
         ];
 
-        \write_current_import_state(
+        \write_current_pull_state(
             new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot),
             array_replace_recursive($defaults, $state)
         );

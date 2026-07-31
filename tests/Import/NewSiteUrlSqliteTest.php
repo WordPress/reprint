@@ -99,11 +99,11 @@ class NewSiteUrlSqliteTest extends TestCase
     }
 
     /**
-     * Write the import state file that db-apply expects.
+     * Write the pull state file that db-apply expects.
      */
     private function writeState(array $extra = []): void
     {
-        \write_current_import_state(
+        \write_current_pull_state(
             new \ImportClient('http://example.invalid', $this->tempDir, $this->tempDir),
             $extra
         );
@@ -365,7 +365,7 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertSame(strtoupper(bin2hex($bytes)), $rows[0]['hex_value']);
     }
 
-    public function testSqliteImportPragmasDoNotChangeProgressCounters(): void
+    public function testSqlitePragmasDoNotChangeProgressCounters(): void
     {
         $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
         $drop = "DROP TABLE IF EXISTS `wp_options`;";

@@ -98,7 +98,7 @@ final class LocalIndexWalTest extends TestCase
                 'type' => 'file',
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
         );
-        \write_current_import_state($this->client(), [
+        \write_current_pull_state($this->client(), [
             'preflight' => [
                 'data' => ['ok' => true],
                 'http_code' => 200,

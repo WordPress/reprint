@@ -71,7 +71,7 @@ class PullFilterFakeClient extends \ImportClient
     public function run_preflight(): void
     {
         $this->preflight_runs++;
-        $state = $this->get_import_state();
+        $state = $this->get_state();
         $state->preflight = [
             "http_code" => 200,
             "data" => [
@@ -87,12 +87,12 @@ class PullFilterFakeClient extends \ImportClient
             ],
         ];
         $state->active_resumable_command->completion_state = "complete";
-        $this->save_import_state();
+        $this->save_state();
     }
 
     public function run_files_pull(): void
     {
-        $state = $this->get_import_state();
+        $state = $this->get_state();
         if (
             ($state->active_resumable_command->command_name ?? null) === "files-pull" &&
             ($state->active_resumable_command->completion_state ?? null) === "complete"
@@ -110,34 +110,34 @@ class PullFilterFakeClient extends \ImportClient
             @unlink($this->state_dir . '/pull/skipped-fetch-list.jsonl');
         }
 
-        $state = $this->get_import_state();
+        $state = $this->get_state();
         $state->active_resumable_command->command_name = "files-pull";
         $state->active_resumable_command->completion_state = "complete";
         $state->active_resumable_command->current_stage = null;
         $state->files_pull_summary->files_pulled = $this->files_pulled;
-        $this->save_import_state();
+        $this->save_state();
     }
 
     public function run_db_sync(): void
     {
         $this->db_sync_runs++;
         file_put_contents($this->state_dir . '/db.sql', "SELECT 1;\n");
-        $state = $this->get_import_state();
+        $state = $this->get_state();
         $state->active_resumable_command->command_name = "db-pull";
         $state->active_resumable_command->completion_state = "complete";
         $state->active_resumable_command->current_stage = null;
-        $this->save_import_state();
+        $this->save_state();
     }
 
     public function run_db_apply(array $options): void
     {
         $this->db_apply_runs++;
-        $state = $this->get_import_state();
+        $state = $this->get_state();
         $state->active_resumable_command->command_name = "db-apply";
         $state->active_resumable_command->completion_state = "complete";
         $state->active_resumable_command->current_stage = null;
         $state->apply->statements_executed = 42;
-        $this->save_import_state();
+        $this->save_state();
     }
 }
 
@@ -147,13 +147,13 @@ class PullFailingPreflightFakeClient extends PullFilterFakeClient
     {
         $this->preflight_runs++;
         $this->last_error_code = 'HTTP_ERROR';
-        $state = $this->get_import_state();
+        $state = $this->get_state();
         $state->preflight = [
             "http_code" => 500,
             "error" => "Exporter unavailable",
         ];
         $state->active_resumable_command->completion_state = "complete";
-        $this->save_import_state();
+        $this->save_state();
     }
 }
 
@@ -238,7 +238,7 @@ class PullFilterOptionTest extends TestCase
 
     private function writeState(array $state): void
     {
-        \write_current_import_state($this->makeClient(false), $state);
+        \write_current_pull_state($this->makeClient(false), $state);
     }
 
     public function testPullRejectsSkippedEarlierFilterBeforePersistingIt(): void

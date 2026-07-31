@@ -173,7 +173,7 @@ PHP, var_export($requestsLog, true)));
             );
         }
 
-        \write_current_import_state(
+        \write_current_pull_state(
             new \ImportClient(
                 'http://fake.invalid/',
                 $this->tempDir . '/state',
