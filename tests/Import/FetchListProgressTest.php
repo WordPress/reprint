@@ -16,6 +16,7 @@ class FetchListProgressTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
+    private $pullStateDirectory;
     private $filesystem_root;
 
     protected function setUp(): void
@@ -23,9 +24,11 @@ class FetchListProgressTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/fetch-list-progress-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
+        $this->pullStateDirectory =
+            $this->stateDir . '/remotes/' . md5('http://fake.url') . '/pull';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
+        mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -64,15 +67,23 @@ class FetchListProgressTest extends TestCase
     /**
      * Build a fetch list JSONL file with N entries.
      */
-    private function writeFetchList(int $count, ?string $file = null): string
+    private function writeFetchList(
+        int $count,
+        ?string $fetchListFilePath = null
+    ): string
     {
-        $file = $file ?? $this->stateDir . '/pull/fetch-list.jsonl';
-        $handle = fopen($file, 'w');
+        $fetchListFilePath =
+            $fetchListFilePath
+            ?? $this->pullStateDirectory . '/fetch-list.jsonl';
+        $fetchListFileHandle = fopen($fetchListFilePath, 'w');
         for ($i = 0; $i < $count; $i++) {
-            fwrite($handle, json_encode(["path" => base64_encode("/file-{$i}.txt")]) . "\n");
+            fwrite(
+                $fetchListFileHandle,
+                json_encode(["path" => base64_encode("/file-{$i}.txt")]) . "\n"
+            );
         }
-        fclose($handle);
-        return $file;
+        fclose($fetchListFileHandle);
+        return $fetchListFilePath;
     }
 
     private function writeState(array $state): void
@@ -109,15 +120,18 @@ class FetchListProgressTest extends TestCase
         ];
     }
 
-    private function byteOffsetAfterLines(string $file, int $n): int
+    private function byteOffsetAfterLines(
+        string $fetchListFilePath,
+        int $lineCount
+    ): int
     {
-        $handle = fopen($file, 'r');
-        for ($i = 0; $i < $n; $i++) {
-            fgets($handle);
+        $fetchListFileHandle = fopen($fetchListFilePath, 'r');
+        for ($lineNumber = 0; $lineNumber < $lineCount; $lineNumber++) {
+            fgets($fetchListFileHandle);
         }
-        $offset = ftell($handle);
-        fclose($handle);
-        return $offset;
+        $fetchListByteOffset = ftell($fetchListFileHandle);
+        fclose($fetchListFileHandle);
+        return $fetchListByteOffset;
     }
 
     // ---------------------------------------------------------------
@@ -271,7 +285,7 @@ class FetchListProgressTest extends TestCase
     public function testSkippedListHasOwnCounters()
     {
         $this->writeFetchList(50);
-        $skippedList = $this->stateDir . '/pull/skipped-fetch-list.jsonl';
+        $skippedList = $this->pullStateDirectory . '/skipped-fetch-list.jsonl';
         $this->writeFetchList(200, $skippedList);
         $offset20 = $this->byteOffsetAfterLines($skippedList, 20);
 

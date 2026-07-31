@@ -14,6 +14,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     fsRootDir, assertPullPipelineComplete, compareDatabases, createMysqlConnection, getDbName,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -84,7 +85,7 @@ describe('Import: Pull essential-files', { timeout: 180000 }, () => {
     });
 
     it('state records deferred files in the pull metadata', () => {
-        const stateFile = join(tempDir, 'pull/state.json');
+        const stateFile = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
         assert.ok(existsSync(stateFile), 'Expected pull/state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assertPullPipelineComplete(state);
@@ -93,7 +94,10 @@ describe('Import: Pull essential-files', { timeout: 180000 }, () => {
     });
 
     it('skipped fetch list remains on disk', () => {
-        const skippedList = join(tempDir, 'pull/skipped-fetch-list.jsonl');
+        const skippedList = join(
+            pullStateDirectory(tempDir, importUrl()),
+            'skipped-fetch-list.jsonl',
+        );
         assert.ok(existsSync(skippedList), 'Expected skipped fetch list to exist');
         assert.ok(readFileSync(skippedList, 'utf-8').trim().length > 0,
             'Expected skipped fetch list to be non-empty');

@@ -200,7 +200,7 @@ First, we'll make sure the server is reachable and the environment is in a good 
 php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
 ```
 
-The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/pull/state.json` under the `preflight` key.
+The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json` under the `preflight` key.
 
 All other commands check that a preflight has been completed and refuse to start without one.
 
@@ -253,7 +253,8 @@ php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 
 The pipeline proceeds as usual through indexing and diffing, but skips uploads. When the essential
 files are done, the sync marks itself **complete**. The skipped file list stays on disk at
-`$STATE_DIR/pull/skipped-fetch-list.jsonl`. At this point you can apply the database and bring the site online.
+`$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/skipped-fetch-list.jsonl`.
+At this point you can apply the database and bring the site online.
 
 ```bash
 # Step 2: download the uploads
@@ -346,7 +347,8 @@ All three modes recover from server crashes mid-stream (PHP fatal errors,
 OOM kills, `max_execution_time` expiry). When the server dies before sending
 a completion chunk, the importer detects the transport failure, saves its
 cursor, and exits with code 2 for automatic retry. Accumulated SQL is
-persisted in `$STATE_DIR/pull/sql-buffer` so the next run reloads it and continues.
+persisted in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/sql-buffer`
+so the next run reloads it and continues.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
@@ -438,7 +440,7 @@ hosting provider, and generates the configuration files your target server needs
 For PHP's built-in development server:
 
 ```bash
-php reprint.phar apply-runtime --state-dir="$STATE_DIR" \
+php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
     --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=php-builtin
 bash "$RUNTIME_DIR/start.sh"
 ```
@@ -446,7 +448,7 @@ bash "$RUNTIME_DIR/start.sh"
 For nginx + PHP-FPM:
 
 ```bash
-php reprint.phar apply-runtime --state-dir="$STATE_DIR" \
+php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
     --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=nginx-fpm
 # Include $RUNTIME_DIR/nginx.conf in your nginx configuration, then reload
 ```
@@ -515,13 +517,18 @@ whatever tool was reading stdout (typically `mysql` CLI).
 
 Reprint uses `$STATE_DIR` exactly as supplied. Consumers that want the state
 hidden can choose a directory named `.reprint`; Reprint does not append that
-name itself. Shared command progress and the audit log live directly in the
-state directory. Pull-owned state lives in `pull/`, while remote-specific push
-state lives in
-`remotes/<md5-of-trimmed-remote-reprint-api-url>/push/`. Shared and pull filenames
-do not begin with a dot or repeat the scope supplied by their parent directory.
+name itself. State-directory-wide command progress and the audit log live directly in the
+state directory. Pull and push operation state live under the remote state
+directory at `remotes/<md5-of-trimmed-remote-reprint-api-url>/`, in `pull/` and
+`push/` respectively. State-directory-wide and pull filenames do not begin
+with a dot or repeat the scope supplied by their parent directory.
 
-`pull/state.json` and `progress.json` are written atomically:
+The directory name is `md5(rtrim(<remote-reprint-api-url>, "?&"))`. Commands
+which read local pull state receive the same remote Reprint API URL even when
+they make no network request; the URL selects the remote state directory.
+
+`<remote-state-directory>/pull/state.json` and the state-directory-wide
+`progress.json` are written atomically:
 a `.tmp` file is written first and then renamed to its final name so readers
 never see partially written state.
 
@@ -529,7 +536,7 @@ While there's many of these files, most of them are for internal use only.
 The two that might be particularly useful for integrators are:
 
 * `progress.json` – the current progress
-* `pull/state.json` – the pull state store
+* `<remote-state-directory>/pull/state.json` – the pull state store
 
 #### `progress.json` – the current progress
 
@@ -576,7 +583,7 @@ Both fields are emitted together only when the fetch list exists — they
 are absent during the index and diff phases. `files_done` grows monotonically
 up to `files_total` and survives exit-code-2 restarts.
 
-#### `pull/state.json` — the pull state store
+#### `<remote-state-directory>/pull/state.json` — the pull state store
 
 This is the pull state store. Pull commands read it on startup and write it
 back periodically and on shutdown. It stores everything needed to resume after
@@ -585,7 +592,8 @@ state, and per-phase bookmarks.
 
 Written atomically (temp file + rename) so a crash mid-write never corrupts it.
 If the JSON is invalid on load, the importer renames it to
-`pull/state.json.corrupt.<timestamp>` and starts fresh.
+`state.json.corrupt.<timestamp>` in the same pull state directory and starts
+fresh.
 
 ```jsonc
 {
@@ -649,22 +657,23 @@ tell you where the pipeline is. The `stage` field gives finer granularity
 (e.g., `"scanning"`, `"sorting"`, `"streaming"` for file sync).
 
 For pull lifecycle and source-site details, prefer `pull-metadata` over reading
-`pull/state.json` directly. It exposes a small, stable JSON contract for host
-integrations:
+`<remote-state-directory>/pull/state.json` directly. It exposes a small, stable
+JSON contract for host integrations:
 
 ```bash
-php reprint.phar pull-metadata --state-dir="$STATE_DIR" | jq '.hasCompletedOnce'
+php reprint.phar pull-metadata "$URL" --state-dir="$STATE_DIR" | jq '.hasCompletedOnce'
 ```
 
 The `sourceSite` object contains the source WordPress home URL, site URL, table
 prefix, WordPress database charset, and database server charset reported by
 preflight. Each field is `null` when preflight did not report it.
 
-#### `pull/volatile-files.json` — files that changed during sync
+#### `<remote-state-directory>/pull/volatile-files.json` — files that changed during sync
 
 During `files-pull`, a file on the source may be modified while the importer is
 streaming it. When that happens, the server returns a different content hash than
-expected and the importer records the file in `pull/volatile-files.json`
+expected and the importer records the file in
+`<remote-state-directory>/pull/volatile-files.json`
 instead of failing.
 
 The file is a flat JSON object mapping paths to the number of times each file
@@ -692,7 +701,7 @@ truncated or rotated, so it provides a complete history of the migration.
 ```
 [2025-01-15 10:30:01] VOLATILE | path=/srv/htdocs/wp-content/debug.log | count=1
 [2025-01-15 10:30:05] VOLATILE CLEARED | path=/srv/htdocs/wp-content/debug.log
-[2025-01-15 10:31:12] FILE TRUNCATE | /tmp/reprint-state/pull/remote-index.wal | remote index WAL batch applied
+[2025-01-15 10:31:12] FILE TRUNCATE | /tmp/reprint-state/remotes/0123456789abcdef0123456789abcdef/pull/remote-index.wal | remote index WAL batch applied
 ```
 
 Pass `--verbose` to also print audit log entries to the console as they happen.
@@ -714,10 +723,10 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `files-index` — Index all remote files (initial) or detect changes (delta). No file contents downloaded.
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
-* `db-domains` — Lists domains discovered in the SQL dump. Reads `pull/domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
+* `db-domains` — Lists domains discovered in the SQL dump. Reads `<remote-state-directory>/pull/domains.json` if available (written by `db-pull`), otherwise scans `db.sql`.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
-* `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. Requires only `--state-dir`; no network calls are made.
+* `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. The remote Reprint API URL selects the pull state; no network calls are made.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
-* `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
+* `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from the pull state selected by the remote Reprint API URL. No network calls are made. See [Step 6](#step-6--generate-runtime-configuration).
 
 All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.

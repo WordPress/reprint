@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    countJsonlLines,
+    countJsonlLines, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -36,7 +36,7 @@ describe('Import: Files Index', () => {
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const nextRemoteIndexFile = join(tempDir, 'pull/remote-index.next.jsonl');
+        const nextRemoteIndexFile = join(pullStateDirectory(tempDir, importUrl()), 'remote-index.next.jsonl');
         const completion = result.stdout
             .split('\n')
             .map(line => {
@@ -73,7 +73,7 @@ describe('Import: Files Index', () => {
     });
 
     it('next remote index has at least 3000 entries', () => {
-        const nextRemoteIndexFile = join(tempDir, 'pull/remote-index.next.jsonl');
+        const nextRemoteIndexFile = join(pullStateDirectory(tempDir, importUrl()), 'remote-index.next.jsonl');
         const count = countJsonlLines(nextRemoteIndexFile);
         assert.ok(count >= 3000,
             `Expected at least 3000 entries in next remote index, got ${count}`);

@@ -96,7 +96,7 @@ describe('Import: Unicode Paths', () => {
     });
 
     it('accounted for at least 3000 remote index entries', () => {
-        assertRemoteIndexEntryCount(tempDir);
+        assertRemoteIndexEntryCount(tempDir, importUrl());
     });
 
     it('imported files form a valid WordPress site mirror', () => {

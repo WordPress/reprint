@@ -13,20 +13,20 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Protocol Version Mismatch', () => {
     const site = 'basic';
     let tempDir;
-    const stateFileName = 'pull/state.json';
 
     function importUrl() {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
     function stateFilePath() {
-        return join(tempDir, stateFileName);
+        return join(pullStateDirectory(tempDir, importUrl()), 'state.json');
     }
 
     function readState() {

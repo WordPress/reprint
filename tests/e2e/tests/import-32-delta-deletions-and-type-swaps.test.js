@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir,
+    fsRootDir, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -221,7 +221,7 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
     });
 
     it('state stores path fields in base64 form', () => {
-        const statePath = join(tempDir, 'pull/state.json');
+        const statePath = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
         const state = JSON.parse(readFileSync(statePath, 'utf-8'));
 
         assert.equal(typeof state.diff.last_consumed_remote_index_entry_path, 'string', 'Expected diff.last_consumed_remote_index_entry_path to be persisted');

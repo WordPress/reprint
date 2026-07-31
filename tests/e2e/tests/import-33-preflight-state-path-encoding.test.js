@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -42,7 +43,10 @@ describe('Import: Preflight state path encoding', () => {
     });
 
     it('stores requested preflight path fields as base64 in state file', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrlWithDirectory()), 'state.json'),
+            'utf-8',
+        ));
         const data = state.preflight?.data;
         assert.ok(data, 'Expected preflight.data in state');
 
@@ -110,7 +114,7 @@ describe('Import: Preflight state path encoding', () => {
     });
 
     it('decodes encoded preflight roots when loading state', () => {
-        const result = runImporter(getSiteUrl(site), tempDir, 'files-index', {
+        const result = runImporter(importUrlWithDirectory(), tempDir, 'files-index', {
             secret: getSiteSecret(site),
             skipPreflight: true,
         });

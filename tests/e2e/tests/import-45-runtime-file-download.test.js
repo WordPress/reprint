@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir, readAuditLog,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { writeFileSync, mkdirSync } from 'node:fs';
@@ -70,7 +71,10 @@ describe('Import: Runtime file download', () => {
             assert.equal(preflightResult.exitCode, 0,
                 `Expected exit 0\nstderr: ${preflightResult.stderr}\nstdout: ${preflightResult.stdout}`);
 
-            const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(
+                join(pullStateDirectory(tempDir, importUrlWithDirectory()), 'state.json'),
+                'utf-8',
+            ));
             const prepend = state.preflight?.data?.runtime?.ini_get_all?.auto_prepend_file ?? '';
             if (prepend.includes('scripts/env.php')) {
                 break;
@@ -93,7 +97,10 @@ describe('Import: Runtime file download', () => {
     });
 
     it('preflight state reports auto_prepend_file path', () => {
-        const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+        const state = JSON.parse(readFileSync(
+            join(pullStateDirectory(tempDir, importUrlWithDirectory()), 'state.json'),
+            'utf-8',
+        ));
         const iniAll = state.preflight?.data?.runtime?.ini_get_all;
         const prepend = iniAll?.auto_prepend_file ?? '';
         assert.ok(

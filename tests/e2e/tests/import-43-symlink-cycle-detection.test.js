@@ -29,7 +29,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     countJsonlLines,
-    fsRootDir,
+    fsRootDir, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -79,7 +79,10 @@ describe('Import: Symlink cycle detection', () => {
         // A WordPress site has ~4000-6000 files.  Without cycle detection
         // the self-symlink would double that on every depth level.  With
         // cycle detection the total should stay in the normal range.
-        const nextRemoteIndexFile = join(tempDir, 'pull/remote-index.next.jsonl');
+        const nextRemoteIndexFile = join(
+            pullStateDirectory(tempDir, importUrl()),
+            'remote-index.next.jsonl',
+        );
         assert.ok(existsSync(nextRemoteIndexFile), 'Next remote index should exist');
 
         const count = countJsonlLines(nextRemoteIndexFile);
@@ -93,7 +96,10 @@ describe('Import: Symlink cycle detection', () => {
     });
 
     it('the marker file is indexed exactly once per reachable path', () => {
-        const nextRemoteIndexFile = join(tempDir, 'pull/remote-index.next.jsonl');
+        const nextRemoteIndexFile = join(
+            pullStateDirectory(tempDir, importUrl()),
+            'remote-index.next.jsonl',
+        );
         const content = readFileSync(nextRemoteIndexFile, 'utf-8');
         const lines = content.split('\n').filter(l => l.trim());
 

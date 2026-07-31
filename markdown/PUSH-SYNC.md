@@ -413,9 +413,9 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 `PushFilesSender`. It sends only the resolved filesystem root named by `--fs-root`.
 It requires `--state-dir`, `--fs-root`, and `--secret`; HTTPS is required unless
 the operator passes `--force-http`. It does not run pull preflight, read or
-write `pull/state.json`, show a plan, ask for confirmation, transfer a
-database, retry a failed request, or start a replacement sender after a
-`restart` outcome.
+write `<remote-state-directory>/pull/state.json`, show a plan, ask for
+confirmation, transfer a database, retry a failed request, or start a
+replacement sender after a `restart` outcome.
 
 The local push state directory is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash

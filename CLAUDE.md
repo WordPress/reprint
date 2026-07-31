@@ -166,7 +166,7 @@ Entries in `paths_to_remove` under `wp-content/plugins/` also trigger automatic 
 
 ### SQL Streaming Crash Recovery
 
-When the export server crashes mid-SQL-stream (`--sql-output=mysql` mode), the importer detects the transport failure (missing completion chunk, curl communication errors), saves the cursor, persists accumulated SQL in `--state-dir/pull/sql-buffer`, and exits with code 2 for automatic retry. The next run reloads the buffer and continues. The `finally` block avoids masking the original exception with a secondary buffer-related throw.
+When the export server crashes mid-SQL-stream (`--sql-output=mysql` mode), the importer detects the transport failure (missing completion chunk, curl communication errors), saves the cursor, persists accumulated SQL in `<remote-state-directory>/pull/sql-buffer`, and exits with code 2 for automatic retry. The next run reloads the buffer and continues. The `finally` block avoids masking the original exception with a secondary buffer-related throw.
 
 ### Progress Tracking
 
@@ -239,11 +239,13 @@ Always consult these when working on the respective components.
 
 ### Progress Computation
 
-Progress is computed client-side by reading state files (all in `--state-dir`):
-- `pull/state.json`: Current command, status, cursor, stage
-- `pull/remote-index.jsonl`: Remote index (line count = accounted entries)
-- `pull/remote-index.next.jsonl`: Next remote index (for delta comparison)
-- `pull/fetch-list.jsonl`: Files pending download
+Progress is computed client-side by reading state files. The remote state
+directory is
+`--state-dir/remotes/<md5-of-trimmed-remote-reprint-api-url>`:
+- `<remote-state-directory>/pull/state.json`: Current command, status, cursor, stage
+- `<remote-state-directory>/pull/remote-index.jsonl`: Remote index (line count = accounted entries)
+- `<remote-state-directory>/pull/remote-index.next.jsonl`: Next remote index (for delta comparison)
+- `<remote-state-directory>/pull/fetch-list.jsonl`: Files pending download
 - `db.sql`: SQL dump file size
 
 And from `--fs-root`:

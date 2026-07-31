@@ -20,6 +20,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 {
     private $tempDir;
     private $stateDir;
+    private $pullStateDirectory;
     private $filesystem_root;
 
     protected function setUp(): void
@@ -27,9 +28,11 @@ class CurlTimeoutRecoveryTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/curl-timeout-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
+        $this->pullStateDirectory =
+            $this->stateDir . '/remotes/' . md5('http://fake.url') . '/pull';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
-        mkdir($this->stateDir . '/pull', 0755, true);
+        mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
 
@@ -76,7 +79,7 @@ class CurlTimeoutRecoveryTest extends TestCase
 
     private function readState(): array
     {
-        $contents = file_get_contents($this->stateDir . '/pull/state.json');
+        $contents = file_get_contents($this->pullStateDirectory . '/state.json');
         return json_decode($contents, true);
     }
 

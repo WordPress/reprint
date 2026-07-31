@@ -345,7 +345,7 @@ class PullPipelineCheckpointState
 /**
  * In-process pull state with typed properties for each persisted field.
  *
- * This object mirrors pull/state.json. Add new persistent state here first;
+ * This object mirrors the pull state file. Add new persistent state here first;
  * from_array() requires the complete current schema.
  */
 class PullState

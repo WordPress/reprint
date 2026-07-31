@@ -16,6 +16,7 @@ import {
     compareDatabases, createMysqlConnection, assertPullPipelineComplete,
     writeTestHooks, removeTestHooks,
     writeHookState, readHookState, clearHookState,
+    pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -91,7 +92,7 @@ describe('Import: Adversarial database pull', { timeout: 300000 }, () => {
                 `${result.stdout.slice(-4000)}`,
         );
         const importState = JSON.parse(
-            readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'),
+            readFileSync(join(pullStateDirectory(tempDir, importUrl()), 'state.json'), 'utf-8'),
         );
         assertPullPipelineComplete(importState, 'pull-db');
 

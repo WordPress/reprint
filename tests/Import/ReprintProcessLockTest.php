@@ -27,28 +27,43 @@ final class ReprintProcessLockTest extends TestCase
 
     public function testLocalStateLayoutUsesMatchingDirectoriesAndFileNames(): void
     {
+        $remote_reprint_api_url = 'https://example.com/?site-export-api';
         $process_lock = new \ReprintProcessLock($this->root . '/state');
         $client = new \ImportClient(
-            'https://example.com/?site-export-api',
+            $remote_reprint_api_url,
             $this->root . '/state',
             $this->root . '/files'
         );
+        $remote_state_directory =
+            $this->root . '/state/remotes/' . md5($remote_reprint_api_url);
+        $pull_state_directory = $remote_state_directory . '/pull';
 
         $this->assertFileExists($this->root . '/state/process.lock');
-        $this->assertDirectoryExists($this->root . '/state/pull');
+        $this->assertDirectoryExists($pull_state_directory);
+        $this->assertDirectoryDoesNotExist($this->root . '/state/pull');
         $this->assertDirectoryDoesNotExist($this->root . '/state/.reprint');
         $this->assertFileDoesNotExist($this->root . '/state/.reprint.lock');
+        $this->assertSame(
+            realpath($remote_state_directory) . '/push',
+            \ImportClient::resolve_push_state_directory(
+                $remote_reprint_api_url,
+                $this->root . '/state',
+                $this->root . '/files',
+                'files-diff'
+            )
+        );
 
         $reflection = new \ReflectionClass($client);
         $expected_paths = [
             'state_dir' => $this->root . '/state',
-            'pull_state_file' => $this->root . '/state/pull/state.json',
-            'remote_index_file' => $this->root . '/state/pull/remote-index.jsonl',
-            'remote_index_wal_path' => $this->root . '/state/pull/remote-index.wal',
-            'next_remote_index_file' => $this->root . '/state/pull/remote-index.next.jsonl',
-            'fetch_list_file' => $this->root . '/state/pull/fetch-list.jsonl',
-            'skipped_fetch_list_file' => $this->root . '/state/pull/skipped-fetch-list.jsonl',
-            'volatile_files_file' => $this->root . '/state/pull/volatile-files.json',
+            'pull_state_directory' => $pull_state_directory,
+            'pull_state_file' => $pull_state_directory . '/state.json',
+            'remote_index_file' => $pull_state_directory . '/remote-index.jsonl',
+            'remote_index_wal_path' => $pull_state_directory . '/remote-index.wal',
+            'next_remote_index_file' => $pull_state_directory . '/remote-index.next.jsonl',
+            'fetch_list_file' => $pull_state_directory . '/fetch-list.jsonl',
+            'skipped_fetch_list_file' => $pull_state_directory . '/skipped-fetch-list.jsonl',
+            'volatile_files_file' => $pull_state_directory . '/volatile-files.json',
             'audit_log_file' => $this->root . '/state/audit.log',
             'progress_file' => $this->root . '/state/progress.json',
         ];

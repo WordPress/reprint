@@ -17,7 +17,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch, readAuditLog,
-    fsRootDir,
+    fsRootDir, pullStateDirectory,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -80,7 +80,10 @@ describe('Import: --filter', () => {
         });
 
         it('state shows complete with filter persisted', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(
+                join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+                'utf-8',
+            ));
             assert.equal(state.active_resumable_command.command_name, 'files-pull');
             assert.equal(state.active_resumable_command.completion_state, 'complete');
             assert.equal(state.filter, 'essential-files');
@@ -105,7 +108,10 @@ describe('Import: --filter', () => {
         });
 
         it('skipped fetch list remains on disk', () => {
-            assert.ok(existsSync(join(tempDir, 'pull/skipped-fetch-list.jsonl')),
+            assert.ok(existsSync(join(
+                pullStateDirectory(tempDir, importUrl()),
+                'skipped-fetch-list.jsonl',
+            )),
                 'Expected skipped fetch list to remain on disk');
         });
 
@@ -134,7 +140,10 @@ describe('Import: --filter', () => {
         });
 
         it('skipped fetch list was cleaned up', () => {
-            assert.ok(!existsSync(join(tempDir, 'pull/skipped-fetch-list.jsonl')),
+            assert.ok(!existsSync(join(
+                pullStateDirectory(tempDir, importUrl()),
+                'skipped-fetch-list.jsonl',
+            )),
                 'Expected skipped fetch list to be cleaned up');
         });
 
@@ -142,7 +151,10 @@ describe('Import: --filter', () => {
             // Regression: the skipped-earlier fetch must mark the sync
             // complete. If it leaves status="in_progress", the filter-change
             // guard blocks the next delta re-pull below.
-            const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(
+                join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+                'utf-8',
+            ));
             assert.equal(state.active_resumable_command.completion_state, 'complete',
                 `Expected completion_state=complete after skipped-earlier, got ${state.active_resumable_command?.completion_state}`);
         });
@@ -192,7 +204,10 @@ describe('Import: --filter', () => {
         });
 
         it('state preserves filter across resume cycles', () => {
-            const state = JSON.parse(readFileSync(join(tempDir, 'pull/state.json'), 'utf-8'));
+            const state = JSON.parse(readFileSync(
+                join(pullStateDirectory(tempDir, importUrl()), 'state.json'),
+                'utf-8',
+            ));
             assert.equal(state.filter, 'essential-files');
             assert.equal(state.active_resumable_command.completion_state, 'complete');
         });
@@ -206,7 +221,10 @@ describe('Import: --filter', () => {
         });
 
         it('skipped list remains on disk', () => {
-            assert.ok(existsSync(join(tempDir, 'pull/skipped-fetch-list.jsonl')),
+            assert.ok(existsSync(join(
+                pullStateDirectory(tempDir, importUrl()),
+                'skipped-fetch-list.jsonl',
+            )),
                 'Expected skipped fetch list to remain');
         });
     });
@@ -234,7 +252,10 @@ describe('Import: --filter', () => {
         });
 
         it('no skipped fetch list was created', () => {
-            assert.ok(!existsSync(join(tempDir, 'pull/skipped-fetch-list.jsonl')),
+            assert.ok(!existsSync(join(
+                pullStateDirectory(tempDir, importUrl()),
+                'skipped-fetch-list.jsonl',
+            )),
                 'Expected no skipped fetch list without --filter');
         });
 
