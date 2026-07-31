@@ -96,7 +96,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             'max_allowed_packet' => null,
         ];
 
-        \write_current_import_state($this->makeClient(), array_replace_recursive($defaults, $state));
+        \write_current_pull_state($this->makeClient(), array_replace_recursive($defaults, $state));
     }
 
     private function makeClient(): \ImportClient
@@ -163,11 +163,11 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             $runtime,
         );
         $this->assertStringContainsString(
-            "REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE",
+            "REPRINT_PULL_STATE_FILE",
             $runtime,
         );
         $this->assertStringContainsString(
-            "REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE",
+            "REPRINT_PULL_SKIPPED_FETCH_LIST_FILE",
             $runtime,
         );
         $this->assertStringContainsString(
@@ -199,7 +199,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             $runtime,
         );
         $this->assertStringContainsString(
-            "REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE",
+            "REPRINT_PULL_STATE_FILE",
             $runtime,
         );
         $this->assertStringContainsString(
@@ -227,7 +227,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             $runtime,
         );
         $this->assertStringNotContainsString(
-            "REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE",
+            "REPRINT_PULL_STATE_FILE",
             $runtime,
         );
         $this->assertStringNotContainsString(

@@ -35,6 +35,13 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--new-site-url=URL', $output);
     }
 
+    public function testImportMetadataAliasShowsPullMetadataHelp(): void
+    {
+        $output = $this->runHelp('import-metadata');
+
+        $this->assertStringContainsString('Usage: reprint pull-metadata --state-dir=DIR', $output);
+    }
+
     public function testFilesPushHelpShowsOnlyItsCommandOptions(): void
     {
         $output = $this->runHelp('files-push');

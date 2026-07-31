@@ -67,7 +67,7 @@ class FilesPullStateTest extends TestCase
      */
     private function writeState(array $state): void
     {
-        \write_current_import_state($this->makeClient(), array_replace_recursive([
+        \write_current_pull_state($this->makeClient(), array_replace_recursive([
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "follow_symlinks" => false,
             "fs_root_nonempty_behavior" => "preserve-local",

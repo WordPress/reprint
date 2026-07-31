@@ -6,7 +6,7 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../importer/import.php';
 
-class ImportMetadataTest extends TestCase
+class PullMetadataTest extends TestCase
 {
     private string $tempDir;
     private string $stateDir;
@@ -18,7 +18,7 @@ class ImportMetadataTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->tempDir = sys_get_temp_dir() . '/reprint-import-metadata-' . uniqid('', true);
+        $this->tempDir = sys_get_temp_dir() . '/reprint-pull-metadata-' . uniqid('', true);
         $this->stateDir = $this->tempDir . '/state';
         $this->fsRoot = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
@@ -60,11 +60,11 @@ class ImportMetadataTest extends TestCase
     }
 
     /**
-     * Writes importer state directly so each test can model one lifecycle shape.
+     * Writes pull state directly so each test can model one lifecycle shape.
      */
     private function writeState(array $state): void
     {
-        \write_current_import_state(
+        \write_current_pull_state(
             new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot),
             $state
         );
@@ -73,12 +73,12 @@ class ImportMetadataTest extends TestCase
     /**
      * Runs the metadata command and returns its decoded JSON response.
      */
-    private function readMetadata(): array
+    private function readMetadata(string $command = 'pull-metadata'): array
     {
         $client = new \ImportClient('http://example.invalid', $this->stateDir, $this->fsRoot);
 
         ob_start();
-        $client->run(['command' => 'import-metadata']);
+        $client->run(['command' => $command]);
         $output = ob_get_clean();
 
         $metadata = json_decode($output, true);
@@ -88,21 +88,71 @@ class ImportMetadataTest extends TestCase
     }
 
     /**
+     * Verifies the previous command name remains an alias for pull metadata.
+     */
+    public function testImportMetadataAliasReportsPullMetadata(): void
+    {
+        $this->assertSame(
+            $this->readMetadata(),
+            $this->readMetadata('import-metadata')
+        );
+    }
+
+    /**
      * Verifies a missing state file is reported as a never-completed pull.
      */
-    public function testImportMetadataReportsNoCompletedPullForFreshState(): void
+    public function testPullMetadataReportsNoCompletedPullForFreshState(): void
     {
         $metadata = $this->readMetadata();
 
         $this->assertFalse($metadata['hasCompletedOnce']);
         $this->assertFileDoesNotExist($this->stateDir . '/pull/state.json');
         $this->assertNull($metadata['pullStage']);
+        $this->assertSame([
+            'homeUrl' => null,
+            'siteUrl' => null,
+            'tablePrefix' => null,
+            'wordpressDatabaseCharset' => null,
+            'serverDatabaseCharset' => null,
+        ], $metadata['sourceSite']);
+    }
+
+    /**
+     * Verifies source-site values are exposed without leaking the preflight schema.
+     */
+    public function testPullMetadataReportsSourceSiteFields(): void
+    {
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'database' => [
+                        'server_charset' => 'latin1',
+                        'wp' => [
+                            'home' => 'https://example.com',
+                            'siteurl' => 'https://example.com/wordpress',
+                            'table_prefix' => 'wp_4_',
+                            'wpdb_charset' => 'utf8mb3',
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        $metadata = $this->readMetadata();
+
+        $this->assertSame([
+            'homeUrl' => 'https://example.com',
+            'siteUrl' => 'https://example.com/wordpress',
+            'tablePrefix' => 'wp_4_',
+            'wordpressDatabaseCharset' => 'utf8mb3',
+            'serverDatabaseCharset' => 'latin1',
+        ], $metadata['sourceSite']);
     }
 
     /**
      * Verifies completed low-level commands do not imply a completed pull.
      */
-    public function testImportMetadataDoesNotTreatCompletedSubcommandAsCompletedPull(): void
+    public function testPullMetadataDoesNotTreatCompletedSubcommandAsCompletedPull(): void
     {
         $this->writeState([
             'active_resumable_command' => [
@@ -120,7 +170,7 @@ class ImportMetadataTest extends TestCase
     /**
      * Verifies a completed pull pipeline reports completion.
      */
-    public function testImportMetadataReportsCompletedPullState(): void
+    public function testPullMetadataReportsCompletedPullState(): void
     {
         $this->writeState([
             'active_resumable_command' => [
@@ -144,7 +194,7 @@ class ImportMetadataTest extends TestCase
     /**
      * Verifies delta re-pull state preserves that a pull completed previously.
      */
-    public function testImportMetadataReportsPriorCompletionDuringRepull(): void
+    public function testPullMetadataReportsPriorCompletionDuringRepull(): void
     {
         $this->writeState([
             'active_resumable_command' => [

@@ -308,7 +308,7 @@ class DeactivateHostPluginsTest extends TestCase
 
     private function writeState(array $state): void
     {
-        \write_current_import_state($this->makeClient(), $state);
+        \write_current_pull_state($this->makeClient(), $state);
     }
 
     private function makeClient(): \ImportClient

@@ -128,7 +128,7 @@ Inside a class, omit the class name when context already supplies it: use
 
 - Exercise process death with an open request, cancellation between steps,
   local path changes before and after a chunk, large indexes, oversized target
-  responses, and interruption between every pair of durable phases.
+  responses, and interruption at every boundary between durable phases.
 - Assert both sides of each boundary: no confirmed work is repeated as new
   work, and no unconfirmed work is skipped.
 - Test boundedness with data larger than one step. A test which only uses one

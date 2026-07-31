@@ -2,9 +2,9 @@
 declare(strict_types=1);
 
 /**
- * Typed import-state objects.
+ * Typed pull-state objects.
  *
- * The importer persists state as JSON, so these objects keep explicit
+ * Reprint persists pull state as JSON, so these objects keep explicit
  * in-process property names while to_array()/from_array() define the current
  * on-disk schema.
  */
@@ -26,7 +26,7 @@ class ResumableCommandCheckpointState
     public static function from_array(array $data): self
     {
         $state = new self();
-        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->command_name = $data['command_name'];
         $state->completion_state = $data['completion_state'];
         $state->current_stage = $data['current_stage'];
@@ -65,7 +65,7 @@ class DatabaseTableIndexState
     public static function from_array(array $data): self
     {
         $state = new self();
-        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->file = $data['file'];
         $state->tables = $data['tables'];
         $state->rows_estimated = $data['rows_estimated'];
@@ -97,7 +97,7 @@ class FileDiffProgressState
     public static function from_array(array $data): self
     {
         $state = new self();
-        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->remote_offset = $data['remote_offset'];
         $state->local_after = $data['local_after'];
         return $state;
@@ -120,7 +120,7 @@ class RemoteFileIndexCursorState
     public static function from_array(array $data): self
     {
         $state = new self();
-        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->cursor = $data['cursor'];
         return $state;
     }
@@ -151,7 +151,7 @@ class FetchListProgressState
     public static function from_array(array $data): self
     {
         $state = new self();
-        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->offset = $data['offset'];
         $state->next_offset = $data['next_offset'];
         $state->batch_file = $data['batch_file'];
@@ -180,7 +180,7 @@ class FilesPullSummaryState
     public static function from_array(array $data): self
     {
         $state = new self();
-        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->files_pulled = $data['files_pulled'];
         return $state;
     }
@@ -233,7 +233,7 @@ class DatabaseApplyCommandState
     public static function from_array(array $data): self
     {
         $state = new self();
-        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->statements_executed = $data['statements_executed'];
         $state->bytes_read = $data['bytes_read'];
         $state->rewrite_url = $data['rewrite_url'];
@@ -277,7 +277,7 @@ class AdaptiveTuningState
     public static function from_array(array $data): self
     {
         $state = new self();
-        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->config = $data['config'];
         $state->state = $data['state'];
         return $state;
@@ -315,7 +315,7 @@ class PullPipelineCheckpointState
     public static function from_array(array $data): self
     {
         $state = new self();
-        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->started_by_command = $data['started_by_command'];
         $state->stage_sequence = array_values($data['stage_sequence']);
         $state->last_completed_stage = $data['last_completed_stage'];
@@ -339,19 +339,19 @@ class PullPipelineCheckpointState
 }
 
 /**
- * In-process import state with typed properties for each persisted field.
+ * In-process pull state with typed properties for each persisted field.
  *
  * This object mirrors pull/state.json. Add new persistent state here first;
  * from_array() requires the complete current schema.
  */
-class ImportState
+class PullState
 {
     /** Resume checkpoint for a lower-level command run directly or inside a pull pipeline. */
     public ResumableCommandCheckpointState $active_resumable_command;
     /** @var array<string,mixed>|null */
     public ?array $preflight = null;
     public ?int $remote_protocol_version = null;
-    /** @var string|null Importer version saved with state. */
+    /** @var string|null Source WordPress version saved with state. */
     public ?string $version = null;
     /** @var string|null Webhost detected during preflight. */
     public ?string $webhost = null;
@@ -386,7 +386,7 @@ class ImportState
     /**
      * @var string|null MySQL host persisted for resume.
      *
-     * The password is deliberately excluded from import state.
+     * The password is deliberately excluded from pull state.
      */
     public ?string $mysql_host = null;
     /** @var int|null MySQL port persisted for resume. */
@@ -419,7 +419,7 @@ class ImportState
     public static function from_array(array $data): self
     {
         $state = new self();
-        reprint_assert_import_state_keys($data, array_keys($state->to_array()), self::class);
+        reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
         $state->preflight = $data['preflight'];
         $state->remote_protocol_version = $data['remote_protocol_version'];
@@ -495,12 +495,12 @@ class ImportState
 }
 
 /**
- * Reject import-state shapes other than the one written by the current code.
+ * Reject pull-state shapes other than the one written by the current code.
  *
  * @param array<string,mixed> $data          Observed state data.
  * @param string[]            $expected_keys Current field names.
  */
-function reprint_assert_import_state_keys(array $data, array $expected_keys, string $state_name): void
+function reprint_assert_state_keys(array $data, array $expected_keys, string $state_name): void
 {
     $actual_keys = array_keys($data);
     sort($actual_keys);

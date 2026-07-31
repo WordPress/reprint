@@ -1,13 +1,13 @@
 #!/usr/bin/env php
 <?php
 /**
- * Import client for export.php.
+ * Reprint client for export.php.
  *
  * Downloads SQL and files from a remote export.php script, with support for:
  * - Resumable downloads using cursors
  * - Streaming multipart parsing (no buffering)
  * - Progress reporting via JSON lines to stdout
- * - Three-phase import: files, SQL, then file deltas
+ * - Three-phase pull: files, SQL, then file deltas
  */
 
 use function WordPress\Filesystem\wp_join_unix_paths;
@@ -61,8 +61,8 @@ require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
 
-// Typed state objects for the persisted import state.
-require_once __DIR__ . '/lib/state/class-import-state.php';
+// Typed state objects for the persisted pull state.
+require_once __DIR__ . '/lib/state/class-pull-state.php';
 
 // Adaptive sizing for push request bodies
 require_once __DIR__ . '/lib/upload/class-push-request-sizer.php';
@@ -145,7 +145,7 @@ function reprint_apply_curl_ca_bundle($ch): ?string {
  * multipart structure, header names, endpoint parameters, response format)
  * would break an older export plugin.
  */
-define('IMPORT_PROTOCOL_VERSION', 1);
+define('PULL_PROTOCOL_VERSION', 1);
 
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -326,8 +326,8 @@ class ImportClient
     /** @var bool Whether stdout is a TTY (enables interactive progress display). */
     private $is_tty;
 
-    /** @var int Running count of files imported in the current invocation. */
-    private $files_imported = 0;
+    /** @var int Running count of files pulled in the current invocation. */
+    private $files_pulled = 0;
 
     /** @var int|null Total entries in the current fetch list.  Set once
      *  at the start of fetch_files_from_list() by counting newlines. */
@@ -339,8 +339,8 @@ class ImportClient
      *  that consumers should display as "files done". */
     private $fetch_list_done = null;
 
-    /** @var ImportState Persistent import state loaded from / saved to $pull_state_file. */
-    private ImportState $state;
+    /** @var PullState Persistent pull state loaded from / saved to $pull_state_file. */
+    private PullState $state;
 
     /** @var bool Set to true by SIGTERM/SIGINT handler to finish the current chunk and exit cleanly. */
     private $shutdown_requested = false;
@@ -382,7 +382,7 @@ class ImportClient
     private $include_caches = false;
 
     /**
-     * @var string Controls behavior when the filesystem root is non-empty at import start.
+     * @var string Controls behavior when the filesystem root is non-empty at pull start.
      *
      * 'error' (default): throw an error if the filesystem root is non-empty.
      * 'preserve-local': preserve existing files, symlinks, and directories in the
@@ -438,7 +438,7 @@ class ImportClient
     private $hmac_client = null;
 
     /**
-     * @var int|null MySQL max_allowed_packet value for the import database connection.
+     * @var int|null MySQL max_allowed_packet value for the target database connection.
      * Passed to the server so it can split SQL statements to fit within this limit.
      */
     private $max_allowed_packet = null;
@@ -500,7 +500,7 @@ class ImportClient
     private $progress_fd;
 
     /**
-     * @var int Process exit code. 0 = import complete, 2 = partial progress
+     * @var int Process exit code. 0 = pull complete, 2 = partial progress
      * (caller should invoke again to continue).
      */
     public $exit_code = 0;
@@ -565,7 +565,7 @@ class ImportClient
             }
         }
 
-        $this->state = new ImportState();
+        $this->state = new PullState();
     }
 
     /**
@@ -636,44 +636,32 @@ class ImportClient
         }
     }
 
-    /** Return the typed in-process import state. */
-    public function get_import_state(): ImportState
-    {
-        return $this->import_state();
-    }
-
-    /** Persist the current typed import state to disk. */
-    public function save_import_state(): void
-    {
-        $this->save_state($this->import_state());
-    }
-
     /** Mark a pull pipeline stage as completed in state. */
     public function mark_pull_stage_complete(string $stage, string $pipeline = 'pull', array $stage_sequence = []): void
     {
-        $this->import_state()->pull_pipeline->started_by_command = $pipeline;
-        $this->import_state()->pull_pipeline->last_completed_stage = $stage;
+        $this->get_state()->pull_pipeline->started_by_command = $pipeline;
+        $this->get_state()->pull_pipeline->last_completed_stage = $stage;
         if ($stage_sequence !== []) {
-            $this->import_state()->pull_pipeline->stage_sequence = $stage_sequence;
+            $this->get_state()->pull_pipeline->stage_sequence = $stage_sequence;
         }
-        $this->save_state($this->state);
+        $this->save_state();
     }
 
     /** Mark the pull pipeline as fully complete in state. */
     public function mark_pull_complete(string $pipeline = 'pull'): void
     {
-        $this->import_state()->pull_pipeline->started_by_command = $pipeline;
-        $this->import_state()->pull_pipeline->has_completed_once = true;
-        $this->import_state()->active_resumable_command->completion_state = 'complete';
-        $this->save_state($this->state);
+        $this->get_state()->pull_pipeline->started_by_command = $pipeline;
+        $this->get_state()->pull_pipeline->has_completed_once = true;
+        $this->get_state()->active_resumable_command->completion_state = 'complete';
+        $this->save_state();
     }
 
     /** Record the pull's file filter and whether deferred files remain. */
     public function set_pull_files_state(string $filter, bool $skipped_pending): void
     {
-        $this->import_state()->pull_pipeline->files_filter = $filter;
-        $this->import_state()->pull_pipeline->skipped_pending = $skipped_pending;
-        $this->save_state($this->state);
+        $this->get_state()->pull_pipeline->files_filter = $filter;
+        $this->get_state()->pull_pipeline->skipped_pending = $skipped_pending;
+        $this->save_state();
     }
 
     /**
@@ -714,9 +702,8 @@ class ImportClient
      *
      * @param string       $command Normalized CLI command name.
      * @param list<string> $argv    Raw command arguments.
-     * @param string|null  $pair    Files-diff or files-push pair key, when available.
      */
-    public function audit_log_argv(string $command, array $argv, ?string $pair = null): void
+    public function audit_log_argv(string $command, array $argv): void
     {
         // Mask the remote URL (argv[2]) to avoid logging secrets embedded in query strings.
         $masked = $argv;
@@ -731,8 +718,10 @@ class ImportClient
                 $masked[$argument_index] = '--secret=***';
             }
         }
-        $pair_field = $pair === null ? '' : " | pair={$pair}";
-        $this->audit_log("COMMAND | {$command}{$pair_field} | argv=" . implode(' ', $masked), false);
+        $this->audit_log(
+            "COMMAND | {$command} | argv=" . implode(' ', $masked),
+            false
+        );
     }
 
     /**
@@ -850,9 +839,10 @@ class ImportClient
     }
 
     /**
-     * Runs one import command while holding the state directory's process lock.
+     * Runs one Reprint command while holding the state directory's process lock.
      *
-     * CLI callers pass the lock acquired before pair setup and audit logging.
+     * CLI callers pass the lock acquired before local push state setup and
+     * audit logging.
      * Direct callers may omit it; this method then acquires the lock before
      * reading or writing command state. A supplied lock remains caller-owned.
      *
@@ -885,6 +875,7 @@ class ImportClient
             "db-sync" => "db-pull",
             "flat-document-root" => "flat-docroot",
             "flatten-docroot" => "flat-docroot",
+            "import-metadata" => "pull-metadata",
         ];
         if ($command && isset($command_aliases[$command])) {
             $command = $command_aliases[$command];
@@ -905,7 +896,7 @@ class ImportClient
             "db-index",
             "db-domains",
             "db-apply",
-            "import-metadata",
+            "pull-metadata",
             "preflight",
             "preflight-assert",
             "flat-docroot",
@@ -937,8 +928,8 @@ class ImportClient
 
         $this->state = $this->load_state();
 
-        if ($command === "import-metadata") {
-            $this->run_import_metadata();
+        if ($command === "pull-metadata") {
+            $this->run_pull_metadata();
             return;
         }
 
@@ -982,27 +973,27 @@ class ImportClient
         // Persist follow_symlinks in state so it survives across invocations.
         // If explicitly set on CLI, store it.  Otherwise, restore from persisted state.
         if (isset($options["follow_symlinks"])) {
-            $this->import_state()->follow_symlinks = $this->follow_symlinks;
-            $this->save_state($this->state);
-        } elseif (isset($this->import_state()->follow_symlinks)) {
-            $this->follow_symlinks = $this->import_state()->follow_symlinks;
+            $this->get_state()->follow_symlinks = $this->follow_symlinks;
+            $this->save_state();
+        } elseif (isset($this->get_state()->follow_symlinks)) {
+            $this->follow_symlinks = $this->get_state()->follow_symlinks;
         }
 
         if (isset($options["local_followed_symlinks_root"])) {
             $this->local_followed_symlinks_root = $this->resolve_local_followed_symlinks_root($options["local_followed_symlinks_root"]);
             $this->follow_symlinks = true;
-            $this->import_state()->follow_symlinks = true;
-            $this->save_state($this->state);
+            $this->get_state()->follow_symlinks = true;
+            $this->save_state();
         }
 
         // Persist fs_root_nonempty_behavior in state so it survives across invocations.
         // 'preserve-local' preserves existing local files instead of overwriting
         // them, and gracefully skips non-writable directories.
         if (isset($options["fs_root_nonempty_behavior"])) {
-            $this->import_state()->fs_root_nonempty_behavior = $this->fs_root_nonempty_behavior;
-            $this->save_state($this->state);
+            $this->get_state()->fs_root_nonempty_behavior = $this->fs_root_nonempty_behavior;
+            $this->save_state();
         } else {
-            $this->fs_root_nonempty_behavior = $this->import_state()->fs_root_nonempty_behavior ?? 'error';
+            $this->fs_root_nonempty_behavior = $this->get_state()->fs_root_nonempty_behavior ?? 'error';
         }
 
         // Persist filter in state so it survives across resume cycles.
@@ -1027,8 +1018,8 @@ class ImportClient
                         "Valid values: none, essential-files",
                 );
             }
-            $prev = $this->import_state()->filter ?? null;
-            $status = $this->import_state()->active_resumable_command->completion_state ?? null;
+            $prev = $this->get_state()->filter ?? null;
+            $status = $this->get_state()->active_resumable_command->completion_state ?? null;
             // Leaving a skipped-earlier tail-fetch for another sync is a fresh
             // cycle, not a mid-flight filter change.
             $is_mid_flight =
@@ -1044,21 +1035,21 @@ class ImportClient
                 );
             }
             $this->filter = $next;
-            $this->import_state()->filter = $this->filter;
-            $this->save_state($this->state);
-        } elseif (isset($this->import_state()->filter)) {
-            $this->filter = $this->import_state()->filter;
+            $this->get_state()->filter = $this->filter;
+            $this->save_state();
+        } elseif (isset($this->get_state()->filter)) {
+            $this->filter = $this->get_state()->filter;
         }
 
         // Persist max_allowed_packet in state so it survives across invocations.
         // The client sends this to the server so SQL statements are capped to a
-        // size the client's MySQL instance can actually import.
+        // size the client's MySQL instance can actually accept.
         if (isset($options["max_allowed_packet"])) {
             $this->max_allowed_packet = (int) $options["max_allowed_packet"];
-            $this->import_state()->max_allowed_packet = $this->max_allowed_packet;
-            $this->save_state($this->state);
-        } elseif (isset($this->import_state()->max_allowed_packet)) {
-            $this->max_allowed_packet = (int) $this->import_state()->max_allowed_packet;
+            $this->get_state()->max_allowed_packet = $this->max_allowed_packet;
+            $this->save_state();
+        } elseif (isset($this->get_state()->max_allowed_packet)) {
+            $this->max_allowed_packet = (int) $this->get_state()->max_allowed_packet;
         }
 
         if (in_array($command, ["pull", "pull-db"], true)) {
@@ -1076,9 +1067,9 @@ class ImportClient
                 );
             }
             $this->sql_output_mode = $mode;
-            $this->import_state()->sql_output = $mode;
-        } elseif (isset($this->import_state()->sql_output)) {
-            $this->sql_output_mode = $this->import_state()->sql_output;
+            $this->get_state()->sql_output = $mode;
+        } elseif (isset($this->get_state()->sql_output)) {
+            $this->sql_output_mode = $this->get_state()->sql_output;
         }
 
         // In stdout mode, SQL goes to STDOUT, so progress/status output must
@@ -1093,33 +1084,33 @@ class ImportClient
         // MySQL connection parameters for --sql-output=mysql.
         if (isset($options["mysql_host"])) {
             $this->mysql_host = $options["mysql_host"];
-            $this->import_state()->mysql_host = $this->mysql_host;
-        } elseif (isset($this->import_state()->mysql_host)) {
-            $this->mysql_host = $this->import_state()->mysql_host;
+            $this->get_state()->mysql_host = $this->mysql_host;
+        } elseif (isset($this->get_state()->mysql_host)) {
+            $this->mysql_host = $this->get_state()->mysql_host;
         }
 
         if (isset($options["mysql_port"])) {
             $this->mysql_port = (int) $options["mysql_port"];
-            $this->import_state()->mysql_port = $this->mysql_port;
-        } elseif (isset($this->import_state()->mysql_port)) {
-            $this->mysql_port = (int) $this->import_state()->mysql_port;
+            $this->get_state()->mysql_port = $this->mysql_port;
+        } elseif (isset($this->get_state()->mysql_port)) {
+            $this->mysql_port = (int) $this->get_state()->mysql_port;
         }
 
         if (isset($options["mysql_user"])) {
             $this->mysql_user = $options["mysql_user"];
-            $this->import_state()->mysql_user = $this->mysql_user;
-        } elseif (isset($this->import_state()->mysql_user)) {
-            $this->mysql_user = $this->import_state()->mysql_user;
+            $this->get_state()->mysql_user = $this->mysql_user;
+        } elseif (isset($this->get_state()->mysql_user)) {
+            $this->mysql_user = $this->get_state()->mysql_user;
         }
 
         if (isset($options["mysql_database"])) {
             $this->mysql_database = $options["mysql_database"];
-            $this->import_state()->mysql_database = $this->mysql_database;
-        } elseif (isset($this->import_state()->mysql_database)) {
-            $this->mysql_database = $this->import_state()->mysql_database;
+            $this->get_state()->mysql_database = $this->mysql_database;
+        } elseif (isset($this->get_state()->mysql_database)) {
+            $this->mysql_database = $this->get_state()->mysql_database;
         }
 
-        $this->save_state($this->state);
+        $this->save_state();
 
         // Password is never persisted — must be supplied each run or via env.
         if (isset($options["mysql_password"])) {
@@ -1221,7 +1212,7 @@ class ImportClient
         if ($command === "db-apply") {
             try {
                 $this->run_db_apply($options);
-                $final_status = $this->import_state()->active_resumable_command->completion_state ?? "complete";
+                $final_status = $this->get_state()->active_resumable_command->completion_state ?? "complete";
                 $this->output_progress(["status" => $final_status, "message" => "db-apply {$final_status}"]);
                 if ($final_status === "partial") {
                     $this->exit_code = 2;
@@ -1269,7 +1260,7 @@ class ImportClient
                     break;
             }
 
-            $final_status = $this->import_state()->active_resumable_command->completion_state ?? "complete";
+            $final_status = $this->get_state()->active_resumable_command->completion_state ?? "complete";
             $this->output_progress(["status" => $final_status, "message" => "{$command} {$final_status}"]);
 
             // Exit code 2 signals "partial progress, call me again" so
@@ -1291,7 +1282,8 @@ class ImportClient
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI filesystem paths, never HTML output.
     /**
-     * Reports local paths changed since the pair's previous local index.
+     * Reports local paths changed since the previous push to this remote
+     * Reprint API URL.
      *
      * files-diff makes no network request. It runs one complete PushPlan
      * against the previous local index a completed files-push published, then
@@ -1300,29 +1292,28 @@ class ImportClient
      * running the command again prints the complete report.
      *
      * @param array $options {
-     *     Parsed files-diff options and context.
+     *     Parsed files-diff options.
      *
-     *     @type array $files_diff_context Validated pair context.
+     *     @type string $files_diff_push_state_directory Local push state directory resolved by the CLI entry point.
      * }
      * @phpstan-param array<string,mixed> $options
      */
     private function run_files_diff(array $options): void
     {
-        $context = $options['files_diff_context'] ?? self::prepare_files_pair_context(
+        $push_state_directory = $options['files_diff_push_state_directory'] ?? self::resolve_push_state_directory(
             $this->remote_reprint_api_url,
             $this->state_dir,
             $this->filesystem_root,
             'files-diff'
         );
-        if (!is_array($context)) {
-            throw new InvalidArgumentException('files-diff requires its validated command context.');
+        if (!is_string($push_state_directory)) {
+            throw new InvalidArgumentException('files-diff requires its resolved local push state directory.');
         }
 
-        $push_state_directory = $context['push_state_directory'];
         $previous_local_index = $push_state_directory . '/previous_local_index.jsonl';
         $missing_previous_local_index_message =
-            'files-diff requires the pair\'s previous local index, which a completed files-push publishes '
-            . 'for the same remote Reprint API URL, state directory, and filesystem root.';
+            'files-diff requires the previous local index published by a completed files-push '
+            . 'for the same remote Reprint API URL and state directory.';
         if (!is_dir($push_state_directory)) {
             throw new RuntimeException($missing_previous_local_index_message);
         }
@@ -1345,7 +1336,7 @@ class ImportClient
             }
             $plan = PushPlan::start(
                 $plan_directory,
-                $context['filesystem_root'],
+                $this->filesystem_root,
                 $previous_local_index,
                 $excluded_paths_path
             );
@@ -1572,7 +1563,7 @@ class ImportClient
         try {
             $this->audit_log(
                 ( $resuming ? 'RESUME' : 'START' )
-                    . " files-push | pair={$context['pair']} | phase={$phase}",
+                    . " files-push | phase={$phase}",
                 false
             );
 
@@ -1601,7 +1592,7 @@ class ImportClient
                 $phase = $sender->get_phase();
                 if ($phase !== $previous_phase) {
                     $this->audit_log(
-                        "PHASE files-push | pair={$context['pair']} | from={$previous_phase} | to={$phase}",
+                        "PHASE files-push | from={$previous_phase} | to={$phase}",
                         false
                     );
                     $previous_phase = $phase;
@@ -1652,33 +1643,33 @@ class ImportClient
 
         switch ($status) {
             case 'complete':
-                $audit_line = "COMPLETE files-push | pair={$context['pair']} | phase={$phase}";
+                $audit_line = "COMPLETE files-push | phase={$phase}";
                 $message = 'Files push complete.';
                 $this->exit_code = 0;
                 break;
             case 'partial':
-                $audit_line = "PARTIAL files-push | pair={$context['pair']} | phase={$phase} | cause={$reason}";
+                $audit_line = "PARTIAL files-push | phase={$phase} | cause={$reason}";
                 $message = 'Files push paused at a durable boundary; run the same command again to continue.';
                 $this->exit_code = 2;
                 break;
             case 'interrupted':
-                $audit_line = "INTERRUPTED files-push | pair={$context['pair']} | phase={$phase} | signal={$this->files_push_stop_signal}";
+                $audit_line = "INTERRUPTED files-push | phase={$phase} | signal={$this->files_push_stop_signal}";
                 $message = 'Files push was interrupted at a durable boundary; run the same command again to continue.';
                 $this->exit_code = 2;
                 break;
             case 'restart':
-                $audit_line = "RESTART files-push | pair={$context['pair']} | phase={$phase} | reason={$reason}";
+                $audit_line = "RESTART files-push | phase={$phase} | reason={$reason}";
                 $message = 'Files push must restart; the next run will build a fresh plan.';
                 $this->exit_code = 2;
                 break;
             case 'failed':
-                $audit_line = "FAILED files-push | pair={$context['pair']} | phase={$phase} | reason={$reason}";
+                $audit_line = "FAILED files-push | phase={$phase} | reason={$reason}";
                 $message = $detail === null ? 'Files push failed.' : 'Files push failed: ' . $detail;
                 $this->exit_code = 1;
                 break;
             case 'error':
             default:
-                $audit_line = "ERROR files-push | pair={$context['pair']} | phase={$phase} | reason={$reason}";
+                $audit_line = "ERROR files-push | phase={$phase} | reason={$reason}";
                 $message = $detail === null ? 'Files push stopped with an error.' : 'Files push stopped with an error: ' . $detail;
                 $this->exit_code = 1;
                 break;
@@ -1687,7 +1678,6 @@ class ImportClient
         $this->audit_log($audit_line, false);
         $result = [
             'command' => 'files-push',
-            'pair' => $context['pair'],
             'status' => $status,
             'phase' => $phase,
             'message' => $message,
@@ -1698,10 +1688,9 @@ class ImportClient
         if ($detail !== null) {
             $result['detail'] = $detail;
         }
-        // Write the flat progress snapshot without consulting import state.
+        // Write the flat progress snapshot without consulting pull state.
         $progress_payload = [
             'command' => 'files-push',
-            'pair' => $context['pair'],
             'status' => $status,
             'phase' => $phase,
             'reason' => $reason,
@@ -1748,10 +1737,9 @@ class ImportClient
      *
      *     @type string $remote_reprint_api_url Remote Reprint API URL.
      *     @type string $filesystem_root  Resolved filesystem root being sent.
-     *     @type string $pair                 Target/filesystem-root pair key.
      *     @type string $push_state_directory Local push state directory.
      * }
-     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
+     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,push_state_directory:string}
      */
     public static function prepare_files_push_context(
         string $remote_reprint_api_url,
@@ -1769,7 +1757,7 @@ class ImportClient
             );
         }
 
-        $context = self::prepare_files_pair_context(
+        $push_state_directory = self::resolve_push_state_directory(
             $remote_reprint_api_url,
             $state_dir,
             $filesystem_root,
@@ -1785,32 +1773,33 @@ class ImportClient
                 . '. Pass --force-http only for a remote Reprint API URL you trust.'
             );
         }
-        return $context;
+        $resolved_local_filesystem_root = realpath($filesystem_root);
+        if ($resolved_local_filesystem_root === false) {
+            throw new InvalidArgumentException(
+                'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
+            );
+        }
+        return [
+            'remote_reprint_api_url' => rtrim($remote_reprint_api_url, '?&'),
+            'filesystem_root' => rtrim($resolved_local_filesystem_root, '/') ?: '/',
+            'push_state_directory' => $push_state_directory,
+        ];
     }
 
     /**
-     * Validates the local inputs shared by files-diff and files-push.
+     * Resolves the local push state directory for a remote Reprint API URL.
      *
-     * This helper deliberately does not require a secret or HTTPS. files-diff
-     * identifies the pull source by URL but performs no network request.
+     * This method deliberately does not require a secret or HTTPS. files-diff
+     * identifies the pull source by URL but makes no network request.
      *
      * @param string $command Command name used in error messages.
-     * @return array {
-     *     Validated pair context.
-     *
-     *     @type string $remote_reprint_api_url Remote Reprint API URL.
-     *     @type string $filesystem_root  Resolved filesystem root.
-     *     @type string $pair                 Target/filesystem-root pair key.
-     *     @type string $push_state_directory Local push state directory.
-     * }
-     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,pair:string,push_state_directory:string}
      */
-    public static function prepare_files_pair_context(
+    public static function resolve_push_state_directory(
         string $remote_reprint_api_url,
         string $state_dir,
         string $filesystem_root,
         string $command
-    ): array {
+    ): string {
         $masked_remote_reprint_api_url =
             self::mask_url_credentials($remote_reprint_api_url);
         if (strpos($remote_reprint_api_url, '#') !== false) {
@@ -1841,9 +1830,8 @@ class ImportClient
         }
         $resolved_local_filesystem_root = rtrim($resolved_local_filesystem_root, '/') ?: '/';
         $remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
-        $pair = hash('sha256', $remote_reprint_api_url . "\0" . $resolved_local_filesystem_root);
         // Resolve an absolute physical path even when its final components do not exist.
-        $push_state_directory = $state_dir . '/push/' . $pair;
+        $push_state_directory = $state_dir . '/push/' . md5($remote_reprint_api_url);
         if (strpos($push_state_directory, '/') !== 0) {
             $working_directory = getcwd();
             if ($working_directory === false) {
@@ -1881,12 +1869,7 @@ class ImportClient
             );
         }
 
-        return [
-            'remote_reprint_api_url' => $remote_reprint_api_url,
-            'filesystem_root' => $resolved_local_filesystem_root,
-            'pair' => $pair,
-            'push_state_directory' => $push_state_directory,
-        ];
+        return $push_state_directory;
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
@@ -1936,7 +1919,7 @@ class ImportClient
         }
     }
 
-    /** Masks URL authority credentials without changing the pair-key input. */
+    /** Masks URL authority credentials without changing the URL used to name the local push state directory. */
     private static function mask_url_credentials(string $url): string
     {
         $masked = preg_replace(
@@ -1958,8 +1941,8 @@ class ImportClient
         ?string $unfinished_import_owner
     ): void {
         $scopes = self::RESUMABLE_COMMAND_SCOPES[$command];
-        $active_checkpoint = $this->import_state()->active_resumable_command;
-        $pipeline_checkpoint = $this->import_state()->pull_pipeline;
+        $active_checkpoint = $this->get_state()->active_resumable_command;
+        $pipeline_checkpoint = $this->get_state()->pull_pipeline;
         $owns_active_checkpoint =
             $active_checkpoint->command_name === $command ||
             (
@@ -1981,23 +1964,23 @@ class ImportClient
         }
 
         $this->prepare_owned_state_reset($scopes, "abort {$command}");
-        $this->reset_owned_import_state($scopes);
+        $this->reset_owned_pull_state($scopes);
 
         if ($owns_active_checkpoint) {
-            $this->import_state()->active_resumable_command =
+            $this->get_state()->active_resumable_command =
                 new ResumableCommandCheckpointState();
-            $this->import_state()->consecutive_interrupted_responses = 0;
+            $this->get_state()->consecutive_interrupted_responses = 0;
         }
 
         if ($pipeline_checkpoint->started_by_command === $command) {
             $has_completed_once = $pipeline_checkpoint->has_completed_once;
-            $this->import_state()->pull_pipeline =
+            $this->get_state()->pull_pipeline =
                 new PullPipelineCheckpointState();
-            $this->import_state()->pull_pipeline->has_completed_once =
+            $this->get_state()->pull_pipeline->has_completed_once =
                 $has_completed_once;
         }
 
-        $this->save_state($this->state);
+        $this->save_state();
         $this->remove_owned_artifacts($scopes, "abort {$command}");
 
         $message = "State cleared for {$command}.";
@@ -2026,21 +2009,21 @@ class ImportClient
             $scopes,
             "start fresh {$command}",
         );
-        $this->reset_owned_import_state($scopes);
+        $this->reset_owned_pull_state($scopes);
 
         $has_completed_once =
-            $this->import_state()->pull_pipeline->has_completed_once;
-        $this->import_state()->active_resumable_command =
+            $this->get_state()->pull_pipeline->has_completed_once;
+        $this->get_state()->active_resumable_command =
             new ResumableCommandCheckpointState();
-        $this->import_state()->consecutive_interrupted_responses = 0;
-        $this->import_state()->pull_pipeline =
+        $this->get_state()->consecutive_interrupted_responses = 0;
+        $this->get_state()->pull_pipeline =
             new PullPipelineCheckpointState();
-        $this->import_state()->pull_pipeline->started_by_command = $command;
-        $this->import_state()->pull_pipeline->stage_sequence = $stages;
-        $this->import_state()->pull_pipeline->has_completed_once =
+        $this->get_state()->pull_pipeline->started_by_command = $command;
+        $this->get_state()->pull_pipeline->stage_sequence = $stages;
+        $this->get_state()->pull_pipeline->has_completed_once =
             $has_completed_once;
         if (in_array("files-pull", $scopes, true)) {
-            $this->import_state()->filter = $this->filter;
+            $this->get_state()->filter = $this->filter;
         }
         if (in_array("db-pull", $scopes, true)) {
             // High-level pulls always download db.sql. MySQL streaming inputs
@@ -2050,10 +2033,10 @@ class ImportClient
             $this->mysql_port = null;
             $this->mysql_user = null;
             $this->mysql_database = null;
-            $this->import_state()->sql_output = $this->sql_output_mode;
+            $this->get_state()->sql_output = $this->sql_output_mode;
         }
 
-        $this->save_state($this->state);
+        $this->save_state();
         $this->remove_owned_artifacts(
             $scopes,
             "start fresh {$command}",
@@ -2077,29 +2060,29 @@ class ImportClient
             $scopes,
             "start fresh {$command}",
         );
-        $this->reset_owned_import_state($scopes);
+        $this->reset_owned_pull_state($scopes);
 
-        $this->import_state()->active_resumable_command =
+        $this->get_state()->active_resumable_command =
             new ResumableCommandCheckpointState();
-        $this->import_state()->active_resumable_command->command_name =
+        $this->get_state()->active_resumable_command->command_name =
             $command;
-        $this->import_state()->active_resumable_command->completion_state =
+        $this->get_state()->active_resumable_command->completion_state =
             "in_progress";
-        $this->import_state()->active_resumable_command->current_stage =
+        $this->get_state()->active_resumable_command->current_stage =
             $current_stage;
-        $this->import_state()->consecutive_interrupted_responses = 0;
+        $this->get_state()->consecutive_interrupted_responses = 0;
 
         if ($command === "files-pull") {
-            $this->import_state()->filter = $this->filter;
+            $this->get_state()->filter = $this->filter;
         } elseif ($command === "db-pull") {
-            $this->import_state()->sql_output = $this->sql_output_mode;
-            $this->import_state()->mysql_host = $this->mysql_host;
-            $this->import_state()->mysql_port = $this->mysql_port;
-            $this->import_state()->mysql_user = $this->mysql_user;
-            $this->import_state()->mysql_database = $this->mysql_database;
+            $this->get_state()->sql_output = $this->sql_output_mode;
+            $this->get_state()->mysql_host = $this->mysql_host;
+            $this->get_state()->mysql_port = $this->mysql_port;
+            $this->get_state()->mysql_user = $this->mysql_user;
+            $this->get_state()->mysql_database = $this->mysql_database;
         }
 
-        $this->save_state($this->state);
+        $this->save_state();
         $this->remove_owned_artifacts(
             $scopes,
             "start fresh {$command}",
@@ -2111,7 +2094,7 @@ class ImportClient
      */
     private function unfinished_import_owner(): ?string
     {
-        $pipeline = $this->import_state()->pull_pipeline;
+        $pipeline = $this->get_state()->pull_pipeline;
         if (
             in_array(
                 $pipeline->started_by_command,
@@ -2130,7 +2113,7 @@ class ImportClient
         }
 
         $active_checkpoint =
-            $this->import_state()->active_resumable_command;
+            $this->get_state()->active_resumable_command;
         if (
             in_array(
                 $active_checkpoint->completion_state,
@@ -2200,8 +2183,8 @@ class ImportClient
         // Batch request bodies may live outside --state-dir. Remove them
         // before clearing the only persisted paths which can find them.
         $batch_files = [
-            $this->import_state()->fetch->batch_file,
-            $this->import_state()->fetch_skipped->batch_file,
+            $this->get_state()->fetch->batch_file,
+            $this->get_state()->fetch_skipped->batch_file,
         ];
         foreach (array_unique(array_filter($batch_files, "is_string")) as $batch_file) {
             $this->remove_artifact($batch_file, $reason);
@@ -2211,50 +2194,50 @@ class ImportClient
     /**
      * @param string[] $scopes State groups to return to their defaults.
      */
-    private function reset_owned_import_state(array $scopes): void
+    private function reset_owned_pull_state(array $scopes): void
     {
         if (in_array("files-pull", $scopes, true)) {
-            $this->import_state()->local_followed_symlinks_root_fingerprint =
+            $this->get_state()->local_followed_symlinks_root_fingerprint =
                 null;
-            $this->import_state()->filter = "none";
-            $this->import_state()->files_pull_only_fingerprint = null;
-            $this->import_state()->files_pull_summary =
+            $this->get_state()->filter = "none";
+            $this->get_state()->files_pull_only_fingerprint = null;
+            $this->get_state()->files_pull_summary =
                 new FilesPullSummaryState();
-            $this->import_state()->diff = new FileDiffProgressState();
-            $this->import_state()->fetch = new FetchListProgressState();
-            $this->import_state()->fetch_skipped =
+            $this->get_state()->diff = new FileDiffProgressState();
+            $this->get_state()->fetch = new FetchListProgressState();
+            $this->get_state()->fetch_skipped =
                 new FetchListProgressState();
-            $this->import_state()->current_file = null;
-            $this->import_state()->current_file_bytes = null;
-            $this->import_state()->pull_pipeline->skipped_pending = false;
-            $this->files_imported = 0;
+            $this->get_state()->current_file = null;
+            $this->get_state()->current_file_bytes = null;
+            $this->get_state()->pull_pipeline->skipped_pending = false;
+            $this->files_pulled = 0;
             $this->fetch_list_total = null;
             $this->fetch_list_done = null;
         }
 
         if (in_array("files-index", $scopes, true)) {
-            $this->import_state()->index =
+            $this->get_state()->index =
                 new RemoteFileIndexCursorState();
             $this->index_entries_counted = 0;
         }
 
         if (in_array("db-pull", $scopes, true)) {
-            $this->import_state()->sql_bytes = null;
-            $this->import_state()->sql_statements_counted = 0;
-            $this->import_state()->sql_output = null;
-            $this->import_state()->mysql_host = null;
-            $this->import_state()->mysql_port = null;
-            $this->import_state()->mysql_user = null;
-            $this->import_state()->mysql_database = null;
+            $this->get_state()->sql_bytes = null;
+            $this->get_state()->sql_statements_counted = 0;
+            $this->get_state()->sql_output = null;
+            $this->get_state()->mysql_host = null;
+            $this->get_state()->mysql_port = null;
+            $this->get_state()->mysql_user = null;
+            $this->get_state()->mysql_database = null;
         }
 
         if (in_array("db-index", $scopes, true)) {
-            $this->import_state()->db_index =
+            $this->get_state()->db_index =
                 new DatabaseTableIndexState();
         }
 
         if (in_array("db-apply", $scopes, true)) {
-            $this->import_state()->apply =
+            $this->get_state()->apply =
                 new DatabaseApplyCommandState();
         }
     }
@@ -2339,18 +2322,18 @@ class ImportClient
      */
     private function initialize_tuner(array $options): void
     {
-        $config = $this->import_state()->tuning->config ?? [];
-        $state = $this->import_state()->tuning->state ?? [];
+        $config = $this->get_state()->tuning->config ?? [];
+        $state = $this->get_state()->tuning->state ?? [];
         $cli_config = $options["tuning_config"] ?? [];
 
         $config = array_merge($config, $cli_config);
 
         $this->tuner = new AdaptiveTuner($config, $state);
-        $this->import_state()->tuning->config = $this->tuner->get_config();
-        $this->import_state()->tuning->state = $this->tuner->get_state();
+        $this->get_state()->tuning->config = $this->tuner->get_config();
+        $this->get_state()->tuning->state = $this->tuner->get_state();
 
         $this->audit_log(
-            "TUNER CONFIG | " . json_encode($this->import_state()->tuning->config),
+            "TUNER CONFIG | " . json_encode($this->get_state()->tuning->config),
             false,
         );
     }
@@ -2369,7 +2352,7 @@ class ImportClient
         $result = null;
         $payload = null;
         foreach (self::USER_AGENTS as $ua) {
-            $this->import_state()->user_agent = $ua;
+            $this->get_state()->user_agent = $ua;
             $result = $this->fetch_json($url);
             $payload = $result["json"] ?? null;
             if ($payload !== null) {
@@ -2392,19 +2375,19 @@ class ImportClient
                 : null,
         ];
 
-        $this->import_state()->preflight = $entry;
+        $this->get_state()->preflight = $entry;
 
         // Store WordPress version at the top level for easy access
         $wp_version = $payload["database"]["wp"]["wp_version"] ?? null;
         if (is_string($wp_version) && $wp_version !== "") {
-            $this->import_state()->version = $wp_version;
+            $this->get_state()->version = $wp_version;
         }
 
         // Store the remote protocol version for the preflight assertion.
         if (isset($payload["protocol_version"])) {
-            $this->import_state()->remote_protocol_version = (int) $payload["protocol_version"];
+            $this->get_state()->remote_protocol_version = (int) $payload["protocol_version"];
         } else {
-            $this->import_state()->remote_protocol_version = null;
+            $this->get_state()->remote_protocol_version = null;
         }
 
         // Detect webhost environment from preflight data.
@@ -2415,10 +2398,10 @@ class ImportClient
         if ($detected_webhost === 'other' && is_link($this->filesystem_root . '/__wp__')) {
             $detected_webhost = 'wpcloud';
         }
-        $this->import_state()->webhost = $detected_webhost;
+        $this->get_state()->webhost = $detected_webhost;
         $this->audit_log("WEBHOST DETECTED | {$detected_webhost}", true);
 
-        $this->save_state($this->state);
+        $this->save_state();
 
         $this->audit_log(
             "PREFLIGHT RESULT | " . json_encode($entry),
@@ -2478,7 +2461,7 @@ class ImportClient
             $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
         }
 
-        $ini_all = $this->import_state()->preflight["data"]["runtime"]["ini_get_all"] ?? [];
+        $ini_all = $this->get_state()->preflight["data"]["runtime"]["ini_get_all"] ?? [];
         $files = [];
         foreach (["auto_prepend_file", "auto_append_file"] as $key) {
             $path = $ini_all[$key] ?? "";
@@ -2641,7 +2624,7 @@ class ImportClient
      */
     private function require_preflight(): void
     {
-        $entry = $this->import_state()->preflight ?? null;
+        $entry = $this->get_state()->preflight ?? null;
         if (!is_array($entry) || empty($entry["data"])) {
             throw new RuntimeException(
                 "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
@@ -2658,7 +2641,7 @@ class ImportClient
      */
     private function run_preflight_report(): void
     {
-        $entry = $this->import_state()->preflight ?? null;
+        $entry = $this->get_state()->preflight ?? null;
         if ($entry === null) {
             echo "No preflight data available.\n";
             exit(1);
@@ -2679,7 +2662,7 @@ class ImportClient
      */
     private function run_preflight_assert(): void
     {
-        $entry = $this->import_state()->preflight ?? null;
+        $entry = $this->get_state()->preflight ?? null;
         $data = $entry["data"] ?? null;
         $checks = [];
         $all_pass = true;
@@ -2711,19 +2694,19 @@ class ImportClient
         }
 
         // 3. Protocol version
-        $remote_ver = $this->import_state()->remote_protocol_version ?? null;
+        $remote_ver = $this->get_state()->remote_protocol_version ?? null;
         if ($remote_ver === null) {
             $proto_ok = false;
             $proto_detail = "Remote export plugin does not report a protocol version. Update the export plugin.";
-        } elseif ($remote_ver < IMPORT_PROTOCOL_VERSION) {
+        } elseif ($remote_ver < PULL_PROTOCOL_VERSION) {
             $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} does not match client protocol v" . IMPORT_PROTOCOL_VERSION . ". Update the export plugin.";
-        } elseif ($remote_ver > IMPORT_PROTOCOL_VERSION) {
+            $proto_detail = "Remote protocol v{$remote_ver} does not match client protocol v" . PULL_PROTOCOL_VERSION . ". Update the export plugin.";
+        } elseif ($remote_ver > PULL_PROTOCOL_VERSION) {
             $proto_ok = false;
-            $proto_detail = "Remote protocol v{$remote_ver} does not match client protocol v" . IMPORT_PROTOCOL_VERSION . ". Update the importer.";
+            $proto_detail = "Remote protocol v{$remote_ver} does not match client protocol v" . PULL_PROTOCOL_VERSION . ". Update the Reprint client.";
         } else {
             $proto_ok = true;
-            $proto_detail = "remote v{$remote_ver}, client v" . IMPORT_PROTOCOL_VERSION;
+            $proto_detail = "remote v{$remote_ver}, client v" . PULL_PROTOCOL_VERSION;
         }
         $checks[] = [
             "label" => "Protocol compatible",
@@ -2801,7 +2784,7 @@ class ImportClient
              * column is matched against the source table metadata, and value_base64 lets
              * the exporter compare with FROM_BASE64(...) without interpolating the raw
              * value into SQL. _edit_lock is ephemeral editor session state and would
-             * otherwise create stale "being edited" notices in the imported site.
+             * otherwise create stale "being edited" notices in the pulled site.
              */
             $params["skip_rows"] = [
                 [
@@ -2812,7 +2795,7 @@ class ImportClient
             ];
 
             // Tell the server about the client's max_allowed_packet so it can
-            // cap SQL statements to a size the client can actually import.
+            // cap SQL statements to a size the client can actually apply.
             if ($this->max_allowed_packet !== null) {
                 $params["max_allowed_packet"] = $this->max_allowed_packet;
             }
@@ -2937,7 +2920,7 @@ class ImportClient
      */
     public function run_files_pull(): void
     {
-        $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
+        $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
 
         // A full `pull` leaves active_resumable_command on its last stage
         // (db-apply), not files-pull, so a standalone skipped-earlier run can't
@@ -2949,18 +2932,18 @@ class ImportClient
         if (
             $this->filter === "skipped-earlier" &&
             $state_command !== "files-pull" &&
-            $this->import_state()->pull_pipeline->skipped_pending
+            $this->get_state()->pull_pipeline->skipped_pending
         ) {
-            $this->import_state()->active_resumable_command->command_name = "files-pull";
-            $this->import_state()->active_resumable_command->completion_state = "complete";
-            $this->import_state()->active_resumable_command->current_stage = null;
-            $this->save_state($this->state);
+            $this->get_state()->active_resumable_command->command_name = "files-pull";
+            $this->get_state()->active_resumable_command->completion_state = "complete";
+            $this->get_state()->active_resumable_command->current_stage = null;
+            $this->save_state();
             $state_command = "files-pull";
         }
 
         $current_status =
             $state_command === "files-pull"
-                ? $this->import_state()->active_resumable_command->completion_state ?? null
+                ? $this->get_state()->active_resumable_command->completion_state ?? null
                 : null;
         $has_progress =
             $state_command === "files-pull" &&
@@ -3004,21 +2987,21 @@ class ImportClient
                     "stage" => "fetch-skipped",
                     "message" => "Downloading previously skipped files",
                 ], true);
-                $this->import_state()->active_resumable_command->completion_state = "in_progress";
-                $this->import_state()->active_resumable_command->current_stage = "fetch-skipped";
-                $this->import_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
-                $this->import_state()->files_pull_summary = new FilesPullSummaryState();
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->completion_state = "in_progress";
+                $this->get_state()->active_resumable_command->current_stage = "fetch-skipped";
+                $this->get_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
+                $this->get_state()->files_pull_summary = new FilesPullSummaryState();
+                $this->save_state();
                 $this->open_local_index_wal();
                 $this->run_files_pull_pipeline();
                 // The deferred tail reopens a completed files-pull. Once the
                 // tail finishes, restore the completed status so later filter
                 // changes are judged against the actual lifecycle state.
-                if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
+                if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
                     return;
                 }
-                $this->import_state()->active_resumable_command->completion_state = "complete";
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->completion_state = "complete";
+                $this->save_state();
                 $this->remove_local_index_wal();
                 return;
             }
@@ -3059,7 +3042,7 @@ class ImportClient
         // $has_progress path below (and completes via the shared tail).
         if (
             $this->filter === "skipped-earlier" &&
-            ($this->import_state()->active_resumable_command->current_stage ?? null) !== "fetch-skipped"
+            ($this->get_state()->active_resumable_command->current_stage ?? null) !== "fetch-skipped"
         ) {
             throw new RuntimeException(
                 "--filter=skipped-earlier was requested but there is no completed sync with skipped files. " .
@@ -3083,14 +3066,14 @@ class ImportClient
 
         // Resuming an in-progress sync
         if ($has_progress) {
-            // Don't reset files_imported here — it counts files within
+            // Don't reset files_pulled here — it counts files within
             // the current batch and is only reset when a batch completes
             // (in fetch_files_from_list). Resetting it on entry would
             // cause the progress counter to dip between pull retries.
             $index_size = $this->index_count();
 
 
-            $stage = $this->import_state()->active_resumable_command->current_stage ?? "index";
+            $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
             $this->audit_log(
                 sprintf(
                     "RESUME files-pull | stage=%s | indexed_files=%d",
@@ -3127,11 +3110,11 @@ class ImportClient
                 "index",
             );
             $this->assert_local_followed_symlinks_root_unchanged();
-            $this->import_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
-            $this->save_state($this->state);
+            $this->get_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
+            $this->save_state();
 
             if ($is_delta) {
-                $this->files_imported = 0;
+                $this->files_pulled = 0;
                 $index_size = $this->index_count();
 
                 $this->audit_log(
@@ -3166,20 +3149,20 @@ class ImportClient
             }
         }
 
-        $this->import_state()->active_resumable_command->command_name = "files-pull";
-        $this->import_state()->active_resumable_command->completion_state = "in_progress";
-        $this->save_state($this->state);
+        $this->get_state()->active_resumable_command->command_name = "files-pull";
+        $this->get_state()->active_resumable_command->completion_state = "in_progress";
+        $this->save_state();
 
         $this->open_local_index_wal();
         $this->run_files_pull_pipeline();
 
         // Pipeline returns early with partial status if interrupted
-        if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
+        if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
             return;
         }
 
-        $this->import_state()->active_resumable_command->completion_state = "complete";
-        $this->save_state($this->state);
+        $this->get_state()->active_resumable_command->completion_state = "complete";
+        $this->save_state();
         $this->remove_local_index_wal();
 
         $this->progress->clear_progress_line();
@@ -3214,26 +3197,26 @@ class ImportClient
      */
     private function run_files_pull_pipeline(): void
     {
-        $stage = $this->import_state()->active_resumable_command->current_stage ?? "index";
+        $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
 
         if ($stage === "index") {
             $complete = $this->fetch_remote_index();
             if (!$complete) {
-                $this->import_state()->active_resumable_command->completion_state = "partial";
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
                 return;
             }
             if ($this->follow_symlinks) {
                 $this->discover_symlink_targets();
                 if ($this->shutdown_requested) {
-                    $this->import_state()->active_resumable_command->completion_state = "partial";
-                    $this->save_state($this->state);
+                    $this->get_state()->active_resumable_command->completion_state = "partial";
+                    $this->save_state();
                     return;
                 }
             }
             $this->sort_index_file($this->remote_index_file);
-            $this->import_state()->active_resumable_command->current_stage = "diff";
-            $this->import_state()->diff = new FileDiffProgressState();
+            $this->get_state()->active_resumable_command->current_stage = "diff";
+            $this->get_state()->diff = new FileDiffProgressState();
             if (file_exists($this->fetch_list_file)) {
                 @unlink($this->fetch_list_file);
                 $this->audit_log(
@@ -3246,15 +3229,15 @@ class ImportClient
                     "FILE DELETE | {$this->skipped_fetch_list_file} | clearing before diff stage",
                 );
             }
-            $this->save_state($this->state);
+            $this->save_state();
             $stage = "diff";
         }
 
         if ($stage === "diff") {
             $complete = $this->diff_indexes_and_build_fetch_list();
             if (!$complete) {
-                $this->import_state()->active_resumable_command->completion_state = "partial";
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
                 return;
             }
 
@@ -3273,8 +3256,8 @@ class ImportClient
             } else {
                 $stage = null;
             }
-            $this->import_state()->active_resumable_command->current_stage = $stage;
-            $this->save_state($this->state);
+            $this->get_state()->active_resumable_command->current_stage = $stage;
+            $this->save_state();
 
             // In pull mode, finalize the scanning line with a checkmark
             // and start the download progress on a fresh line.
@@ -3313,11 +3296,11 @@ class ImportClient
                 "fetch",
             );
             if (!$complete) {
-                $this->import_state()->active_resumable_command->completion_state = "partial";
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
                 return;
             }
-            $this->import_state()->fetch = new FetchListProgressState();
+            $this->get_state()->fetch = new FetchListProgressState();
 
             if (file_exists($this->fetch_list_file)) {
                 @unlink($this->fetch_list_file);
@@ -3334,8 +3317,8 @@ class ImportClient
                 // Essential files are done — mark the sync as complete.
                 // The skipped list stays on disk for a later
                 // --filter=skipped-earlier run.
-                $this->import_state()->active_resumable_command->current_stage = null;
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->current_stage = null;
+                $this->save_state();
                 $this->audit_log(
                     "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_fetch_list_file} — run with --filter=skipped-earlier to download them",
                     true,
@@ -3343,8 +3326,8 @@ class ImportClient
                 $stage = null;
             } elseif ($has_skipped) {
                 // Skipped list exists but filter is "none" — download now.
-                $this->import_state()->active_resumable_command->current_stage = "fetch-skipped";
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->current_stage = "fetch-skipped";
+                $this->save_state();
                 $stage = "fetch-skipped";
                 $this->audit_log(
                     "ESSENTIAL FILES COMPLETE | transitioning to skipped files",
@@ -3352,8 +3335,8 @@ class ImportClient
                 );
                 $this->write_progress_file();
             } else {
-                $this->import_state()->active_resumable_command->current_stage = null;
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->current_stage = null;
+                $this->save_state();
                 $stage = null;
             }
         }
@@ -3364,16 +3347,16 @@ class ImportClient
                 "fetch_skipped",
             );
             if (!$complete) {
-                $this->import_state()->active_resumable_command->completion_state = "partial";
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
                 return;
             }
-            $this->import_state()->active_resumable_command->current_stage = null;
-            $this->import_state()->fetch_skipped = new FetchListProgressState();
+            $this->get_state()->active_resumable_command->current_stage = null;
+            $this->get_state()->fetch_skipped = new FetchListProgressState();
             // Tail fully fetched; clear the flag so a later skipped-earlier run
             // doesn't treat the now-empty tail as pending.
-            $this->import_state()->pull_pipeline->skipped_pending = false;
-            $this->save_state($this->state);
+            $this->get_state()->pull_pipeline->skipped_pending = false;
+            $this->save_state();
 
             if (file_exists($this->skipped_fetch_list_file)) {
                 @unlink($this->skipped_fetch_list_file);
@@ -3401,10 +3384,10 @@ class ImportClient
      */
     private function run_files_index(): void
     {
-        $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
+        $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $current_status =
             $state_command === "files-index"
-                ? $this->import_state()->active_resumable_command->completion_state ?? null
+                ? $this->get_state()->active_resumable_command->completion_state ?? null
                 : null;
 
         if ($current_status === "complete") {
@@ -3427,7 +3410,7 @@ class ImportClient
                 "message" => "Starting files-index",
             ], true);
         } else {
-            $cursor = $this->import_state()->index->cursor ?? null;
+            $cursor = $this->get_state()->index->cursor ?? null;
             $this->audit_log(
                 sprintf(
                     "RESUME files-index | cursor=%s",
@@ -3444,11 +3427,11 @@ class ImportClient
             ], true);
         }
 
-        $this->import_state()->active_resumable_command->command_name = "files-index";
-        $this->save_state($this->state);
+        $this->get_state()->active_resumable_command->command_name = "files-index";
+        $this->save_state();
 
         $attempts = 0;
-        $last_cursor = $this->import_state()->index->cursor ?? null;
+        $last_cursor = $this->get_state()->index->cursor ?? null;
         while (true) {
             $complete = $this->fetch_remote_index();
             if ($complete) {
@@ -3456,12 +3439,12 @@ class ImportClient
             }
 
             if ($this->shutdown_requested) {
-                $this->import_state()->active_resumable_command->completion_state = "partial";
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
                 return;
             }
 
-            $current_cursor = $this->import_state()->index->cursor ?? null;
+            $current_cursor = $this->get_state()->index->cursor ?? null;
             if ($current_cursor === $last_cursor) {
                 throw new RuntimeException(
                     "files-index made no progress (cursor unchanged)",
@@ -3485,9 +3468,9 @@ class ImportClient
         }
 
         $this->sort_index_file($this->remote_index_file);
-        $this->import_state()->active_resumable_command->completion_state = "complete";
-        $this->import_state()->active_resumable_command->current_stage = null;
-        $this->save_state($this->state);
+        $this->get_state()->active_resumable_command->completion_state = "complete";
+        $this->get_state()->active_resumable_command->current_stage = null;
+        $this->save_state();
 
         $count = 0;
         if (file_exists($this->remote_index_file)) {
@@ -3580,8 +3563,8 @@ class ImportClient
             // Note we are not losing the previous cursor position. This code
             // runs only after the previous directory was fully indexed so
             // we won't need any prior cursor information again.
-            $this->import_state()->index->cursor = null;
-            $this->save_state($this->state);
+            $this->get_state()->index->cursor = null;
+            $this->save_state();
 
             $attempts = 0;
             $last_cursor = null;
@@ -3624,7 +3607,7 @@ class ImportClient
                     return;
                 }
 
-                $current_cursor = $this->import_state()->index->cursor ?? null;
+                $current_cursor = $this->get_state()->index->cursor ?? null;
                 if ($current_cursor === $last_cursor) {
                     throw new RuntimeException(
                         "files-index (symlink follow) made no progress (cursor unchanged)",
@@ -3884,19 +3867,19 @@ class ImportClient
      */
     public function run_db_sync(): void
     {
-        $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
+        $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $sql_file = $this->state_dir . "/db.sql";
 
         $has_progress =
             $state_command === "db-pull" &&
             in_array(
-                $this->import_state()->active_resumable_command->completion_state ?? null,
+                $this->get_state()->active_resumable_command->completion_state ?? null,
                 ["in_progress", "partial"],
                 true,
             );
         $current_status =
             $state_command === "db-pull"
-                ? $this->import_state()->active_resumable_command->completion_state ?? null
+                ? $this->get_state()->active_resumable_command->completion_state ?? null
                 : null;
 
         // Check if already completed
@@ -3920,13 +3903,13 @@ class ImportClient
         }
 
         if ($has_progress) {
-            $stage = $this->import_state()->active_resumable_command->current_stage ?? "db-index";
+            $stage = $this->get_state()->active_resumable_command->current_stage ?? "db-index";
             $this->audit_log(
                 sprintf(
                     "RESUME db-pull | stage=%s | cursor=%s",
                     $stage,
-                    !empty($this->import_state()->active_resumable_command->remote_cursor)
-                        ? substr($this->import_state()->active_resumable_command->remote_cursor, 0, 20) . "..."
+                    !empty($this->get_state()->active_resumable_command->remote_cursor)
+                        ? substr($this->get_state()->active_resumable_command->remote_cursor, 0, 20) . "..."
                         : "none",
                 ),
                 true,
@@ -3958,13 +3941,13 @@ class ImportClient
             ], true);
         }
 
-        $this->import_state()->active_resumable_command->command_name = "db-pull";
-        $this->import_state()->active_resumable_command->completion_state =
+        $this->get_state()->active_resumable_command->command_name = "db-pull";
+        $this->get_state()->active_resumable_command->completion_state =
             "in_progress";
-        $this->save_state($this->state);
+        $this->save_state();
 
         // Stage 1: db-index (table metadata for progress estimation)
-        $stage = $this->import_state()->active_resumable_command->current_stage ?? "db-index";
+        $stage = $this->get_state()->active_resumable_command->current_stage ?? "db-index";
         if ($stage === "db-index") {
             $this->output_progress([
                 "status" => "starting",
@@ -3975,19 +3958,19 @@ class ImportClient
             $this->fetch_database_index();
 
             // Interrupted response during db-index — state already saved, exit partial.
-            if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
+            if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
                 return;
             }
 
-            $tables = (int) ($this->import_state()->db_index->tables ?? 0);
+            $tables = (int) ($this->get_state()->db_index->tables ?? 0);
             $this->audit_log(
                 sprintf("db-pull db-index stage complete: %d tables", $tables),
             );
 
             // Transition to sql stage
-            $this->import_state()->active_resumable_command->current_stage = "sql";
-            $this->import_state()->active_resumable_command->remote_cursor = null;
-            $this->save_state($this->state);
+            $this->get_state()->active_resumable_command->current_stage = "sql";
+            $this->get_state()->active_resumable_command->remote_cursor = null;
+            $this->save_state();
         }
 
         // Stage 2: SQL dump download
@@ -4000,13 +3983,13 @@ class ImportClient
         $this->fetch_sql();
 
         // Interrupted response during SQL download — state already saved, exit partial.
-        if (($this->import_state()->active_resumable_command->completion_state ?? null) === "partial") {
+        if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
             return;
         }
 
         // Mark as complete
-        $this->import_state()->active_resumable_command->completion_state = "complete";
-        $this->save_state($this->state);
+        $this->get_state()->active_resumable_command->completion_state = "complete";
+        $this->save_state();
 
         $this->audit_log("db-pull complete", true);
 
@@ -4016,7 +3999,7 @@ class ImportClient
         } elseif ($this->sql_output_mode === "stdout") {
             $this->progress->show_lifecycle_line("SQL written to stdout\n");
         } elseif ($this->sql_output_mode === "mysql") {
-            $this->progress->show_lifecycle_line("SQL imported into {$this->mysql_database}\n");
+            $this->progress->show_lifecycle_line("SQL applied to {$this->mysql_database}\n");
         }
         $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
         $db_sync_complete = [
@@ -4153,7 +4136,7 @@ class ImportClient
         $skipped_pending_bytes = 0;
 
         // Count pending in the main fetch list
-        $fetch_offset = $this->import_state()->fetch->offset ?? 0;
+        $fetch_offset = $this->get_state()->fetch->offset ?? 0;
         if (is_file($fetch_list)) {
             $handle = fopen($fetch_list, "r");
             if ($handle) {
@@ -4185,7 +4168,7 @@ class ImportClient
         }
 
         // Count pending in the skipped fetch list (uploads filtered out by --filter=essential-files)
-        $skipped_offset = $this->import_state()->fetch_skipped->offset ?? 0;
+        $skipped_offset = $this->get_state()->fetch_skipped->offset ?? 0;
         $skipped_list = $this->skipped_fetch_list_file;
         if (is_file($skipped_list)) {
             $handle = fopen($skipped_list, "r");
@@ -4235,12 +4218,12 @@ class ImportClient
     }
 
     /**
-     * Prints host-facing import lifecycle metadata without mutating state.
+     * Prints host-facing pull metadata without mutating state.
      */
-    private function run_import_metadata(): void
+    private function run_pull_metadata(): void
     {
         echo json_encode(
-            $this->build_import_metadata(),
+            $this->build_pull_metadata(),
             JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
         ) . "\n";
     }
@@ -4252,21 +4235,53 @@ class ImportClient
      * callers do not need to persist a parallel flag that could drift.
      *
      * @return array {
-     *     Import metadata for host integrations.
+     *     Pull metadata for host integrations.
      *
      *     @type bool  $hasCompletedOnce Whether the pull pipeline has completed
      *                                   at least once.
      *     @type mixed $pullStage        Last completed pull stage.
+     *     @type array $sourceSite {
+     *         Source-site values reported by preflight.
+     *
+     *         @type string|null $homeUrl                    WordPress home URL.
+     *         @type string|null $siteUrl                    WordPress site URL.
+     *         @type string|null $tablePrefix                WordPress database
+     *                                                       table prefix.
+     *         @type string|null $wordpressDatabaseCharset   Charset used by
+     *                                                       WordPress.
+     *         @type string|null $serverDatabaseCharset      Database server's
+     *                                                       default charset.
+     *     }
      * }
-     * @phpstan-return array{hasCompletedOnce: bool, pullStage: mixed}
+     * @phpstan-return array{
+     *     hasCompletedOnce: bool,
+     *     pullStage: mixed,
+     *     sourceSite: array{
+     *         homeUrl: string|null,
+     *         siteUrl: string|null,
+     *         tablePrefix: string|null,
+     *         wordpressDatabaseCharset: string|null,
+     *         serverDatabaseCharset: string|null
+     *     }
+     * }
      */
-    private function build_import_metadata(): array
+    private function build_pull_metadata(): array
     {
-        $pull = $this->import_state()->pull_pipeline;
+        $state = $this->get_state();
+        $pull = $state->pull_pipeline;
+        $database = $state->preflight["data"]["database"] ?? [];
+        $wordpress = $database["wp"] ?? [];
 
         return [
             "hasCompletedOnce" => $pull->has_completed_once,
             "pullStage" => $pull->last_completed_stage,
+            "sourceSite" => [
+                "homeUrl" => $wordpress["home"] ?? null,
+                "siteUrl" => $wordpress["siteurl"] ?? null,
+                "tablePrefix" => $wordpress["table_prefix"] ?? null,
+                "wordpressDatabaseCharset" => $wordpress["wpdb_charset"] ?? null,
+                "serverDatabaseCharset" => $database["server_charset"] ?? null,
+            ],
         ];
     }
 
@@ -4288,7 +4303,7 @@ class ImportClient
     }
 
     /**
-     * Generate runtime configuration for the imported site.
+     * Generate runtime configuration for the pulled site.
      *
      * Reads the detected webhost from state (set during preflight), runs the
      * appropriate host analyzer to produce a runtime manifest, then applies
@@ -4321,7 +4336,7 @@ class ImportClient
         }
 
         // Load state to get preflight data and detected webhost.
-        $entry = $this->import_state()->preflight ?? null;
+        $entry = $this->get_state()->preflight ?? null;
         if (!is_array($entry) || empty($entry["data"])) {
             throw new RuntimeException(
                 "apply-runtime requires a prior preflight run. " .
@@ -4330,7 +4345,7 @@ class ImportClient
         }
 
         $preflight_data = $entry["data"];
-        $webhost = $this->import_state()->webhost ?? "other";
+        $webhost = $this->get_state()->webhost ?? "other";
 
         // Resolve the local document root from either --flat-document-root
         // (used as-is) or --fs-root (prefixed with the remote document_root).
@@ -4391,7 +4406,7 @@ class ImportClient
         // db-apply persists the target engine and connection details so that
         // apply-runtime can generate the matching DB_* constants and, for
         // SQLite targets, set up the database integration plugin.
-        $apply_state = $this->import_state()->apply;
+        $apply_state = $this->get_state()->apply;
         $target_engine = $apply_state->target_engine;
         if ($target_engine === "mysql") {
             $manifest->constants["DB_NAME"] = $apply_state->target_db ?? "";
@@ -4438,7 +4453,7 @@ class ImportClient
         $host = $options["host"] ?? null;
         $port = $options["port"] ?? null;
         if ($host === null || $port === null) {
-            $rewrite_map = $this->import_state()->apply->rewrite_url ?? [];
+            $rewrite_map = $this->get_state()->apply->rewrite_url ?? [];
             $first_target = !empty($rewrite_map) ? reset($rewrite_map) : null;
             if (is_string($first_target)) {
                 $parsed = parse_url($first_target);
@@ -4527,8 +4542,8 @@ class ImportClient
         }
 
         // Persist which paths were removed so callers can inspect state.
-        $this->import_state()->apply->remote_paths_removed_from_local_site = $manifest->paths_to_remove;
-        $this->save_state($this->state);
+        $this->get_state()->apply->remote_paths_removed_from_local_site = $manifest->paths_to_remove;
+        $this->save_state();
 
         // Read the structured start config if the applier wrote one.
         // Playground CLI writes start.json with mount paths as seen by
@@ -4593,9 +4608,9 @@ class ImportClient
 
         $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
         $state_dir = realpath($this->state_dir) ?: $this->state_dir;
-        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE"] =
+        $manifest->constants["REPRINT_PULL_STATE_FILE"] =
             rtrim($state_dir, "/") . "/pull/state.json";
-        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE"] =
+        $manifest->constants["REPRINT_PULL_SKIPPED_FETCH_LIST_FILE"] =
             rtrim($state_dir, "/") . "/pull/skipped-fetch-list.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
@@ -4624,11 +4639,11 @@ class ImportClient
             return true;
         }
 
-        if (($this->import_state()->active_resumable_command->command_name ?? null) !== "files-pull") {
+        if (($this->get_state()->active_resumable_command->command_name ?? null) !== "files-pull") {
             return false;
         }
 
-        $status = $this->import_state()->active_resumable_command->completion_state ?? null;
+        $status = $this->get_state()->active_resumable_command->completion_state ?? null;
         return $status !== null && $status !== "complete";
     }
 
@@ -4697,7 +4712,7 @@ class ImportClient
 
         // Require preflight data so we know where WP components live
         $this->require_preflight();
-        $preflight = $this->import_state()->preflight["data"] ?? [];
+        $preflight = $this->get_state()->preflight["data"] ?? [];
 
         // Extract WordPress directory paths from preflight
         $paths_urls = $preflight["database"]["wp"]["paths_urls"] ?? null;
@@ -5386,7 +5401,7 @@ class ImportClient
 
             if (!$target_path) {
                 $content_dir = rtrim(
-                    $this->import_state()->preflight["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
+                    $this->get_state()->preflight["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
                     "/",
                 );
                 if(!$content_dir) {
@@ -5400,9 +5415,9 @@ class ImportClient
             }
 
             // Persist target database configuration for apply-runtime.
-            $this->import_state()->apply->target_engine = "sqlite";
-            $this->import_state()->apply->target_db = $target_db;
-            $this->import_state()->apply->target_sqlite_path = $target_path;
+            $this->get_state()->apply->target_engine = "sqlite";
+            $this->get_state()->apply->target_db = $target_db;
+            $this->get_state()->apply->target_sqlite_path = $target_path;
 
             return [
                 $this->create_sqlite_target_pdo($target_path, $target_db),
@@ -5427,12 +5442,12 @@ class ImportClient
         }
 
         // Persist target database configuration for apply-runtime.
-        $this->import_state()->apply->target_engine = "mysql";
-        $this->import_state()->apply->target_db = $target_db;
-        $this->import_state()->apply->target_host = $target_host;
-        $this->import_state()->apply->target_port = $target_port;
-        $this->import_state()->apply->target_user = $target_user;
-        $this->import_state()->apply->target_pass = $target_pass;
+        $this->get_state()->apply->target_engine = "mysql";
+        $this->get_state()->apply->target_db = $target_db;
+        $this->get_state()->apply->target_host = $target_host;
+        $this->get_state()->apply->target_port = $target_port;
+        $this->get_state()->apply->target_user = $target_user;
+        $this->get_state()->apply->target_pass = $target_pass;
 
         $dsn = "mysql:host={$target_host};port={$target_port};dbname={$target_db};charset=utf8mb4";
         try {
@@ -5477,8 +5492,8 @@ class ImportClient
         // Parse URL mapping
         $url_mapping = [];
         if (!empty($options["rewrite_url"])) {
-            foreach ($options["rewrite_url"] as $pair) {
-                $url_mapping[$pair[0]] = $pair[1];
+            foreach ($options["rewrite_url"] as [$source_url, $target_url]) {
+                $url_mapping[$source_url] = $target_url;
             }
         }
 
@@ -5510,8 +5525,8 @@ class ImportClient
         }
 
         // Check state for resume
-        $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
-        $current_status = $state_command === "db-apply" ? ($this->import_state()->active_resumable_command->completion_state ?? null) : null;
+        $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
+        $current_status = $state_command === "db-apply" ? ($this->get_state()->active_resumable_command->completion_state ?? null) : null;
 
         if ($current_status === "complete") {
             throw new RuntimeException(
@@ -5519,7 +5534,7 @@ class ImportClient
             );
         }
 
-        $apply_state = $this->import_state()->apply;
+        $apply_state = $this->get_state()->apply;
         $statements_executed = $apply_state->statements_executed;
         $bytes_read = $apply_state->bytes_read;
         $is_resume = in_array(
@@ -5552,10 +5567,10 @@ class ImportClient
                 null,
             );
             if (!empty($url_mapping)) {
-                $this->import_state()->apply->rewrite_url = $url_mapping;
+                $this->get_state()->apply->rewrite_url = $url_mapping;
             }
-            $this->save_state($this->state);
-            $apply_state = $this->import_state()->apply;
+            $this->save_state();
+            $apply_state = $this->get_state()->apply;
             $statements_executed = 0;
             $bytes_read = 0;
 
@@ -5577,7 +5592,7 @@ class ImportClient
         // Set up SQL statement rewriter if we have URL mappings
         $stmt_rewriter = null;
         if (!empty($url_mapping)) {
-            $table_prefix = $this->import_state()->preflight["data"]["database"]["wp"]["table_prefix"] ?? 'wp_';
+            $table_prefix = $this->get_state()->preflight["data"]["database"]["wp"]["table_prefix"] ?? 'wp_';
             $stmt_rewriter = new SqlStatementRewriter(
                 new StructuredDataUrlRewriter($url_mapping),
                 $table_prefix,
@@ -5605,7 +5620,7 @@ class ImportClient
             && method_exists($pdo, 'get_connection')
         ) {
             $sqlite_prepared_pdo = $pdo->get_connection()->get_pdo();
-            // These are connection-local import hints. Avoid journal/sync/locking
+            // These are connection-local db-apply hints. Avoid journal/sync/locking
             // PRAGMAs because they alter durability or observable database state.
             $sqlite_prepared_pdo->exec('PRAGMA temp_store = MEMORY');
             $sqlite_prepared_pdo->exec('PRAGMA cache_size = -32768');
@@ -5754,9 +5769,9 @@ class ImportClient
                     // formed a complete query yet. This ensures resumption starts at
                     // the exact boundary between executed and un-executed queries.
                     if ($stmts_since_save >= $save_every) {
-                        $this->import_state()->apply->statements_executed = $statements_executed;
-                        $this->import_state()->apply->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
-                        $this->save_state($this->state);
+                        $this->get_state()->apply->statements_executed = $statements_executed;
+                        $this->get_state()->apply->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                        $this->save_state();
                         $stmts_since_save = 0;
 
                         // Progress output
@@ -5830,10 +5845,10 @@ class ImportClient
 
             if ($this->shutdown_requested) {
                 // Save partial progress
-                $this->import_state()->apply->statements_executed = $statements_executed;
-                $this->import_state()->apply->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
-                $this->import_state()->active_resumable_command->completion_state = "partial";
-                $this->save_state($this->state);
+                $this->get_state()->apply->statements_executed = $statements_executed;
+                $this->get_state()->apply->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
                 $this->audit_log(
                     sprintf(
                         "PARTIAL db-apply | %d statements executed",
@@ -5875,10 +5890,10 @@ class ImportClient
                 }
 
                 // Mark complete
-                $this->import_state()->apply->statements_executed = $statements_executed;
-                $this->import_state()->apply->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
-                $this->import_state()->active_resumable_command->completion_state = "complete";
-                $this->save_state($this->state);
+                $this->get_state()->apply->statements_executed = $statements_executed;
+                $this->get_state()->apply->bytes_read = $seek_offset + $query_stream->get_bytes_consumed();
+                $this->get_state()->active_resumable_command->completion_state = "complete";
+                $this->save_state();
 
                 $this->audit_log(
                     sprintf(
@@ -5978,9 +5993,9 @@ class ImportClient
      */
     private function deactivate_host_plugins(PDO $pdo): array
     {
-        $webhost = $this->import_state()->webhost ?? "other";
+        $webhost = $this->get_state()->webhost ?? "other";
         $analyzer = host_analyzer_for($webhost);
-        $preflight_data = $this->import_state()->preflight["data"] ?? [];
+        $preflight_data = $this->get_state()->preflight["data"] ?? [];
         $manifest = $analyzer->analyze($preflight_data);
 
         $plugin_dirs = [];
@@ -6046,7 +6061,7 @@ class ImportClient
             return [];
         }
 
-        $preflight_data = $this->import_state()->preflight["data"] ?? [];
+        $preflight_data = $this->get_state()->preflight["data"] ?? [];
         $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
         // Quote the table name to prevent SQL injection from a crafted prefix.
         $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
@@ -6119,12 +6134,12 @@ class ImportClient
      */
     private function run_db_index(): void
     {
-        $state_command = $this->import_state()->active_resumable_command->command_name ?? null;
+        $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $tables_file = $this->state_dir . "/db-tables.jsonl";
 
         $current_status =
             $state_command === "db-index"
-                ? $this->import_state()->active_resumable_command->completion_state ?? null
+                ? $this->get_state()->active_resumable_command->completion_state ?? null
                 : null;
         $has_progress = in_array(
             $current_status,
@@ -6161,7 +6176,7 @@ class ImportClient
             ], true);
         } else {
             $cursor =
-                $this->import_state()->active_resumable_command->remote_cursor;
+                $this->get_state()->active_resumable_command->remote_cursor;
             $this->audit_log(
                 sprintf(
                     "RESUME db-index | cursor=%s",
@@ -6180,23 +6195,23 @@ class ImportClient
             ], true);
         }
 
-        $this->import_state()->active_resumable_command->command_name = "db-index";
-        $this->import_state()->active_resumable_command->completion_state =
+        $this->get_state()->active_resumable_command->command_name = "db-index";
+        $this->get_state()->active_resumable_command->completion_state =
             "in_progress";
-        $this->save_state($this->state);
+        $this->save_state();
 
         $this->fetch_database_index();
         if (
-            $this->import_state()->active_resumable_command->completion_state ===
+            $this->get_state()->active_resumable_command->completion_state ===
             "partial"
         ) {
             return;
         }
 
-        $this->import_state()->active_resumable_command->completion_state = "complete";
-        $this->save_state($this->state);
+        $this->get_state()->active_resumable_command->completion_state = "complete";
+        $this->save_state();
 
-        $tables = (int) ($this->import_state()->db_index->tables ?? 0);
+        $tables = (int) ($this->get_state()->db_index->tables ?? 0);
         $this->audit_log(
             sprintf("db-index complete: %d tables", $tables),
             true,
@@ -6235,8 +6250,8 @@ class ImportClient
         // Crash recovery: if we have a tracked file that's larger than expected,
         // truncate it. This happens if we crashed after writing but before saving
         // the new cursor, so we'll re-fetch the same data.
-        $tracked_file = $this->import_state()->current_file ?? null;
-        $tracked_bytes = $this->import_state()->current_file_bytes ?? null;
+        $tracked_file = $this->get_state()->current_file ?? null;
+        $tracked_bytes = $this->get_state()->current_file_bytes ?? null;
         if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
             $actual_size = filesize($tracked_file);
             if ($actual_size > $tracked_bytes) {
@@ -6411,9 +6426,9 @@ class ImportClient
                 $force_save = $is_streaming_close;
                 if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
                     if ($file_path_at_completed_part !== null) {
-                        $this->import_state()->current_file =
+                        $this->get_state()->current_file =
                             $file_path_at_completed_part;
-                        $this->import_state()->current_file_bytes =
+                        $this->get_state()->current_file_bytes =
                             $file_bytes_at_completed_part;
                     } elseif ($context->file_handle && $context->file_path) {
                         // Flush to ensure bytes are on disk before saving state.
@@ -6423,11 +6438,11 @@ class ImportClient
                             );
                         }
                         // Track the current file for crash recovery.
-                        $this->import_state()->current_file = $context->file_path;
-                        $this->import_state()->current_file_bytes = $context->file_bytes_written;
+                        $this->get_state()->current_file = $context->file_path;
+                        $this->get_state()->current_file_bytes = $context->file_bytes_written;
                     } else {
-                        $this->import_state()->current_file = null;
-                        $this->import_state()->current_file_bytes = null;
+                        $this->get_state()->current_file = null;
+                        $this->get_state()->current_file_bytes = null;
                     }
                     if (
                         $this->local_index_wal_handle
@@ -6436,7 +6451,7 @@ class ImportClient
                         throw new RuntimeException('Failed to flush the local index WAL.');
                     }
                     $this->get_fetch_list_progress_state($state_key)->cursor = $cursor;
-                    $this->save_state($this->state);
+                    $this->save_state();
                     $chunks_since_save = 0;
                 }
             }
@@ -6471,11 +6486,11 @@ class ImportClient
                 $context->file_handle = null;
             }
             $this->apply_local_index_wal();
-            $this->import_state()->active_resumable_command->completion_state = "partial";
-            $this->save_state($this->state);
+            $this->get_state()->active_resumable_command->completion_state = "partial";
+            $this->save_state();
             return false;
         }
-        $this->import_state()->consecutive_interrupted_responses = 0;
+        $this->get_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
 
         $this->finalize_tuned_request(
@@ -6492,13 +6507,13 @@ class ImportClient
                     'Failed to flush the pulled file before saving its fetch cursor.'
                 );
             }
-            $this->import_state()->current_file = $context->file_path;
-            $this->import_state()->current_file_bytes = $context->file_bytes_written;
+            $this->get_state()->current_file = $context->file_path;
+            $this->get_state()->current_file_bytes = $context->file_bytes_written;
         } else {
-            $this->import_state()->current_file = null;
-            $this->import_state()->current_file_bytes = null;
+            $this->get_state()->current_file = null;
+            $this->get_state()->current_file_bytes = null;
         }
-        $this->save_state($this->state);
+        $this->save_state();
 
         return $complete;
     }
@@ -6508,7 +6523,7 @@ class ImportClient
      */
     private function fetch_remote_index(?string $list_dir_override = null): bool
     {
-        $cursor = $this->import_state()->index->cursor;
+        $cursor = $this->get_state()->index->cursor;
 
         $roots = $this->get_root_directories_from_preflight();
         if (empty($roots)) {
@@ -6604,8 +6619,8 @@ class ImportClient
 
             $chunks_since_save++;
             if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                $this->import_state()->index->cursor = $cursor;
-                $this->save_state($this->state);
+                $this->get_state()->index->cursor = $cursor;
+                $this->save_state();
                 $chunks_since_save = 0;
             }
 
@@ -6736,12 +6751,12 @@ class ImportClient
                 $e,
             );
             fclose($handle);
-            $this->import_state()->index->cursor = $cursor;
-            $this->import_state()->active_resumable_command->completion_state = "partial";
-            $this->save_state($this->state);
+            $this->get_state()->index->cursor = $cursor;
+            $this->get_state()->active_resumable_command->completion_state = "partial";
+            $this->save_state();
             return false;
         }
-        $this->import_state()->consecutive_interrupted_responses = 0;
+        $this->get_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
         $this->finalize_tuned_request(
             "file_index",
@@ -6750,8 +6765,8 @@ class ImportClient
         );
         fclose($handle);
 
-        $this->import_state()->index->cursor = $complete ? null : $cursor;
-        $this->save_state($this->state);
+        $this->get_state()->index->cursor = $complete ? null : $cursor;
+        $this->save_state();
 
         return $complete;
     }
@@ -6765,7 +6780,7 @@ class ImportClient
             throw new RuntimeException("Remote index file not found");
         }
 
-        $diff = $this->import_state()->diff;
+        $diff = $this->get_state()->diff;
         $remote_offset = $diff->remote_offset;
         $last_local_index_entry_path = $diff->local_after;
         $fetch_list_mode = $remote_offset > 0 ? "a" : "w";
@@ -6926,15 +6941,15 @@ class ImportClient
 
             $processed++;
             if ($processed % 200 === 0) {
-                $this->import_state()->diff->remote_offset = $remote_offset;
-                $this->import_state()->diff->local_after = $last_local_index_entry_path;
+                $this->get_state()->diff->remote_offset = $remote_offset;
+                $this->get_state()->diff->local_after = $last_local_index_entry_path;
                 if (
                     $this->local_index_wal_handle
                     && !fflush($this->local_index_wal_handle)
                 ) {
                     throw new RuntimeException('Failed to flush the local index WAL.');
                 }
-                $this->save_state($this->state);
+                $this->save_state();
                 $this->progress->tick_spinner();
             }
         }
@@ -6958,10 +6973,10 @@ class ImportClient
             fclose($skipped_handle);
         }
 
-        $this->import_state()->diff->remote_offset = $remote_offset;
-        $this->import_state()->diff->local_after = $last_local_index_entry_path;
+        $this->get_state()->diff->remote_offset = $remote_offset;
+        $this->get_state()->diff->local_after = $last_local_index_entry_path;
         $this->apply_local_index_wal();
-        $this->save_state($this->state);
+        $this->save_state();
 
         return !$this->shutdown_requested;
     }
@@ -7052,7 +7067,7 @@ class ImportClient
                 "batch_entries" => $batch_entries,
                 "cursor" => null,
             ]));
-            $this->save_state($this->state);
+            $this->save_state();
         }
 
         $post_data = [
@@ -7074,14 +7089,14 @@ class ImportClient
         }
 
         // Advance the done counter by the known batch size and reset
-        // the per-batch file counter. files_imported counted files within
+        // the per-batch file counter. files_pulled counted files within
         // this batch; now that the batch is complete, those files are
         // accounted for in fetch_list_done.
         if ($this->fetch_list_done !== null) {
             $this->fetch_list_done += $batch_entries;
         }
-        $this->import_state()->files_pull_summary->files_pulled += $batch_entries;
-        $this->files_imported = 0;
+        $this->get_state()->files_pull_summary->files_pulled += $batch_entries;
+        $this->files_pulled = 0;
 
         $this->set_fetch_list_progress_state($state_key, FetchListProgressState::from_array([
             "offset" => $next_offset,
@@ -7090,7 +7105,7 @@ class ImportClient
             "batch_entries" => 0,
             "cursor" => null,
         ]));
-        $this->save_state($this->state);
+        $this->save_state();
 
         return $next_offset >= filesize($list_file);
     }
@@ -7098,10 +7113,10 @@ class ImportClient
     private function get_fetch_list_progress_state(string $state_key): FetchListProgressState
     {
         if ($state_key === "fetch") {
-            return $this->import_state()->fetch;
+            return $this->get_state()->fetch;
         }
         if ($state_key === "fetch_skipped") {
-            return $this->import_state()->fetch_skipped;
+            return $this->get_state()->fetch_skipped;
         }
         throw new InvalidArgumentException("Unknown fetch state key: {$state_key}");
     }
@@ -7109,11 +7124,11 @@ class ImportClient
     private function set_fetch_list_progress_state(string $state_key, FetchListProgressState $state): void
     {
         if ($state_key === "fetch") {
-            $this->import_state()->fetch = $state;
+            $this->get_state()->fetch = $state;
             return;
         }
         if ($state_key === "fetch_skipped") {
-            $this->import_state()->fetch_skipped = $state;
+            $this->get_state()->fetch_skipped = $state;
             return;
         }
         throw new InvalidArgumentException("Unknown fetch state key: {$state_key}");
@@ -7270,7 +7285,7 @@ class ImportClient
      */
     private function get_max_request_bytes(): int
     {
-        $preflight = $this->import_state()->preflight["data"]["limits"] ?? null;
+        $preflight = $this->get_state()->preflight["data"]["limits"] ?? null;
         $max_request = null;
         if (is_array($preflight) && isset($preflight["max_request_bytes"])) {
             $max_request = (int) $preflight["max_request_bytes"];
@@ -7289,7 +7304,7 @@ class ImportClient
      */
     private function get_uploads_basedir(): ?string
     {
-        $paths_urls = $this->import_state()->preflight["data"]["database"]["wp"]["paths_urls"] ?? null;
+        $paths_urls = $this->get_state()->preflight["data"]["database"]["wp"]["paths_urls"] ?? null;
         if (!is_array($paths_urls)) {
             return null;
         }
@@ -7803,7 +7818,7 @@ class ImportClient
      */
     private function fetch_sql(): void
     {
-        $cursor = $this->import_state()->active_resumable_command->remote_cursor ?? null;
+        $cursor = $this->get_state()->active_resumable_command->remote_cursor ?? null;
         $is_resume = $cursor !== null;
         $complete = false;
         $mode = $this->sql_output_mode;
@@ -7829,7 +7844,7 @@ class ImportClient
             // Crash recovery: if SQL file is larger than expected, truncate it.
             // This happens if we crashed after writing but before saving the new cursor.
             $tracked_bytes = $is_resume
-                ? $this->import_state()->sql_bytes ?? null
+                ? $this->get_state()->sql_bytes ?? null
                 : null;
             if ($tracked_bytes !== null && file_exists($sql_file)) {
                 $actual_size = filesize($sql_file);
@@ -7863,12 +7878,12 @@ class ImportClient
 
         } elseif ($mode === "stdout") {
             $sql_bytes_written = $is_resume
-                ? $this->import_state()->sql_bytes ?? 0
+                ? $this->get_state()->sql_bytes ?? 0
                 : 0;
 
         } elseif ($mode === "mysql") {
             $sql_bytes_written = $is_resume
-                ? $this->import_state()->sql_bytes ?? 0
+                ? $this->get_state()->sql_bytes ?? 0
                 : 0;
 
             $host = $this->mysql_host ?? "127.0.0.1";
@@ -7940,7 +7955,7 @@ class ImportClient
             );
         }
         $sql_statements_counted = $is_resume
-            ? (int) ($this->import_state()->sql_statements_counted ?? 0)
+            ? (int) ($this->get_state()->sql_statements_counted ?? 0)
             : 0;
 
         // Auto-detect the source site domain from the export URL so it
@@ -8026,10 +8041,10 @@ class ImportClient
                         if ($sql_handle) {
                             fflush($sql_handle);
                         }
-                        $this->import_state()->active_resumable_command->remote_cursor = $cursor;
-                        $this->import_state()->sql_bytes = $sql_bytes_written;
-                        $this->import_state()->sql_statements_counted = $sql_statements_counted;
-                        $this->save_state($this->state);
+                        $this->get_state()->active_resumable_command->remote_cursor = $cursor;
+                        $this->get_state()->sql_bytes = $sql_bytes_written;
+                        $this->get_state()->sql_statements_counted = $sql_statements_counted;
+                        $this->save_state();
                         $chunks_since_save = 0;
 
                         // Also persist discovered domains so they survive crashes.
@@ -8070,7 +8085,7 @@ class ImportClient
                                 if ($bytes === false) {
                                     // Broken pipe — save state and exit cleanly so the
                                     // pipe reader (e.g. `mysql`) can finish on its own.
-                                    $this->save_state($this->state);
+                                    $this->save_state();
                                     exit(0);
                                 }
                                 $sql_bytes_written += $bytes;
@@ -8126,7 +8141,7 @@ class ImportClient
                         // but only if the estimate is larger than what we've
                         // already downloaded — INFORMATION_SCHEMA estimates
                         // can be wildly off (e.g. 7 KB for a 22 MB dump).
-                        $db_bytes_est = (int) ($this->import_state()->db_index->bytes ?? 0);
+                        $db_bytes_est = (int) ($this->get_state()->db_index->bytes ?? 0);
                         $est_is_useful = $db_bytes_est > $sql_bytes_written;
                         $sql_fraction = $est_is_useful
                             ? $sql_bytes_written / $db_bytes_est
@@ -8202,7 +8217,7 @@ class ImportClient
                     $this->audit_log($retry_log, true);
                     continue;
                 }
-                $this->import_state()->consecutive_interrupted_responses = 0;
+                $this->get_state()->consecutive_interrupted_responses = 0;
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
                     "sql_chunk",
@@ -8215,10 +8230,10 @@ class ImportClient
                     fflush($sql_handle);
                 }
 
-                $this->import_state()->active_resumable_command->remote_cursor = $cursor;
+                $this->get_state()->active_resumable_command->remote_cursor = $cursor;
                 // Clear sql_bytes when complete, otherwise save current position
-                $this->import_state()->sql_bytes = $complete ? null : $sql_bytes_written;
-                $this->save_state($this->state);
+                $this->get_state()->sql_bytes = $complete ? null : $sql_bytes_written;
+                $this->save_state();
             }
 
             // Drain any remaining statements after download completes
@@ -8535,13 +8550,13 @@ class ImportClient
      */
     private function fetch_database_index(): void
     {
-        $cursor = $this->import_state()->active_resumable_command->remote_cursor ?? null;
+        $cursor = $this->get_state()->active_resumable_command->remote_cursor ?? null;
         $is_resume = $cursor !== null;
         $complete = false;
         $tables_file = $this->state_dir . "/db-tables.jsonl";
 
         $stats = $is_resume
-            ? $this->import_state()->db_index
+            ? $this->get_state()->db_index
             : new DatabaseTableIndexState();
         $tables_written = $stats->tables;
         $rows_estimated = $stats->rows_estimated;
@@ -8685,17 +8700,17 @@ class ImportClient
                         $e,
                     );
                     fflush($handle);
-                    $this->import_state()->active_resumable_command->remote_cursor = $cursor;
-                    $this->import_state()->db_index->file = $tables_file;
-                    $this->import_state()->db_index->tables = $tables_written;
-                    $this->import_state()->db_index->rows_estimated = $rows_estimated;
-                    $this->import_state()->db_index->bytes = $bytes_written;
-                    $this->import_state()->db_index->updated_at = (string) time();
-                    $this->import_state()->active_resumable_command->completion_state = "partial";
-                    $this->save_state($this->state);
+                    $this->get_state()->active_resumable_command->remote_cursor = $cursor;
+                    $this->get_state()->db_index->file = $tables_file;
+                    $this->get_state()->db_index->tables = $tables_written;
+                    $this->get_state()->db_index->rows_estimated = $rows_estimated;
+                    $this->get_state()->db_index->bytes = $bytes_written;
+                    $this->get_state()->db_index->updated_at = (string) time();
+                    $this->get_state()->active_resumable_command->completion_state = "partial";
+                    $this->save_state();
                     return;
                 }
-                $this->import_state()->consecutive_interrupted_responses = 0;
+                $this->get_state()->consecutive_interrupted_responses = 0;
                 $wall_time = microtime(true) - $request_start;
                 $this->finalize_tuned_request(
                     "db_index",
@@ -8704,13 +8719,13 @@ class ImportClient
                 );
 
                 fflush($handle);
-                $this->import_state()->active_resumable_command->remote_cursor = $cursor;
-                $this->import_state()->db_index->file = $tables_file;
-                $this->import_state()->db_index->tables = $tables_written;
-                $this->import_state()->db_index->rows_estimated = $rows_estimated;
-                $this->import_state()->db_index->bytes = $bytes_written;
-                $this->import_state()->db_index->updated_at = (string) time();
-                $this->save_state($this->state);
+                $this->get_state()->active_resumable_command->remote_cursor = $cursor;
+                $this->get_state()->db_index->file = $tables_file;
+                $this->get_state()->db_index->tables = $tables_written;
+                $this->get_state()->db_index->rows_estimated = $rows_estimated;
+                $this->get_state()->db_index->bytes = $bytes_written;
+                $this->get_state()->db_index->updated_at = (string) time();
+                $this->save_state();
             }
         } finally {
             fclose($handle);
@@ -8769,7 +8784,7 @@ class ImportClient
      *   |-- style.css
      *   `-- index.php
      *
-     * Local import state:
+     * Local pull state:
      *
      *   <state-dir>/filesystem root/
      *   |-- tmp/e2e-shared-themes/pub/indice/
@@ -8904,7 +8919,7 @@ class ImportClient
     private function assert_resolved_path_mappings_consistent(): void
     {
         $fingerprint = $this->resolved_path_mappings_fingerprint();
-        $previous = $this->import_state()->resolved_path_mappings_fingerprint ?? null;
+        $previous = $this->get_state()->resolved_path_mappings_fingerprint ?? null;
 
         $has_existing_index = file_exists($this->local_index_file) && filesize($this->local_index_file) > 0;
         if ($previous === null && $has_existing_index && !empty($this->resolved_path_mappings)) {
@@ -8922,8 +8937,8 @@ class ImportClient
         }
 
         if ($previous === null) {
-            $this->import_state()->resolved_path_mappings_fingerprint = $fingerprint;
-            $this->save_state($this->state);
+            $this->get_state()->resolved_path_mappings_fingerprint = $fingerprint;
+            $this->save_state();
         }
     }
 
@@ -8956,7 +8971,7 @@ class ImportClient
         }
 
         $fingerprint = $this->files_pull_only_fingerprint();
-        $previous = $this->import_state()->files_pull_only_fingerprint ?? null;
+        $previous = $this->get_state()->files_pull_only_fingerprint ?? null;
 
         if ($previous !== null && $previous !== $fingerprint) {
             throw new RuntimeException(
@@ -8968,8 +8983,8 @@ class ImportClient
         // Older in-progress state may not have this guard persisted yet. Record
         // the current value so subsequent resumes cannot drift.
         if ($previous === null) {
-            $this->import_state()->files_pull_only_fingerprint = $fingerprint;
-            $this->save_state($this->state);
+            $this->get_state()->files_pull_only_fingerprint = $fingerprint;
+            $this->save_state();
         }
     }
 
@@ -8996,7 +9011,7 @@ class ImportClient
     private function assert_local_followed_symlinks_root_unchanged(): void
     {
         $fingerprint = $this->local_followed_symlinks_root_fingerprint();
-        $previous = $this->import_state()->local_followed_symlinks_root_fingerprint ?? null;
+        $previous = $this->get_state()->local_followed_symlinks_root_fingerprint ?? null;
 
         if ($previous !== null && $previous !== $fingerprint) {
             throw new RuntimeException(
@@ -9006,8 +9021,8 @@ class ImportClient
         }
 
         if ($previous === null) {
-            $this->import_state()->local_followed_symlinks_root_fingerprint = $fingerprint;
-            $this->save_state($this->state);
+            $this->get_state()->local_followed_symlinks_root_fingerprint = $fingerprint;
+            $this->save_state();
         }
     }
 
@@ -9044,14 +9059,14 @@ class ImportClient
     }
 
     /**
-     * Build the remap rules from the raw remap pairs + preflight data.
+     * Build the remap rules from raw SOURCE TARGET arguments and preflight data.
      *
      * Each argument is a template string of `:token:` substitutions and/or a raw absolute path.
      * Source arguments resolve against the remote site's WordPress path tokens.
      * Target arguments resolve under --fs-root and must stay within it.
      * Each rule is a full source path => full local target path (both absolute).
      *
-     * @param array<int,array{0:string,1:string}> $remap_raw Raw (SOURCE, TARGET) pairs.
+     * @param array<int,array{0:string,1:string}> $remap_raw Raw SOURCE/TARGET mappings.
      * @return array<string,string> Source path => target path (both absolute).
      */
     private function resolve_remap(array $remap_raw): array
@@ -9216,7 +9231,7 @@ class ImportClient
      */
     private function wp_source_path_tokens(): array
     {
-        $preflight = $this->import_state()->preflight["data"] ?? [];
+        $preflight = $this->get_state()->preflight["data"] ?? [];
         $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
 
         $content_dir = $this->clean_preflight_path( $paths["content_dir"] ?? null);
@@ -9411,7 +9426,7 @@ class ImportClient
             $local_size = $exists_locally ? filesize($local_absolute_path) : 0;
             $file_size = (int) ($headers["x-file-size"] ?? 0);
 
-            // Log file import with useful context
+            // Log file pull with useful context
             $this->audit_log(
                 sprintf(
                     "File: %s (remote_size=%d, ctime=%d, local_exists=%s, local_size=%d)",
@@ -9424,7 +9439,7 @@ class ImportClient
                 false,
             );
 
-            $files_done = ($this->fetch_list_done ?? 0) + $this->files_imported;
+            $files_done = ($this->fetch_list_done ?? 0) + $this->files_pulled;
             $files_total = $this->fetch_list_total;
             $file_fraction = ($files_total !== null && $files_total > 0)
                 ? $files_done / $files_total
@@ -9534,7 +9549,7 @@ class ImportClient
                     $file_size,
                     "file",
                 );
-                $this->files_imported++; // Count completed files only
+                $this->files_pulled++; // Count completed files only
                 $this->clear_volatile_file($path);
                 $this->audit_log(
                     sprintf("  Indexed (wrote %d bytes)", $final_size),
@@ -9552,8 +9567,8 @@ class ImportClient
             $context->file_ctime = null;
             $context->file_bytes_written = 0;
             // Clear crash recovery tracking - file is complete
-            $this->import_state()->current_file = null;
-            $this->import_state()->current_file_bytes = null;
+            $this->get_state()->current_file = null;
+            $this->get_state()->current_file_bytes = null;
         }
     }
 
@@ -9855,7 +9870,7 @@ class ImportClient
      * validates that the target stays within the filesystem root (preventing
      * directory traversal), then creates the symlink.  Failures are logged
      * to the audit log and reported as symlink_error progress events — they
-     * do not halt the import.
+     * do not halt the pull.
      *
      * @param array $chunk Multipart chunk with x-symlink-path, x-symlink-target,
      *                     and x-symlink-ctime headers (all base64-encoded).
@@ -10116,7 +10131,7 @@ class ImportClient
      */
     private function get_root_directories_from_preflight(): array
     {
-        $roots = $this->import_state()->preflight["data"]["wp_detect"]["roots"] ?? [];
+        $roots = $this->get_state()->preflight["data"]["wp_detect"]["roots"] ?? [];
         if (!is_array($roots) || empty($roots)) {
             return [];
         }
@@ -10185,7 +10200,7 @@ class ImportClient
             return $this->export_directories_cache;
         }
 
-        $preflight = $this->import_state()->preflight["data"] ?? [];
+        $preflight = $this->get_state()->preflight["data"] ?? [];
 
         // Collect extra paths that may live outside the wp_detect roots.
         $extra_paths = [
@@ -10477,7 +10492,7 @@ class ImportClient
 
     private function get_base_headers(string $accept): array
     {
-        $ua = $this->import_state()->user_agent ?? self::USER_AGENTS[0];
+        $ua = $this->get_state()->user_agent ?? self::USER_AGENTS[0];
         return [
             "User-Agent: {$ua}",
             "Accept: {$accept}",
@@ -10639,12 +10654,12 @@ class ImportClient
         TransientInterruptionException $exception
     ): void {
         if ($cursor_after !== null && $cursor_after !== $cursor_before) {
-            $this->import_state()->consecutive_interrupted_responses = 0;
+            $this->get_state()->consecutive_interrupted_responses = 0;
         } else {
-            $this->import_state()->consecutive_interrupted_responses++;
+            $this->get_state()->consecutive_interrupted_responses++;
         }
 
-        $count = $this->import_state()->consecutive_interrupted_responses;
+        $count = $this->get_state()->consecutive_interrupted_responses;
 
         $this->audit_log(
             "INTERRUPTED RESPONSE | {$phase} | " .
@@ -11214,7 +11229,7 @@ class ImportClient
                         // without files_total confuses consumers.
                         if ($this->fetch_list_total !== null) {
                             $heartbeat["files_done"] =
-                                ($this->fetch_list_done ?? 0) + $this->files_imported;
+                                ($this->fetch_list_done ?? 0) + $this->files_pulled;
                             $heartbeat["files_total"] = $this->fetch_list_total;
                         }
                         fwrite($this->progress_fd, json_encode($heartbeat) . "\n");
@@ -11308,8 +11323,8 @@ class ImportClient
         }
     }
 
-    /** Return the in-process import state. */
-    private function import_state(): ImportState
+    /** Return the in-process pull state. */
+    public function get_state(): PullState
     {
         return $this->state;
     }
@@ -11533,31 +11548,31 @@ class ImportClient
         }
         if (!str_starts_with($value, self::STATE_PATH_ENCODING_PREFIX)) {
             throw new UnexpectedValueException(
-                "Import state path is missing the base64: encoding prefix."
+                "Pull state path is missing the base64: encoding prefix."
             );
         }
         $encoded = substr($value, strlen(self::STATE_PATH_ENCODING_PREFIX));
         $decoded = base64_decode($encoded, true);
         if ($decoded === false) {
             throw new UnexpectedValueException(
-                "Import state path contains invalid base64 after the base64: encoding prefix."
+                "Pull state path contains invalid base64 after the base64: encoding prefix."
             );
         }
         return $decoded;
     }
 
     /**
-     * Load import state from disk.
+     * Load pull state from disk.
      */
-    private function load_state(): ImportState
+    private function load_state(): PullState
     {
         if (!file_exists($this->pull_state_file)) {
-            return new ImportState();
+            return new PullState();
         }
 
         $contents = file_get_contents($this->pull_state_file);
         if ($contents === false) {
-            return new ImportState();
+            return new PullState();
         }
 
         $state = json_decode($contents, true);
@@ -11568,28 +11583,28 @@ class ImportClient
             );
             $corrupt_name = $this->pull_state_file . ".corrupt." . time();
             @rename($this->pull_state_file, $corrupt_name);
-            return new ImportState();
+            return new PullState();
         }
 
         $state = $this->decode_state_paths($state);
 
-        return ImportState::from_array($state);
+        return PullState::from_array($state);
     }
 
     /**
-     * Save import state to disk.
+     * Save pull state to disk.
      *
      * Uses atomic write (temp file + rename) to prevent corruption if
      * the process is killed mid-write.
      */
-    private function save_state(ImportState $state): void
+    public function save_state(): void
     {
         // Keep the spinner alive between curl requests. save_state is
         // called frequently during streaming operations, so this fills
         // the gaps where curl's progress callback doesn't fire.
         $this->progress->tick_spinner();
 
-        $state = $state->to_array();
+        $state = $this->state->to_array();
         if ($this->tuner instanceof AdaptiveTuner) {
             $state["tuning"] = [
                 "config" => $this->tuner->get_config(),
@@ -11613,7 +11628,7 @@ class ImportClient
         }
 
         $indexed = $this->index_count();
-        $files_imported = $this->files_imported; // Completed in this run
+        $files_pulled = $this->files_pulled; // Completed in this run
         $has_cursor =
             !empty($state["active_resumable_command"]["remote_cursor"] ?? null) ||
             !empty($state["index"]["cursor"] ?? null) ||
@@ -11624,7 +11639,7 @@ class ImportClient
             sprintf(
                 "SAVE CURSOR | total_indexed=%d | completed_this_run=%d | %s",
                 $indexed,
-                $files_imported,
+                $files_pulled,
                 $cursor_info,
             ),
             false,
@@ -11662,7 +11677,7 @@ class ImportClient
 
         $json = json_encode($payload, JSON_PRETTY_PRINT);
         if ($json === false) {
-            return; // Best-effort — don't crash the import over a progress file
+            return; // Best-effort — don't crash the pull over a progress file
         }
         $tmp = $this->progress_file . ".tmp";
         if (file_put_contents($tmp, $json) !== false) {
@@ -11707,15 +11722,15 @@ class ImportClient
 
         // Log final progress before exit
         $indexed = $this->index_count();
-        $files_imported = $this->files_imported; // Files completed in this run
-        $current_command = $this->import_state()->active_resumable_command->command_name ?? "unknown";
+        $files_pulled = $this->files_pulled; // Files completed in this run
+        $current_command = $this->get_state()->active_resumable_command->command_name ?? "unknown";
 
         $this->audit_log(
             sprintf(
                 "SHUTDOWN REQUESTED | command=%s | total_indexed=%d files | completed_this_run=%d files",
                 $current_command,
                 $indexed,
-                $files_imported,
+                $files_pulled,
             ),
             true,
         );
@@ -11723,18 +11738,18 @@ class ImportClient
         $this->progress->show_lifecycle_line("\nInterrupted - saving state...\n");
         $this->progress->show_lifecycle_line("  Command: {$current_command}\n");
         $this->progress->show_lifecycle_line("  Total files indexed: {$indexed}\n");
-        $this->progress->show_lifecycle_line("  Files completed in this run: {$files_imported}\n");
+        $this->progress->show_lifecycle_line("  Files completed in this run: {$files_pulled}\n");
         $this->output_progress([
             "type" => "interrupt",
             "command" => $current_command,
             "files_indexed" => $indexed,
-            "files_completed" => $files_imported,
+            "files_completed" => $files_pulled,
             "message" => "Interrupted - saving state...",
         ], true);
 
         // Save current state (with timeout protection)
         try {
-            $this->save_state($this->state);
+            $this->save_state();
             $this->progress->show_lifecycle_line("✓ State saved successfully\n");
             $this->output_progress([
                 "type" => "state_saved",
@@ -11789,7 +11804,7 @@ class ImportClient
             $written = @fwrite($this->progress_fd, json_encode($data) . "\n");
             if ($written === false) {
                 // Broken pipe — save state and exit cleanly
-                $this->save_state($this->state);
+                $this->save_state();
                 exit(0);
             }
             @flush();
@@ -11898,7 +11913,7 @@ if (
     //   type           'value'         --name=VAL
     //                  'flag'          --name (sets a boolean)
     //                  'value-or-next' --name=VAL or --name VAL
-    //                  'pair'          --name A B (repeatable, takes 2 args)
+    //                  'two-arguments' --name A B (repeatable, takes 2 arguments)
     //   target         Where to store the parsed value:
     //                  'state_dir' | 'filesystem_root' → special local variables
     //                  'key'                   → $options['key']
@@ -11914,7 +11929,7 @@ if (
     //   cast           'int' | 'float' | 'size' (default: string)
     //   flag_value     What to store for flag types (default: true)
     //   valid_values   Array of allowed values (enforced at parse time)
-    //   pair_args      Arg labels for pair type help, e.g. 'FROM TO'
+    //   argument_labels Labels for two-argument type help, e.g. 'FROM TO'
     // ================================================================
     $option_defs = [
         // ── Required options ─────────────────────────────────────
@@ -11923,7 +11938,7 @@ if (
             'type' => 'value',
             'target' => 'state_dir',
             'placeholder' => 'DIR',
-            'help' => 'Directory for import state files and SQL dumps',
+            'help' => 'Directory for pull state files and SQL dumps',
             'help_section' => 'required',
             'commands' => [],
         ],
@@ -12194,9 +12209,9 @@ if (
         ],
         [
             'name' => 'rewrite-url',
-            'type' => 'pair',
+            'type' => 'two-arguments',
             'target' => 'rewrite_url',
-            'pair_args' => 'FROM TO',
+            'argument_labels' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
             'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
@@ -12210,9 +12225,9 @@ if (
         ],
         [
             'name' => 'remap',
-            'type' => 'pair',
+            'type' => 'two-arguments',
             'target' => 'remap',
-            'pair_args' => 'SOURCE TARGET',
+            'argument_labels' => 'SOURCE TARGET',
             'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
                 '(a :fs-root: path or an absolute path within --fs-root); repeatable',
             'commands' => ['pull-files', 'files-pull'],
@@ -12310,16 +12325,7 @@ if (
         ['name' => 'aimd-increase-file', 'type' => 'value', 'target' => 'tuning_config.aimd_increase_file_bytes', 'cast' => 'int', 'help' => null, 'commands' => []],
         ['name' => 'aimd-increase-index', 'type' => 'value', 'target' => 'tuning_config.aimd_increase_index_entries', 'cast' => 'int', 'help' => null, 'commands' => []],
         ['name' => 'aimd-increase-sql', 'type' => 'value', 'target' => 'tuning_config.aimd_increase_sql_fragments', 'cast' => 'int', 'help' => null, 'commands' => []],
-        ['name' => 'tune-all', 'type' => 'flag', 'target' => 'tuning_config.tune_only_partial', 'flag_value' => false, 'help' => null, 'commands' => []],
-        ['name' => 'buffered-ratio', 'type' => 'value', 'target' => 'tuning_config.buffered_ratio_threshold', 'cast' => 'float', 'help' => null, 'commands' => []],
-        ['name' => 'buffered-min-time', 'type' => 'value', 'target' => 'tuning_config.buffered_min_server_time', 'cast' => 'float', 'help' => null, 'commands' => []],
-        ['name' => 'buffered-cooldown', 'type' => 'value', 'target' => 'tuning_config.buffered_cooldown', 'cast' => 'int', 'help' => null, 'commands' => []],
         ['name' => 'error-backoff', 'type' => 'value', 'target' => 'tuning_config.error_backoff_requests', 'cast' => 'int', 'help' => null, 'commands' => []],
-        ['name' => 'slow-host-threshold', 'type' => 'value', 'target' => 'tuning_config.slow_host_threshold', 'cast' => 'int', 'help' => null, 'commands' => []],
-        ['name' => 'slow-file-chunk-max', 'type' => 'value', 'target' => 'tuning_config.slow_host_file_chunk_max', 'cast' => 'int', 'help' => null, 'commands' => []],
-        ['name' => 'slow-index-batch-max', 'type' => 'value', 'target' => 'tuning_config.slow_host_index_batch_max', 'cast' => 'int', 'help' => null, 'commands' => []],
-        ['name' => 'slow-sql-fragments-max', 'type' => 'value', 'target' => 'tuning_config.slow_host_sql_fragments_max', 'cast' => 'int', 'help' => null, 'commands' => []],
-        ['name' => 'sleep-jitter', 'type' => 'value', 'target' => 'tuning_config.sleep_jitter', 'cast' => 'float', 'help' => null, 'commands' => []],
         ['name' => 'max-exec', 'type' => 'value', 'target' => 'tuning_config.max_execution_time', 'cast' => 'int', 'help' => null, 'commands' => []],
         ['name' => 'memory-threshold', 'type' => 'value', 'target' => 'tuning_config.memory_threshold', 'cast' => 'float', 'help' => null, 'commands' => []],
         ['name' => 'file-chunk-start', 'type' => 'value', 'target' => 'tuning_config.file_chunk_start', 'cast' => 'int', 'help' => null, 'commands' => []],
@@ -12415,10 +12421,10 @@ if (
                             }
                             break;
 
-                        case 'pair':
+                        case 'two-arguments':
                             if ($arg === "--{$cli_name}") {
                                 if (!isset($argv[$i + 1]) || !isset($argv[$i + 2])) {
-                                    fwrite(STDERR, "--{$def['name']} requires two arguments: " . ($def['pair_args'] ?? 'ARG1 ARG2') . "\n");
+                                    fwrite(STDERR, "--{$def['name']} requires two arguments: " . ($def['argument_labels'] ?? 'ARG1 ARG2') . "\n");
                                     exit(1);
                                 }
                                 $target = $def['target'];
@@ -12696,8 +12702,8 @@ if (
             case 'value':
             case 'value-or-next':
                 return "{$name}=" . ($def['placeholder'] ?? 'VALUE');
-            case 'pair':
-                return "{$name} " . ($def['pair_args'] ?? 'ARG1 ARG2');
+            case 'two-arguments':
+                return "{$name} " . ($def['argument_labels'] ?? 'ARG1 ARG2');
             case 'flag':
             default:
                 return $name;
@@ -12719,7 +12725,7 @@ if (
     $command_info = [
         "pull" => [
             "level" => "high",
-            "short" => "Clone a remote site (preflight + files + database + import)",
+            "short" => "Clone a remote site (preflight + files + database + apply)",
             "description" =>
                 "Full site clone in a single command. Composes lower-level commands into\n" .
                 "a resumable pipeline:\n" .
@@ -12727,7 +12733,7 @@ if (
                 "  1. Preflight — probe the remote site environment\n" .
                 "  2. Files     — download all remote files into --fs-root\n" .
                 "  3. Database  — download the SQL dump\n" .
-                "  4. Import    — apply SQL to a local database (if --target-db)\n" .
+                "  4. Apply     — apply SQL to a local database (if --target-db)\n" .
                 "  5. Flatten   — reassemble into standard WP layout (if --flatten-to)\n" .
                 "  6. Runtime   — generate server config (default: php-builtin)\n" .
                 "  7. Start     — launch the selected runtime when supported\n" .
@@ -12743,11 +12749,11 @@ if (
                 "so you can pass just the site URL.\n",
             "extra" =>
                 "Examples:\n" .
-                "  # Download files and database (no import):\n" .
+                "  # Download files and database without applying SQL:\n" .
                 "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
                 "\n" .
-                "  # Full clone with MySQL import and URL rewriting:\n" .
+                "  # Full clone with MySQL database apply and URL rewriting:\n" .
                 "  reprint pull https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-user=root --target-db=wp_local \\\n" .
@@ -12798,11 +12804,11 @@ if (
                 "\n" .
                 "  1. Preflight — probe the remote site environment\n" .
                 "  2. db-pull — download the SQL dump into --state-dir/db.sql\n" .
-                "  3. db-apply — import the dump into a local database\n" .
+                "  3. db-apply — apply the dump to a local database\n" .
                 "\n" .
                 "This gives the database the same retry and resume behavior as pull,\n" .
                 "without running the file or runtime stages. With no MySQL target\n" .
-                "options, pull-db imports into SQLite by default.\n",
+                "options, pull-db applies the dump to SQLite by default.\n",
             "extra" =>
                 "Examples:\n" .
                 "  reprint pull-db https://example.com \\\n" .
@@ -12889,7 +12895,7 @@ if (
             "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR",
             "description" =>
                 "Shows which local paths a files-push would send or delete, comparing\n" .
-                "the filesystem root at --fs-root with the pair's previous local index —\n" .
+                "the filesystem root at --fs-root with the previous local index for this remote Reprint API URL —\n" .
                 "the index a completed files-push publishes for the same remote Reprint API URL,\n" .
                 "state directory, and filesystem root.\n" .
                 "The output is a local minimized push operation plan before target\n" .
@@ -12994,20 +13000,20 @@ if (
                 "  reprint db-domains - --state-dir=/path/to/state\n",
             "extra" => null,
         ],
-        "import-metadata" => [
+        "pull-metadata" => [
             "level" => "low",
-            "short" => "Print local pull lifecycle metadata as JSON",
-            "usage" => "reprint import-metadata --state-dir=DIR",
+            "short" => "Print local pull metadata for host integrations as JSON",
+            "usage" => "reprint pull-metadata --state-dir=DIR",
             "description" =>
-                "Reads --state-dir/pull/state.json and prints metadata for\n" .
-                "host integrations. No network calls are made.\n",
+                "Reads --state-dir/pull/state.json and prints pull lifecycle and\n" .
+                "source-site metadata for host integrations. No network calls are made.\n",
             "extra" =>
                 "Example:\n" .
-                "  reprint import-metadata --state-dir=./state | jq '.hasCompletedOnce'\n",
+                "  reprint pull-metadata --state-dir=./state | jq '.hasCompletedOnce'\n",
         ],
         "db-apply" => [
             "level" => "low",
-            "short" => "Import the SQL dump into a local MySQL or SQLite database",
+            "short" => "Apply the SQL dump to a local MySQL or SQLite database",
             "description" =>
                 "Reads db.sql from --state-dir, optionally rewrites URLs, and executes\n" .
                 "all statements against a target database. Resumable. Saves target\n" .
@@ -13114,6 +13120,7 @@ if (
         "db-sync" => "db-pull",
         "flat-document-root" => "flat-docroot",
         "flatten-docroot" => "flat-docroot",
+        "import-metadata" => "pull-metadata",
     ];
     if (isset($command_aliases[$command])) {
         $command = $command_aliases[$command];
@@ -13132,10 +13139,10 @@ if (
         exit(0);
     }
 
-    // apply-runtime and import-metadata don't need a remote URL. Other
+    // apply-runtime and pull-metadata don't need a remote URL. Other
     // local-only commands (db-domains, db-apply, etc.) still accept it for
     // CLI consistency and backward compatibility with existing callers.
-    $local_only_commands = ["apply-runtime", "import-metadata"];
+    $local_only_commands = ["apply-runtime", "pull-metadata"];
     $is_local_only = in_array($command, $local_only_commands, true);
 
     if ($is_local_only) {
@@ -13202,7 +13209,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$filesystem_root && !$flat_document_root && $command !== "import-metadata") {
+    if (!$filesystem_root && !$flat_document_root && $command !== "pull-metadata") {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
@@ -13210,18 +13217,18 @@ if (
     if (!$filesystem_root) {
         // For commands that need a filesystem root in the constructor, use the
         // flattened filesystem root. run_apply_runtime will resolve it properly.
-        // import-metadata reads only state, but ImportClient still expects
+        // pull-metadata reads only state, but ImportClient still expects
         // a filesystem root path. Point it at state-dir rather than requiring an
         // otherwise-unused CLI option.
         $filesystem_root = $flat_document_root ?: $state_dir;
     }
 
     try {
-        // Acquire the lock before pair setup and audit writes so each command
-        // owns every local state transition for its complete invocation.
+        // Acquire the lock before local push state setup and audit writes so
+        // each command owns every local state transition for its complete invocation.
         $reprint_process_lock = new ReprintProcessLock($state_dir);
         $reprint_files_push_context = null;
-        $reprint_files_diff_context = null;
+        $reprint_files_diff_push_state_directory = null;
         if ($command === 'files-push') {
             $reprint_files_push_context = ImportClient::prepare_files_push_context(
                 $remote_reprint_api_url,
@@ -13230,7 +13237,7 @@ if (
                 $options
             );
         } elseif ($command === 'files-diff') {
-            $reprint_files_diff_context = ImportClient::prepare_files_pair_context(
+            $reprint_files_diff_push_state_directory = ImportClient::resolve_push_state_directory(
                 $remote_reprint_api_url,
                 $state_dir,
                 $filesystem_root,
@@ -13238,32 +13245,31 @@ if (
             );
         }
         $client = new ImportClient($remote_reprint_api_url, $state_dir, $filesystem_root, $command);
-        $reprint_files_pair = $reprint_files_push_context['pair'] ?? ( $reprint_files_diff_context['pair'] ?? null );
-        $client->audit_log_argv($command, $argv, $reprint_files_pair);
+        $client->audit_log_argv($command, $argv);
         $client->run(
             $options
                 + ( $reprint_files_push_context === null
                     ? []
                     : ['files_push_context' => $reprint_files_push_context] )
-                + ( $reprint_files_diff_context === null
+                + ( $reprint_files_diff_push_state_directory === null
                     ? []
-                    : ['files_diff_context' => $reprint_files_diff_context] ),
+                    : ['files_diff_push_state_directory' => $reprint_files_diff_push_state_directory] ),
             $reprint_process_lock
         );
-        // EXIT_AFTER_IMPORT controls whether we hand control back to
+        // EXIT_AFTER_PULL controls whether we hand control back to
         // the caller after pull returns. Default true: standard CLI
         // invocations (reprint pull, the phar bin, e2e tests) get the
         // exit() they expect. Embedders that include the phar from a
         // web SAPI — the Playground wizard in reprint-import.php is
-        // the live case — define EXIT_AFTER_IMPORT=false so cleanup
+        // the live case — define EXIT_AFTER_PULL=false so cleanup
         // logic can run AFTER pull, in the same try/catch scope as
         // the include. Without that knob the bare exit() jumps the
         // embedder's stack and forces it to wire activation through
         // register_shutdown_function, where exceptions have no
         // channel to surface as ndjson events. Stash the exit code on
         // a global so the embedder can read it.
-        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = (int) $client->exit_code;
-        if (!defined('EXIT_AFTER_IMPORT') || EXIT_AFTER_IMPORT) {
+        $GLOBALS['REPRINT_PULL_EXIT_CODE'] = (int) $client->exit_code;
+        if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
             exit($client->exit_code);
         }
         return;
@@ -13286,11 +13292,11 @@ if (
             }
             fwrite(STDERR, $json . "\n");
         }
-        $GLOBALS['REPRINT_IMPORTER_EXIT_CODE'] = 1;
-        if (!defined('EXIT_AFTER_IMPORT') || EXIT_AFTER_IMPORT) {
+        $GLOBALS['REPRINT_PULL_EXIT_CODE'] = 1;
+        if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
             exit(1);
         }
-        // When EXIT_AFTER_IMPORT is false we still want the embedder
+        // When EXIT_AFTER_PULL is false we still want the embedder
         // to see the failure — re-throw so its try/catch around
         // `include $phar` can surface a proper `{type:'error'}` event.
         throw $e;

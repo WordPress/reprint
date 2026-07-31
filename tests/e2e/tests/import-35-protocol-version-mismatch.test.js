@@ -93,7 +93,7 @@ describe('Import: Protocol Version Mismatch', () => {
         assert.equal(result.exitCode, 1, `Expected exit 1:\nstdout: ${result.stdout}`);
         assert.ok(result.stdout.includes('[FAIL] Protocol compatible'), `Expected FAIL for protocol check:\n${result.stdout}`);
         assert.ok(result.stdout.includes('does not match'), `Expected mismatch message:\n${result.stdout}`);
-        assert.ok(result.stdout.includes('Update the importer'), `Expected update instruction:\n${result.stdout}`);
+        assert.ok(result.stdout.includes('Update the Reprint client'), `Expected update instruction:\n${result.stdout}`);
     });
 
     it('fails when remote does not report a protocol version', () => {

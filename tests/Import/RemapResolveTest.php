@@ -7,7 +7,7 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * --remap: resolving template-string SOURCE TARGET pairs into remap rules.
+ * --remap: resolving template-string SOURCE TARGET mappings into remap rules.
  *
  * Each argument has its known `:token:`s substituted wherever they appear, then
  * must resolve to an absolute path. Source tokens are remote WP-layout locations
@@ -67,15 +67,15 @@ class RemapResolveTest extends TestCase
     private function client(array $pathsUrls): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
-        $c->get_import_state()->preflight = array('data' => array(
+        $c->get_state()->preflight = array('data' => array(
             'database' => array('wp' => array('paths_urls' => $pathsUrls)),
         ));
         return $c;
     }
 
-    private function resolve($c, array ...$pairs): array
+    private function resolve($c, array ...$mappings): array
     {
-        return $this->call($c, 'resolve_remap', array($pairs));
+        return $this->call($c, 'resolve_remap', array($mappings));
     }
 
     private function assertRemapConsistent($c): void
@@ -91,7 +91,7 @@ class RemapResolveTest extends TestCase
     // --- resolution: SOURCE TARGET → one source => target rule -------------
 
     /**
-     * Each case resolves a single --remap pair and asserts the resulting rule.
+     * Each case resolves a single --remap mapping and asserts the resulting rule.
      * The expected target is given as a suffix appended to the (per-test) fs root.
      *
      * @dataProvider provideResolutionCases

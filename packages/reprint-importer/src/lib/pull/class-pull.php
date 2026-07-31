@@ -87,7 +87,7 @@ class Pull
             case 'preflight':     return 'Connecting';
             case 'files-pull':    return 'Pulling files';
             case 'db-pull':       return 'Pulling database';
-            case 'db-apply':      return 'Importing database';
+            case 'db-apply':      return 'Applying database';
             case 'flat-docroot':  return 'Flattening layout';
             case 'apply-runtime': return 'Preparing runtime';
             case 'start':         return 'Starting server';
@@ -129,7 +129,7 @@ class Pull
         $this->progress->set_mode('pipeline');
 
         if (!isset($options['filter'])) {
-            $options['filter'] = $this->client->get_import_state()->filter ?? 'none';
+            $options['filter'] = $this->client->get_state()->filter ?? 'none';
         }
         if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
             throw new InvalidArgumentException(
@@ -174,9 +174,9 @@ class Pull
     /**
      * Runs a named pull pipeline from the first unfinished stage.
      *
-     * ImportState::$pull_pipeline records orchestration progress: which
+     * PullState::$pull_pipeline records orchestration progress: which
      * user-facing command started the pipeline and which whole stage was last
-     * completed. ImportState::$active_resumable_command records the resumable
+     * completed. PullState::$active_resumable_command records the resumable
      * lower-level command, whether it was invoked directly or as a stage in
      * this pipeline, including its completion status, internal state, and
      * remote cursor.
@@ -192,7 +192,7 @@ class Pull
         string $title,
         bool $resume_pipeline
     ): void {
-        $state = $this->client->get_import_state();
+        $state = $this->client->get_state();
         if ($resume_pipeline) {
             $stages = $state->pull_pipeline->stage_sequence;
             $completed_stage = $state->pull_pipeline->last_completed_stage;
@@ -284,7 +284,7 @@ class Pull
         switch ($stage) {
             case 'preflight':
                 $this->client->run_preflight();
-                $preflight = $this->client->get_import_state()->preflight;
+                $preflight = $this->client->get_state()->preflight;
                 $ok = ($preflight["http_code"] ?? 0) === 200 && !empty($preflight["data"]["ok"]);
                 if (!$ok) {
                     $this->client->exit_code = 1;
@@ -316,7 +316,7 @@ class Pull
                     $options['filter'] === 'essential-files' &&
                     $this->client->has_skipped_files_pending();
                 $this->client->set_pull_files_state($options['filter'], $skipped_pending);
-                $files_pulled = $this->client->get_import_state()->files_pull_summary->files_pulled;
+                $files_pulled = $this->client->get_state()->files_pull_summary->files_pulled;
                 $pulled_label = $files_pulled === 1 ? 'file' : 'files';
                 $summary = sprintf(
                     '%s changed %s pulled',
@@ -332,8 +332,8 @@ class Pull
             case 'db-pull':
                 // A completed db-pull is useful only when the downloaded SQL
                 // dump is still present. Without the dump, the following
-                // db-apply stage would have nothing safe to import.
-                $state = $this->client->get_import_state();
+                // db-apply stage would have nothing safe to apply.
+                $state = $this->client->get_state();
                 if (
                     $state->active_resumable_command->command_name !== 'db-pull' ||
                     $state->active_resumable_command->completion_state !== 'complete' ||
@@ -355,10 +355,10 @@ class Pull
                 break;
 
             case 'db-apply':
-                // Database import is not safe to run twice. If db-apply
+                // Database apply is not safe to run twice. If db-apply
                 // already reached lower-level completion, accept that result even
                 // when the pipeline checkpoint still needs to be advanced.
-                $state = $this->client->get_import_state();
+                $state = $this->client->get_state();
                 if (
                     $state->active_resumable_command->command_name !== 'db-apply' ||
                     $state->active_resumable_command->completion_state !== 'complete'
@@ -445,7 +445,7 @@ class Pull
         }
 
         if (!isset($options['filter'])) {
-            $options['filter'] = $this->client->get_import_state()->filter;
+            $options['filter'] = $this->client->get_state()->filter;
         }
         if (!in_array($options['filter'], ['none', 'essential-files'], true)) {
             throw new InvalidArgumentException(
@@ -532,8 +532,8 @@ class Pull
      * Applies the database target defaults for generated runtimes.
      *
      * php-builtin and playground-cli can run without a local MySQL server, so
-     * pull imports into SQLite by default for those runtimes. nginx-fpm does
-     * not imply a database target because it is normally paired with an
+     * pull applies the dump to SQLite by default for those runtimes. nginx-fpm
+     * does not imply a database target because it is normally paired with an
      * externally managed server.
      */
     private function default_pull_target_options(array $options): array
@@ -568,10 +568,10 @@ class Pull
     }
 
     /**
-     * Validates database import target options.
+     * Validates database apply target options.
      *
-     * MySQL imports need a user and database name because Reprint connects to
-     * an existing server. SQLite imports can use the generated default path
+     * MySQL database apply needs a user and database name because Reprint connects to
+     * an existing server. SQLite database apply can use the generated default path
      * when no explicit target path is supplied.
      */
     private function validate_database_target_options(array $options): array
@@ -590,12 +590,12 @@ class Pull
         if (($options['target_engine'] ?? 'mysql') === 'mysql') {
             if (empty($options['target_user'])) {
                 throw new InvalidArgumentException(
-                    "--target-user is required for MySQL database import."
+                    "--target-user is required when db-apply targets MySQL."
                 );
             }
             if (empty($options['target_db'])) {
                 throw new InvalidArgumentException(
-                    "--target-db is required for MySQL database import."
+                    "--target-db is required when db-apply targets MySQL."
                 );
             }
         }
@@ -642,7 +642,7 @@ class Pull
     {
         for ($attempt = 0; $attempt < 1000; $attempt++) {
             $handler();
-            $state = $this->client->get_import_state();
+            $state = $this->client->get_state();
             if ($state->active_resumable_command->completion_state === 'complete') {
                 return;
             }
@@ -650,7 +650,7 @@ class Pull
                 throw new RuntimeException("Stage {$stage} stopped before completing.");
             }
             $state->active_resumable_command->completion_state = 'in_progress';
-            $this->client->save_import_state();
+            $this->client->save_state();
             $this->client->exit_code = 0;
             $this->progress->tick_spinner();
         }
@@ -681,11 +681,11 @@ class Pull
 
         // Mark pull complete BEFORE the server blocks so killing the
         // server (Ctrl-C) doesn't leave the pipeline mid-flight.
-        $state = $this->client->get_import_state();
+        $state = $this->client->get_state();
         $state->pull_pipeline->last_completed_stage = 'start';
         $state->pull_pipeline->has_completed_once = true;
         $state->active_resumable_command->completion_state = 'complete';
-        $this->client->save_import_state();
+        $this->client->save_state();
 
         $green = "\033[32m";
         $bold = "\033[1m";
@@ -763,7 +763,7 @@ class Pull
         $this->progress->print_line(
             "\n{$green}{$bold}Done.{$r} {$dim}Files in {$filesystem_root}{$r}\n"
         );
-        if ($this->client->get_import_state()->pull_pipeline->skipped_pending) {
+        if ($this->client->get_state()->pull_pipeline->skipped_pending) {
             $this->progress->print_line(
                 "{$dim}Deferred files remain. The skipped fetch list was preserved on disk for a follow-up sync.{$r}\n"
             );

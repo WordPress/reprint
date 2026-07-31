@@ -33,13 +33,13 @@ final class AbortStateTest extends TestCase
         $this->removeTree($this->root);
     }
 
-    public function testExplicitImportStateFixtureRoundTrips(): void
+    public function testExplicitPullStateFixtureRoundTrips(): void
     {
         $fixture = $this->populatedState();
 
         $this->assertSame(
             $fixture,
-            \ImportState::from_array($fixture)->to_array(),
+            \PullState::from_array($fixture)->to_array(),
         );
     }
 
@@ -85,7 +85,7 @@ final class AbortStateTest extends TestCase
             $before['pull_pipeline']['last_completed_stage'] =
                 $lastCompletedStage;
         }
-        \write_current_import_state($client, $before);
+        \write_current_pull_state($client, $before);
         $this->createArtifacts();
 
         $this->runCommand($client, [
@@ -159,7 +159,7 @@ final class AbortStateTest extends TestCase
         ?string $expectedOwner
     ): void {
         $client = $this->client();
-        \write_current_import_state($client, $changes);
+        \write_current_pull_state($client, $changes);
 
         $method = (
             new \ReflectionClass(\ImportClient::class)
@@ -256,7 +256,7 @@ final class AbortStateTest extends TestCase
             $this->populatedState(),
             $stateChanges,
         );
-        \write_current_import_state($client, $before);
+        \write_current_pull_state($client, $before);
         $this->createArtifacts();
         $statePath = $this->stateDirectory . '/pull/state.json';
         $rawState = file_get_contents($statePath);
@@ -407,7 +407,7 @@ final class AbortStateTest extends TestCase
             'remote_cursor' => null,
         ];
         $before['pull_pipeline']['last_completed_stage'] = 'db-pull';
-        \write_current_import_state($client, $before);
+        \write_current_pull_state($client, $before);
         $this->createArtifacts();
 
         $this->runCommand($client, [
@@ -481,7 +481,7 @@ final class AbortStateTest extends TestCase
             'skipped_pending' => false,
             'has_completed_once' => true,
         ];
-        \write_current_import_state($client, $before);
+        \write_current_pull_state($client, $before);
         $this->createArtifacts();
 
         $this->runCommand($client, [
@@ -527,7 +527,7 @@ final class AbortStateTest extends TestCase
             'skipped_pending' => true,
             'has_completed_once' => true,
         ];
-        \write_current_import_state($client, $before);
+        \write_current_pull_state($client, $before);
         $rawState = file_get_contents(
             $this->stateDirectory . '/pull/state.json',
         );
@@ -584,7 +584,7 @@ final class AbortStateTest extends TestCase
         $before['fetch']['batch_file'] = null;
         $before['fetch_skipped']['batch_file'] = null;
         $before[$stateKey]['batch_file'] = $batchPath;
-        \write_current_import_state($client, $before);
+        \write_current_pull_state($client, $before);
 
         $this->runCommand($client, [
             'command' => 'files-pull',
@@ -614,7 +614,7 @@ final class AbortStateTest extends TestCase
             'remote_cursor' => 'cursor',
         ];
         $before['pull_pipeline']['last_completed_stage'] = 'db-pull';
-        \write_current_import_state($client, $before);
+        \write_current_pull_state($client, $before);
         file_put_contents(
             $this->stateDirectory . '/pull/local-index.jsonl',
             $this->indexRecord('/site/existing.txt'),
@@ -713,7 +713,7 @@ final class AbortStateTest extends TestCase
             'skipped_pending' => false,
             'has_completed_once' => $hasCompletedOnce,
         ];
-        \write_current_import_state($client, $before);
+        \write_current_pull_state($client, $before);
 
         $this->runCommand($client, [
             'command' => 'pull-db',
@@ -754,7 +754,7 @@ final class AbortStateTest extends TestCase
             'remote_cursor' => 'cursor',
         ];
         $before['pull_pipeline']['last_completed_stage'] = 'db-pull';
-        \write_current_import_state($client, $before);
+        \write_current_pull_state($client, $before);
         $remoteIndex = $this->stateDirectory . '/pull/remote-index.jsonl';
         mkdir($remoteIndex);
 

@@ -213,7 +213,7 @@ function handleEvent(ev) {
   }
 }
 
-async function runImport() {
+async function runPull() {
   // Credentials are baked into the page server-side by the wizard's
   // ?action=blueprint endpoint. We read them via tiny PHP echoes into
   // window globals, set just before this script runs.
@@ -327,7 +327,7 @@ async function runImport() {
   };
 }
 
-window.addEventListener('DOMContentLoaded', runImport);
+window.addEventListener('DOMContentLoaded', runPull);
 </script>
 </body>
 </html>
@@ -336,13 +336,13 @@ window.addEventListener('DOMContentLoaded', runImport);
 // ─────────────────────────────────────────────────────────────────
 
 function stream_pull_and_activate(): void {
-    // The phar checks EXIT_AFTER_IMPORT; setting it to false makes
+    // The phar checks EXIT_AFTER_PULL; setting it to false makes
     // it return control after pull instead of exit()ing. We run
     // activation in the same try/catch scope as the include, so
     // exceptions surface as proper {type:'error'} ndjson events
     // instead of disappearing into a shutdown handler.
-    if (!defined('EXIT_AFTER_IMPORT')) {
-        define('EXIT_AFTER_IMPORT', false);
+    if (!defined('EXIT_AFTER_PULL')) {
+        define('EXIT_AFTER_PULL', false);
     }
     stream_pull();
     $activate = run_local_activation();

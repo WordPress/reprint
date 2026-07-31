@@ -77,7 +77,7 @@ class FetchListProgressTest extends TestCase
 
     private function writeState(array $state): void
     {
-        \write_current_import_state($this->makeClient(), array_replace_recursive([
+        \write_current_pull_state($this->makeClient(), array_replace_recursive([
             "preflight" => ["data" => ["ok" => true], "http_code" => 200],
             "follow_symlinks" => false,
         ], $state));
@@ -335,7 +335,7 @@ class FetchListProgressTest extends TestCase
         }
     }
 
-    public function testFilesDoneIncludesFilesImported()
+    public function testFilesDoneIncludesFilesPulled()
     {
         $listFile = $this->writeFetchList(100);
         $offset40 = $this->byteOffsetAfterLines($listFile, 40);
@@ -357,15 +357,15 @@ class FetchListProgressTest extends TestCase
         } catch (\Exception $e) {}
 
         // Simulate 5 files written in this invocation
-        $reflection->getProperty('files_imported')->setValue($client, 5);
+        $reflection->getProperty('files_pulled')->setValue($client, 5);
 
         $done = $reflection->getProperty('fetch_list_done')->getValue($client);
-        $imported = $reflection->getProperty('files_imported')->getValue($client);
+        $pulled = $reflection->getProperty('files_pulled')->getValue($client);
         $total = $reflection->getProperty('fetch_list_total')->getValue($client);
 
-        // files_done as emitted in progress records = done + imported
-        $filesDone = $done + $imported;
-        $this->assertSame(45, $filesDone); // 40 from offset + 5 imported
+        // files_done as emitted in progress records = done + pulled
+        $filesDone = $done + $pulled;
+        $this->assertSame(45, $filesDone); // 40 from offset + 5 pulled
         $this->assertSame(100, $total);
         $this->assertLessThanOrEqual($total, $filesDone);
     }

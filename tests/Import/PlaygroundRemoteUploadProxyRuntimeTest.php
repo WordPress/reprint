@@ -70,9 +70,9 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $manifest = new \RuntimeManifest('other');
         $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL'] =
             'https://source.example/wp-content/uploads';
-        $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_STATE_FILE'] =
+        $manifest->constants['REPRINT_PULL_STATE_FILE'] =
             $this->pullStateFile;
-        $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_SKIPPED_FILE'] =
+        $manifest->constants['REPRINT_PULL_SKIPPED_FETCH_LIST_FILE'] =
             $this->skippedFetchListFile;
         $manifest->routes[] = [
             'handler' => 'remote-upload-proxy',

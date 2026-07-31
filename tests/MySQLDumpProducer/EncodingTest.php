@@ -804,7 +804,7 @@ class EncodingTest extends MySQLDumpProducerTestBase
         $this->assertEquals(4, $count);
     }
 
-    public function testSurrogatePairs(): void
+    public function testSupplementaryPlaneCharacters(): void
     {
         $this->pdo->exec("
             CREATE TABLE surrogates (
@@ -817,7 +817,7 @@ class EncodingTest extends MySQLDumpProducerTestBase
             "INSERT INTO surrogates (content) VALUES (?)",
         );
 
-        // Characters outside BMP (require surrogate pairs in UTF-16)
+        // Characters outside BMP are encoded as two UTF-16 code units.
         $stmt->execute(["𝕳𝖊𝖑𝖑𝖔"]); // Mathematical alphanumeric symbols
         $stmt->execute(["🂡🂢🂣🂤"]); // Playing cards
         $stmt->execute(["𝄞𝄢𝄫"]); // Musical symbols
