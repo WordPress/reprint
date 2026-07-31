@@ -3017,7 +3017,10 @@ final class PushEndpointsTest extends TestCase {
 
     private function filesPushStateDirectory(string $state_directory): string
     {
-        return $state_directory . '/push/' . md5(rtrim($this->remote_reprint_api_url, '?&'));
+        return $state_directory
+            . '/remotes/'
+            . md5(rtrim($this->remote_reprint_api_url, '?&'))
+            . '/push';
     }
 
     /** @return array<string,mixed> */

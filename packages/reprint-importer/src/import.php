@@ -1814,7 +1814,9 @@ class ImportClient
         $resolved_local_filesystem_root = rtrim($resolved_local_filesystem_root, '/') ?: '/';
         $remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
         // Resolve an absolute physical path even when its final components do not exist.
-        $push_state_directory = $state_dir . '/push/' . md5($remote_reprint_api_url);
+        $remote_state_directory =
+            $state_dir . '/remotes/' . md5($remote_reprint_api_url);
+        $push_state_directory = $remote_state_directory . '/push';
         if (strpos($push_state_directory, '/') !== 0) {
             $working_directory = getcwd();
             if ($working_directory === false) {

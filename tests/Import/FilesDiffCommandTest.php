@@ -394,8 +394,9 @@ final class FilesDiffCommandTest extends TestCase
     private function pushStateDirectory(): string
     {
         return realpath($this->stateDirectory)
-            . '/push/'
-            . md5(rtrim($this->targetUrl, '?&'));
+            . '/remotes/'
+            . md5(rtrim($this->targetUrl, '?&'))
+            . '/push';
     }
 
     /** @param list<string> $extraArguments

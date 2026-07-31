@@ -162,7 +162,10 @@ Reprint uses it exactly as supplied and does not append `.reprint`. A consumer
 may choose `.reprint` or any other private directory name. The **pull state
 directory** is `<state-dir>/pull`; use `$pull_state_directory`. Filenames
 inside the state directory do not begin with a dot or repeat the scope supplied
-by their parent directories.
+by their parent directories. A **remote state directory** contains state for
+one remote Reprint API URL. It is
+`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`; use
+`$remote_state_directory`.
 
 ```text
 <state-dir>/
@@ -180,8 +183,9 @@ by their parent directories.
 │   ├── domains.json
 │   ├── sql-stats.json
 │   └── sql-buffer
-└── push/
+└── remotes/
     └── <md5-of-trimmed-remote-reprint-api-url>/
+        └── push/
 ```
 
 Use these path names:
@@ -190,6 +194,7 @@ Use these path names:
 | --- | --- |
 | State directory | `$state_dir` |
 | Pull state directory | `$pull_state_directory` |
+| Remote state directory | `$remote_state_directory` |
 | Pull state file | `$pull_state_file` |
 | Remote index file | `$remote_index_file` |
 | Remote index WAL | `$remote_index_wal_path` |
@@ -239,8 +244,8 @@ command; unrelated commands do not consume it.
 
 The local machine keeps planning and active state outside the receiver push
 directory. Under
-`<state-dir>/push/<md5-of-trimmed-remote-reprint-api-url>/`, use these names
-verbatim:
+`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push/`, use these
+names verbatim:
 
 | Surface | Name |
 | --- | --- |
@@ -349,7 +354,9 @@ exporter API URL, and its `filesystem root` is the resolved absolute directory s
 `--fs-root`. It requires `--secret=TOKEN`; `--force-http` is the explicit
 plain-HTTP opt-in.
 
-The **local push state directory** is `<state-dir>/push/` followed by:
+The **local push state directory** is
+`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash
+directory name is:
 
 ```text
 md5(rtrim(<remote-reprint-api-url>, "?&"))
