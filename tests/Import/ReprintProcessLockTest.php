@@ -42,6 +42,7 @@ final class ReprintProcessLockTest extends TestCase
         $reflection = new \ReflectionClass($client);
         $expected_paths = [
             'state_dir' => $this->root . '/state',
+            'pull_state_directory' => $this->root . '/state/pull',
             'pull_state_file' => $this->root . '/state/pull/state.json',
             'remote_index_file' => $this->root . '/state/pull/remote-index.jsonl',
             'remote_index_wal_path' => $this->root . '/state/pull/remote-index.wal',

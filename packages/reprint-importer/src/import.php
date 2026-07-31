@@ -232,6 +232,9 @@ class ImportClient
     /** @var string Caller-selected state directory for this filesystem root. */
     public $state_dir;
 
+    /** @var string Pull state directory. */
+    public $pull_state_directory;
+
     /** @var string Filesystem root where the remote filesystem is reconstructed. */
     public $filesystem_root;
 
@@ -518,18 +521,19 @@ class ImportClient
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
         $this->filesystem_root = rtrim($filesystem_root, "/");
-        $this->pull_state_file = $this->state_dir . "/pull/state.json";
-        $this->remote_index_file = $this->state_dir . "/pull/remote-index.jsonl";
+        $this->pull_state_directory = $this->state_dir . "/pull";
+        $this->pull_state_file = $this->pull_state_directory . "/state.json";
+        $this->remote_index_file = $this->pull_state_directory . "/remote-index.jsonl";
         $this->remote_index_wal_path =
-            $this->state_dir . "/pull/remote-index.wal";
+            $this->pull_state_directory . "/remote-index.wal";
         $this->next_remote_index_file =
-            $this->state_dir . "/pull/remote-index.next.jsonl";
+            $this->pull_state_directory . "/remote-index.next.jsonl";
         $this->fetch_list_file =
-            $this->state_dir . "/pull/fetch-list.jsonl";
+            $this->pull_state_directory . "/fetch-list.jsonl";
         $this->skipped_fetch_list_file =
-            $this->state_dir . "/pull/skipped-fetch-list.jsonl";
+            $this->pull_state_directory . "/skipped-fetch-list.jsonl";
         $this->audit_log_file = $this->state_dir . "/audit.log";
-        $this->volatile_files_file = $this->state_dir . "/pull/volatile-files.json";
+        $this->volatile_files_file = $this->pull_state_directory . "/volatile-files.json";
         $this->progress_file = $this->state_dir . "/progress.json";
 
         // Detect TTY for progress display. In stdout mode this is re-evaluated
@@ -540,9 +544,9 @@ class ImportClient
         $this->pull = new Pull($this, $this->progress);
 
         // Create directories
-        if (!is_dir($this->state_dir . "/pull")) {
-            if (!mkdir($this->state_dir . "/pull", 0755, true)) {
-                throw new RuntimeException("Failed to create directory: {$this->state_dir}/pull");
+        if (!is_dir($this->pull_state_directory)) {
+            if (!mkdir($this->pull_state_directory, 0755, true)) {
+                throw new RuntimeException("Failed to create directory: {$this->pull_state_directory}");
             }
         }
         if (!is_dir($this->filesystem_root)) {
@@ -1969,7 +1973,7 @@ class ImportClient
                         "FILE DELETE | {$tables_file} | abort db-pull",
                     );
                 }
-                $domains_file = $this->state_dir . "/pull/domains.json";
+                $domains_file = $this->pull_state_directory . "/domains.json";
                 if (file_exists($domains_file)) {
                     unlink($domains_file);
                     $this->audit_log(
@@ -3767,7 +3771,7 @@ class ImportClient
      */
     private function run_db_domains(): void
     {
-        $domains_file = $this->state_dir . "/pull/domains.json";
+        $domains_file = $this->pull_state_directory . "/domains.json";
         $sql_file = $this->state_dir . "/db.sql";
 
         if (file_exists($domains_file)) {
@@ -5236,7 +5240,7 @@ class ImportClient
         }
 
         // Show discovered domains if available
-        $domains_file = $this->state_dir . "/pull/domains.json";
+        $domains_file = $this->pull_state_directory . "/domains.json";
         if (file_exists($domains_file)) {
             $domains = json_decode(file_get_contents($domains_file), true);
             if (is_array($domains) && !empty($domains)) {
@@ -5403,7 +5407,7 @@ class ImportClient
         $stmts_since_save = 0;
 
         // Load pre-computed statement count from db-pull for progress reporting
-        $sql_stats_file = $this->state_dir . "/pull/sql-stats.json";
+        $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
         $statements_total = null;
         if (file_exists($sql_stats_file)) {
             $stats = json_decode(file_get_contents($sql_stats_file), true);
@@ -7653,7 +7657,7 @@ class ImportClient
             // Each SQL chunk is appended to this file as it arrives; when the
             // query completes and executes, the file is truncated. If the process
             // dies at any point, the next run reloads whatever was accumulated.
-            $sql_buffer_file = $this->state_dir . "/pull/sql-buffer";
+            $sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
             if (file_exists($sql_buffer_file)) {
                 $sql_buffer = file_get_contents($sql_buffer_file);
                 $this->audit_log(
@@ -7676,8 +7680,8 @@ class ImportClient
         $domain_collector = class_exists('DomainCollector')
             ? new \DomainCollector()
             : null;
-        $domains_file = $this->state_dir . "/pull/domains.json";
-        $sql_stats_file = $this->state_dir . "/pull/sql-stats.json";
+        $domains_file = $this->pull_state_directory . "/domains.json";
+        $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
         $sql_statements_counted = (int) ($this->get_state()->sql_statements_counted ?? 0);
 
         // Auto-detect the source site domain from the export URL so it
@@ -8015,7 +8019,7 @@ class ImportClient
                 $mysql_conn = null;
                 // Clean up buffer file — if we got here with an empty buffer,
                 // all queries were executed successfully.
-                $sql_buffer_file = $this->state_dir . "/pull/sql-buffer";
+                $sql_buffer_file = $this->pull_state_directory . "/sql-buffer";
                 if ($pending === "" && file_exists($sql_buffer_file)) {
                     unlink($sql_buffer_file);
                 }
