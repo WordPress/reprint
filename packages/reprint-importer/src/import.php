@@ -641,6 +641,10 @@ class ImportClient
     {
         $this->get_state()->pull_pipeline->started_by_command = $pipeline;
         $this->get_state()->pull_pipeline->last_completed_stage = $stage;
+        if ($this->get_state()->active_resumable_command->command_name !== null) {
+            $this->get_state()->active_resumable_command->started_by_command =
+                $pipeline;
+        }
         if ($stage_sequence !== []) {
             $this->get_state()->pull_pipeline->stage_sequence = $stage_sequence;
         }
@@ -652,6 +656,10 @@ class ImportClient
     {
         $this->get_state()->pull_pipeline->started_by_command = $pipeline;
         $this->get_state()->pull_pipeline->has_completed_once = true;
+        if ($this->get_state()->active_resumable_command->command_name !== null) {
+            $this->get_state()->active_resumable_command->started_by_command =
+                $pipeline;
+        }
         $this->get_state()->active_resumable_command->completion_state = 'complete';
         $this->save_state();
     }
@@ -1945,6 +1953,7 @@ class ImportClient
         $pipeline_checkpoint = $this->get_state()->pull_pipeline;
         $owns_active_checkpoint =
             $active_checkpoint->command_name === $command ||
+            $active_checkpoint->started_by_command === $command ||
             (
                 $unfinished_import_owner === $command &&
                 $pipeline_checkpoint->started_by_command === $command
@@ -1989,10 +1998,19 @@ class ImportClient
         }
         $this->audit_log("ABORT {$command} | complete", true);
         $this->progress->show_lifecycle_line("{$message}\n");
-        $this->output_progress([
-            "status" => "aborted",
-            "message" => $message,
-        ]);
+        if (in_array($command, ["pull", "pull-files", "pull-db"], true)) {
+            $this->output_progress([
+                "type" => "lifecycle",
+                "event" => "aborted",
+                "command" => $command,
+                "message" => $message,
+            ], true);
+        } else {
+            $this->output_progress([
+                "status" => "aborted",
+                "message" => $message,
+            ], true);
+        }
     }
 
     /**
@@ -2055,6 +2073,7 @@ class ImportClient
         string $command,
         ?string $current_stage
     ): void {
+        $started_by_command = $this->unfinished_import_owner() ?? $command;
         $scopes = self::RESUMABLE_COMMAND_SCOPES[$command];
         $this->prepare_owned_state_reset(
             $scopes,
@@ -2066,10 +2085,12 @@ class ImportClient
             new ResumableCommandCheckpointState();
         $this->get_state()->active_resumable_command->command_name =
             $command;
+        $this->get_state()->active_resumable_command->started_by_command =
+            $started_by_command;
         $this->get_state()->active_resumable_command->completion_state =
             "in_progress";
         $this->get_state()->active_resumable_command->current_stage =
-            $current_stage;
+            "artifact-cleanup";
         $this->get_state()->consecutive_interrupted_responses = 0;
 
         if ($command === "files-pull") {
@@ -2087,6 +2108,32 @@ class ImportClient
             $scopes,
             "start fresh {$command}",
         );
+        $this->get_state()->active_resumable_command->current_stage =
+            $current_stage;
+        $this->save_state();
+    }
+
+    /**
+     * Repeat artifact cleanup after interruption at the fresh-start boundary.
+     */
+    private function finish_pending_artifact_cleanup(
+        string $command,
+        ?string $next_stage
+    ): void {
+        $checkpoint = $this->get_state()->active_resumable_command;
+        if (
+            $checkpoint->command_name !== $command ||
+            $checkpoint->current_stage !== "artifact-cleanup"
+        ) {
+            return;
+        }
+
+        $this->remove_owned_artifacts(
+            self::RESUMABLE_COMMAND_SCOPES[$command],
+            "start fresh {$command}",
+        );
+        $checkpoint->current_stage = $next_stage;
+        $this->save_state();
     }
 
     /**
@@ -2920,6 +2967,7 @@ class ImportClient
      */
     public function run_files_pull(): void
     {
+        $this->finish_pending_artifact_cleanup("files-pull", "index");
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
 
         // A full `pull` leaves active_resumable_command on its last stage
@@ -2935,6 +2983,8 @@ class ImportClient
             $this->get_state()->pull_pipeline->skipped_pending
         ) {
             $this->get_state()->active_resumable_command->command_name = "files-pull";
+            $this->get_state()->active_resumable_command->started_by_command =
+                "files-pull";
             $this->get_state()->active_resumable_command->completion_state = "complete";
             $this->get_state()->active_resumable_command->current_stage = null;
             $this->save_state();
@@ -3384,6 +3434,7 @@ class ImportClient
      */
     private function run_files_index(): void
     {
+        $this->finish_pending_artifact_cleanup("files-index", "index");
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $current_status =
             $state_command === "files-index"
@@ -3867,6 +3918,7 @@ class ImportClient
      */
     public function run_db_sync(): void
     {
+        $this->finish_pending_artifact_cleanup("db-pull", "db-index");
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $sql_file = $this->state_dir . "/db.sql";
 
@@ -5484,6 +5536,7 @@ class ImportClient
                 "db.sql not found in {$this->state_dir}. Run db-pull first.",
             );
         }
+        $this->finish_pending_artifact_cleanup("db-apply", null);
 
         // If --new-site-url is provided, derive the source origin from the
         // export URL and add an implicit --rewrite-url mapping.
@@ -6134,6 +6187,7 @@ class ImportClient
      */
     private function run_db_index(): void
     {
+        $this->finish_pending_artifact_cleanup("db-index", null);
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $tables_file = $this->state_dir . "/db-tables.jsonl";
 

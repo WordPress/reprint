@@ -375,6 +375,45 @@ PHP, var_export($requestsLog, true)));
         );
     }
 
+    public function testInterruptedFreshFilesPullRepeatsArtifactCleanup(): void
+    {
+        $this->writePreflightState(true);
+        $this->writeStateAtCleanupInterruptionBoundary(
+            'files-pull',
+            'artifact-cleanup',
+        );
+        $volatileFiles = $this->tempDir
+            . '/state/pull/volatile-files.json';
+        $mergeChunk = $this->tempDir
+            . '/state/pull/merge-chunk-stale';
+        file_put_contents(
+            $volatileFiles,
+            json_encode(
+                array('/wp-content/volatile.php' => 1),
+                JSON_THROW_ON_ERROR,
+            ),
+        );
+        file_put_contents($mergeChunk, "stale merge chunk\n");
+
+        $requestsLog = $this->tempDir
+            . '/fresh-files-cleanup-requests.jsonl';
+        $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
+        $output = $this->runCli(array(
+            'files-pull',
+            $remoteUrl,
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+        ));
+
+        $this->assertStringNotContainsString('"status":"error"', $output);
+        $this->assertStringNotContainsString(
+            '"type":"volatile_files"',
+            $output,
+        );
+        $this->assertFileDoesNotExist($volatileFiles);
+        $this->assertFileDoesNotExist($mergeChunk);
+    }
+
     public function testFreshDatabasePullReplacesStaleDownloadArtifacts(): void
     {
         $this->writePreflightState();
@@ -504,6 +543,7 @@ PHP, var_export($requestsLog, true)));
         );
         $state['active_resumable_command'] = array(
             'command_name' => $command,
+            'started_by_command' => $command,
             'completion_state' => 'in_progress',
             'current_stage' => $stage,
             'remote_cursor' => null,

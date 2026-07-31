@@ -67,6 +67,7 @@ final class AbortStateTest extends TestCase
         $before = $this->populatedState();
         $before['active_resumable_command'] = [
             'command_name' => $activeCommand,
+            'started_by_command' => $command,
             'completion_state' => 'partial',
             'current_stage' => 'interrupted-stage',
             'remote_cursor' => 'interrupted-cursor',
@@ -402,6 +403,7 @@ final class AbortStateTest extends TestCase
         $before = $this->populatedState();
         $before['active_resumable_command'] = [
             'command_name' => $completedCommand,
+            'started_by_command' => $completedCommand,
             'completion_state' => 'complete',
             'current_stage' => null,
             'remote_cursor' => null,
@@ -425,6 +427,48 @@ final class AbortStateTest extends TestCase
             $this->loadPersistedState($client),
         );
         $this->assertArtifactOwnership($effectiveScopes);
+    }
+
+    public function testCompletedPipelineAbortClearsItsCompletedCheckpoint(): void
+    {
+        $client = $this->client();
+        $before = $this->populatedState();
+        $before['active_resumable_command'] = [
+            'command_name' => 'files-pull',
+            'started_by_command' => 'pull-files',
+            'completion_state' => 'complete',
+            'current_stage' => null,
+            'remote_cursor' => null,
+        ];
+        $before['pull_pipeline'] = [
+            'started_by_command' => 'pull-files',
+            'stage_sequence' => ['preflight', 'files-pull'],
+            'last_completed_stage' => 'files-pull',
+            'files_filter' => 'none',
+            'skipped_pending' => false,
+            'has_completed_once' => true,
+        ];
+        \write_current_pull_state($client, $before);
+        $this->createArtifacts();
+
+        $this->runCommand($client, [
+            'command' => 'pull-files',
+            'abort' => true,
+        ]);
+
+        $this->assertSame(
+            $this->expectedStateAfterReset(
+                $before,
+                ['files-index', 'files-pull'],
+                true,
+                'pull-files',
+            ),
+            $this->loadPersistedState($client),
+        );
+        $this->assertArtifactOwnership([
+            'files-index',
+            'files-pull',
+        ]);
     }
 
     /** @return array<string,array{string,string,string[]}> */
@@ -465,6 +509,7 @@ final class AbortStateTest extends TestCase
         $before = $this->populatedState();
         $before['active_resumable_command'] = [
             'command_name' => 'db-index',
+            'started_by_command' => 'db-index',
             'completion_state' => 'complete',
             'current_stage' => null,
             'remote_cursor' => null,
@@ -511,6 +556,7 @@ final class AbortStateTest extends TestCase
         $before = $this->populatedState();
         $before['active_resumable_command'] = [
             'command_name' => 'files-pull',
+            'started_by_command' => 'files-pull',
             'completion_state' => 'partial',
             'current_stage' => 'fetch-skipped',
             'remote_cursor' => 'fetch-cursor',
@@ -576,6 +622,7 @@ final class AbortStateTest extends TestCase
         $before = $this->populatedState();
         $before['active_resumable_command'] = [
             'command_name' => 'files-pull',
+            'started_by_command' => 'files-pull',
             'completion_state' => 'partial',
             'current_stage' => $stage,
             'remote_cursor' => 'cursor',
@@ -609,6 +656,7 @@ final class AbortStateTest extends TestCase
         $before = $this->populatedState();
         $before['active_resumable_command'] = [
             'command_name' => 'files-pull',
+            'started_by_command' => 'files-pull',
             'completion_state' => 'partial',
             'current_stage' => 'fetch',
             'remote_cursor' => 'cursor',
@@ -697,6 +745,7 @@ final class AbortStateTest extends TestCase
         $before = $this->populatedState();
         $before['active_resumable_command'] = [
             'command_name' => 'db-pull',
+            'started_by_command' => 'pull-db',
             'completion_state' => 'partial',
             'current_stage' => 'sql',
             'remote_cursor' => 'cursor',
@@ -749,6 +798,7 @@ final class AbortStateTest extends TestCase
         $before = $this->populatedState();
         $before['active_resumable_command'] = [
             'command_name' => 'files-index',
+            'started_by_command' => 'files-index',
             'completion_state' => 'partial',
             'current_stage' => 'index',
             'remote_cursor' => 'cursor',
@@ -815,6 +865,7 @@ final class AbortStateTest extends TestCase
         return [
             'active_resumable_command' => [
                 'command_name' => 'previous-command',
+                'started_by_command' => 'previous-command',
                 'completion_state' => 'complete',
                 'current_stage' => 'previous-stage',
                 'remote_cursor' => 'remote-cursor',

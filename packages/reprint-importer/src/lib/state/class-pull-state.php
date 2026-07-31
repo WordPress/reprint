@@ -14,6 +14,9 @@ class ResumableCommandCheckpointState
     /** @var string|null Lower-level command name, e.g. files-pull/db-pull/db-apply. */
     public ?string $command_name = null;
 
+    /** @var string|null User-facing command which started this checkpoint. */
+    public ?string $started_by_command = null;
+
     /** @var string|null Completion state: in_progress, partial, complete, or null before start. */
     public ?string $completion_state = null;
 
@@ -26,8 +29,14 @@ class ResumableCommandCheckpointState
     public static function from_array(array $data): self
     {
         $state = new self();
+        // State written before checkpoint provenance was persisted has no
+        // reliable way to distinguish pipeline work from a later direct run.
+        if (!array_key_exists('started_by_command', $data)) {
+            $data['started_by_command'] = null;
+        }
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->command_name = $data['command_name'];
+        $state->started_by_command = $data['started_by_command'];
         $state->completion_state = $data['completion_state'];
         $state->current_stage = $data['current_stage'];
         $state->remote_cursor = $data['remote_cursor'];
@@ -38,6 +47,7 @@ class ResumableCommandCheckpointState
     {
         return [
             'command_name' => $this->command_name,
+            'started_by_command' => $this->started_by_command,
             'completion_state' => $this->completion_state,
             'current_stage' => $this->current_stage,
             'remote_cursor' => $this->remote_cursor,
@@ -294,7 +304,7 @@ class AdaptiveTuningState
 
 class PullPipelineCheckpointState
 {
-    /** @var string|null User-facing pipeline command that owns the checkpoint. */
+    /** @var string|null User-facing pipeline command that started the checkpoint. */
     public ?string $started_by_command = null;
 
     /** @var string[] Ordered stage names for the pipeline currently being resumed. */
@@ -342,7 +352,8 @@ class PullPipelineCheckpointState
  * In-process pull state with typed properties for each persisted field.
  *
  * This object mirrors pull/state.json. Add new persistent state here first;
- * from_array() requires the complete current schema.
+ * from_array() validates the on-disk schema, with explicit nested defaults
+ * for fields added after state files entered use.
  */
 class PullState
 {

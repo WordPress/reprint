@@ -13,6 +13,7 @@ class PullStateTest extends TestCase
         $data = (new \PullState())->to_array();
         $data['active_resumable_command'] = [
             'command_name' => 'files-pull',
+            'started_by_command' => 'pull-files',
             'completion_state' => 'partial',
             'current_stage' => 'fetch',
             'remote_cursor' => 'cursor-1',
@@ -31,6 +32,7 @@ class PullStateTest extends TestCase
         $state = \PullState::from_array($data);
 
         $this->assertSame('files-pull', $state->active_resumable_command->command_name);
+        $this->assertSame('pull-files', $state->active_resumable_command->started_by_command);
         $this->assertSame('partial', $state->active_resumable_command->completion_state);
         $this->assertSame('preflight', $state->pull_pipeline->last_completed_stage);
         $this->assertSame(['preflight', 'files-pull'], $state->pull_pipeline->stage_sequence);
@@ -41,6 +43,7 @@ class PullStateTest extends TestCase
     {
         $state = new \PullState();
         $state->active_resumable_command->command_name = 'db-pull';
+        $state->active_resumable_command->started_by_command = 'pull-db';
         $state->active_resumable_command->completion_state = 'complete';
         $state->pull_pipeline->started_by_command = 'pull';
         $state->sql_statements_counted = 99;
@@ -48,6 +51,7 @@ class PullStateTest extends TestCase
         $array = $state->to_array();
 
         $this->assertSame('db-pull', $array['active_resumable_command']['command_name']);
+        $this->assertSame('pull-db', $array['active_resumable_command']['started_by_command']);
         $this->assertSame('complete', $array['active_resumable_command']['completion_state']);
         $this->assertSame('pull', $array['pull_pipeline']['started_by_command']);
         $this->assertSame(99, $array['sql_statements_counted']);
@@ -59,6 +63,16 @@ class PullStateTest extends TestCase
 
         $this->assertNotInstanceOf(\ArrayAccess::class, $state);
         $this->assertNotInstanceOf(\ArrayAccess::class, $state->active_resumable_command);
+    }
+
+    public function testStateWithoutCheckpointProvenanceLoadsAsUnknown(): void
+    {
+        $data = ( new \PullState() )->to_array();
+        unset($data['active_resumable_command']['started_by_command']);
+
+        $state = \PullState::from_array($data);
+
+        $this->assertNull($state->active_resumable_command->started_by_command);
     }
 
     public function testStateRejectsAnIncompleteSchema(): void

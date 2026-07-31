@@ -15,6 +15,7 @@ class PullFilterFakeClient extends \ImportClient
     public int $db_sync_runs = 0;
     public int $db_apply_runs = 0;
     public array $progress_events = [];
+    public array $progress_event_force_flags = [];
     public array $progress_file_errors = [];
 
     /** @var resource|null */
@@ -33,6 +34,7 @@ class PullFilterFakeClient extends \ImportClient
     public function output_progress(array $data, bool $force = false): void
     {
         $this->progress_events[] = $data;
+        $this->progress_event_force_flags[] = $force;
     }
 
     public function write_progress_file(?string $error = null): void
@@ -239,6 +241,94 @@ class PullFilterOptionTest extends TestCase
     private function writeState(array $state): void
     {
         \write_current_pull_state($this->makeClient(false), $state);
+    }
+
+    public function testHighLevelAbortForcesLifecycleEvent(): void
+    {
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            'command' => 'pull-files',
+        ]);
+        $completedState = $this->readState();
+        $client->run([
+            'command' => 'pull-files',
+            'abort' => true,
+        ]);
+        ob_end_clean();
+
+        $this->assertSame(
+            'pull-files',
+            $completedState['active_resumable_command'][
+                'started_by_command'
+            ],
+        );
+        $abortedState = $this->readState();
+        $this->assertNull(
+            $abortedState['active_resumable_command']['command_name'],
+        );
+        $this->assertNull(
+            $abortedState['pull_pipeline']['started_by_command'],
+        );
+
+        $eventIndex = null;
+        foreach ($client->progress_events as $index => $event) {
+            $eventName = $event['event'] ?? null;
+            if ($eventName === 'aborted') {
+                $eventIndex = $index;
+                break;
+            }
+        }
+        $this->assertNotNull($eventIndex);
+        $this->assertSame(
+            [
+                'type' => 'lifecycle',
+                'event' => 'aborted',
+                'command' => 'pull-files',
+                'message' => 'State cleared for pull-files. Downloaded files and pull/local-index.jsonl were preserved.',
+            ],
+            $client->progress_events[$eventIndex],
+        );
+        $this->assertTrue($client->progress_event_force_flags[$eventIndex]);
+    }
+
+    public function testDirectAbortForcesStatusRecord(): void
+    {
+        $this->writeState([
+            'active_resumable_command' => [
+                'command_name' => 'files-index',
+                'started_by_command' => 'files-index',
+                'completion_state' => 'partial',
+                'current_stage' => 'index',
+            ],
+        ]);
+        $client = $this->makeClient(false);
+
+        ob_start();
+        $client->run([
+            'command' => 'files-index',
+            'abort' => true,
+        ]);
+        ob_end_clean();
+
+        $eventIndex = null;
+        foreach ($client->progress_events as $index => $event) {
+            $status = $event['status'] ?? null;
+            if ($status === 'aborted') {
+                $eventIndex = $index;
+                break;
+            }
+        }
+        $this->assertNotNull($eventIndex);
+        $this->assertSame(
+            [
+                'status' => 'aborted',
+                'message' => 'State cleared for files-index.',
+            ],
+            $client->progress_events[$eventIndex],
+        );
+        $this->assertTrue($client->progress_event_force_flags[$eventIndex]);
     }
 
     public function testPullRejectsSkippedEarlierFilterBeforePersistingIt(): void
