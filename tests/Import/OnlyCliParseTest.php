@@ -344,10 +344,7 @@ PHP, var_export($requestsLog, true)));
     public function testFreshFilesIndexReplacesStaleIndexAfterStateReset(): void
     {
         $this->writePreflightState(true);
-        $this->writeStateAtCleanupInterruptionBoundary(
-            'files-index',
-            'index',
-        );
+        $this->writeStateAtCleanupInterruptionBoundary('files-index');
         $remoteIndex = $this->tempDir
             . '/state/pull/remote-index.jsonl';
         file_put_contents($remoteIndex, "stale remote index\n");
@@ -378,10 +375,7 @@ PHP, var_export($requestsLog, true)));
     public function testInterruptedFreshFilesPullRepeatsArtifactCleanup(): void
     {
         $this->writePreflightState(true);
-        $this->writeStateAtCleanupInterruptionBoundary(
-            'files-pull',
-            'artifact-cleanup',
-        );
+        $this->writeStateAtCleanupInterruptionBoundary('files-pull');
         $volatileFiles = $this->tempDir
             . '/state/pull/volatile-files.json';
         $mergeChunk = $this->tempDir
@@ -417,10 +411,7 @@ PHP, var_export($requestsLog, true)));
     public function testFreshDatabasePullReplacesStaleDownloadArtifacts(): void
     {
         $this->writePreflightState();
-        $this->writeStateAtCleanupInterruptionBoundary(
-            'db-pull',
-            'db-index',
-        );
+        $this->writeStateAtCleanupInterruptionBoundary('db-pull');
         $artifacts = array(
             $this->tempDir . '/state/db.sql',
             $this->tempDir . '/state/db-tables.jsonl',
@@ -471,10 +462,7 @@ PHP, var_export($requestsLog, true)));
         }
 
         $this->writePreflightState();
-        $this->writeStateAtCleanupInterruptionBoundary(
-            'db-pull',
-            'db-index',
-        );
+        $this->writeStateAtCleanupInterruptionBoundary('db-pull');
         $sqlBuffer = $this->tempDir . '/state/pull/sql-buffer';
         file_put_contents($sqlBuffer, "stale partial query\n");
 
@@ -529,8 +517,7 @@ PHP, var_export($requestsLog, true)));
      * Write the durable checkpoint saved before fixed artifact cleanup.
      */
     private function writeStateAtCleanupInterruptionBoundary(
-        string $command,
-        ?string $stage
+        string $command
     ): void {
         // Fresh-start preparation saves this checkpoint before deleting fixed
         // transient artifacts. A process may stop between those actions.
@@ -545,7 +532,7 @@ PHP, var_export($requestsLog, true)));
             'command_name' => $command,
             'started_by_command' => $command,
             'completion_state' => 'in_progress',
-            'current_stage' => $stage,
+            'current_stage' => 'artifact-cleanup',
             'remote_cursor' => null,
         );
         file_put_contents(

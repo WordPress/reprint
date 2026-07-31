@@ -546,6 +546,135 @@ final class AbortStateTest extends TestCase
         $this->assertArtifactOwnership(['db-pull', 'db-apply']);
     }
 
+    public function testAbortProtectsCompletedCheckpointStarterScopes(): void
+    {
+        $client = $this->client();
+        $before = $this->populatedState();
+        $before['active_resumable_command'] = [
+            'command_name' => 'db-apply',
+            'started_by_command' => 'pull-db',
+            'completion_state' => 'complete',
+            'current_stage' => null,
+            'remote_cursor' => null,
+        ];
+        $before['pull_pipeline'] = [
+            'started_by_command' => 'pull-db',
+            'stage_sequence' => [
+                'preflight',
+                'db-pull',
+                'db-apply',
+            ],
+            'last_completed_stage' => 'db-apply',
+            'files_filter' => null,
+            'skipped_pending' => false,
+            'has_completed_once' => true,
+        ];
+        \write_current_pull_state($client, $before);
+        $this->createArtifacts();
+
+        $this->runCommand($client, [
+            'command' => 'pull',
+            'abort' => true,
+        ]);
+
+        $this->assertSame(
+            $this->expectedStateAfterReset(
+                $before,
+                ['files-index', 'files-pull'],
+                false,
+                null,
+            ),
+            $this->loadPersistedState($client),
+        );
+        $this->assertArtifactOwnership(['files-index', 'files-pull']);
+    }
+
+    public function testLegacyCompletedCheckpointRequiresExactAbort(): void
+    {
+        $client = $this->client();
+        $before = $this->populatedState();
+        $before['active_resumable_command'] = [
+            'command_name' => 'files-pull',
+            'started_by_command' => null,
+            'completion_state' => 'complete',
+            'current_stage' => null,
+            'remote_cursor' => null,
+        ];
+        $before['pull_pipeline'] = [
+            'started_by_command' => 'pull-files',
+            'stage_sequence' => ['preflight', 'files-pull'],
+            'last_completed_stage' => 'files-pull',
+            'files_filter' => 'none',
+            'skipped_pending' => false,
+            'has_completed_once' => true,
+        ];
+        $statePath = $this->stateDirectory . '/pull/state.json';
+        \write_current_pull_state($client, $before);
+        $legacyState = json_decode(
+            file_get_contents($statePath),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        unset(
+            $legacyState['active_resumable_command'][
+                'started_by_command'
+            ],
+        );
+        file_put_contents(
+            $statePath,
+            json_encode(
+                $legacyState,
+                JSON_PRETTY_PRINT |
+                    JSON_UNESCAPED_SLASHES |
+                    JSON_THROW_ON_ERROR,
+            ),
+        );
+        $this->createArtifacts();
+        $rawState = file_get_contents($statePath);
+        $artifactSnapshot = $this->artifactSnapshot();
+
+        $caught = null;
+        try {
+            $this->runCommand($client, [
+                'command' => 'pull-files',
+                'abort' => true,
+            ]);
+        } catch (\RuntimeException $error) {
+            $caught = $error;
+        }
+
+        $this->assertInstanceOf(\RuntimeException::class, $caught);
+        $this->assertStringContainsString(
+            'the completed files-pull checkpoint does not record which command started it',
+            $caught->getMessage(),
+        );
+        $this->assertStringContainsString(
+            '`reprint files-pull --abort`',
+            $caught->getMessage(),
+        );
+        $this->assertStringContainsString(
+            '`reprint pull-files --abort`',
+            $caught->getMessage(),
+        );
+        $this->assertSame($rawState, file_get_contents($statePath));
+        $this->assertSame($artifactSnapshot, $this->artifactSnapshot());
+
+        $this->runCommand($client, [
+            'command' => 'files-pull',
+            'abort' => true,
+        ]);
+        $this->runCommand($client, [
+            'command' => 'pull-files',
+            'abort' => true,
+        ]);
+        $state = $this->loadPersistedState($client);
+        $this->assertNull(
+            $state['active_resumable_command']['command_name'],
+        );
+        $this->assertNull($state['pull_pipeline']['started_by_command']);
+    }
+
     /**
      * @dataProvider completedPipelineCollisionProvider
      */
