@@ -607,8 +607,10 @@ If the JSON is invalid on load, the importer renames it to
     "updated_at": "2025-01-15T10:30:00Z"
   },
   "diff": {
-    "remote_offset": 1024,        // byte offset into remote index
-    "local_after": "base64..."    // last compared local path
+    // Byte offset into the next remote index.
+    "next_remote_index_byte_offset": 1024,
+    // Last local index entry path consumed before that byte offset.
+    "last_consumed_local_index_entry_path": "base64..."
   },
   "index": {
     "cursor": "..."               // file_index cursor

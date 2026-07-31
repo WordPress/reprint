@@ -335,9 +335,9 @@ class FilesPullStateTest extends TestCase
         $localIndex = $this->stateDir . '/pull/local-index.jsonl';
         file_put_contents($localIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 1000, 200));
 
-        // Remote index: same file at ctime 2000 (changed)
-        $remoteIndex = $this->stateDir . '/pull/remote-index.jsonl';
-        file_put_contents($remoteIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 2000, 250));
+        // Next remote index: same file at ctime 2000 (changed)
+        $nextRemoteIndexFile = $this->stateDir . '/pull/remote-index.next.jsonl';
+        file_put_contents($nextRemoteIndexFile, $this->indexLine('/wp-content/themes/flavor/style.css', 2000, 250));
 
         // The file exists locally (downloaded during the initial sync)
         $localFile = $this->filesystem_root . '/wp-content/themes/flavor/style.css';
@@ -375,9 +375,9 @@ class FilesPullStateTest extends TestCase
         $localIndex = $this->stateDir . '/pull/local-index.jsonl';
         file_put_contents($localIndex, '');
 
-        // Remote index: file exists on remote
-        $remoteIndex = $this->stateDir . '/pull/remote-index.jsonl';
-        file_put_contents($remoteIndex, $this->indexLine('/wp-content/object-cache.php', 1000, 500));
+        // Next remote index: file exists on remote
+        $nextRemoteIndexFile = $this->stateDir . '/pull/remote-index.next.jsonl';
+        file_put_contents($nextRemoteIndexFile, $this->indexLine('/wp-content/object-cache.php', 1000, 500));
 
         // The file exists locally (pre-existing, e.g. hosting drop-in)
         $localFile = $this->filesystem_root . '/wp-content/object-cache.php';
