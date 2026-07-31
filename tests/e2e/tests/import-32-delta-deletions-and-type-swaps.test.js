@@ -224,10 +224,10 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
         const statePath = join(tempDir, 'pull/state.json');
         const state = JSON.parse(readFileSync(statePath, 'utf-8'));
 
-        assert.equal(typeof state.diff.local_after, 'string', 'Expected diff.local_after to be persisted');
+        assert.equal(typeof state.diff.last_consumed_remote_index_entry_path, 'string', 'Expected diff.last_consumed_remote_index_entry_path to be persisted');
         assert.ok(
-            state.diff.local_after.startsWith('base64:'),
-            `Expected base64-encoded diff.local_after, got: ${state.diff.local_after}`,
+            state.diff.last_consumed_remote_index_entry_path.startsWith('base64:'),
+            `Expected base64-encoded diff.last_consumed_remote_index_entry_path, got: ${state.diff.last_consumed_remote_index_entry_path}`,
         );
 
         if (typeof state.fetch.batch_file === 'string') {

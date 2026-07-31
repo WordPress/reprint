@@ -98,26 +98,30 @@ class DatabaseTableIndexState
 
 class FileDiffProgressState
 {
-    /** @var int Offset into the remote index while diffing. */
-    public int $remote_offset = 0;
+    /** @var int Byte offset into the next remote index while diffing. */
+    public int $next_remote_index_byte_offset = 0;
 
-    /** @var string|null Last local path seen after the current remote offset. */
-    public ?string $local_after = null;
+    /** @var string|null Last remote index entry path consumed at the current next remote index byte offset. */
+    public ?string $last_consumed_remote_index_entry_path = null;
 
     public static function from_array(array $data): self
     {
         $state = new self();
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
-        $state->remote_offset = $data['remote_offset'];
-        $state->local_after = $data['local_after'];
+        $state->next_remote_index_byte_offset =
+            $data['next_remote_index_byte_offset'];
+        $state->last_consumed_remote_index_entry_path =
+            $data['last_consumed_remote_index_entry_path'];
         return $state;
     }
 
     public function to_array(): array
     {
         return [
-            'remote_offset' => $this->remote_offset,
-            'local_after' => $this->local_after,
+            'next_remote_index_byte_offset' =>
+                $this->next_remote_index_byte_offset,
+            'last_consumed_remote_index_entry_path' =>
+                $this->last_consumed_remote_index_entry_path,
         ];
     }
 }

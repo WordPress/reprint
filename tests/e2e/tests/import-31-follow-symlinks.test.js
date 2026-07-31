@@ -328,10 +328,10 @@ describe('Import: Follow Symlinks', () => {
 
     it('multiple symlinks to same target do not create duplicate index entries', () => {
         // After sort+dedup, each path should appear at most once
-        const remoteIndex = join(tempDir, 'pull/remote-index.jsonl');
-        if (!existsSync(remoteIndex)) return;
+        const nextRemoteIndexFile = join(tempDir, 'pull/remote-index.next.jsonl');
+        if (!existsSync(nextRemoteIndexFile)) return;
 
-        const lines = readFileSync(remoteIndex, 'utf-8').split('\n').filter(l => l.trim());
+        const lines = readFileSync(nextRemoteIndexFile, 'utf-8').split('\n').filter(l => l.trim());
         const paths = new Set();
         let duplicates = 0;
         for (const line of lines) {
@@ -348,7 +348,7 @@ describe('Import: Follow Symlinks', () => {
             }
         }
         assert.equal(duplicates, 0,
-            `Expected no duplicate paths in remote index, found ${duplicates}`);
+            `Expected no duplicate paths in next remote index, found ${duplicates}`);
     });
 
     it('shared-target files are downloaded exactly once', () => {

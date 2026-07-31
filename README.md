@@ -517,9 +517,9 @@ Reprint uses `$STATE_DIR` exactly as supplied. Consumers that want the state
 hidden can choose a directory named `.reprint`; Reprint does not append that
 name itself. Shared command progress and the audit log live directly in the
 state directory. Pull-owned state lives in `pull/`, while remote-specific push
-state lives in `push/<md5-of-trimmed-remote-reprint-api-url>/`. Shared and pull
-filenames do not begin with a dot or repeat the scope supplied by their parent
-directory.
+state lives in
+`remotes/<md5-of-trimmed-remote-reprint-api-url>/push/`. Shared and pull filenames
+do not begin with a dot or repeat the scope supplied by their parent directory.
 
 `pull/state.json` and `progress.json` are written atomically:
 a `.tmp` file is written first and then renamed to its final name so readers
@@ -607,8 +607,10 @@ If the JSON is invalid on load, the importer renames it to
     "updated_at": "2025-01-15T10:30:00Z"
   },
   "diff": {
-    "remote_offset": 1024,        // byte offset into remote index
-    "local_after": "base64..."    // last compared local path
+    // Byte offset into the next remote index.
+    "next_remote_index_byte_offset": 1024,
+    // Last remote index entry path consumed before that byte offset.
+    "last_consumed_remote_index_entry_path": "base64..."
   },
   "index": {
     "cursor": "..."               // file_index cursor
@@ -690,7 +692,7 @@ truncated or rotated, so it provides a complete history of the migration.
 ```
 [2025-01-15 10:30:01] VOLATILE | path=/srv/htdocs/wp-content/debug.log | count=1
 [2025-01-15 10:30:05] VOLATILE CLEARED | path=/srv/htdocs/wp-content/debug.log
-[2025-01-15 10:31:12] FILE DELETE | pull/local-index.wal
+[2025-01-15 10:31:12] FILE TRUNCATE | /tmp/reprint-state/pull/remote-index.wal | remote index WAL batch applied
 ```
 
 Pass `--verbose` to also print audit log entries to the console as they happen.
@@ -724,7 +726,7 @@ unfinished import belongs to the command that started it; only that exact
 command may resume or abort it. If another command is requested, the error
 names the owning command and gives its exact resume and abort invocations.
 Abort ignores options used only to perform normal work. File aborts retain
-downloaded files and `pull/local-index.jsonl`, so the next file pull computes a
+downloaded files and `pull/remote-index.jsonl`, so the next file pull computes a
 delta. Database download aborts discard their SQL, table-index, domain, buffer,
 and statistics files, while `db-apply` aborts retain its SQL/domain inputs and
 do not alter the external database target.

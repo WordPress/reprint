@@ -10,7 +10,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
-    assertFileCount, assertSiteMirror,
+    assertRemoteIndexEntryCount, assertSiteMirror,
     fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -56,15 +56,15 @@ describe('Import: Basic File Sync', () => {
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
-    it('pull/local-index.jsonl has entries', () => {
-        const indexFile = join(tempDir, 'pull/local-index.jsonl');
-        assert.ok(existsSync(indexFile), 'Expected pull/local-index.jsonl to exist');
-        const lines = readFileSync(indexFile, 'utf-8').trim().split('\n').filter(l => l);
+    it('pull/remote-index.jsonl has entries', () => {
+        const remoteIndexFile = join(tempDir, 'pull/remote-index.jsonl');
+        assert.ok(existsSync(remoteIndexFile), 'Expected pull/remote-index.jsonl to exist');
+        const lines = readFileSync(remoteIndexFile, 'utf-8').trim().split('\n').filter(l => l);
         assert.ok(lines.length > 0, 'Expected at least one index entry');
     });
 
-    it('indexed at least 3000 files from remote', () => {
-        assertFileCount(tempDir);
+    it('accounted for at least 3000 remote index entries', () => {
+        assertRemoteIndexEntryCount(tempDir);
     });
 
     it('imported files form a valid WordPress site mirror', () => {
@@ -92,12 +92,12 @@ describe('Import: Basic File Sync', () => {
         });
         assert.equal(restart.exitCode, 0, `Expected restart exit 0, got ${restart.exitCode}\nstderr: ${restart.stderr}\nstdout: ${restart.stdout}`);
 
-        // Local index should still exist (restart preserves it)
-        const indexFile = join(tempDir, 'pull/local-index.jsonl');
-        assert.ok(existsSync(indexFile), 'Expected local index to be preserved after --abort');
+        // Remote index should still exist (restart preserves it)
+        const remoteIndexFile = join(tempDir, 'pull/remote-index.jsonl');
+        assert.ok(existsSync(remoteIndexFile), 'Expected remote index to be preserved after --abort');
 
         // Transient files should be cleaned up
-        assert.ok(!existsSync(join(tempDir, 'pull/remote-index.jsonl')), 'Expected remote index to be deleted');
+        assert.ok(!existsSync(join(tempDir, 'pull/remote-index.next.jsonl')), 'Expected next remote index to be deleted');
         assert.ok(!existsSync(join(tempDir, 'pull/fetch-list.jsonl')), 'Expected fetch list to be deleted');
     });
 

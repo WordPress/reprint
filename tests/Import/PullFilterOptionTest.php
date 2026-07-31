@@ -65,7 +65,7 @@ class PullFilterFakeClient extends \ImportClient
         return $output === false ? '' : $output;
     }
 
-    public function index_count(): int
+    public function remote_index_entry_count(): int
     {
         return 12;
     }
@@ -286,7 +286,7 @@ class PullFilterOptionTest extends TestCase
                 'type' => 'lifecycle',
                 'event' => 'aborted',
                 'command' => 'pull-files',
-                'message' => 'State cleared for pull-files. Downloaded files and pull/local-index.jsonl were preserved.',
+                'message' => 'State cleared for pull-files. Downloaded files and pull/remote-index.jsonl were preserved.',
             ],
             $client->progress_events[$eventIndex],
         );

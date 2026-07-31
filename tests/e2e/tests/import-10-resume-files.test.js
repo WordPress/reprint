@@ -11,7 +11,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     assertTreesMatch,
-    assertFileCount, assertSiteMirror,
+    assertRemoteIndexEntryCount, assertSiteMirror,
     fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -63,8 +63,8 @@ describe('Import: Resume Files', { timeout: 180000 }, () => {
         assert.equal(state.active_resumable_command.completion_state, 'complete', 'Expected status to be complete');
     });
 
-    it('indexed at least 3000 files from remote', () => {
-        assertFileCount(tempDir);
+    it('accounted for at least 3000 remote index entries', () => {
+        assertRemoteIndexEntryCount(tempDir);
     });
 
     it('imported files form a valid WordPress site mirror', () => {

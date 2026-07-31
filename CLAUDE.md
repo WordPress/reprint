@@ -241,8 +241,8 @@ Always consult these when working on the respective components.
 
 Progress is computed client-side by reading state files (all in `--state-dir`):
 - `pull/state.json`: Current command, status, cursor, stage
-- `pull/local-index.jsonl`: Local file index (line count = files indexed)
-- `pull/remote-index.jsonl`: Remote file index (for delta comparison)
+- `pull/remote-index.jsonl`: Remote index (line count = accounted entries)
+- `pull/remote-index.next.jsonl`: Next remote index (for delta comparison)
 - `pull/fetch-list.jsonl`: Files pending download
 - `db.sql`: SQL dump file size
 

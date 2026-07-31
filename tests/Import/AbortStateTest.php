@@ -111,7 +111,7 @@ final class AbortStateTest extends TestCase
         );
         $this->assertArtifactOwnership($scopes);
         $this->assertFileExists(
-            $this->stateDirectory . '/pull/local-index.jsonl',
+            $this->stateDirectory . '/pull/remote-index.jsonl',
         );
         $this->assertFileExists(
             $this->fileRoot . '/wp-content/downloaded.php',
@@ -779,7 +779,7 @@ final class AbortStateTest extends TestCase
         ];
     }
 
-    public function testFileAbortReplaysWalAndRemovesScratchWithoutDeletingLocalFiles(): void
+    public function testFileAbortReplaysRemoteIndexWalAndRemovesScratchWithoutDeletingDownloadedFiles(): void
     {
         $client = $this->client();
         $before = $this->populatedState();
@@ -793,11 +793,11 @@ final class AbortStateTest extends TestCase
         $before['pull_pipeline']['last_completed_stage'] = 'db-pull';
         \write_current_pull_state($client, $before);
         file_put_contents(
-            $this->stateDirectory . '/pull/local-index.jsonl',
+            $this->stateDirectory . '/pull/remote-index.jsonl',
             $this->indexRecord('/site/existing.txt'),
         );
         file_put_contents(
-            $this->stateDirectory . '/pull/local-index.wal',
+            $this->stateDirectory . '/pull/remote-index.wal',
             json_encode([
                 'op' => 'F',
                 'path' => base64_encode('/site/downloaded.txt'),
@@ -807,13 +807,13 @@ final class AbortStateTest extends TestCase
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n",
         );
         foreach ([
-            'pull/remote-index.jsonl.sorted',
-            'pull/remote-index.jsonl.keyed',
-            'pull/remote-index.jsonl.keyed.sorted',
-            'pull/remote-index.jsonl.merge-sorted',
+            'pull/remote-index.next.jsonl.sorted',
+            'pull/remote-index.next.jsonl.keyed',
+            'pull/remote-index.next.jsonl.keyed.sorted',
+            'pull/remote-index.next.jsonl.merge-sorted',
             'pull/merge-chunk-stale',
-            'pull/local-index.jsonl.new',
-            'pull/local-index.jsonl.swap',
+            'pull/remote-index.jsonl.new',
+            'pull/remote-index.jsonl.swap',
         ] as $artifact) {
             file_put_contents(
                 $this->stateDirectory . '/' . $artifact,
@@ -829,8 +829,8 @@ final class AbortStateTest extends TestCase
             'command' => 'files-pull',
             'abort' => true,
         ]);
-        $firstLocalIndex = file_get_contents(
-            $this->stateDirectory . '/pull/local-index.jsonl',
+        $firstRemoteIndex = file_get_contents(
+            $this->stateDirectory . '/pull/remote-index.jsonl',
         );
         $this->runCommand($client, [
             'command' => 'files-pull',
@@ -838,21 +838,21 @@ final class AbortStateTest extends TestCase
         ]);
 
         $this->assertSame(
-            $firstLocalIndex,
+            $firstRemoteIndex,
             file_get_contents(
-                $this->stateDirectory . '/pull/local-index.jsonl',
+                $this->stateDirectory . '/pull/remote-index.jsonl',
             ),
         );
         $this->assertStringContainsString(
             base64_encode('/site/existing.txt'),
-            $firstLocalIndex,
+            $firstRemoteIndex,
         );
         $this->assertStringContainsString(
             base64_encode('/site/downloaded.txt'),
-            $firstLocalIndex,
+            $firstRemoteIndex,
         );
         $this->assertFileDoesNotExist(
-            $this->stateDirectory . '/pull/local-index.wal',
+            $this->stateDirectory . '/pull/remote-index.wal',
         );
         $this->assertFileExists(
             $this->fileRoot . '/wp-content/downloaded.php',
@@ -934,8 +934,9 @@ final class AbortStateTest extends TestCase
         ];
         $before['pull_pipeline']['last_completed_stage'] = 'db-pull';
         \write_current_pull_state($client, $before);
-        $remoteIndex = $this->stateDirectory . '/pull/remote-index.jsonl';
-        mkdir($remoteIndex);
+        $nextRemoteIndex =
+            $this->stateDirectory . '/pull/remote-index.next.jsonl';
+        mkdir($nextRemoteIndex);
 
         $caught = null;
         try {
@@ -948,7 +949,10 @@ final class AbortStateTest extends TestCase
         }
 
         $this->assertInstanceOf(\RuntimeException::class, $caught);
-        $this->assertStringContainsString($remoteIndex, $caught->getMessage());
+        $this->assertStringContainsString(
+            $nextRemoteIndex,
+            $caught->getMessage(),
+        );
         $this->assertSame(
             ( new \ResumableCommandCheckpointState() )->to_array(),
             $this->loadPersistedState($client)[
@@ -956,7 +960,7 @@ final class AbortStateTest extends TestCase
             ],
         );
 
-        rmdir($remoteIndex);
+        rmdir($nextRemoteIndex);
         $this->runCommand($client, [
             'command' => 'files-index',
             'abort' => true,
@@ -1025,8 +1029,9 @@ final class AbortStateTest extends TestCase
                 'updated_at' => '1234567890',
             ],
             'diff' => [
-                'remote_offset' => 64,
-                'local_after' => '/remote/wp-content',
+                'next_remote_index_byte_offset' => 64,
+                'last_consumed_remote_index_entry_path' =>
+                    '/remote/wp-content',
             ],
             'index' => [
                 'cursor' => 'file-index-cursor',
@@ -1180,14 +1185,14 @@ final class AbortStateTest extends TestCase
                 file_put_contents($path, "preserve\n");
                 continue;
             }
-            if ($name === 'local-index') {
+            if ($name === 'remote-index') {
                 file_put_contents(
                     $path,
                     $this->indexRecord('/site/existing.txt'),
                 );
                 continue;
             }
-            if ($name === 'local-index-wal') {
+            if ($name === 'remote-index-wal') {
                 file_put_contents($path, '');
                 continue;
             }
@@ -1203,26 +1208,26 @@ final class AbortStateTest extends TestCase
     private function artifactPaths(): array
     {
         return [
-            'local-index' =>
-                $this->stateDirectory . '/pull/local-index.jsonl',
-            'local-index-wal' =>
-                $this->stateDirectory . '/pull/local-index.wal',
-            'local-index-new' =>
-                $this->stateDirectory . '/pull/local-index.jsonl.new',
-            'local-index-swap' =>
-                $this->stateDirectory . '/pull/local-index.jsonl.swap',
             'remote-index' =>
                 $this->stateDirectory . '/pull/remote-index.jsonl',
-            'remote-index-sorted' =>
-                $this->stateDirectory . '/pull/remote-index.jsonl.sorted',
-            'remote-index-keyed' =>
-                $this->stateDirectory . '/pull/remote-index.jsonl.keyed',
-            'remote-index-keyed-sorted' =>
+            'remote-index-wal' =>
+                $this->stateDirectory . '/pull/remote-index.wal',
+            'remote-index-new' =>
+                $this->stateDirectory . '/pull/remote-index.jsonl.new',
+            'remote-index-swap' =>
+                $this->stateDirectory . '/pull/remote-index.jsonl.swap',
+            'next-remote-index' =>
+                $this->stateDirectory . '/pull/remote-index.next.jsonl',
+            'next-remote-index-sorted' =>
+                $this->stateDirectory . '/pull/remote-index.next.jsonl.sorted',
+            'next-remote-index-keyed' =>
+                $this->stateDirectory . '/pull/remote-index.next.jsonl.keyed',
+            'next-remote-index-keyed-sorted' =>
                 $this->stateDirectory .
-                '/pull/remote-index.jsonl.keyed.sorted',
-            'remote-index-merge-sorted' =>
+                '/pull/remote-index.next.jsonl.keyed.sorted',
+            'next-remote-index-merge-sorted' =>
                 $this->stateDirectory .
-                '/pull/remote-index.jsonl.merge-sorted',
+                '/pull/remote-index.next.jsonl.merge-sorted',
             'merge-chunk' =>
                 $this->stateDirectory . '/pull/merge-chunk-stale',
             'fetch-list' =>
@@ -1257,9 +1262,9 @@ final class AbortStateTest extends TestCase
         $removed = [];
         if (in_array('files-pull', $scopes, true)) {
             $removed = array_merge($removed, [
-                'local-index-wal',
-                'local-index-new',
-                'local-index-swap',
+                'remote-index-wal',
+                'remote-index-new',
+                'remote-index-swap',
                 'fetch-list',
                 'skipped-fetch-list',
                 'volatile-files',
@@ -1269,11 +1274,11 @@ final class AbortStateTest extends TestCase
         }
         if (in_array('files-index', $scopes, true)) {
             $removed = array_merge($removed, [
-                'remote-index',
-                'remote-index-sorted',
-                'remote-index-keyed',
-                'remote-index-keyed-sorted',
-                'remote-index-merge-sorted',
+                'next-remote-index',
+                'next-remote-index-sorted',
+                'next-remote-index-keyed',
+                'next-remote-index-keyed-sorted',
+                'next-remote-index-merge-sorted',
                 'merge-chunk',
             ]);
         }

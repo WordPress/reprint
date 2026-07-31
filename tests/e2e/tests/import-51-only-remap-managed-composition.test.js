@@ -35,7 +35,7 @@
  *                       and was previously synced is deleted on the target.
  *   B. Scope-survival — content synced by the earlier, broader run but OUTSIDE
  *                       the current scope is NOT deleted (the delete-drain is
- *                       guarded by in_scope(); the local index is a union across
+ *                       guarded by in_scope(); the remote index is a union across
  *                       scoped runs).
  *   plus a control: an in-scope file the source still has is retained.
  */

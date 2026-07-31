@@ -46,18 +46,18 @@ local relative path to a push-root-relative path.
 
 ## Indexes and mappings
 
-- A **remote index** is the last remote filesystem state accepted by pull.
-  Its entries use remote absolute paths and remote-observed metadata. Use
-  `$remote_index_file`.
-- A **local index** is the locally accounted pull baseline. Its entries use
-  remote absolute paths as the merge key and locally observed metadata. Use
-  `$local_index_file`.
+- A **remote index** records remote absolute paths and remote-observed type,
+  size, and ctime for pull operations already accounted for in the filesystem
+  root. Use `$remote_index_file`.
+- A **next remote index** is the snapshot of the remote paths selected for the
+  current pull. Its entries use remote absolute paths and remote-observed
+  metadata. Use `$next_remote_index_file`.
 - A **fresh local index** is the current filesystem-root scan created while
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
-- The **local index WAL** records completed pull mutations awaiting application
-  to the local index.
+- The **remote index WAL** records completed pull mutations awaiting application
+  to the remote index.
 - A **pull plan** lists remote absolute paths still scheduled for download or
   deletion. A **push plan** maps local relative paths to push-root-relative
   paths.
@@ -160,9 +160,12 @@ development. There are no compatibility aliases or migration paths.
 The **state directory** is the caller-supplied `<state-dir>`; use `$state_dir`.
 Reprint uses it exactly as supplied and does not append `.reprint`. A consumer
 may choose `.reprint` or any other private directory name. The **pull state
-directory** is `<state-dir>/pull`; use `$pull_state_directory`. Shared and pull
-filenames inside the state directory do not begin with a dot or repeat the
-scope supplied by their parent directories.
+directory** is `<state-dir>/pull`; use `$pull_state_directory`. Filenames
+inside the state directory do not begin with a dot or repeat the scope supplied
+by their parent directories. A **remote state directory** contains state for
+one remote Reprint API URL. It is
+`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`; use
+`$remote_state_directory`.
 
 ```text
 <state-dir>/
@@ -171,17 +174,18 @@ scope supplied by their parent directories.
 ├── audit.log
 ├── pull/
 │   ├── state.json
-│   ├── local-index.jsonl
-│   ├── local-index.wal
 │   ├── remote-index.jsonl
+│   ├── remote-index.wal
+│   ├── remote-index.next.jsonl
 │   ├── fetch-list.jsonl
 │   ├── skipped-fetch-list.jsonl
 │   ├── volatile-files.json
 │   ├── domains.json
 │   ├── sql-stats.json
 │   └── sql-buffer
-└── push/
+└── remotes/
     └── <md5-of-trimmed-remote-reprint-api-url>/
+        └── push/
 ```
 
 Use these path names:
@@ -190,10 +194,11 @@ Use these path names:
 | --- | --- |
 | State directory | `$state_dir` |
 | Pull state directory | `$pull_state_directory` |
+| Remote state directory | `$remote_state_directory` |
 | Pull state file | `$pull_state_file` |
-| Local index file | `$local_index_file` |
-| Local index WAL | `$local_index_wal_path` |
 | Remote index file | `$remote_index_file` |
+| Remote index WAL | `$remote_index_wal_path` |
+| Next remote index file | `$next_remote_index_file` |
 | Fetch list file | `$fetch_list_file` |
 | Skipped fetch list file | `$skipped_fetch_list_file` |
 | Volatile files file | `$volatile_files_file` |
@@ -225,11 +230,11 @@ its caller supplies none. `PushFilesSender::start()` and
 `close()` does not release it. This local lock is separate from the receiver's
 push-session and commit locks.
 
-## Pull local index WAL
+## Pull remote index WAL
 
-Call the single pull-side write-ahead log the **local index WAL**. It lives at
-`<state-dir>/pull/local-index.wal`; use `pull/local-index.wal`,
-`$local_index_wal_path`, and `$local_index_wal_handle`.
+Call the single pull-side write-ahead log the **remote index WAL**. It lives at
+`<state-dir>/pull/remote-index.wal`; use `pull/remote-index.wal`,
+`$remote_index_wal_path`, and `$remote_index_wal_handle`.
 Applied batch records are cleared, but the empty WAL remains as a marker until
 files-pull completes. A retained WAL is consumed only while resuming or
 aborting the interrupted files-pull, including through a high-level pull
@@ -239,8 +244,8 @@ command; unrelated commands do not consume it.
 
 The local machine keeps planning and active state outside the receiver push
 directory. Under
-`<state-dir>/push/<md5-of-trimmed-remote-reprint-api-url>/`, use these names
-verbatim:
+`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push/`, use these
+names verbatim:
 
 | Surface | Name |
 | --- | --- |
@@ -349,7 +354,9 @@ exporter API URL, and its `filesystem root` is the resolved absolute directory s
 `--fs-root`. It requires `--secret=TOKEN`; `--force-http` is the explicit
 plain-HTTP opt-in.
 
-The **local push state directory** is `<state-dir>/push/` followed by:
+The **local push state directory** is
+`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash
+directory name is:
 
 ```text
 md5(rtrim(<remote-reprint-api-url>, "?&"))

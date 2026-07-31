@@ -345,9 +345,9 @@ PHP, var_export($requestsLog, true)));
     {
         $this->writePreflightState(true);
         $this->writeStateAtCleanupInterruptionBoundary('files-index');
-        $remoteIndex = $this->tempDir
-            . '/state/pull/remote-index.jsonl';
-        file_put_contents($remoteIndex, "stale remote index\n");
+        $nextRemoteIndex = $this->tempDir
+            . '/state/pull/remote-index.next.jsonl';
+        file_put_contents($nextRemoteIndex, "stale next remote index\n");
 
         $requestsLog = $this->tempDir . '/fresh-file-requests.jsonl';
         $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
@@ -362,7 +362,7 @@ PHP, var_export($requestsLog, true)));
             '"status":"error"',
             $output,
         );
-        $this->assertSame('', file_get_contents($remoteIndex));
+        $this->assertSame('', file_get_contents($nextRemoteIndex));
         $this->assertContains(
             'file_index',
             array_column(

@@ -10,7 +10,7 @@ import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch,
-    assertFileCount, assertSiteMirror,
+    assertRemoteIndexEntryCount, assertSiteMirror,
     fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -95,8 +95,8 @@ describe('Import: Unicode Paths', () => {
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
-    it('indexed at least 3000 files from remote', () => {
-        assertFileCount(tempDir);
+    it('accounted for at least 3000 remote index entries', () => {
+        assertRemoteIndexEntryCount(tempDir);
     });
 
     it('imported files form a valid WordPress site mirror', () => {
