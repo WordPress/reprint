@@ -1272,11 +1272,10 @@ class ImportClient
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI filesystem paths, never HTML output.
     /**
-     * Reports local paths changed since the previous push to this remote
-     * Reprint API URL.
+     * Reports changes between the filesystem root and its local index.
      *
      * files-diff makes no network request. It runs one complete PushPlan
-     * against the previous local index a completed files-push published, then
+     * against the local index, then
      * streams the finished push and delete lists from the beginning. Every run
      * reports the whole diff, so an interrupted report needs no resume state:
      * running the command again prints the complete report.
@@ -1300,18 +1299,17 @@ class ImportClient
             throw new InvalidArgumentException('files-diff requires its resolved local push state directory.');
         }
 
-        $previous_local_index = $push_state_directory . '/previous_local_index.jsonl';
-        $missing_previous_local_index_message =
-            'files-diff requires the previous local index published by a completed files-push '
-            . 'for the same remote Reprint API URL and state directory.';
-        if (!is_dir($push_state_directory)) {
-            throw new RuntimeException($missing_previous_local_index_message);
-        }
+        $remote_state_directory = dirname($push_state_directory);
+        $local_index_file = $remote_state_directory . '/local_index.jsonl';
+        $missing_local_index_message =
+            'files-diff requires <remote-state-directory>/local_index.jsonl. '
+            . 'files-push writes it after the target confirms commit for the same '
+            . 'remote Reprint API URL and state directory.';
 
         $plan_directory = $push_state_directory . '/files-diff-plan';
         try {
-            if (!is_file($previous_local_index)) {
-                throw new RuntimeException($missing_previous_local_index_message);
+            if (!is_file($local_index_file)) {
+                throw new RuntimeException($missing_local_index_message);
             }
 
             // Build the complete local-only plan from scratch without target
@@ -1327,7 +1325,7 @@ class ImportClient
             $plan = PushPlan::start(
                 $plan_directory,
                 $this->filesystem_root,
-                $previous_local_index,
+                $local_index_file,
                 $excluded_paths_path
             );
             try {
@@ -12662,13 +12660,14 @@ if (
         ],
         "files-diff" => [
             "level" => "low",
-            "short" => "Show local file changes since the last push",
+            "short" => "Compare local files with the local index",
             "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR",
             "description" =>
                 "Shows which local paths a files-push would send or delete, comparing\n" .
-                "the filesystem root at --fs-root with the previous local index for this remote Reprint API URL —\n" .
-                "the index a completed files-push publishes for the same remote Reprint API URL,\n" .
-                "state directory, and filesystem root.\n" .
+                "the filesystem root at --fs-root with the local index for this remote\n" .
+                "Reprint API URL. files-push writes that index after the target confirms\n" .
+                "commit. Use the same remote Reprint API URL, state directory, and\n" .
+                "filesystem root for both commands.\n" .
                 "The output is a local minimized push operation plan before target\n" .
                 "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
                 "default-skipped paths include generated wp-content caches, version-\n" .

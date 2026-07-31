@@ -52,6 +52,12 @@ local relative path to a push-root-relative path.
 - A **next remote index** is the snapshot of the remote paths selected for the
   current pull. Its entries use remote absolute paths and remote-observed
   metadata. Use `$next_remote_index_file`.
+- A **local index** is the retained filesystem-root snapshot in one remote
+  state directory. Its entries use local relative paths and locally observed
+  type, size, ctime, and directory emptiness. The remote Reprint API URL selects
+  the remote state directory; a different filesystem root uses a different
+  state directory. Files-push atomically replaces the local index only after
+  the target confirms commit. Use `$local_index_file`.
 - A **fresh local index** is the current filesystem-root scan created while
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
@@ -174,6 +180,7 @@ their parent directories.
 ├── audit.log
 └── remotes/
     └── <md5-of-trimmed-remote-reprint-api-url>/
+        ├── local_index.jsonl
         ├── pull/
         │   ├── state.json
         │   ├── remote-index.jsonl
@@ -195,6 +202,7 @@ Use these path names:
 | State directory | `$state_dir` |
 | Pull state directory | `$pull_state_directory` |
 | Remote state directory | `$remote_state_directory` |
+| Local index file | `$local_index_file` |
 | Pull state file | `$pull_state_file` |
 | Remote index file | `$remote_index_file` |
 | Remote index WAL | `$remote_index_wal_path` |
@@ -244,19 +252,21 @@ files-pull completes. A retained WAL is consumed only while resuming or
 aborting the interrupted files-pull, including through a high-level pull
 command; unrelated commands do not consume it.
 
-## Local push state
+## Local index and push state
 
-The local machine keeps planning and active state outside the receiver push
-directory. Under
-`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push/`, use these
-names verbatim:
+The local index is `<remote-state-directory>/local_index.jsonl`.
+`files-diff` and PushPlan read it. PushFilesSender replaces it only after the
+target confirms commit. Planning and active push state remain under
+`<remote-state-directory>/push/`.
+
+Use these names verbatim:
 
 | Surface | Name |
 | --- | --- |
 | Active plan directory | `plan`, `$plan_directory` |
-| Plan-owned fresh local index | `fresh_local_index.jsonl`, `$fresh_local_index` |
-| Previous local index | `previous_local_index.jsonl`, `previous_local_index`, `$previous_local_index` |
-| Byte offset in the previous local index | `byte_offset_in_previous_local_index`, `$byte_offset_in_previous_local_index` |
+| Plan-owned fresh local index file | `fresh_local_index.jsonl`, `$fresh_local_index_file` |
+| Local index file | `local_index.jsonl`, `local_index_file`, `$local_index_file` |
+| Byte offset in the local index | `byte_offset_in_local_index`, `$byte_offset_in_local_index` |
 | Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
 | Local push state directory | `push_state_directory`, `$push_state_directory` |
@@ -267,34 +277,32 @@ names verbatim:
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
-`sender.json`, `excluded_paths.json`, and
-`previous_local_index.jsonl` live directly under the local push state
-directory. The sender creates `plan/` for one active plan. PushPlan copies the
-sender-owned exclusions to `plan/excluded_paths.json` when it starts.
+`sender.json` and `excluded_paths.json` live directly under the local push
+state directory. The sender creates `plan/` for one active plan. PushPlan
+copies the sender-owned exclusions to `plan/excluded_paths.json` when it starts.
 `fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
 `local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
 
-The **previous local index** describes the filesystem root as its last
-completed push to the remote Reprint API URL observed it. The sender saves it
-after a successful commit, and `files-diff` reads it. PushPlan diffs its fresh
-local index against the copy its caller supplies.
-`byte_offset_in_previous_local_index` is the position from which its current
+The local index contains the most recent fresh filesystem-root scan the sender
+finished saving after the target confirmed its corresponding files-push
+commit. PushPlan diffs its fresh local index against the local index its caller
+supplies. `byte_offset_in_local_index` is the position from which its current
 lookahead entry is read again after resume.
 
-The PushPlan cursor is stored in `sender.json`. It contains the plan
-directory, filesystem root, previous local index, and current
+The PushPlan cursor is stored in `sender.json`. It contains `plan_directory`,
+`filesystem_root`, `local_index_file`, and the current
 planning position. During `indexing`, that position contains the
 FileIndexProcessor cursor and the committed byte offset in
 `fresh_local_index.jsonl`. During `diffing`, it contains the index offsets,
 output offsets, and the active byte offset in
 `deleted_directories_stack.jsonl`. The stack file is append-only; each entry
 links to the preceding active directory. The exclusions have a maximum of 100
-paths. `sender.json` phases are `creating`, `starting_plan`,
+paths. The `sender.json` phases are `creating`, `starting_plan`,
 `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
-`saving_previous_local_index`, `completing`,
+`saving_local_index`, `completing`,
 `removing`, and `discarding_plan`. It stores the push session ID, selected
 path-list cursor, receiver part limit, and request-sizing state. The index diff
-completes before local paths are sent. The index copy after a successful commit
+completes before local paths are sent. The index copy after a target-confirmed commit
 has no separate copy cursor and is repeated after interruption. After the index
 is saved or the remote confirms removal, the sender clears the PushPlan
 cursor, then removes the entire plan directory and its exclusions file. It
@@ -330,11 +338,10 @@ reports `complete`, `restart`, or `failed`.
 
 ## Files-diff CLI names
 
-The local-only command is `files-diff`. Its `remote Reprint API URL`,
-`filesystem root`, and `local push state directory` have the same meanings and
-directory formula as `files-push`. It reads
-`previous_local_index.jsonl` for that remote Reprint API URL, which a completed
-files-push publishes, and never changes it.
+The local-only command is `files-diff`. Its `remote Reprint API URL` and
+`filesystem root` have the same meanings as for `files-push`. It reads
+`<remote-state-directory>/local_index.jsonl`, which files-push writes after the
+target confirms commit, and never changes it.
 
 Each JSONL change record has `command: "files-diff"`, an `action` of `push` or
 `delete`, and `path_b64`. A push record also has the local path `type`, `size`,
@@ -434,18 +441,23 @@ Use these names verbatim inside `PushPlan`:
 | --- | --- |
 | Active plan directory | `$plan_directory` |
 | Filesystem root | `$filesystem_root`, `set_filesystem_root()` |
-| Previous local index | `$previous_local_index` |
-| Open previous local index | `$previous_local_index_handle` |
-| Previous local index lookahead entry | `$previous_local_index_lookahead_entry`, `$previous_local_index_lookahead_entry_loaded` |
-| Byte offset in the previous local index | `$byte_offset_in_previous_local_index` |
+| Local index file | `$local_index_file` |
+| Open local index file | `$local_index_file_handle` |
+| Local index lookahead entry | `$local_index_lookahead_entry`, `$local_index_lookahead_entry_loaded` |
+| Byte offset in the local index | `$byte_offset_in_local_index` |
+| Read the next index entry | `read_next_index_entry()`, `$index_file_handle` |
+| Index entry and shape | `$index_entry`, `$local_index_entry`, `$local_index_entry_shape`, `index_entry_shape()` |
 | Cursor | `$cursor`, `get_cursor()` |
 | Plan-owned excluded paths | `$excluded_paths_file` |
 | Fresh local index processor | `$file_index_processor`, `next_file_index_step()` |
 | Fresh local indexing cursor | `IndexingCursor`, `file_index_cursor` |
 | Fresh local index byte offset | `$fresh_local_index_byte_offset` |
+| Byte offset in the fresh local index during diff | `$byte_offset_in_fresh_local_index` |
 | Open fresh local index | `$fresh_local_index_handle` |
 | Index diff cursor | `IndexDiffCursor` |
 | Start index diff | `start_index_diff()` |
+| Seek an index file | `seek_index_file_to_byte_offset()`, `$index_file_handle` |
+| Open push-plan output file | `open_push_plan_output_file_at_byte_offset()`, `$push_plan_output_file_handle` |
 
 ## Protocol names
 
