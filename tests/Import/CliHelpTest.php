@@ -22,6 +22,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--filter=MODE', $output);
         $this->assertStringContainsString('--remap SOURCE TARGET', $output);
         $this->assertStringContainsString('--only=SOURCE', $output);
+        $this->assertStringContainsString('--exclude=SOURCE', $output);
     }
 
     public function testFilesIndexHelpNamesTheNextRemoteIndexFile(): void

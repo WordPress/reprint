@@ -369,6 +369,7 @@ class PullState
     public ?int $max_allowed_packet = null;
     /** @var string|null Fingerprint of resolved path mappings; guards files-pull reuse. */
     public ?string $resolved_path_mappings_fingerprint = null;
+    /** @var string|null Files-pull path-selection fingerprint; the key name is retained for state-file compatibility. */
     public ?string $files_pull_only_fingerprint = null;
     public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
