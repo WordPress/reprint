@@ -83,9 +83,9 @@ class RemapResolveTest extends TestCase
         $this->call($c, 'assert_resolved_path_mappings_consistent');
     }
 
-    private function writeLocalIndex(): void
+    private function writeRemoteIndex(): void
     {
-        file_put_contents($this->stateDir . '/pull/local-index.jsonl', "{}\n");
+        file_put_contents($this->stateDir . '/pull/remote-index.jsonl', "{}\n");
     }
 
     // --- resolution: SOURCE TARGET → one source => target rule -------------
@@ -224,16 +224,16 @@ class RemapResolveTest extends TestCase
         $this->assertRemapConsistent($c);
     }
 
-    public function testRejectsRemapWithUntrackedExistingFilesIndex(): void
+    public function testRejectsRemapWithUntrackedExistingRemoteIndex(): void
     {
-        $this->writeLocalIndex();
+        $this->writeRemoteIndex();
         $c = $this->client(array('content_dir' => '/var/www/html/wp-content'));
         $this->set($c, 'resolved_path_mappings', array(
             '/var/www/html/wp-content' => $this->root . '/wp-content',
         ));
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('existing files index');
+        $this->expectExceptionMessage('existing remote index');
         $this->assertRemapConsistent($c);
     }
 

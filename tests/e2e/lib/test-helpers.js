@@ -677,15 +677,15 @@ export function readAuditLog(outputDir) {
 }
 
 /**
- * Assert that the import indexed at least minCount files.
- * Checks pull/local-index.jsonl line count.
+ * Assert that the remote index contains at least minCount entries.
+ * Checks pull/remote-index.jsonl line count.
  */
-export function assertFileCount(outputDir, minCount = 3000) {
-    const indexPath = join(outputDir, 'pull/local-index.jsonl');
-    assert.ok(existsSync(indexPath), `Expected ${indexPath} to exist`);
-    const count = countJsonlLines(indexPath);
-    assert.ok(count >= minCount,
-        `Expected at least ${minCount} files in index, got ${count}`);
+export function assertRemoteIndexEntryCount(outputDir, minCount = 3000) {
+    const remoteIndexFile = join(outputDir, 'pull/remote-index.jsonl');
+    assert.ok(existsSync(remoteIndexFile), `Expected ${remoteIndexFile} to exist`);
+    const remoteIndexEntryCount = countJsonlLines(remoteIndexFile);
+    assert.ok(remoteIndexEntryCount >= minCount,
+        `Expected at least ${minCount} remote index entries, got ${remoteIndexEntryCount}`);
 }
 
 /**

@@ -209,8 +209,8 @@ class FilesPullStateTest extends TestCase
      */
     public function testAbortClearsCompletedStatus()
     {
-        $indexFile = $this->stateDir . '/pull/local-index.jsonl';
-        file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
+        $remoteIndexFile = $this->stateDir . '/pull/remote-index.jsonl';
+        file_put_contents($remoteIndexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
             "active_resumable_command" => [
@@ -239,8 +239,8 @@ class FilesPullStateTest extends TestCase
      */
     public function testAbortThenRerunStartsFresh()
     {
-        $indexFile = $this->stateDir . '/pull/local-index.jsonl';
-        file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
+        $remoteIndexFile = $this->stateDir . '/pull/remote-index.jsonl';
+        file_put_contents($remoteIndexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
             "active_resumable_command" => [
@@ -323,17 +323,17 @@ class FilesPullStateTest extends TestCase
     // ---------------------------------------------------------------
 
     /**
-     * In preserve-local mode, a file that is in the local index and changed
+     * In preserve-local mode, a file that is in the remote index and changed
      * remotely (different ctime) must be added to the fetch list.
      *
      * Preserve-local protects pre-existing local files, not files we
-     * previously synced. A changed file in the local index is ours to update.
+     * previously synced. A changed file in the remote index is ours to update.
      */
     public function testDeltaDiffRedownloadsChangedIndexedFile()
     {
-        // Local index: file synced at ctime 1000
-        $localIndex = $this->stateDir . '/pull/local-index.jsonl';
-        file_put_contents($localIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 1000, 200));
+        // Remote index: file synced at ctime 1000
+        $remoteIndexFile = $this->stateDir . '/pull/remote-index.jsonl';
+        file_put_contents($remoteIndexFile, $this->indexLine('/wp-content/themes/flavor/style.css', 1000, 200));
 
         // Next remote index: same file at ctime 2000 (changed)
         $nextRemoteIndexFile = $this->stateDir . '/pull/remote-index.next.jsonl';
@@ -354,26 +354,26 @@ class FilesPullStateTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
+        $diffMethod = $reflection->getMethod('compare_remote_indexes_and_build_fetch_list');
         $diffMethod->invoke($client);
 
         $downloads = $this->readFetchList();
         $this->assertContains(
             '/wp-content/themes/flavor/style.css',
             $downloads,
-            "A changed file in the local index must be re-downloaded, not skipped by preserve-local",
+            "A changed file in the remote index must be re-downloaded, not skipped by preserve-local",
         );
     }
 
     /**
-     * In preserve-local mode, a file that is NOT in the local index but
+     * In preserve-local mode, a file that is NOT in the remote index but
      * exists locally (pre-existing) must be skipped.
      */
     public function testDeltaDiffSkipsPreExistingLocalFile()
     {
-        // Local index: empty (file was never synced by us)
-        $localIndex = $this->stateDir . '/pull/local-index.jsonl';
-        file_put_contents($localIndex, '');
+        // Remote index: empty (file was never synced by us)
+        $remoteIndexFile = $this->stateDir . '/pull/remote-index.jsonl';
+        file_put_contents($remoteIndexFile, '');
 
         // Next remote index: file exists on remote
         $nextRemoteIndexFile = $this->stateDir . '/pull/remote-index.next.jsonl';
@@ -394,7 +394,7 @@ class FilesPullStateTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
+        $diffMethod = $reflection->getMethod('compare_remote_indexes_and_build_fetch_list');
         $diffMethod->invoke($client);
 
         $downloads = $this->readFetchList();

@@ -31,11 +31,13 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('pull/remote-index.next.jsonl', $output);
     }
 
-    public function testFilesPullHelpNamesTheNextRemoteIndexFile(): void
+    public function testFilesPullHelpNamesTheRemoteIndexFiles(): void
     {
         $output = $this->runHelp('files-pull');
 
+        $this->assertStringContainsString('pull/remote-index.jsonl', $output);
         $this->assertStringContainsString('pull/remote-index.next.jsonl', $output);
+        $this->assertStringContainsString('Remote index', $output);
         $this->assertStringContainsString('Next remote index', $output);
     }
 

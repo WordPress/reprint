@@ -279,9 +279,9 @@ class Pull
             // checkpoint first so the stage computes a fresh delta.
             $state_dir = $this->client->state_dir;
             if ($state_command === 'files-pull' && in_array('files-pull', $stages, true)) {
-                // Keep the local file index, but clear transient files-pull
-                // download state so this pipeline computes a fresh
-                // remote-vs-local delta.
+                // Keep the remote index, but clear transient files-pull state
+                // so this pipeline downloads a next remote index and compares
+                // it with the remote index.
                 $state = $this->client->get_state();
                 $state->active_resumable_command->command_name = null;
                 $state->active_resumable_command->completion_state = null;

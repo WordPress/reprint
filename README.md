@@ -609,8 +609,8 @@ If the JSON is invalid on load, the importer renames it to
   "diff": {
     // Byte offset into the next remote index.
     "next_remote_index_byte_offset": 1024,
-    // Last local index entry path consumed before that byte offset.
-    "last_consumed_local_index_entry_path": "base64..."
+    // Last remote index entry path consumed before that byte offset.
+    "last_consumed_remote_index_entry_path": "base64..."
   },
   "index": {
     "cursor": "..."               // file_index cursor
@@ -692,7 +692,7 @@ truncated or rotated, so it provides a complete history of the migration.
 ```
 [2025-01-15 10:30:01] VOLATILE | path=/srv/htdocs/wp-content/debug.log | count=1
 [2025-01-15 10:30:05] VOLATILE CLEARED | path=/srv/htdocs/wp-content/debug.log
-[2025-01-15 10:31:12] FILE DELETE | pull/local-index.wal
+[2025-01-15 10:31:12] FILE TRUNCATE | /tmp/reprint-state/pull/remote-index.wal | remote index WAL batch applied
 ```
 
 Pass `--verbose` to also print audit log entries to the console as they happen.
@@ -720,4 +720,4 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the local index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
