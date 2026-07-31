@@ -97,7 +97,7 @@ describe('Import: Basic File Sync', () => {
         assert.ok(existsSync(indexFile), 'Expected local index to be preserved after --abort');
 
         // Transient files should be cleaned up
-        assert.ok(!existsSync(join(tempDir, 'pull/remote-index.jsonl')), 'Expected remote index to be deleted');
+        assert.ok(!existsSync(join(tempDir, 'pull/remote-index.next.jsonl')), 'Expected next remote index to be deleted');
         assert.ok(!existsSync(join(tempDir, 'pull/fetch-list.jsonl')), 'Expected fetch list to be deleted');
     });
 

@@ -244,7 +244,7 @@ class FollowedSymlinksRootTest extends TestCase
         $rc->getProperty('follow_symlinks')->setValue($c, true);
         $target = $this->root . '/wp-content/themes/x'; // realpath-clean, so it is its own cache key
         // Pretend the target subtree was followed + indexed.
-        $rc->getProperty('remote_index_prefix_cache')->setValue($c, [$target => true]);
+        $rc->getProperty('next_remote_index_prefix_cache')->setValue($c, [$target => true]);
 
         $result = $rc->getMethod('rewrite_symlink_target_for_local_filesystem')->invoke(
             $c,
@@ -271,7 +271,7 @@ class FollowedSymlinksRootTest extends TestCase
         $rc->getProperty('local_followed_symlinks_root')->setValue($c, $this->root . '/.followed-symlinks-root');
         $rc->getProperty('pull_only_files_with_path_prefixes')->setValue($c, ['/src/wp-content']);
         $rc->getProperty('follow_symlinks')->setValue($c, true);
-        $rc->getProperty('remote_index_prefix_cache')->setValue($c, ['/opt/data' => true]);
+        $rc->getProperty('next_remote_index_prefix_cache')->setValue($c, ['/opt/data' => true]);
 
         $entry = json_encode([
             'path' => base64_encode('/src/wp-content/data'),
@@ -279,7 +279,7 @@ class FollowedSymlinksRootTest extends TestCase
             'type' => 'link',
             'intermediate' => true,
         ]);
-        file_put_contents($this->stateDir . '/pull/remote-index.jsonl', $entry . "\n");
+        file_put_contents($this->stateDir . '/pull/remote-index.next.jsonl', $entry . "\n");
 
         $rc->getMethod('recreate_intermediate_symlinks')->invoke($c);
 

@@ -46,12 +46,12 @@ local relative path to a push-root-relative path.
 
 ## Indexes and mappings
 
-- A **remote index** is the last remote filesystem state accepted by pull.
-  Its entries use remote absolute paths and remote-observed metadata. Use
-  `$remote_index_file`.
-- A **local index** is the locally accounted pull baseline. Its entries use
-  remote absolute paths as the merge key and locally observed metadata. Use
-  `$local_index_file`.
+- A **local index** is the pull baseline stored locally after remote operations
+  are applied. Its entries use remote absolute paths and remote-observed
+  metadata. Use `$local_index_file`.
+- A **next remote index** is the snapshot of the remote paths selected for the
+  current pull. Its entries use remote absolute paths and remote-observed
+  metadata. Use `$next_remote_index_file`.
 - A **fresh local index** is the current filesystem-root scan created while
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
@@ -160,9 +160,9 @@ development. There are no compatibility aliases or migration paths.
 The **state directory** is the caller-supplied `<state-dir>`; use `$state_dir`.
 Reprint uses it exactly as supplied and does not append `.reprint`. A consumer
 may choose `.reprint` or any other private directory name. The **pull state
-directory** is `<state-dir>/pull`; use `$pull_state_directory`. Shared and pull
-filenames inside the state directory do not begin with a dot or repeat the
-scope supplied by their parent directories.
+directory** is `<state-dir>/pull`; use `$pull_state_directory`. Filenames
+inside the state directory do not begin with a dot or repeat the scope supplied
+by their parent directories.
 
 ```text
 <state-dir>/
@@ -173,7 +173,7 @@ scope supplied by their parent directories.
 │   ├── state.json
 │   ├── local-index.jsonl
 │   ├── local-index.wal
-│   ├── remote-index.jsonl
+│   ├── remote-index.next.jsonl
 │   ├── fetch-list.jsonl
 │   ├── skipped-fetch-list.jsonl
 │   ├── volatile-files.json
@@ -193,7 +193,7 @@ Use these path names:
 | Pull state file | `$pull_state_file` |
 | Local index file | `$local_index_file` |
 | Local index WAL | `$local_index_wal_path` |
-| Remote index file | `$remote_index_file` |
+| Next remote index file | `$next_remote_index_file` |
 | Fetch list file | `$fetch_list_file` |
 | Skipped fetch list file | `$skipped_fetch_list_file` |
 | Volatile files file | `$volatile_files_file` |

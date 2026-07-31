@@ -79,10 +79,10 @@ describe('Import: Symlink cycle detection', () => {
         // A WordPress site has ~4000-6000 files.  Without cycle detection
         // the self-symlink would double that on every depth level.  With
         // cycle detection the total should stay in the normal range.
-        const remoteIndex = join(tempDir, 'pull/remote-index.jsonl');
-        assert.ok(existsSync(remoteIndex), 'Remote index should exist');
+        const nextRemoteIndexFile = join(tempDir, 'pull/remote-index.next.jsonl');
+        assert.ok(existsSync(nextRemoteIndexFile), 'Next remote index should exist');
 
-        const count = countJsonlLines(remoteIndex);
+        const count = countJsonlLines(nextRemoteIndexFile);
         // The site has ~4-6K real files.  Allow up to 2x for one level
         // of symlink following, but not 3x+ which indicates a cycle leak.
         assert.ok(
@@ -93,8 +93,8 @@ describe('Import: Symlink cycle detection', () => {
     });
 
     it('the marker file is indexed exactly once per reachable path', () => {
-        const remoteIndex = join(tempDir, 'pull/remote-index.jsonl');
-        const content = readFileSync(remoteIndex, 'utf-8');
+        const nextRemoteIndexFile = join(tempDir, 'pull/remote-index.next.jsonl');
+        const content = readFileSync(nextRemoteIndexFile, 'utf-8');
         const lines = content.split('\n').filter(l => l.trim());
 
         // Decode all paths and count how many end with /marker.txt

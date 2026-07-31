@@ -9,7 +9,7 @@ require_once __DIR__ . '/../../importer/import.php';
 /**
  * Verify recovery from cURL timeouts during streaming fetches.
  *
- * Each fetch method (fetch_sql, fetch_file_batch, fetch_remote_index,
+ * Each fetch method (fetch_sql, fetch_file_batch, fetch_next_remote_index,
  * fetch_database_index) is tested by injecting a CurlTimeoutException. SQL retries
  * in the same invocation; the other phases save partial state for a later run.
  *
@@ -279,10 +279,10 @@ class CurlTimeoutRecoveryTest extends TestCase
     }
 
     // ---------------------------------------------------------------
-    // fetch_remote_index: timeout saves state and returns false
+    // fetch_next_remote_index: timeout saves state and returns false
     // ---------------------------------------------------------------
 
-    public function testRemoteIndexTimeoutSavesPartialState()
+    public function testNextRemoteIndexTimeoutSavesPartialState()
     {
         $this->writeState([
             "active_resumable_command" => [
@@ -308,12 +308,12 @@ class CurlTimeoutRecoveryTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $fetchRemoteIndex = $reflection->getMethod('fetch_remote_index');
-        $result = $fetchRemoteIndex->invoke($client);
+        $fetchNextRemoteIndex = $reflection->getMethod('fetch_next_remote_index');
+        $result = $fetchNextRemoteIndex->invoke($client);
 
         $this->assertFalse(
             $result,
-            "fetch_remote_index should return false on timeout"
+            "fetch_next_remote_index should return false on timeout"
         );
 
         $state = $this->readState();
@@ -550,8 +550,8 @@ class CurlTimeoutRecoveryTest extends TestCase
             SuccessTestClient::class,
         );
 
-        $fetchRemoteIndex = $reflection->getMethod('fetch_remote_index');
-        $fetchRemoteIndex->invoke($client);
+        $fetchNextRemoteIndex = $reflection->getMethod('fetch_next_remote_index');
+        $fetchNextRemoteIndex->invoke($client);
 
         $state = $this->readState();
         $this->assertEquals(

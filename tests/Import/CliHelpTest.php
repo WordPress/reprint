@@ -24,6 +24,21 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--only=SOURCE', $output);
     }
 
+    public function testFilesIndexHelpNamesTheNextRemoteIndexFile(): void
+    {
+        $output = $this->runHelp('files-index');
+
+        $this->assertStringContainsString('pull/remote-index.next.jsonl', $output);
+    }
+
+    public function testFilesPullHelpNamesTheNextRemoteIndexFile(): void
+    {
+        $output = $this->runHelp('files-pull');
+
+        $this->assertStringContainsString('pull/remote-index.next.jsonl', $output);
+        $this->assertStringContainsString('Next remote index', $output);
+    }
+
     public function testPullDbHelpShowsRequiredAndDatabaseOptions(): void
     {
         $output = $this->runHelp('pull-db');

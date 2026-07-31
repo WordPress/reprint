@@ -45,7 +45,7 @@ final class ReprintProcessLockTest extends TestCase
             'pull_state_file' => $this->root . '/state/pull/state.json',
             'local_index_file' => $this->root . '/state/pull/local-index.jsonl',
             'local_index_wal_path' => $this->root . '/state/pull/local-index.wal',
-            'remote_index_file' => $this->root . '/state/pull/remote-index.jsonl',
+            'next_remote_index_file' => $this->root . '/state/pull/remote-index.next.jsonl',
             'fetch_list_file' => $this->root . '/state/pull/fetch-list.jsonl',
             'skipped_fetch_list_file' => $this->root . '/state/pull/skipped-fetch-list.jsonl',
             'volatile_files_file' => $this->root . '/state/pull/volatile-files.json',

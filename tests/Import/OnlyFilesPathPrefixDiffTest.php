@@ -7,7 +7,7 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * --only: the diff must reconcile only within the --only file path prefixes. A remote index built
+ * --only: the diff must reconcile only within the --only file path prefixes. A next remote index built
  * with --only lists selected paths only, so the delete drains in
  * diff_indexes_and_build_fetch_list() would otherwise wrongly delete every
  * unselected local entry. Guard both drains so unselected local files +
@@ -129,7 +129,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
     public function testOnlyFilesPrefixDiffKeepsUnselectedAndDeletesSelectedOrphan(): void
     {
         // Local index (sorted): an unselected entry, a matched selected file,
-        // and a selected orphan absent from the --only remote index. The
+        // and a selected orphan absent from the --only next remote index. The
         // delete drains must reconcile only within the --only file prefixes, so the local index
         // accumulates as a union across files-pull --only runs.
         $this->writeIndex('pull/local-index.jsonl',
@@ -137,7 +137,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             . $this->indexLine('/wp-content/keep.txt', 1000, 10)       // matched
             . $this->indexLine('/wp-content/old/orphan.txt', 1000, 10) // selected orphan
         );
-        $this->writeIndex('pull/remote-index.jsonl',
+        $this->writeIndex('pull/remote-index.next.jsonl',
             $this->indexLine('/wp-content/keep.txt', 1000, 10)
         );
 
@@ -158,7 +158,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
     public function testOnlyRootItselfSurvivesTheDeleteDrains(): void
     {
-        // A remote index built with --only lists each selected directory's
+        // A next remote index built with --only lists each selected directory's
         // *contents* but never the directory itself, so the --only roots
         // always look deleted-on-remote to the diff. The drains must not
         // delete them: that would recursively remove the very directories
@@ -169,7 +169,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
             . $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
             . $this->indexLine('/wp-content/themes/old/orphan.css', 1000, 10)
         );
-        $this->writeIndex('pull/remote-index.jsonl',
+        $this->writeIndex('pull/remote-index.next.jsonl',
             $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
         );
 

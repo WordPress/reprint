@@ -249,7 +249,7 @@ class ImportClient
 
     /**
      * @var string Local index file pull/local-index.jsonl. It tracks each accounted
-     * path's ctime, size, and type for the next remote-index comparison.
+     * path's ctime, size, and type for comparison with the next remote index.
      */
     private $local_index_file;
 
@@ -287,10 +287,10 @@ class ImportClient
     private $last_local_index_wal_type = null;
 
     /**
-     * @var string Remote index file pull/remote-index.jsonl, including
+     * @var string Next remote index file pull/remote-index.next.jsonl, including
      * directory `empty` fields when available.
      */
-    private $remote_index_file;
+    private $next_remote_index_file;
 
     /** @var string Path to pull/fetch-list.jsonl — files to download, computed by diffing remote vs local index. */
     private $fetch_list_file;
@@ -377,10 +377,10 @@ class ImportClient
      * symlink, or directory that already exists at a path the remote tries to write
      * is skipped and never added to the local index.
      *
-     * On subsequent delta syncs, preserved paths survive because the importer only
-     * acts on paths listed in the remote index. Local-only hosting infrastructure
-     * (e.g. __wp__ symlinks, drop-in symlinks, shared plugin directories) is simply
-     * invisible to the diff and never touched.
+     * On subsequent delta syncs, preserved paths survive because the importer compares
+     * the next remote index only with paths it previously added to the local index.
+     * A preserved local path was never added to that baseline, so its absence from the
+     * next remote index cannot schedule it for deletion.
      *
      * Set via --on-fs-root-nonempty, persisted in state so it survives across invocations.
      */
@@ -443,15 +443,15 @@ class ImportClient
     private Pull $pull;
 
     /** @var int Cumulative count of index entries written (survives retries). */
-    private $index_entries_counted = 0;
+    private $next_remote_index_entries_counted = 0;
 
     /**
-     * Memoized lookups for "does remote index contain this path or any descendant path?"
+     * Memoized lookups for "does next remote index contain this path or any descendant path?"
      * keyed by normalized absolute path.
      *
      * @var array<string,bool>
      */
-    private $remote_index_prefix_cache = [];
+    private $next_remote_index_prefix_cache = [];
 
     /** @var int|null Current step in a multi-step pipeline (1-indexed). Set via --step. */
     private $pipeline_step = null;
@@ -520,8 +520,8 @@ class ImportClient
         $this->local_index_file = $this->state_dir . "/pull/local-index.jsonl";
         $this->local_index_wal_path =
             $this->state_dir . "/pull/local-index.wal";
-        $this->remote_index_file =
-            $this->state_dir . "/pull/remote-index.jsonl";
+        $this->next_remote_index_file =
+            $this->state_dir . "/pull/remote-index.next.jsonl";
         $this->fetch_list_file =
             $this->state_dir . "/pull/fetch-list.jsonl";
         $this->skipped_fetch_list_file =
@@ -1929,9 +1929,9 @@ class ImportClient
                 $this->get_state()->active_resumable_command->completion_state = null;
                 $this->get_state()->active_resumable_command->current_stage = null;
                 $this->get_state()->index = new RemoteFileIndexCursorState();
-                if (file_exists($this->remote_index_file)) {
-                    @unlink($this->remote_index_file);
-                    $this->audit_log("FILE DELETE | {$this->remote_index_file}");
+                if (file_exists($this->next_remote_index_file)) {
+                    @unlink($this->next_remote_index_file);
+                    $this->audit_log("FILE DELETE | {$this->next_remote_index_file}");
                 }
                 $this->save_state();
                 break;
@@ -2018,9 +2018,9 @@ class ImportClient
         $this->local_index_wal_handle = null;
         $this->local_index_wal_record_count = 0;
 
-        if (file_exists($this->remote_index_file)) {
-            @unlink($this->remote_index_file);
-            $this->audit_log("FILE DELETE | {$this->remote_index_file}");
+        if (file_exists($this->next_remote_index_file)) {
+            @unlink($this->next_remote_index_file);
+            $this->audit_log("FILE DELETE | {$this->next_remote_index_file}");
         }
         if (file_exists($this->fetch_list_file)) {
             @unlink($this->fetch_list_file);
@@ -2923,7 +2923,7 @@ class ImportClient
         $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
 
         if ($stage === "index") {
-            $complete = $this->fetch_remote_index();
+            $complete = $this->fetch_next_remote_index();
             if (!$complete) {
                 $this->get_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state();
@@ -2937,7 +2937,7 @@ class ImportClient
                     return;
                 }
             }
-            $this->sort_index_file($this->remote_index_file);
+            $this->sort_index_file($this->next_remote_index_file);
             $this->get_state()->active_resumable_command->current_stage = "diff";
             $this->get_state()->diff = new FileDiffProgressState();
             if (file_exists($this->fetch_list_file)) {
@@ -2988,7 +2988,7 @@ class ImportClient
                 $green = "\033[32m";
                 $dim = "\033[2m";
                 $r = "\033[0m";
-                $scanned = number_format($this->index_entries_counted);
+                $scanned = number_format($this->next_remote_index_entries_counted);
                 $this->progress->clear_progress_line();
                 $this->progress->print_line("  {$green}✓{$r} Scanned {$dim}— {$scanned} entries{$r}\n");
                 $total = $this->count_newlines($this->fetch_list_file);
@@ -3091,7 +3091,7 @@ class ImportClient
 
         // Recreate intermediate path symlinks so the full symlink chain
         // works locally.  The server discovers these (e.g. /srv/wordpress
-        // -> /wordpress) and includes them in the remote index.
+        // -> /wordpress) and includes them in the next remote index.
         if ($this->follow_symlinks) {
             $this->recreate_intermediate_symlinks();
         }
@@ -3101,9 +3101,9 @@ class ImportClient
      * Command: files-index
      *
      * Rules:
-     * - Streams the full remote index (DFS across directories) until complete
+     * - Streams the full next remote index (DFS across directories) until complete
      * - If already completed: require --abort flag
-     * - If abort flag: clear remote index file and index cursor
+     * - If abort flag: clear next remote index file and index cursor
      */
     private function run_files_index(): void
     {
@@ -3156,7 +3156,7 @@ class ImportClient
         $attempts = 0;
         $last_cursor = $this->get_state()->index->cursor ?? null;
         while (true) {
-            $complete = $this->fetch_remote_index();
+            $complete = $this->fetch_next_remote_index();
             if ($complete) {
                 break;
             }
@@ -3190,37 +3190,39 @@ class ImportClient
             $this->discover_symlink_targets();
         }
 
-        $this->sort_index_file($this->remote_index_file);
+        $this->sort_index_file($this->next_remote_index_file);
         $this->get_state()->active_resumable_command->completion_state = "complete";
         $this->get_state()->active_resumable_command->current_stage = null;
         $this->save_state();
 
-        $count = 0;
-        if (file_exists($this->remote_index_file)) {
-            $h = fopen($this->remote_index_file, "r");
-            if ($h) {
-                while (fgets($h) !== false) {
-                    $count++;
+        $next_remote_index_entry_count = 0;
+        if (file_exists($this->next_remote_index_file)) {
+            $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
+            if ($next_remote_index_file_handle) {
+                while (fgets($next_remote_index_file_handle) !== false) {
+                    $next_remote_index_entry_count++;
                 }
-                fclose($h);
+                fclose($next_remote_index_file_handle);
             }
         }
         $this->audit_log(
-            sprintf("files-index complete: %d entries indexed", $count),
+            sprintf("files-index complete: %d entries indexed", $next_remote_index_entry_count),
             true,
         );
 
-        $this->progress->show_lifecycle_line("files-index complete: {$count} entries indexed\n");
-        $this->progress->show_lifecycle_line("Remote index: {$this->remote_index_file}\n");
+        $this->progress->show_lifecycle_line(
+            "files-index complete: {$next_remote_index_entry_count} entries indexed\n"
+        );
+        $this->progress->show_lifecycle_line("Next remote index: {$this->next_remote_index_file}\n");
         $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
         $this->output_progress([
             "type" => "lifecycle",
             "event" => "complete",
             "command" => "files-index",
-            "entries_indexed" => $count,
-            "remote_index" => $this->remote_index_file,
+            "entries_indexed" => $next_remote_index_entry_count,
+            "next_remote_index_file" => $this->next_remote_index_file,
             "audit_log" => $this->audit_log_file,
-            "message" => "files-index complete: {$count} entries indexed",
+            "message" => "files-index complete: {$next_remote_index_entry_count} entries indexed",
         ], true);
     }
 
@@ -3228,7 +3230,7 @@ class ImportClient
      * Recursively discover directories that need indexing beyond the primary
      * export roots.
      *
-     * Scans the remote index for symlink entries with a "target" field,
+     * Scans the next remote index for symlink entries with a "target" field,
      * resolves relative targets to absolute paths, and indexes each target
      * directory. Repeats until the queue is drained, with cycle detection.
      */
@@ -3245,7 +3247,7 @@ class ImportClient
             $visited[$root] = true;
         }
 
-        $queue = $this->extract_symlink_dirs_from_index($visited);
+        $queue = $this->extract_symlink_directories_from_next_remote_index($visited);
 
         while (!empty($queue)) {
             $dir = array_shift($queue);
@@ -3281,7 +3283,7 @@ class ImportClient
                 "message" => "Following symlink target: {$dir}",
             ], true);
 
-            // Reset the index cursor so fetch_remote_index starts fresh
+            // Reset the index cursor so fetch_next_remote_index starts fresh
             // for this directory, but appends to the existing index file.
             // Note we are not losing the previous cursor position. This code
             // runs only after the previous directory was fully indexed so
@@ -3293,7 +3295,7 @@ class ImportClient
             $last_cursor = null;
             while (true) {
                 try {
-                $complete = $this->fetch_remote_index($dir);
+                $complete = $this->fetch_next_remote_index($dir);
                 } catch (RuntimeException $e) {
                     // We won't be able to follow every symlink. If
                     // the response seems like the remote server rejecting
@@ -3349,7 +3351,7 @@ class ImportClient
             }
 
             // Scan newly added entries for more symlink targets
-            $new_targets = $this->extract_symlink_dirs_from_index($visited);
+            $new_targets = $this->extract_symlink_directories_from_next_remote_index($visited);
             foreach ($new_targets as $target) {
                 if (!isset($visited[$target])) {
                     $queue[] = $target;
@@ -3359,37 +3361,37 @@ class ImportClient
     }
 
     /**
-     * Scan the remote index file for symlink entries whose targets are
+     * Scan the next remote index file for symlink entries whose targets are
      * directories not already in $visited.  Returns an array of real paths.
      *
      * Skips entries marked as "intermediate" — those are path-component
      * symlinks (e.g. /srv/wordpress -> /wordpress) emitted by the server's
      * discover_path_symlinks() for local recreation only, not for indexing.
      */
-    private function extract_symlink_dirs_from_index(array $visited): array
+    private function extract_symlink_directories_from_next_remote_index(array $visited): array
     {
         $symlink_targets = [];
-        if (!file_exists($this->remote_index_file)) {
+        if (!file_exists($this->next_remote_index_file)) {
             return $symlink_targets;
         }
 
-        $handle = fopen($this->remote_index_file, "r");
-        if (!$handle) {
+        $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
+        if (!$next_remote_index_file_handle) {
             return $symlink_targets;
         }
 
-        while (($line = fgets($handle)) !== false) {
-            $entry = json_decode($line, true);
-            if (!is_array($entry)) {
+        while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
+            $next_remote_index_entry = json_decode($next_remote_index_json_line, true);
+            if (!is_array($next_remote_index_entry)) {
                 continue;
             }
-            if (($entry["type"] ?? "") !== "link") {
+            if (($next_remote_index_entry["type"] ?? "") !== "link") {
                 continue;
             }
-            if (!empty($entry["intermediate"])) {
+            if (!empty($next_remote_index_entry["intermediate"])) {
                 continue;
             }
-            $symlink_target_encoded = $entry["target"] ?? null;
+            $symlink_target_encoded = $next_remote_index_entry["target"] ?? null;
             if (!is_string($symlink_target_encoded) || $symlink_target_encoded === "") {
                 continue;
             }
@@ -3418,7 +3420,7 @@ class ImportClient
 
             $symlink_targets[] = $symlink_target;
         }
-        fclose($handle);
+        fclose($next_remote_index_file_handle);
 
         return array_values(array_unique($symlink_targets));
     }
@@ -3441,32 +3443,32 @@ class ImportClient
      */
     private function recreate_intermediate_symlinks(): void
     {
-        if (!file_exists($this->remote_index_file)) {
+        if (!file_exists($this->next_remote_index_file)) {
             return;
         }
 
-        $h = fopen($this->remote_index_file, "r");
-        if (!$h) {
+        $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
+        if (!$next_remote_index_file_handle) {
             return;
         }
 
         $created = 0;
-        while (($line = fgets($h)) !== false) {
-            $entry = json_decode($line, true);
-            if (!is_array($entry)) {
+        while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
+            $next_remote_index_entry = json_decode($next_remote_index_json_line, true);
+            if (!is_array($next_remote_index_entry)) {
                 continue;
             }
-            if (($entry["type"] ?? "") !== "link") {
+            if (($next_remote_index_entry["type"] ?? "") !== "link") {
                 continue;
             }
-            if (empty($entry["intermediate"])) {
+            if (empty($next_remote_index_entry["intermediate"])) {
                 continue;
             }
-            $symlink_target_encoded = $entry["target"] ?? null;
+            $symlink_target_encoded = $next_remote_index_entry["target"] ?? null;
             if (!is_string($symlink_target_encoded) || $symlink_target_encoded === "") {
                 continue;
             }
-            $path_encoded = $entry["path"] ?? null;
+            $path_encoded = $next_remote_index_entry["path"] ?? null;
             if (!is_string($path_encoded) || $path_encoded === "") {
                 continue;
             }
@@ -3479,7 +3481,12 @@ class ImportClient
              */
             $remote_absolute_path = base64_decode($path_encoded, true);
             $symlink_target = base64_decode($symlink_target_encoded, true);
-            if ($remote_absolute_path === false || $remote_absolute_path === "" || $symlink_target === false || $symlink_target === "") {
+            if (
+                $remote_absolute_path === false ||
+                $remote_absolute_path === "" ||
+                $symlink_target === false ||
+                $symlink_target === ""
+            ) {
                 continue;
             }
 
@@ -3569,7 +3576,7 @@ class ImportClient
                 );
             }
         }
-        fclose($h);
+        fclose($next_remote_index_file_handle);
 
         if ($created > 0) {
             $this->audit_log(
@@ -3816,31 +3823,31 @@ class ImportClient
      * Print file index statistics: total indexed files and their size,
      * plus pending downloads and their size.
      *
-     * Reads pull/remote-index.jsonl for all indexed files and
+     * Reads pull/remote-index.next.jsonl for all indexed files and
      * pull/fetch-list.jsonl for files not yet downloaded.
      */
     private function run_files_stats(): void
     {
-        $remote_index = $this->remote_index_file;
+        $next_remote_index_file = $this->next_remote_index_file;
         $fetch_list = $this->fetch_list_file;
 
-        // Single pass over the remote index to build a path→size map.
+        // Single pass over the next remote index to build a path→size map.
         // Duplicates (from overlapping symlink targets) are collapsed
         // automatically because later entries overwrite earlier ones in
         // the map, so the counts we derive are always deduplicated.
         $size_by_path = [];
 
-        if (is_file($remote_index)) {
-            $handle = fopen($remote_index, "r");
-            if ($handle) {
-                while (($line = fgets($handle)) !== false) {
-                    $entry = $this->parse_index_line($line);
-                    if ($entry === null) {
+        if (is_file($next_remote_index_file)) {
+            $next_remote_index_file_handle = fopen($next_remote_index_file, "r");
+            if ($next_remote_index_file_handle) {
+                while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
+                    $next_remote_index_entry = $this->parse_index_line($next_remote_index_json_line);
+                    if ($next_remote_index_entry === null) {
                         continue;
                     }
-                    $size_by_path[$entry["path"]] = $entry["size"];
+                    $size_by_path[$next_remote_index_entry["path"]] = $next_remote_index_entry["size"];
                 }
-                fclose($handle);
+                fclose($next_remote_index_file_handle);
             }
         }
 
@@ -5982,7 +5989,7 @@ class ImportClient
         }
 
         $params = $this->get_tuned_params("file_fetch");
-        // Always send directory[] – see comment in fetch_remote_index().
+        // Always send directory[] – see comment in fetch_next_remote_index().
         $export_dirs = $this->get_export_directories();
         if (!empty($export_dirs)) {
             $params["directory"] = $export_dirs;
@@ -6228,9 +6235,9 @@ class ImportClient
     }
 
     /**
-     * Download the remote index stream and write to disk.
+     * Download the next remote index stream and write to disk.
      */
-    private function fetch_remote_index(?string $list_dir_override = null): bool
+    private function fetch_next_remote_index(?string $list_dir_override = null): bool
     {
         $cursor = $this->get_state()->index->cursor;
 
@@ -6242,27 +6249,27 @@ class ImportClient
             );
         }
 
-        $mode = file_exists($this->remote_index_file) ? "a" : "w";
+        $next_remote_index_file_mode = file_exists($this->next_remote_index_file) ? "a" : "w";
         // Initialize the index counter from the existing file so resume
         // shows a monotonically increasing count.
-        if ($mode === "a" && $this->index_entries_counted === 0) {
-            $this->index_entries_counted = $this->count_newlines($this->remote_index_file);
+        if ($next_remote_index_file_mode === "a" && $this->next_remote_index_entries_counted === 0) {
+            $this->next_remote_index_entries_counted = $this->count_newlines($this->next_remote_index_file);
         }
-        if ($mode === "w") {
+        if ($next_remote_index_file_mode === "w") {
             $this->audit_log(
-                "FILE CREATE | {$this->remote_index_file} | downloading fresh remote index",
+                "FILE CREATE | {$this->next_remote_index_file} | downloading next remote index from the beginning",
             );
         } else {
             $this->audit_log(
-                "FILE APPEND | {$this->remote_index_file} | resuming remote index download",
+                "FILE APPEND | {$this->next_remote_index_file} | resuming next remote index download",
             );
         }
-        $handle = fopen($this->remote_index_file, $mode);
-        if (!$handle) {
-            throw new RuntimeException("Failed to open remote index file");
+        $next_remote_index_file_handle = fopen($this->next_remote_index_file, $next_remote_index_file_mode);
+        if (!$next_remote_index_file_handle) {
+            throw new RuntimeException("Failed to open next remote index file");
         }
 
-        $complete = false;
+        $next_remote_index_is_complete = false;
         $chunks_since_save = 0;
 
         $export_dirs = $this->get_export_directories();
@@ -6304,9 +6311,9 @@ class ImportClient
 
         $context->on_chunk = function ($chunk) use (
             &$cursor,
-            &$complete,
+            &$next_remote_index_is_complete,
             &$chunks_since_save,
-            $handle,
+            $next_remote_index_file_handle,
             $context
         ) {
             if ($this->shutdown_requested) {
@@ -6365,17 +6372,17 @@ class ImportClient
                     $size = (int) ($item["size"] ?? 0);
                     $type = (string) ($item["type"] ?? "file");
 
-                    $entry = [
+                    $next_remote_index_entry = [
                         "path" => base64_encode($path),
                         "ctime" => $ctime,
                         "size" => $size,
                         "type" => $type,
                     ];
                     if (isset($item["target"]) && is_string($item["target"]) && $item["target"] !== "") {
-                        $entry["target"] = $item["target"]; // already base64-encoded
+                        $next_remote_index_entry["target"] = $item["target"]; // already base64-encoded
                     }
                     if (!empty($item["intermediate"])) {
-                        $entry["intermediate"] = true;
+                        $next_remote_index_entry["intermediate"] = true;
                     }
                     if (array_key_exists("empty", $item) && !is_bool($item["empty"])) {
                         throw new RuntimeException(
@@ -6384,25 +6391,28 @@ class ImportClient
                         );
                     }
                     if (isset($item["empty"])) {
-                        $entry["empty"] = $item["empty"];
+                        $next_remote_index_entry["empty"] = $item["empty"];
                     }
-                    $line = json_encode(
-                        $entry,
+                    $next_remote_index_json_line = json_encode(
+                        $next_remote_index_entry,
                         JSON_UNESCAPED_SLASHES,
                     );
-                    if ($line === false) {
+                    if ($next_remote_index_json_line === false) {
                         continue;
                     }
-                    $bytes = fwrite($handle, $line . "\n");
-                    if ($bytes === false) {
-                        throw new RuntimeException("Failed to write to remote index file (disk full?)");
+                    $next_remote_index_bytes_written = fwrite(
+                        $next_remote_index_file_handle,
+                        $next_remote_index_json_line . "\n"
+                    );
+                    if ($next_remote_index_bytes_written === false) {
+                        throw new RuntimeException("Failed to write to next remote index file (disk full?)");
                     }
-                    $this->index_entries_counted++;
+                    $this->next_remote_index_entries_counted++;
                 }
-                if ($this->index_entries_counted > 0) {
+                if ($this->next_remote_index_entries_counted > 0) {
                     $this->progress->show_progress_line(
                         "Scanning remote files — " .
-                        number_format($this->index_entries_counted) . " scanned"
+                        number_format($this->next_remote_index_entries_counted) . " scanned"
                     );
                 } else {
                     $this->progress->show_progress_line("Scanning remote files");
@@ -6412,7 +6422,7 @@ class ImportClient
             } elseif ($chunk_type === "metadata") {
                 $this->handle_metadata_chunk($chunk);
             } elseif ($chunk_type === "completion") {
-                $complete =
+                $next_remote_index_is_complete =
                     ($chunk["headers"]["x-status"] ?? "") === "complete";
                 $context->saw_completion = true;
                 $context->response_stats = [
@@ -6450,7 +6460,7 @@ class ImportClient
                 $cursor,
                 $e,
             );
-            fclose($handle);
+            fclose($next_remote_index_file_handle);
             $this->get_state()->index->cursor = $cursor;
             $this->get_state()->active_resumable_command->completion_state = "partial";
             $this->save_state();
@@ -6463,27 +6473,27 @@ class ImportClient
             $wall_time,
             $context->response_stats ?? [],
         );
-        fclose($handle);
+        fclose($next_remote_index_file_handle);
 
-        $this->get_state()->index->cursor = $complete ? null : $cursor;
+        $this->get_state()->index->cursor = $next_remote_index_is_complete ? null : $cursor;
         $this->save_state();
 
-        return $complete;
+        return $next_remote_index_is_complete;
     }
 
     /**
-     * Diff local index against remote index and build fetch list.
+     * Diff local index against next remote index and build fetch list.
      */
     private function diff_indexes_and_build_fetch_list(): bool
     {
-        if (!file_exists($this->remote_index_file)) {
-            throw new RuntimeException("Remote index file not found");
+        if (!file_exists($this->next_remote_index_file)) {
+            throw new RuntimeException("Next remote index file not found");
         }
 
-        $diff = $this->get_state()->diff;
-        $remote_offset = $diff->remote_offset;
-        $last_local_index_entry_path = $diff->local_after;
-        $fetch_list_mode = $remote_offset > 0 ? "a" : "w";
+        $file_diff_progress = $this->get_state()->diff;
+        $next_remote_index_byte_offset = $file_diff_progress->next_remote_index_byte_offset;
+        $last_consumed_local_index_entry_path = $file_diff_progress->last_consumed_local_index_entry_path;
+        $fetch_list_mode = $next_remote_index_byte_offset > 0 ? "a" : "w";
         if ($fetch_list_mode === "w") {
             $this->audit_log(
                 "FILE CREATE | {$this->fetch_list_file} | building fetch list",
@@ -6523,32 +6533,32 @@ class ImportClient
             );
         }
 
-        $remote_index_handle = fopen($this->remote_index_file, "r");
-        if (!$remote_index_handle) {
+        $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
+        if (!$next_remote_index_file_handle) {
             fclose($fetch_list_handle);
-            throw new RuntimeException("Failed to open remote index file");
+            throw new RuntimeException("Failed to open next remote index file");
         }
-        if ($remote_offset > 0) {
-            fseek($remote_index_handle, $remote_offset);
+        if ($next_remote_index_byte_offset > 0) {
+            fseek($next_remote_index_file_handle, $next_remote_index_byte_offset);
         }
 
-        $local_index_handle = file_exists($this->local_index_file)
+        $local_index_file_handle = file_exists($this->local_index_file)
             ? fopen($this->local_index_file, "r")
             : null;
         // Local index entries retain remote absolute paths as the merge key.
-        $local_index_entry = $this->read_index_line($local_index_handle);
-        if ($last_local_index_entry_path) {
+        $local_index_entry = $this->read_index_line($local_index_file_handle);
+        if ($last_consumed_local_index_entry_path) {
             while (
                 $local_index_entry !== null &&
-                strcmp($local_index_entry["path"], $last_local_index_entry_path) <= 0
+                strcmp($local_index_entry["path"], $last_consumed_local_index_entry_path) <= 0
             ) {
-                $local_index_entry = $this->read_index_line($local_index_handle);
+                $local_index_entry = $this->read_index_line($local_index_file_handle);
             }
         }
         $this->open_local_index_wal();
-        $processed = 0;
+        $next_remote_index_entries_processed = 0;
 
-        while (($line = fgets($remote_index_handle)) !== false) {
+        while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
             if ($this->shutdown_requested) {
                 break;
             }
@@ -6557,15 +6567,15 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $remote_offset = ftell($remote_index_handle);
-            $remote_index_entry = $this->parse_index_line($line);
-            if (!$remote_index_entry) {
+            $next_remote_index_byte_offset = ftell($next_remote_index_file_handle);
+            $next_remote_index_entry = $this->parse_index_line($next_remote_index_json_line);
+            if (!$next_remote_index_entry) {
                 continue;
             }
 
             while (
                 $local_index_entry !== null &&
-                strcmp($local_index_entry["path"], $remote_index_entry["path"]) < 0
+                strcmp($local_index_entry["path"], $next_remote_index_entry["path"]) < 0
             ) {
                 // The local files index ends up being a union across files-pull --only runs.
                 if ($this->is_selected_for_pulling($local_index_entry["path"])) {
@@ -6573,15 +6583,15 @@ class ImportClient
                     $this->apply_remote_deletion_locally($remote_absolute_path);
                     $this->delete_index_entry($remote_absolute_path);
                 }
-                $last_local_index_entry_path = $local_index_entry["path"];
-                $local_index_entry = $this->read_index_line($local_index_handle);
+                $last_consumed_local_index_entry_path = $local_index_entry["path"];
+                $local_index_entry = $this->read_index_line($local_index_file_handle);
             }
 
-            if ($local_index_entry !== null && $local_index_entry["path"] === $remote_index_entry["path"]) {
+            if ($local_index_entry !== null && $local_index_entry["path"] === $next_remote_index_entry["path"]) {
                 if (
-                    $local_index_entry["ctime"] !== $remote_index_entry["ctime"] ||
-                    $local_index_entry["size"] !== $remote_index_entry["size"] ||
-                    $local_index_entry["type"] !== $remote_index_entry["type"]
+                    $local_index_entry["ctime"] !== $next_remote_index_entry["ctime"] ||
+                    $local_index_entry["size"] !== $next_remote_index_entry["size"] ||
+                    $local_index_entry["type"] !== $next_remote_index_entry["type"]
                 ) {
                     // File is in both indexes but changed on the remote.
                     // Always re-download — this file is in our local index,
@@ -6592,11 +6602,11 @@ class ImportClient
                         (
                             $uploads_basedir !== null
                                 ? path_is_within_root(
-                                    $remote_index_entry["path"],
+                                    $next_remote_index_entry["path"],
                                     $uploads_basedir
                                 )
                                 : strpos(
-                                    $remote_index_entry["path"],
+                                    $next_remote_index_entry["path"],
                                     "wp-content/uploads/"
                                 ) !== false
                         )
@@ -6604,45 +6614,45 @@ class ImportClient
                         ? $skipped_handle
                         : $fetch_list_handle;
                     $this->append_to_fetch_list(
-                        $remote_index_entry["path"],
+                        $next_remote_index_entry["path"],
                         $selected_fetch_list_handle,
                     );
                 }
-                $last_local_index_entry_path = $local_index_entry["path"];
-                $local_index_entry = $this->read_index_line($local_index_handle);
+                $last_consumed_local_index_entry_path = $local_index_entry["path"];
+                $local_index_entry = $this->read_index_line($local_index_file_handle);
             } elseif (
                 $local_index_entry === null ||
-                strcmp($local_index_entry["path"], $remote_index_entry["path"]) > 0
+                strcmp($local_index_entry["path"], $next_remote_index_entry["path"]) > 0
             ) {
-                $skip_reason = $this->should_skip_for_preserve_local($remote_index_entry["path"]);
+                $skip_reason = $this->should_skip_for_preserve_local($next_remote_index_entry["path"]);
                 if ($skip_reason) {
                     $this->audit_log($skip_reason, true);
-                    $this->emit_skip_progress($remote_index_entry["path"]);
+                    $this->emit_skip_progress($next_remote_index_entry["path"]);
                 } else {
                     $selected_fetch_list_handle = (
                         $skipped_handle !== null &&
                         (
                             $uploads_basedir !== null
                                 ? path_is_within_root(
-                                    $remote_index_entry["path"],
+                                    $next_remote_index_entry["path"],
                                     $uploads_basedir
                                 )
                                 : strpos(
-                                    $remote_index_entry["path"],
+                                    $next_remote_index_entry["path"],
                                     "wp-content/uploads/"
                                 ) !== false
                         )
                     )
                         ? $skipped_handle
                         : $fetch_list_handle;
-                    $this->append_to_fetch_list($remote_index_entry["path"], $selected_fetch_list_handle);
+                    $this->append_to_fetch_list($next_remote_index_entry["path"], $selected_fetch_list_handle);
                 }
             }
 
-            $processed++;
-            if ($processed % 200 === 0) {
-                $this->get_state()->diff->remote_offset = $remote_offset;
-                $this->get_state()->diff->local_after = $last_local_index_entry_path;
+            $next_remote_index_entries_processed++;
+            if ($next_remote_index_entries_processed % 200 === 0) {
+                $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
+                $this->get_state()->diff->last_consumed_local_index_entry_path = $last_consumed_local_index_entry_path;
                 if (
                     $this->local_index_wal_handle
                     && !fflush($this->local_index_wal_handle)
@@ -6660,21 +6670,21 @@ class ImportClient
                 $this->apply_remote_deletion_locally($remote_absolute_path);
                 $this->delete_index_entry($remote_absolute_path);
             }
-            $last_local_index_entry_path = $local_index_entry["path"];
-            $local_index_entry = $this->read_index_line($local_index_handle);
+            $last_consumed_local_index_entry_path = $local_index_entry["path"];
+            $local_index_entry = $this->read_index_line($local_index_file_handle);
         }
 
-        if ($local_index_handle) {
-            fclose($local_index_handle);
+        if ($local_index_file_handle) {
+            fclose($local_index_file_handle);
         }
-        fclose($remote_index_handle);
+        fclose($next_remote_index_file_handle);
         fclose($fetch_list_handle);
         if ($skipped_handle !== null) {
             fclose($skipped_handle);
         }
 
-        $this->get_state()->diff->remote_offset = $remote_offset;
-        $this->get_state()->diff->local_after = $last_local_index_entry_path;
+        $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
+        $this->get_state()->diff->last_consumed_local_index_entry_path = $last_consumed_local_index_entry_path;
         $this->apply_local_index_wal();
         $this->save_state();
 
@@ -7031,7 +7041,8 @@ class ImportClient
     }
 
     /**
-     * Remove the local filesystem entry for a deletion reported by the remote index.
+     * Remove a local filesystem entry whose local index entry is absent from the next
+     * remote index.
      */
     private function apply_remote_deletion_locally(string $remote_absolute_path): void
     {
@@ -8475,7 +8486,7 @@ class ImportClient
         // everything else keeps its original (portable) spelling.
         if (
             !$this->follow_symlinks ||
-            !$this->remote_index_contains_remote_absolute_path_prefix($remote_absolute_target)
+            !$this->next_remote_index_contains_remote_absolute_path_prefix($remote_absolute_target)
         ) {
             return $target;
         }
@@ -8499,10 +8510,10 @@ class ImportClient
     }
 
     /**
-     * Checks whether the remote index contains a remote absolute path or one
-     * of its descendants. Runs a memoized O(N) scan of pull/remote-index.jsonl.
+     * Checks whether the next remote index contains a remote absolute path or one
+     * of its descendants. Runs a memoized O(N) scan of pull/remote-index.next.jsonl.
      */
-    private function remote_index_contains_remote_absolute_path_prefix(
+    private function next_remote_index_contains_remote_absolute_path_prefix(
         string $remote_absolute_path
     ): bool {
         $remote_absolute_path = rtrim(normalize_path($remote_absolute_path), "/");
@@ -8510,42 +8521,48 @@ class ImportClient
             return false;
         }
 
-        if (isset($this->remote_index_prefix_cache[$remote_absolute_path])) {
-            return $this->remote_index_prefix_cache[$remote_absolute_path];
+        if (isset($this->next_remote_index_prefix_cache[$remote_absolute_path])) {
+            return $this->next_remote_index_prefix_cache[$remote_absolute_path];
         }
 
-        if (!file_exists($this->remote_index_file)) {
-            $this->remote_index_prefix_cache[$remote_absolute_path] = false;
+        if (!file_exists($this->next_remote_index_file)) {
+            $this->next_remote_index_prefix_cache[$remote_absolute_path] = false;
             return false;
         }
 
-        $h = fopen($this->remote_index_file, "r");
-        if (!$h) {
-            $this->remote_index_prefix_cache[$remote_absolute_path] = false;
+        $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
+        if (!$next_remote_index_file_handle) {
+            $this->next_remote_index_prefix_cache[$remote_absolute_path] = false;
             return false;
         }
 
-        $prefix = $remote_absolute_path . "/";
-        $found = false;
-        while (($line = fgets($h)) !== false) {
+        $remote_absolute_path_prefix = $remote_absolute_path . "/";
+        $path_prefix_found = false;
+        while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
             try {
-                $entry = $this->parse_index_line($line);
+                $next_remote_index_entry = $this->parse_index_line($next_remote_index_json_line);
             } catch (RuntimeException $e) {
                 continue;
             }
-            if ($entry === null) {
+            if ($next_remote_index_entry === null) {
                 continue;
             }
-            $entry_path = $entry["path"];
-            if ($entry_path === $remote_absolute_path || str_starts_with($entry_path, $prefix)) {
-                $found = true;
+            $next_remote_index_entry_path = $next_remote_index_entry["path"];
+            if (
+                $next_remote_index_entry_path === $remote_absolute_path ||
+                str_starts_with(
+                    $next_remote_index_entry_path,
+                    $remote_absolute_path_prefix
+                )
+            ) {
+                $path_prefix_found = true;
                 break;
             }
         }
-        fclose($h);
+        fclose($next_remote_index_file_handle);
 
-        $this->remote_index_prefix_cache[$remote_absolute_path] = $found;
-        return $found;
+        $this->next_remote_index_prefix_cache[$remote_absolute_path] = $path_prefix_found;
+        return $path_prefix_found;
     }
 
     /**
@@ -8620,7 +8637,7 @@ class ImportClient
     /**
      * Refuse to resume a files-pull after changing --only.
      *
-     * The in-progress remote index cursor/file was built from one directory[]
+     * The in-progress next remote index cursor/file was built from one directory[]
      * allowlist. Switching the selected source path prefixes mid-resume would
      * mix indexes from different traversals. Completed runs are allowed to use
      * different --only prefixes because the local index is intentionally a union
@@ -8859,7 +8876,7 @@ class ImportClient
     /**
      * Whether a remote absolute path is selected by the active --only file path
      * prefixes. With no --only flag, every path is selected. A selected root is
-     * excluded because a filtered remote index lists its contents, not the root.
+     * excluded because a filtered next remote index lists its contents, not the root.
      */
     private function is_selected_for_pulling(string $remote_absolute_path): bool
     {
@@ -11013,8 +11030,8 @@ class ImportClient
      */
     private function encode_state_paths(array $state): array
     {
-        $state["diff"]["local_after"] = $this->encode_state_path_value(
-            $state["diff"]["local_after"] ?? null,
+        $state["diff"]["last_consumed_local_index_entry_path"] = $this->encode_state_path_value(
+            $state["diff"]["last_consumed_local_index_entry_path"] ?? null,
         );
         $state["fetch"]["batch_file"] = $this->encode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
@@ -11045,8 +11062,8 @@ class ImportClient
      */
     private function decode_state_paths(array $state): array
     {
-        $state["diff"]["local_after"] = $this->decode_state_path_value(
-            $state["diff"]["local_after"] ?? null,
+        $state["diff"]["last_consumed_local_index_entry_path"] = $this->decode_state_path_value(
+            $state["diff"]["last_consumed_local_index_entry_path"] ?? null,
         );
         $state["fetch"]["batch_file"] = $this->decode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
@@ -12562,7 +12579,7 @@ if (
                 "Output files:\n" .
                 "  (filesystem root)/                       Downloaded files\n" .
                 "  pull/local-index.jsonl          Local index\n" .
-                "  pull/remote-index.jsonl         Remote index\n" .
+                "  pull/remote-index.next.jsonl    Next remote index\n" .
                 "  pull/fetch-list.jsonl           Files pending download\n" .
                 "  pull/skipped-fetch-list.jsonl   Files skipped by --filter=essential-files\n" .
                 "  pull/state.json                 Resumable pull state\n" .
@@ -12615,7 +12632,7 @@ if (
             "description" =>
                 "Streams the full remote directory tree over HTTP and writes each\n" .
                 "entry (path, size, ctime, type, and directory emptiness) to\n" .
-                "pull/remote-index.jsonl.\n" .
+                "pull/remote-index.next.jsonl.\n" .
                 "\n" .
                 "On the first run, builds the complete index. On subsequent runs,\n" .
                 "re-indexes and diffs against the prior snapshot to produce a\n" .
@@ -12629,9 +12646,9 @@ if (
         ],
         "files-stats" => [
             "level" => "low",
-            "short" => "Show file counts and sizes from the local index",
+            "short" => "Show file counts and sizes from the next remote index",
             "description" =>
-                "Reads local index files to report (no network calls):\n" .
+                "Reads the next remote index and fetch lists to report (no network calls):\n" .
                 "\n" .
                 "  - Total indexed files and their combined size\n" .
                 "  - Files not yet downloaded and their combined size\n" .
