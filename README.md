@@ -720,4 +720,13 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from preflight data. See [Step 6](#step-6--generate-runtime-configuration).
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+The resumable commands `pull`, `pull-files`, `pull-db`, `files-pull`,
+`files-index`, `db-pull`, `db-index`, and `db-apply` support `--abort`. An
+unfinished import belongs to the command that started it; only that exact
+command may resume or abort it. If another command is requested, the error
+names the owning command and gives its exact resume and abort invocations.
+Abort ignores options used only to perform normal work. File aborts retain
+downloaded files and `pull/remote-index.jsonl`, so the next file pull computes a
+delta. Database download aborts discard their SQL, table-index, domain, buffer,
+and statistics files, while `db-apply` aborts retain its SQL/domain inputs and
+do not alter the external database target.

@@ -409,4 +409,72 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertSame(3, $state['apply']['statements_executed']);
         $this->assertSame(strlen($sql), $state['apply']['bytes_read']);
     }
+
+    public function testInterruptedFreshInitializationPersistsRewriteMapForResume(): void
+    {
+        $oldUrl = 'https://old-site.example.com';
+        $newUrl = 'https://new-site.example.com';
+        $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
+        file_put_contents(
+            $this->tempDir . '/db.sql',
+            "INSERT INTO missing_table VALUES (1);\n",
+        );
+        $this->writeState([
+            'active_resumable_command' => [
+                'command_name' => 'db-apply',
+                'started_by_command' => 'db-apply',
+                'completion_state' => 'in_progress',
+                'current_stage' => 'fresh-initialization',
+                'remote_cursor' => null,
+            ],
+        ]);
+        $client = new \ImportClient(
+            'https://old-site.example.com/?reprint-api',
+            $this->tempDir,
+            $this->tempDir . '/fs-root',
+        );
+
+        $caught = null;
+        try {
+            $client->run([
+                'command' => 'db-apply',
+                'target_engine' => 'sqlite',
+                'target_sqlite_path' => $sqlitePath,
+                'target_db' => 'wp_test',
+                'rewrite_url' => [[$oldUrl, $newUrl]],
+            ]);
+        } catch (\RuntimeException $error) {
+            $caught = $error;
+        }
+
+        $this->assertInstanceOf(\RuntimeException::class, $caught);
+        $state = json_decode(
+            file_get_contents($this->tempDir . '/pull/state.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        $this->assertSame(
+            [$oldUrl => $newUrl],
+            $state['apply']['rewrite_url'],
+        );
+
+        file_put_contents(
+            $this->tempDir . '/db.sql',
+            $this->buildSqlDump($oldUrl),
+        );
+        $client->run([
+            'command' => 'db-apply',
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $sqlitePath,
+            'target_db' => 'wp_test',
+        ]);
+
+        $rows = $this->querySqlite(
+            $sqlitePath,
+            "SELECT option_value FROM wp_options WHERE option_name = 'siteurl'",
+            'wp_test',
+        );
+        $this->assertSame($newUrl, $rows[0]['option_value']);
+    }
 }
