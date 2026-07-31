@@ -4,8 +4,8 @@
  * When using --sql-output=mysql with short execution times, the server
  * may pause mid-query (x-query-complete: 0). The importer buffers the
  * partial SQL in memory and persists it to pull/sql-buffer on disk as each
- * chunk arrives. If the process dies at any point, the next run reloads
- * whatever was accumulated.
+ * chunk arrives. A resumed SQL request reloads its persisted buffer. A fresh
+ * download removes a stale buffer.
  *
  * This test forces many resume cycles with --max-exec=1, verifies the
  * database is correct after completion, and confirms pull/sql-buffer is
@@ -90,7 +90,7 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
         });
     });
 
-    describe('pre-seeded pull/sql-buffer is loaded on resume', () => {
+    describe('pre-seeded pull/sql-buffer is removed on a fresh run', () => {
         let tempDir;
         const importDb = 'e2e_basic_import_36_seeded';
 
@@ -109,19 +109,17 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             await conn.end();
         });
 
-        it('loads pull/sql-buffer from disk and logs recovery', { timeout: 300000 }, () => {
+        it('does not execute SQL from a stale pull/sql-buffer', { timeout: 300000 }, () => {
             // Run preflight so db-pull can proceed
             runImporter(importUrl(), tempDir, 'preflight', {
                 secret: getSiteSecret(site),
             });
 
-            // Seed a pull/sql-buffer file before running db-pull.
-            // The content is a harmless SQL comment that won't affect execution
-            // — the point is to verify the importer reads it and logs recovery.
+            // Seed invalid SQL before a fresh db-pull. Restoring this buffer
+            // would make the first query fail.
             const bufferFile = join(tempDir, 'pull/sql-buffer');
-            writeFileSync(bufferFile, '-- pre-seeded buffer\n');
+            writeFileSync(bufferFile, 'THIS IS NOT SQL;\n');
 
-            // Run a fresh db-pull — the importer should detect the buffer file
             const result = runImporter(importUrl(), tempDir, 'db-pull', {
                 secret: getSiteSecret(site),
                 extraArgs: mysqlArgs(importDb),
@@ -130,10 +128,9 @@ describe('Import: MySQL Mode Crash Recovery', { timeout: 120000 }, () => {
             assert.equal(result.exitCode, 0,
                 `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}`);
 
-            // Verify recovery was logged
             const audit = readAuditLog(tempDir);
-            assert.ok(audit.includes('CRASH RECOVERY') && audit.includes('pull/sql-buffer'),
-                'Expected audit log to mention pull/sql-buffer crash recovery');
+            assert.ok(!audit.includes('from pull/sql-buffer'),
+                'Expected a fresh db-pull not to restore pull/sql-buffer');
 
             // Buffer should be cleaned up
             assert.ok(!existsSync(bufferFile),

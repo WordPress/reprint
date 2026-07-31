@@ -3959,6 +3959,8 @@ class ImportClient
         }
 
         $this->import_state()->active_resumable_command->command_name = "db-pull";
+        $this->import_state()->active_resumable_command->completion_state =
+            "in_progress";
         $this->save_state($this->state);
 
         // Stage 1: db-index (table metadata for progress estimation)
@@ -6179,6 +6181,8 @@ class ImportClient
         }
 
         $this->import_state()->active_resumable_command->command_name = "db-index";
+        $this->import_state()->active_resumable_command->completion_state =
+            "in_progress";
         $this->save_state($this->state);
 
         $this->fetch_database_index();
