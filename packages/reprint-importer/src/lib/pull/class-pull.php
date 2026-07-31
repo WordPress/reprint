@@ -298,7 +298,7 @@ class Pull
                 $state->files_pull_only_fingerprint = null;
                 $this->client->save_state();
                 foreach ([
-                    "{$state_dir}/pull/remote-index.jsonl",
+                    "{$state_dir}/pull/remote-index.next.jsonl",
                     "{$state_dir}/pull/fetch-list.jsonl",
                     "{$state_dir}/pull/skipped-fetch-list.jsonl",
                 ] as $path) {
@@ -826,7 +826,7 @@ class Pull
 
         $paths = [];
         if ($reset_file_transfer_state) {
-            $paths[] = $state_dir . "/pull/remote-index.jsonl";
+            $paths[] = $state_dir . "/pull/remote-index.next.jsonl";
             $paths[] = $state_dir . "/pull/fetch-list.jsonl";
             $paths[] = $state_dir . "/pull/skipped-fetch-list.jsonl";
         }

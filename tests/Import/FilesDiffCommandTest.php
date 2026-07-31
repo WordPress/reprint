@@ -12,11 +12,12 @@ require_once __DIR__ . '/../../importer/import.php';
 /**
  * The files-diff user contract.
  *
- * files-diff compares the filesystem root with the previous local index for
- * the remote Reprint API URL — the index a completed files-push publishes —
- * without contacting the target, and reports the complete diff on every run.
+ * files-diff compares the filesystem root with the local index for
+ * the remote Reprint API URL. A completed files-pull or files-push writes that
+ * index. The command does not contact the target and reports the complete diff
+ * on every run.
  * These tests pin that contract: local-only operation, correct change records,
- * arbitrary path bytes, the previous-local-index requirement, no mutation of
+ * arbitrary path bytes, the local-index requirement, no mutation of
  * that index, and a complete report after an interrupted run.
  */
 final class FilesDiffCommandTest extends TestCase
@@ -62,7 +63,7 @@ final class FilesDiffCommandTest extends TestCase
 
     public function testFilesDiffReportsAnEmptyDiffWhenTheLocalTreeMatchesTheIndex(): void
     {
-        $this->writePreviousLocalIndex(array_keys($this->initialFiles));
+        $this->writeLocalIndex(array_keys($this->initialFiles));
 
         $result = $this->runFilesDiff();
 
@@ -79,7 +80,7 @@ final class FilesDiffCommandTest extends TestCase
 
     public function testFilesDiffReportsAddedEditedDeletedAndTypeChangedPaths(): void
     {
-        $this->writePreviousLocalIndex(array_keys($this->initialFiles));
+        $this->writeLocalIndex(array_keys($this->initialFiles));
 
         $arbitraryBytePath = "arbitrary-\nname.txt";
         file_put_contents($this->localTree . '/added.txt', 'new file');
@@ -165,7 +166,7 @@ final class FilesDiffCommandTest extends TestCase
         if ($this->invalidBytePathInIndex === null) {
             $this->markTestSkipped('This filesystem does not accept invalid UTF-8 path bytes.');
         }
-        $this->writePreviousLocalIndex(array_keys($this->initialFiles));
+        $this->writeLocalIndex(array_keys($this->initialFiles));
 
         $invalidBytePathToPush = "push-invalid-\xfe.txt";
         if (@file_put_contents($this->localTree . '/' . $invalidBytePathToPush, 'new invalid path bytes') === false) {
@@ -197,12 +198,12 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertStringNotContainsString($this->invalidBytePathInIndex, $result['stdout']);
     }
 
-    public function testFilesDiffDoesNotChangeThePreviousLocalIndexAndRepeatsTheSameReport(): void
+    public function testFilesDiffDoesNotChangeTheLocalIndexAndRepeatsTheSameReport(): void
     {
-        $this->writePreviousLocalIndex(array_keys($this->initialFiles));
-        $previousLocalIndex = $this->pushStateDirectory() . '/previous_local_index.jsonl';
-        $previousLocalIndexContents = file_get_contents($previousLocalIndex);
-        $this->assertIsString($previousLocalIndexContents);
+        $this->writeLocalIndex(array_keys($this->initialFiles));
+        $localIndex = $this->pushStateDirectory() . '/local_index.jsonl';
+        $localIndexContents = file_get_contents($localIndex);
+        $this->assertIsString($localIndexContents);
         file_put_contents($this->localTree . '/added-after-index.txt', 'new');
 
         $firstResult = $this->runFilesDiff();
@@ -211,7 +212,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertSame(0, $firstResult['exit'], $firstResult['output']);
         $this->assertSame(0, $secondResult['exit'], $secondResult['output']);
         $this->assertSame($firstResult['stdout'], $secondResult['stdout']);
-        $this->assertSame($previousLocalIndexContents, file_get_contents($previousLocalIndex));
+        $this->assertSame($localIndexContents, file_get_contents($localIndex));
         $records = $this->filesDiffRecords($secondResult['stdout']);
         $this->assertSame(
             $this->expectedPushRecord('added-after-index.txt', 'file'),
@@ -219,30 +220,36 @@ final class FilesDiffCommandTest extends TestCase
         );
     }
 
-    public function testFilesDiffWithoutAPreviousLocalIndexFailsWithPointedGuidance(): void
+    public function testFilesDiffWithoutALocalIndexFailsWithPointedGuidance(): void
     {
         $result = $this->runFilesDiff();
 
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertSame('', $result['stdout']);
         $this->assertCanonicalSingleJsonLine($result['stderr']);
-        $this->assertStringContainsString('completed files-push', $result['output']);
+        $this->assertStringContainsString(
+            'completed files-pull or files-push',
+            $result['output']
+        );
         $this->assertStringContainsString(
             'same remote Reprint API URL and state directory',
             $result['output']
         );
     }
 
-    public function testFilesDiffDoesNotReuseThePreviousLocalIndexForADifferentTargetUrlQuery(): void
+    public function testFilesDiffDoesNotReuseTheLocalIndexForADifferentTargetUrlQuery(): void
     {
-        $this->writePreviousLocalIndex(array_keys($this->initialFiles));
+        $this->writeLocalIndex(array_keys($this->initialFiles));
 
         $result = $this->runFilesDiff($this->targetUrl . '&site=other');
 
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertSame('', $result['stdout']);
         $this->assertCanonicalSingleJsonLine($result['stderr']);
-        $this->assertStringContainsString('completed files-push', $result['output']);
+        $this->assertStringContainsString(
+            'completed files-pull or files-push',
+            $result['output']
+        );
         $this->assertStringContainsString(
             'same remote Reprint API URL and state directory',
             $result['output']
@@ -261,10 +268,10 @@ final class FilesDiffCommandTest extends TestCase
 
     public function testInterruptedFilesDiffReportsTheCompleteDiffWhenItIsRunAgain(): void
     {
-        // An empty previous local index selects every current path for push.
+        // An empty local index selects every current path for push.
         $this->removeTree($this->localTree);
         mkdir($this->localTree, 0700, true);
-        $this->writePreviousLocalIndex([]);
+        $this->writeLocalIndex([]);
         $bulkPaths = $this->createBulkFiles('rerun');
 
         // Backpressure from the unread stdout pipe holds the first process
@@ -322,12 +329,12 @@ final class FilesDiffCommandTest extends TestCase
     }
 
     /**
-     * Publishes a previous local index describing the named paths as they
-     * exist right now, the way a completed files-push saves its index.
+     * Writes a local index describing the named paths as they
+     * exist right now, the way a completed files-pull or files-push writes it.
      *
      * @param list<string> $paths Document-root-relative paths to record.
      */
-    private function writePreviousLocalIndex(array $paths): void
+    private function writeLocalIndex(array $paths): void
     {
         usort($paths, 'strcmp');
         $lines = '';
@@ -354,7 +361,7 @@ final class FilesDiffCommandTest extends TestCase
         if (!is_dir($pushStateDirectory)) {
             mkdir($pushStateDirectory, 0700, true);
         }
-        file_put_contents($pushStateDirectory . '/previous_local_index.jsonl', $lines);
+        file_put_contents($pushStateDirectory . '/local_index.jsonl', $lines);
     }
 
     /** @return array{command:string,action:string,path_b64:string,type:string,size:int,ctime:int} */

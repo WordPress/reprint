@@ -755,7 +755,7 @@ final class PushPlanTest extends TestCase
 
     private function previousLocalIndexPath(): string
     {
-        return $this->pushStateDirectory() . '/previous_local_index.jsonl';
+        return $this->pushStateDirectory() . '/local_index.jsonl';
     }
 
     private function excludedPathsPath(): string

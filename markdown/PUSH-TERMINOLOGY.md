@@ -46,18 +46,21 @@ local relative path to a push-root-relative path.
 
 ## Indexes and mappings
 
-- A **remote index** is the last remote filesystem state accepted by pull.
-  Its entries use remote absolute paths and remote-observed metadata. Use
-  `$remote_index_file`.
-- A **local index** is the locally accounted pull baseline. Its entries use
-  remote absolute paths as the merge key and locally observed metadata. Use
-  `$local_index_file`.
+- A **remote index** records the remote filesystem entries already accounted for
+  by completed pull work. Its entries use remote absolute paths and
+  remote-observed metadata. Use `$remote_index_file`.
+- A **next remote index** is the remote filesystem snapshot downloaded by the
+  current pull. Its entries use remote absolute paths and remote-observed
+  metadata. Use `$next_remote_index_file`.
+- A **local index** is a filesystem-root snapshot written after a completed
+  pull or target-committed push. Its entries use local relative paths and
+  locally observed metadata. Use `$local_index_file`.
 - A **fresh local index** is the current filesystem-root scan created while
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
-- The **local index WAL** records completed pull mutations awaiting application
-  to the local index.
+- The **remote index WAL** records completed pull mutations awaiting
+  application to the remote index.
 - A **pull plan** lists remote absolute paths still scheduled for download or
   deletion. A **push plan** maps local relative paths to push-root-relative
   paths.
@@ -171,9 +174,9 @@ scope supplied by their parent directories.
 ├── audit.log
 ├── pull/
 │   ├── state.json
-│   ├── local-index.jsonl
-│   ├── local-index.wal
 │   ├── remote-index.jsonl
+│   ├── remote-index.wal
+│   ├── remote-index.next.jsonl
 │   ├── fetch-list.jsonl
 │   ├── skipped-fetch-list.jsonl
 │   ├── volatile-files.json
@@ -182,6 +185,7 @@ scope supplied by their parent directories.
 │   └── sql-buffer
 └── push/
     └── <md5-of-trimmed-remote-reprint-api-url>/
+        └── local_index.jsonl
 ```
 
 Use these path names:
@@ -191,9 +195,9 @@ Use these path names:
 | State directory | `$state_dir` |
 | Pull state directory | `$pull_state_directory` |
 | Pull state file | `$pull_state_file` |
-| Local index file | `$local_index_file` |
-| Local index WAL | `$local_index_wal_path` |
 | Remote index file | `$remote_index_file` |
+| Remote index WAL | `$remote_index_wal_path` |
+| Next remote index file | `$next_remote_index_file` |
 | Fetch list file | `$fetch_list_file` |
 | Skipped fetch list file | `$skipped_fetch_list_file` |
 | Volatile files file | `$volatile_files_file` |
@@ -225,11 +229,11 @@ its caller supplies none. `PushFilesSender::start()` and
 `close()` does not release it. This local lock is separate from the receiver's
 push-session and commit locks.
 
-## Pull local index WAL
+## Pull remote index WAL
 
-Call the single pull-side write-ahead log the **local index WAL**. It lives at
-`<state-dir>/pull/local-index.wal`; use `pull/local-index.wal`,
-`$local_index_wal_path`, and `$local_index_wal_handle`.
+Call the single pull-side write-ahead log the **remote index WAL**. It lives at
+`<state-dir>/pull/remote-index.wal`; use `pull/remote-index.wal`,
+`$remote_index_wal_path`, and `$remote_index_wal_handle`.
 Applied batch records are cleared, but the empty WAL remains as a marker until
 files-pull completes. A retained WAL is consumed only while resuming or
 aborting the interrupted files-pull, including through a high-level pull
@@ -246,7 +250,7 @@ verbatim:
 | --- | --- |
 | Active plan directory | `plan`, `$plan_directory` |
 | Plan-owned fresh local index | `fresh_local_index.jsonl`, `$fresh_local_index` |
-| Previous local index | `previous_local_index.jsonl`, `previous_local_index`, `$previous_local_index` |
+| Local index in its previous-snapshot role | `local_index.jsonl`, `previous_local_index`, `$previous_local_index` |
 | Byte offset in the previous local index | `byte_offset_in_previous_local_index`, `$byte_offset_in_previous_local_index` |
 | Local paths to push | `local_paths_to_push.jsonl`, `$local_paths_to_push` |
 | Local paths to delete | `local_paths_to_delete`, `$local_paths_to_delete` |
@@ -259,18 +263,24 @@ verbatim:
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
 `sender.json`, `excluded_paths.json`, and
-`previous_local_index.jsonl` live directly under the local push state
+`local_index.jsonl` live directly under the local push state
 directory. The sender creates `plan/` for one active plan. PushPlan copies the
 sender-owned exclusions to `plan/excluded_paths.json` when it starts.
 `fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
 `local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
 
-The **previous local index** describes the filesystem root as its last
-completed push to the remote Reprint API URL observed it. The sender saves it
-after a successful commit, and `files-diff` reads it. PushPlan diffs its fresh
-local index against the copy its caller supplies.
+The **local index** describes the filesystem root after the last completed
+pull or target-committed push for the remote Reprint API URL. Pull scans the
+filesystem root after applying remote changes. The sender replaces the same
+file after a successful target commit. `files-diff` reads it, and PushPlan
+diffs its fresh local index against the copy its caller supplies. PushPlan's
+**previous local index** is this same file in its role relative to the fresh
+local index, not another retained index.
 `byte_offset_in_previous_local_index` is the position from which its current
 lookahead entry is read again after resume.
+
+Pull remapping affects the local paths in the local index. Files-push continues
+to send local relative paths unchanged; it does not invert pull remapping.
 
 The PushPlan cursor is stored in `sender.json`. It contains the plan
 directory, filesystem root, previous local index, and current
@@ -282,7 +292,7 @@ output offsets, and the active byte offset in
 links to the preceding active directory. The exclusions have a maximum of 100
 paths. `sender.json` phases are `creating`, `starting_plan`,
 `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
-`saving_previous_local_index`, `completing`,
+`saving_local_index`, `completing`,
 `removing`, and `discarding_plan`. It stores the push session ID, selected
 path-list cursor, receiver part limit, and request-sizing state. The index diff
 completes before local paths are sent. The index copy after a successful commit
@@ -324,8 +334,8 @@ reports `complete`, `restart`, or `failed`.
 The local-only command is `files-diff`. Its `remote Reprint API URL`,
 `filesystem root`, and `local push state directory` have the same meanings and
 directory formula as `files-push`. It reads
-`previous_local_index.jsonl` for that remote Reprint API URL, which a completed
-files-push publishes, and never changes it.
+`local_index.jsonl` for that remote Reprint API URL, which a completed
+files-pull or target-committed files-push writes, and never changes it.
 
 Each JSONL change record has `command: "files-diff"`, an `action` of `push` or
 `delete`, and `path_b64`. A push record also has the local path `type`, `size`,
