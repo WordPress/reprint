@@ -1,6 +1,6 @@
 /**
  * Test 04: Files Index via import.php
- * Tests files-index command produces pull/remote-index.jsonl.
+ * Tests files-index command produces pull/remote-index.next.jsonl.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -30,14 +30,14 @@ describe('Import: Files Index', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
-    it('files-index produces pull/remote-index.jsonl', () => {
+    it('files-index produces pull/remote-index.next.jsonl', () => {
         const result = runImporter(importUrl(), tempDir, 'files-index', {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
 
-        const indexFile = join(tempDir, 'pull/remote-index.jsonl');
-        assert.ok(existsSync(indexFile), 'Expected pull/remote-index.jsonl to exist');
+        const indexFile = join(tempDir, 'pull/remote-index.next.jsonl');
+        assert.ok(existsSync(indexFile), 'Expected pull/remote-index.next.jsonl to exist');
 
         const lines = readFileSync(indexFile, 'utf-8').trim().split('\n').filter(l => l);
         assert.ok(lines.length > 0, 'Expected at least one index entry');
@@ -61,10 +61,10 @@ describe('Import: Files Index', () => {
         }
     });
 
-    it('remote index has at least 3000 entries', () => {
-        const indexFile = join(tempDir, 'pull/remote-index.jsonl');
+    it('next remote index has at least 3000 entries', () => {
+        const indexFile = join(tempDir, 'pull/remote-index.next.jsonl');
         const count = countJsonlLines(indexFile);
         assert.ok(count >= 3000,
-            `Expected at least 3000 entries in remote index, got ${count}`);
+            `Expected at least 3000 entries in the next remote index, got ${count}`);
     });
 });

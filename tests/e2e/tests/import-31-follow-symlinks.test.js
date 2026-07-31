@@ -328,7 +328,7 @@ describe('Import: Follow Symlinks', () => {
 
     it('multiple symlinks to same target do not create duplicate index entries', () => {
         // After sort+dedup, each path should appear at most once
-        const remoteIndex = join(tempDir, 'pull/remote-index.jsonl');
+        const remoteIndex = join(tempDir, 'pull/remote-index.next.jsonl');
         if (!existsSync(remoteIndex)) return;
 
         const lines = readFileSync(remoteIndex, 'utf-8').split('\n').filter(l => l.trim());

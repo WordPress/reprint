@@ -40,12 +40,17 @@ final class ReprintProcessLockTest extends TestCase
         $this->assertFileDoesNotExist($this->root . '/state/.reprint.lock');
 
         $reflection = new \ReflectionClass($client);
+        $local_index_directory =
+            realpath($this->root . '/state')
+            . '/push/'
+            . md5('https://example.com/?site-export-api');
         $expected_paths = [
             'state_dir' => $this->root . '/state',
             'pull_state_file' => $this->root . '/state/pull/state.json',
-            'local_index_file' => $this->root . '/state/pull/local-index.jsonl',
-            'local_index_wal_path' => $this->root . '/state/pull/local-index.wal',
+            'local_index_file' => $local_index_directory . '/local_index.jsonl',
             'remote_index_file' => $this->root . '/state/pull/remote-index.jsonl',
+            'remote_index_wal_path' => $this->root . '/state/pull/remote-index.wal',
+            'next_remote_index_file' => $this->root . '/state/pull/remote-index.next.jsonl',
             'fetch_list_file' => $this->root . '/state/pull/fetch-list.jsonl',
             'skipped_fetch_list_file' => $this->root . '/state/pull/skipped-fetch-list.jsonl',
             'volatile_files_file' => $this->root . '/state/pull/volatile-files.json',

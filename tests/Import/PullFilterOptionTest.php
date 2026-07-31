@@ -63,7 +63,7 @@ class PullFilterFakeClient extends \ImportClient
         return $output === false ? '' : $output;
     }
 
-    public function index_count(): int
+    public function remote_index_entry_count(): int
     {
         return 12;
     }

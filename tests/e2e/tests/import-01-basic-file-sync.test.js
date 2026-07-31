@@ -6,6 +6,7 @@ import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
@@ -32,6 +33,13 @@ describe('Import: Basic File Sync', () => {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 
+    function localIndexFile() {
+        const remoteUrlHash = createHash('md5')
+            .update(importUrl())
+            .digest('hex');
+        return join(tempDir, 'push', remoteUrlHash, 'local_index.jsonl');
+    }
+
     it('files-pull completes successfully', () => {
         const result = runImporter(importUrl(), tempDir, 'files-pull', {
             secret: getSiteSecret(site),
@@ -56,11 +64,19 @@ describe('Import: Basic File Sync', () => {
         assertTreesMatch(getSiteDir(site), importedRoot);
     });
 
-    it('pull/local-index.jsonl has entries', () => {
-        const indexFile = join(tempDir, 'pull/local-index.jsonl');
-        assert.ok(existsSync(indexFile), 'Expected pull/local-index.jsonl to exist');
+    it('pull/remote-index.jsonl has entries', () => {
+        const indexFile = join(tempDir, 'pull/remote-index.jsonl');
+        assert.ok(existsSync(indexFile), 'Expected pull/remote-index.jsonl to exist');
         const lines = readFileSync(indexFile, 'utf-8').trim().split('\n').filter(l => l);
         assert.ok(lines.length > 0, 'Expected at least one index entry');
+    });
+
+    it('the completed pull writes the local index', () => {
+        const lines = readFileSync(localIndexFile(), 'utf-8')
+            .trim()
+            .split('\n')
+            .filter(line => line);
+        assert.ok(lines.length > 0, 'Expected at least one local index entry');
     });
 
     it('indexed at least 3000 files from remote', () => {
@@ -92,12 +108,17 @@ describe('Import: Basic File Sync', () => {
         });
         assert.equal(restart.exitCode, 0, `Expected restart exit 0, got ${restart.exitCode}\nstderr: ${restart.stderr}\nstdout: ${restart.stdout}`);
 
-        // Local index should still exist (restart preserves it)
-        const indexFile = join(tempDir, 'pull/local-index.jsonl');
-        assert.ok(existsSync(indexFile), 'Expected local index to be preserved after --abort');
+        assert.ok(
+            existsSync(join(tempDir, 'pull/remote-index.jsonl')),
+            'Expected the remote index to be preserved after --abort',
+        );
+        assert.ok(
+            existsSync(localIndexFile()),
+            'Expected the local index to be preserved after --abort',
+        );
 
         // Transient files should be cleaned up
-        assert.ok(!existsSync(join(tempDir, 'pull/remote-index.jsonl')), 'Expected remote index to be deleted');
+        assert.ok(!existsSync(join(tempDir, 'pull/remote-index.next.jsonl')), 'Expected the next remote index to be deleted');
         assert.ok(!existsSync(join(tempDir, 'pull/fetch-list.jsonl')), 'Expected fetch list to be deleted');
     });
 

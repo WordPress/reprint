@@ -1392,7 +1392,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNull($this->loadActiveState($push_state_directory));
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
         $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json');
-        $this->assertFileExists($push_state_directory . '/previous_local_index.jsonl');
+        $this->assertFileExists($push_state_directory . '/local_index.jsonl');
     }
 
     /**
@@ -1758,7 +1758,7 @@ final class PushEndpointsTest extends TestCase {
 
         $this->assertSame('complete', $result['status']);
         $index_lines = file(
-            $push_state_directory . '/previous_local_index.jsonl',
+            $push_state_directory . '/local_index.jsonl',
             FILE_IGNORE_NEW_LINES
         );
         $this->assertIsArray($index_lines);
@@ -2190,7 +2190,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
         $this->assertSame('public-change', file_get_contents($this->docroot . '/public.txt'));
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
-        $saved_local_index = file_get_contents($push_state_directory . '/previous_local_index.jsonl');
+        $saved_local_index = file_get_contents($push_state_directory . '/local_index.jsonl');
         $this->assertIsString($saved_local_index);
         $this->assertStringContainsString(
             '"path":"' . base64_encode('preserved/value.txt') . '"',
@@ -2524,7 +2524,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNull($this->loadActiveState($push_state_directory));
     }
 
-    public function testCompletedFilesPushPublishesThePreviousLocalIndexForFilesDiff(): void
+    public function testCompletedFilesPushWritesTheLocalIndexForFilesDiff(): void
     {
         $local_docroot = $this->root . '/push-diff-local-docroot';
         $state_directory = $this->root . '/push-diff-state';
@@ -2639,7 +2639,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertTrue(is_link($this->docroot . '/file-link'));
         $this->assertSame('nested/multi-chunk.bin', readlink($this->docroot . '/file-link'));
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
-        $this->assertFileExists($push_state_directory . '/previous_local_index.jsonl');
+        $this->assertFileExists($push_state_directory . '/local_index.jsonl');
         $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
         $this->assertFileDoesNotExist($state_directory . '/pull/state.json');
@@ -2689,7 +2689,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertFileDoesNotExist($this->docroot . '/delete-later.txt');
         $this->assertSame('added', file_get_contents($this->docroot . '/added.txt'));
         $this->assertSame('keep', file_get_contents($this->docroot . '/preserved/value.txt'));
-        $this->assertFileExists($push_state_directory . '/previous_local_index.jsonl');
+        $this->assertFileExists($push_state_directory . '/local_index.jsonl');
         $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
     }
@@ -3536,7 +3536,7 @@ final class PushEndpointsTest extends TestCase {
         if (!is_dir($push_state_directory)) {
             mkdir($push_state_directory, 0700, true);
         }
-        $this->assertTrue(copy($index_path, $push_state_directory . '/previous_local_index.jsonl'));
+        $this->assertTrue(copy($index_path, $push_state_directory . '/local_index.jsonl'));
     }
 
     /**

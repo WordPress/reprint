@@ -9,9 +9,10 @@ require_once __DIR__ . '/../../importer/import.php';
 /**
  * --only: the diff must reconcile only within the --only file path prefixes. A remote index built
  * with --only lists selected paths only, so the delete drains in
- * diff_indexes_and_build_fetch_list() would otherwise wrongly delete every
- * unselected local entry. Guard both drains so unselected local files +
- * index entries survive, while selected orphans are still deleted (delta).
+ * compare_remote_indexes_and_build_fetch_list() would otherwise wrongly delete every
+ * unselected remote index entry. Guard both drains so unselected local
+ * files and remote index entries survive, while selected orphans are still
+ * deleted.
  */
 class OnlyFilesPathPrefixDiffTest extends TestCase
 {
@@ -83,9 +84,9 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         file_put_contents($this->stateDir . '/' . $name, $contents);
     }
 
-    private function readLocalIndexPaths(): array
+    private function readRemoteIndexPaths(): array
     {
-        $file = $this->stateDir . '/pull/local-index.jsonl';
+        $file = $this->stateDir . '/pull/remote-index.jsonl';
         if (!file_exists($file)) {
             return [];
         }
@@ -128,16 +129,16 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
 
     public function testOnlyFilesPrefixDiffKeepsUnselectedAndDeletesSelectedOrphan(): void
     {
-        // Local index (sorted): an unselected entry, a matched selected file,
+        // Remote index (sorted): an unselected entry, a matched selected file,
         // and a selected orphan absent from the --only remote index. The
-        // delete drains must reconcile only within the --only file prefixes, so the local index
+        // delete drains must reconcile only within the --only file prefixes, so the remote index
         // accumulates as a union across files-pull --only runs.
-        $this->writeIndex('pull/local-index.jsonl',
+        $this->writeIndex('pull/remote-index.jsonl',
             $this->indexLine('/wp-config.php', 1000, 10)               // unselected
             . $this->indexLine('/wp-content/keep.txt', 1000, 10)       // matched
             . $this->indexLine('/wp-content/old/orphan.txt', 1000, 10) // selected orphan
         );
-        $this->writeIndex('pull/remote-index.jsonl',
+        $this->writeIndex('pull/remote-index.next.jsonl',
             $this->indexLine('/wp-content/keep.txt', 1000, 10)
         );
 
@@ -146,14 +147,14 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $orphan = $this->seedLocalFile('/wp-content/old/orphan.txt');
 
         [$client, $r] = $this->prepareClient(['/wp-content']);
-        $r->getMethod('diff_indexes_and_build_fetch_list')->invoke($client);
+        $r->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
 
         // Unselected file AND its index entry survive.
         $this->assertFileExists($unselected);
-        $this->assertContains('/wp-config.php', $this->readLocalIndexPaths());
+        $this->assertContains('/wp-config.php', $this->readRemoteIndexPaths());
         // Selected orphan file AND its index entry are deleted.
         $this->assertFileDoesNotExist($orphan);
-        $this->assertNotContains('/wp-content/old/orphan.txt', $this->readLocalIndexPaths());
+        $this->assertNotContains('/wp-content/old/orphan.txt', $this->readRemoteIndexPaths());
     }
 
     public function testOnlyRootItselfSurvivesTheDeleteDrains(): void
@@ -164,12 +165,12 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         // delete them: that would recursively remove the very directories
         // the user asked to pull, while the matched children keep the
         // fetch list empty — silent data loss.
-        $this->writeIndex('pull/local-index.jsonl',
+        $this->writeIndex('pull/remote-index.jsonl',
             $this->indexLine('/wp-content/themes', 1000, 0, 'dir')
             . $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
             . $this->indexLine('/wp-content/themes/old/orphan.css', 1000, 10)
         );
-        $this->writeIndex('pull/remote-index.jsonl',
+        $this->writeIndex('pull/remote-index.next.jsonl',
             $this->indexLine('/wp-content/themes/keep/style.css', 1000, 10)
         );
 
@@ -177,14 +178,14 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $orphan = $this->seedLocalFile('/wp-content/themes/old/orphan.css');
 
         [$client, $r] = $this->prepareClient(['/wp-content/themes']);
-        $r->getMethod('diff_indexes_and_build_fetch_list')->invoke($client);
+        $r->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
 
         // The selected root, its matched contents, and its index entry survive…
         $this->assertDirectoryExists($this->filesystem_root . '/wp-content/themes');
         $this->assertFileExists($kept);
-        $this->assertContains('/wp-content/themes', $this->readLocalIndexPaths());
+        $this->assertContains('/wp-content/themes', $this->readRemoteIndexPaths());
         // …while a genuine orphan inside it is still drained.
         $this->assertFileDoesNotExist($orphan);
-        $this->assertNotContains('/wp-content/themes/old/orphan.css', $this->readLocalIndexPaths());
+        $this->assertNotContains('/wp-content/themes/old/orphan.css', $this->readRemoteIndexPaths());
     }
 }

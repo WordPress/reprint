@@ -88,26 +88,30 @@ class DatabaseTableIndexState
 
 class FileDiffProgressState
 {
-    /** @var int Offset into the remote index while diffing. */
-    public int $remote_offset = 0;
+    /** @var int Offset into the next remote index while diffing. */
+    public int $next_remote_index_byte_offset = 0;
 
-    /** @var string|null Last local path seen after the current remote offset. */
-    public ?string $local_after = null;
+    /** @var string|null Last remote index path consumed at the current next remote index offset. */
+    public ?string $last_consumed_remote_index_path = null;
 
     public static function from_array(array $data): self
     {
         $state = new self();
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
-        $state->remote_offset = $data['remote_offset'];
-        $state->local_after = $data['local_after'];
+        $state->next_remote_index_byte_offset =
+            $data['next_remote_index_byte_offset'];
+        $state->last_consumed_remote_index_path =
+            $data['last_consumed_remote_index_path'];
         return $state;
     }
 
     public function to_array(): array
     {
         return [
-            'remote_offset' => $this->remote_offset,
-            'local_after' => $this->local_after,
+            'next_remote_index_byte_offset' =>
+                $this->next_remote_index_byte_offset,
+            'last_consumed_remote_index_path' =>
+                $this->last_consumed_remote_index_path,
         ];
     }
 }
@@ -370,6 +374,13 @@ class PullState
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
     public RemoteFileIndexCursorState $index;
+    /**
+     * @var array{stack:list<array{dir:string,after:string|null}>}|null
+     * FileIndexProcessor cursor for local index creation.
+     */
+    public ?array $local_index_processor_cursor = null;
+    /** @var int Durable byte offset in the local index building file. */
+    public int $local_index_building_file_byte_offset = 0;
     public FetchListProgressState $fetch;
     public FetchListProgressState $fetch_skipped;
     /** @var string|null Path to the file being written for crash recovery. */
@@ -437,6 +448,8 @@ class PullState
         $state->db_index = DatabaseTableIndexState::from_array($data['db_index']);
         $state->diff = FileDiffProgressState::from_array($data['diff']);
         $state->index = RemoteFileIndexCursorState::from_array($data['index']);
+        $state->local_index_processor_cursor = $data['local_index_processor_cursor'];
+        $state->local_index_building_file_byte_offset = $data['local_index_building_file_byte_offset'];
         $state->fetch = FetchListProgressState::from_array($data['fetch']);
         $state->fetch_skipped = FetchListProgressState::from_array($data['fetch_skipped']);
         $state->current_file = $data['current_file'];
@@ -475,6 +488,8 @@ class PullState
             'db_index' => $this->db_index->to_array(),
             'diff' => $this->diff->to_array(),
             'index' => $this->index->to_array(),
+            'local_index_processor_cursor' => $this->local_index_processor_cursor,
+            'local_index_building_file_byte_offset' => $this->local_index_building_file_byte_offset,
             'fetch' => $this->fetch->to_array(),
             'fetch_skipped' => $this->fetch_skipped->to_array(),
             'current_file' => $this->current_file,

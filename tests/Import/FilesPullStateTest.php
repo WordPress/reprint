@@ -24,8 +24,8 @@ class FilesPullStateTest extends TestCase
     {
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/import-state-test-' . uniqid();
-        $this->stateDir = $this->tempDir . '/state';
-        $this->filesystem_root = $this->tempDir . '/fs-root';
+        $this->stateDir = $this->tempDir;
+        $this->filesystem_root = $this->stateDir . '/fs-root';
         mkdir($this->stateDir . '/pull', 0755, true);
         mkdir($this->filesystem_root, 0755, true);
     }
@@ -60,6 +60,14 @@ class FilesPullStateTest extends TestCase
     private function makeClient(): \ImportClient
     {
         return new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);
+    }
+
+    private function localIndexFile(): string
+    {
+        return realpath($this->stateDir)
+            . '/push/'
+            . md5('http://fake.url')
+            . '/local_index.jsonl';
     }
 
     /**
@@ -182,6 +190,10 @@ class FilesPullStateTest extends TestCase
                 "path" => base64_encode('/wp-content/uploads/2024/01/photo.jpg'),
             ], JSON_UNESCAPED_SLASHES) . "\n",
         );
+        file_put_contents(
+            $this->filesystem_root . '/local.txt',
+            'local contents'
+        );
 
         $client = new CompletedFileFetchClient(
             'http://fake.url',
@@ -202,6 +214,100 @@ class FilesPullStateTest extends TestCase
         $this->assertNull($state["active_resumable_command"]["current_stage"]);
         $this->assertEquals("skipped-earlier", $state["filter"]);
         $this->assertFileDoesNotExist($this->stateDir . '/pull/skipped-fetch-list.jsonl');
+        $this->assertFileExists($this->localIndexFile());
+        $localIndexEntries = file(
+            $this->localIndexFile(),
+            FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES
+        );
+        $this->assertIsArray($localIndexEntries);
+        $localIndexEntry = json_decode(
+            $localIndexEntries[0],
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $this->assertSame(
+            'local.txt',
+            base64_decode($localIndexEntry['path'], true)
+        );
+    }
+
+    public function testLocalIndexCreationResumesFromItsDurableCursor(): void
+    {
+        file_put_contents($this->filesystem_root . '/first.txt', 'first');
+        file_put_contents($this->filesystem_root . '/second.txt', 'second');
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => "files-pull",
+                "completion_state" => "partial",
+                "current_stage" => "building-local-index",
+            ],
+        ]);
+
+        $localIndexFile = $this->localIndexFile();
+        mkdir(dirname($localIndexFile), 0755, true);
+        file_put_contents(
+            $localIndexFile,
+            json_encode(
+                [
+                    'path' => base64_encode('old.txt'),
+                    'ctime' => 1,
+                    'size' => 1,
+                    'type' => 'file',
+                ],
+                JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+            ) . "\n"
+        );
+
+        [$client, $reflection] = $this->prepareClient();
+        $reflection->getProperty('shutdown_requested')->setValue(
+            $client,
+            true
+        );
+        $this->assertFalse(
+            $reflection
+                ->getMethod('replace_local_index_with_filesystem_root_snapshot')
+                ->invoke($client)
+        );
+        $this->assertStringContainsString(
+            base64_encode('old.txt'),
+            (string) file_get_contents($localIndexFile)
+        );
+        $interruptedState = $this->readState();
+        $this->assertNotNull($interruptedState['local_index_processor_cursor']);
+        $this->assertGreaterThan(
+            0,
+            $interruptedState['local_index_building_file_byte_offset']
+        );
+
+        [$resumedClient, $resumedReflection] = $this->prepareClient();
+        $this->assertTrue(
+            $resumedReflection
+                ->getMethod('replace_local_index_with_filesystem_root_snapshot')
+                ->invoke($resumedClient)
+        );
+
+        $localIndexPaths = [];
+        foreach (
+            file(
+                $localIndexFile,
+                FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES
+            ) ?: []
+            as $localIndexLine
+        ) {
+            $localIndexEntry = json_decode(
+                $localIndexLine,
+                true,
+                512,
+                JSON_THROW_ON_ERROR
+            );
+            $localIndexPaths[] =
+                base64_decode($localIndexEntry['path'], true);
+        }
+        $this->assertSame(
+            ['first.txt', 'second.txt'],
+            $localIndexPaths
+        );
     }
 
     /**
@@ -209,7 +315,7 @@ class FilesPullStateTest extends TestCase
      */
     public function testAbortClearsCompletedStatus()
     {
-        $indexFile = $this->stateDir . '/pull/local-index.jsonl';
+        $indexFile = $this->stateDir . '/pull/remote-index.jsonl';
         file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
@@ -239,7 +345,7 @@ class FilesPullStateTest extends TestCase
      */
     public function testAbortThenRerunStartsFresh()
     {
-        $indexFile = $this->stateDir . '/pull/local-index.jsonl';
+        $indexFile = $this->stateDir . '/pull/remote-index.jsonl';
         file_put_contents($indexFile, $this->indexLine('/wp-login.php', 1000, 100));
 
         $this->writeState([
@@ -323,20 +429,20 @@ class FilesPullStateTest extends TestCase
     // ---------------------------------------------------------------
 
     /**
-     * In preserve-local mode, a file that is in the local index and changed
+     * In preserve-local mode, a file that is in the remote index and changed
      * remotely (different ctime) must be added to the fetch list.
      *
      * Preserve-local protects pre-existing local files, not files we
-     * previously synced. A changed file in the local index is ours to update.
+     * previously synced. A changed file in the remote index is ours to update.
      */
     public function testDeltaDiffRedownloadsChangedIndexedFile()
     {
-        // Local index: file synced at ctime 1000
-        $localIndex = $this->stateDir . '/pull/local-index.jsonl';
-        file_put_contents($localIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 1000, 200));
-
-        // Remote index: same file at ctime 2000 (changed)
+        // Remote index: file synced at ctime 1000
         $remoteIndex = $this->stateDir . '/pull/remote-index.jsonl';
+        file_put_contents($remoteIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 1000, 200));
+
+        // Next remote index: same file at ctime 2000 (changed)
+        $remoteIndex = $this->stateDir . '/pull/remote-index.next.jsonl';
         file_put_contents($remoteIndex, $this->indexLine('/wp-content/themes/flavor/style.css', 2000, 250));
 
         // The file exists locally (downloaded during the initial sync)
@@ -354,29 +460,29 @@ class FilesPullStateTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
+        $diffMethod = $reflection->getMethod('compare_remote_indexes_and_build_fetch_list');
         $diffMethod->invoke($client);
 
         $downloads = $this->readFetchList();
         $this->assertContains(
             '/wp-content/themes/flavor/style.css',
             $downloads,
-            "A changed file in the local index must be re-downloaded, not skipped by preserve-local",
+            "A changed file in the remote index must be re-downloaded, not skipped by preserve-local",
         );
     }
 
     /**
-     * In preserve-local mode, a file that is NOT in the local index but
+     * In preserve-local mode, a file that is NOT in the remote index but
      * exists locally (pre-existing) must be skipped.
      */
     public function testDeltaDiffSkipsPreExistingLocalFile()
     {
-        // Local index: empty (file was never synced by us)
-        $localIndex = $this->stateDir . '/pull/local-index.jsonl';
-        file_put_contents($localIndex, '');
-
-        // Remote index: file exists on remote
+        // Remote index: empty because the file was never synced by us.
         $remoteIndex = $this->stateDir . '/pull/remote-index.jsonl';
+        file_put_contents($remoteIndex, '');
+
+        // Next remote index: file exists on remote.
+        $remoteIndex = $this->stateDir . '/pull/remote-index.next.jsonl';
         file_put_contents($remoteIndex, $this->indexLine('/wp-content/object-cache.php', 1000, 500));
 
         // The file exists locally (pre-existing, e.g. hosting drop-in)
@@ -394,7 +500,7 @@ class FilesPullStateTest extends TestCase
 
         [$client, $reflection] = $this->prepareClient();
 
-        $diffMethod = $reflection->getMethod('diff_indexes_and_build_fetch_list');
+        $diffMethod = $reflection->getMethod('compare_remote_indexes_and_build_fetch_list');
         $diffMethod->invoke($client);
 
         $downloads = $this->readFetchList();
