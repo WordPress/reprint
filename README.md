@@ -517,15 +517,18 @@ whatever tool was reading stdout (typically `mysql` CLI).
 
 Reprint uses `$STATE_DIR` exactly as supplied. Consumers that want the state
 hidden can choose a directory named `.reprint`; Reprint does not append that
-name itself. State-directory-wide command progress and the audit log live directly in the
-state directory. Pull and push operation state live under the remote state
-directory at `remotes/<md5-of-trimmed-remote-reprint-api-url>/`, in `pull/` and
-`push/` respectively. State-directory-wide and pull filenames do not begin
-with a dot or repeat the scope supplied by their parent directory.
+name itself. State-directory-wide command progress and the audit log live
+directly in the state directory. The retained local index lives at
+`remotes/<md5-of-trimmed-remote-reprint-api-url>/local_index.jsonl`. Pull and
+push operation state live in the sibling `pull/` and `push/` directories.
+State-directory-wide and pull filenames do not begin with a dot or repeat the
+scope supplied by their parent directory.
 
 The directory name is `md5(rtrim(<remote-reprint-api-url>, "?&"))`. Commands
 which read local pull state receive the same remote Reprint API URL even when
-they make no network request; the URL selects the remote state directory.
+they make no network request; the URL selects the remote state directory. The
+filesystem root is not part of that directory name, so a different filesystem
+root uses a different state directory.
 
 `<remote-state-directory>/pull/state.json` and the state-directory-wide
 `progress.json` are written atomically:

@@ -6,7 +6,7 @@
  * Internal bounded local-index and change planner.
  *
  * PushPlan builds a path-sorted fresh local index, then diffs it against the
- * previous local index supplied by its caller. It writes durable lists of
+ * local index supplied by its caller. It writes durable lists of
  * local paths to push and local paths to delete without accumulating an index
  * or path list in memory.
  *
@@ -26,14 +26,13 @@
  *
  * ## Change detection
  *
- * ctime is machine-local, so the previous local index must describe the same
- * local machine: PushFilesSender supplies the index saved after the previous
- * push, and files-diff supplies the index captured after the previous pull.
- * File and symlink changes are determined by type, ctime, and size. Directory
- * changes use the indexer's empty-directory marker; non-empty directories are
- * represented by their descendants.
+ * ctime is machine-local, so the local index must describe the same filesystem
+ * root on the same local machine. The caller supplies the local index for its
+ * remote Reprint API URL. File and symlink changes are determined by type,
+ * ctime, and size. Directory changes use the indexer's empty-directory marker;
+ * non-empty directories are represented by their descendants.
  *
- * With no previous local index, every file, symlink, and empty directory is
+ * With no local index, every file, symlink, and empty directory is
  * selected, and no deletion can be detected. Excluded paths are omitted from
  * both path lists but remain in the fresh local index.
  *
@@ -58,10 +57,10 @@
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
  * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
  * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
- * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_index:int,byte_offset_in_previous_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_stack_top_byte_offset:int|null}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_local_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_stack_top_byte_offset:int|null}
  * @phpstan-type CompleteCursor array{phase:'complete'}
  * @phpstan-type PushPlanPosition IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
- * @phpstan-type PushPlanCursor array{plan_directory:string,local_tree_root:string,previous_local_index:string,position:PushPlanPosition}
+ * @phpstan-type PushPlanCursor array{plan_directory:string,filesystem_root:string,local_index_file:string,position:PushPlanPosition}
  * @phpstan-type DeletedDirectoryStackEntry array{path:string,previous_byte_offset:int|null}
  */
 class PushPlan
@@ -72,8 +71,8 @@ class PushPlan
     /** @var string Caller-owned active plan directory. */
     private string $plan_directory;
 
-    /** @var string Previous local index supplied by the caller. */
-    private string $previous_local_index;
+    /** @var string Local index supplied by the caller. */
+    private string $local_index_file;
 
     /** @var string JSONL file of local paths to push. */
     private string $local_paths_to_push;
@@ -81,8 +80,8 @@ class PushPlan
     /** @var string Raw NUL-delimited local paths to delete. */
     private string $local_paths_to_delete;
 
-    /** @var string Plan-owned fresh local index. */
-    private string $fresh_local_index;
+    /** @var string Plan-owned fresh local index file. */
+    private string $fresh_local_index_file;
 
     /** @var string Plan path containing receiver-owned exclusions for the active push. */
     private string $excluded_paths_file;
@@ -109,10 +108,10 @@ class PushPlan
     private bool $fresh_local_index_entry_loaded = false;
 
     /** @var array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}|null */
-    private ?array $previous_local_index_lookahead_entry = null;
+    private ?array $local_index_lookahead_entry = null;
 
-    /** @var bool Whether $previous_local_index_lookahead_entry has been read, including EOF. */
-    private bool $previous_local_index_lookahead_entry_loaded = false;
+    /** @var bool Whether $local_index_lookahead_entry has been read, including EOF. */
+    private bool $local_index_lookahead_entry_loaded = false;
 
     /** @var DeletedDirectoryStackEntry|null Top active deleted-directory stack entry. */
     private ?array $deleted_directory_stack_entry = null;
@@ -120,7 +119,7 @@ class PushPlan
     /** @var resource|null Open fresh local index retained during indexing or the index diff. */
     private $fresh_local_index_handle = null;
     /** @var resource|null */
-    private $previous_local_index_handle = null;
+    private $local_index_file_handle = null;
     /** @var resource|null */
     private $local_paths_to_push_handle = null;
     /** @var resource|null */
@@ -135,26 +134,26 @@ class PushPlan
      * fresh local index traversal. Until the caller stores the returned cursor,
      * an interrupted start is repeated and overwrites these initial plan files.
      *
-     * @param string $plan_directory              Caller-owned active plan directory.
-     * @param string $filesystem_root              Resolved filesystem root.
-     * @param string $previous_local_index Previous local index this plan diffs against.
-     * @param string $excluded_paths_path          Caller-owned target exclusions file.
+     * @param string $plan_directory      Caller-owned active plan directory.
+     * @param string $filesystem_root     Resolved filesystem root.
+     * @param string $local_index_file    Local index file this plan diffs against.
+     * @param string $excluded_paths_path Caller-owned target exclusions file.
      * @return self Open plan positioned at the initial indexing cursor.
      */
     public static function start(
         string $plan_directory,
         string $filesystem_root,
-        string $previous_local_index,
+        string $local_index_file,
         string $excluded_paths_path
     ): self {
-        $plan = new self($plan_directory, $filesystem_root, $previous_local_index);
+        $plan = new self($plan_directory, $filesystem_root, $local_index_file);
         if (!@copy($excluded_paths_path, $plan->excluded_paths_file)) {
             throw new RuntimeException("Failed to copy excluded paths into the push plan: {$excluded_paths_path}");
         }
         $plan->excluded_paths = $plan->load_excluded_paths();
-        $plan->fresh_local_index_handle = fopen($plan->fresh_local_index, "w+b");
+        $plan->fresh_local_index_handle = fopen($plan->fresh_local_index_file, "w+b");
         if (!is_resource($plan->fresh_local_index_handle)) {
-            throw new RuntimeException("Failed to open the fresh local index: {$plan->fresh_local_index}");
+            throw new RuntimeException("Failed to open the fresh local index: {$plan->fresh_local_index_file}");
         }
         $plan->file_index_processor = FileIndexProcessor::start(
             [$plan->filesystem_root],
@@ -165,8 +164,8 @@ class PushPlan
         );
         $plan->cursor = [
             "plan_directory" => $plan->plan_directory,
-            "local_tree_root" => $plan->filesystem_root,
-            "previous_local_index" => $plan->previous_local_index,
+            "filesystem_root" => $plan->filesystem_root,
+            "local_index_file" => $plan->local_index_file,
             "position" => [
                 "phase" => "indexing",
                 "file_index_cursor" => $plan->file_index_processor->get_cursor(),
@@ -189,8 +188,8 @@ class PushPlan
     {
         $plan = new self(
             $cursor["plan_directory"],
-            $cursor["local_tree_root"],
-            $cursor["previous_local_index"]
+            $cursor["filesystem_root"],
+            $cursor["local_index_file"]
         );
         $plan->cursor = $cursor;
         $position = $plan->cursor["position"];
@@ -236,20 +235,20 @@ class PushPlan
      */
     public function get_fresh_local_index_path(): string
     {
-        return $this->fresh_local_index;
+        return $this->fresh_local_index_file;
     }
 
     /**
      * Initializes paths in the caller-owned active plan directory.
      *
-     * @param string $plan_directory              Caller-owned active plan directory.
-     * @param string $filesystem_root              Resolved filesystem root.
-     * @param string $previous_local_index Previous local index this plan diffs against.
+     * @param string $plan_directory   Caller-owned active plan directory.
+     * @param string $filesystem_root  Resolved filesystem root.
+     * @param string $local_index_file Local index file this plan diffs against.
      */
     private function __construct(
         string $plan_directory,
         string $filesystem_root,
-        string $previous_local_index
+        string $local_index_file
     ) {
         $plan_directory = rtrim($plan_directory, "/");
         if (!is_dir($plan_directory)) {
@@ -257,10 +256,10 @@ class PushPlan
         }
         $this->plan_directory = $plan_directory;
         $this->set_filesystem_root($filesystem_root);
-        $this->previous_local_index = $previous_local_index;
+        $this->local_index_file = $local_index_file;
         $this->local_paths_to_push = $plan_directory . "/local_paths_to_push.jsonl";
         $this->local_paths_to_delete = $plan_directory . "/local_paths_to_delete";
-        $this->fresh_local_index = $plan_directory . "/fresh_local_index.jsonl";
+        $this->fresh_local_index_file = $plan_directory . "/fresh_local_index.jsonl";
         $this->excluded_paths_file = $plan_directory . "/excluded_paths.json";
         $this->deleted_directories_stack = $plan_directory . "/deleted_directories_stack.jsonl";
     }
@@ -290,9 +289,9 @@ class PushPlan
     {
         /** @var IndexingCursor $cursor */
         $cursor = $this->cursor["position"];
-        $this->fresh_local_index_handle = fopen($this->fresh_local_index, "r+b");
+        $this->fresh_local_index_handle = fopen($this->fresh_local_index_file, "r+b");
         if (!is_resource($this->fresh_local_index_handle)) {
-            throw new RuntimeException("Failed to reopen the fresh local index: {$this->fresh_local_index}");
+            throw new RuntimeException("Failed to reopen the fresh local index: {$this->fresh_local_index_file}");
         }
         if (!ftruncate($this->fresh_local_index_handle, $cursor["fresh_local_index_byte_offset"])) {
             throw new RuntimeException("Failed to discard uncommitted fresh-local-index bytes.");
@@ -321,38 +320,38 @@ class PushPlan
         $cursor = $this->cursor["position"];
         $this->fresh_local_index_entry = null;
         $this->fresh_local_index_entry_loaded = false;
-        $this->previous_local_index_lookahead_entry = null;
-        $this->previous_local_index_lookahead_entry_loaded = false;
+        $this->local_index_lookahead_entry = null;
+        $this->local_index_lookahead_entry_loaded = false;
         $this->deleted_directory_stack_entry = null;
-        $this->local_paths_to_push_handle = $this->open_and_truncate_and_seek(
+        $this->local_paths_to_push_handle = $this->open_push_plan_output_file_at_byte_offset(
             $this->local_paths_to_push,
             $cursor["byte_offset_in_local_paths_to_push"]
         );
-        $this->local_paths_to_delete_handle = $this->open_and_truncate_and_seek(
+        $this->local_paths_to_delete_handle = $this->open_push_plan_output_file_at_byte_offset(
             $this->local_paths_to_delete,
             $cursor["byte_offset_in_local_paths_to_delete"]
         );
-        $this->fresh_local_index_handle = fopen($this->fresh_local_index, "rb");
+        $this->fresh_local_index_handle = fopen($this->fresh_local_index_file, "rb");
         if (!is_resource($this->fresh_local_index_handle)) {
-            throw new RuntimeException("Failed to open the retained fresh local index: {$this->fresh_local_index}");
+            throw new RuntimeException("Failed to open the retained fresh local index: {$this->fresh_local_index_file}");
         }
 
-        if (is_file($this->previous_local_index)) {
-            $this->previous_local_index_handle = fopen($this->previous_local_index, "rb");
-            if (!is_resource($this->previous_local_index_handle)) {
-                throw new RuntimeException("Failed to open the previous local index: {$this->previous_local_index}");
+        if (is_file($this->local_index_file)) {
+            $this->local_index_file_handle = fopen($this->local_index_file, "rb");
+            if (!is_resource($this->local_index_file_handle)) {
+                throw new RuntimeException("Failed to open the local index: {$this->local_index_file}");
             }
         }
-        $this->seek_to_cursor(
+        $this->seek_index_file_to_byte_offset(
             $this->fresh_local_index_handle,
-            $cursor["byte_offset_in_fresh_index"],
+            $cursor["byte_offset_in_fresh_local_index"],
             "fresh local index"
         );
-        if ($this->previous_local_index_handle) {
-            $this->seek_to_cursor(
-                $this->previous_local_index_handle,
-                $cursor["byte_offset_in_previous_local_index"],
-                "previous local index"
+        if ($this->local_index_file_handle) {
+            $this->seek_index_file_to_byte_offset(
+                $this->local_index_file_handle,
+                $cursor["byte_offset_in_local_index"],
+                "local index"
             );
         }
         $this->deleted_directories_stack_handle = fopen($this->deleted_directories_stack, "a+b");
@@ -414,8 +413,8 @@ class PushPlan
         $fresh_local_index_changed = false;
         switch ($this->file_index_processor->get_step_status()) {
             case FileIndexProcessor::STATUS_INDEXED:
-                foreach ($this->file_index_processor->get_index_entries() as $index_entry) {
-                    $this->append_fresh_local_index_entry($index_entry);
+                foreach ($this->file_index_processor->get_index_entries() as $file_index_processor_entry) {
+                    $this->append_fresh_local_index_entry($file_index_processor_entry);
                     $fresh_local_index_changed = true;
                 }
                 break;
@@ -456,8 +455,8 @@ class PushPlan
         }
         $this->cursor["position"] = [
             "phase" => "diffing",
-            "byte_offset_in_fresh_index" => 0,
-            "byte_offset_in_previous_local_index" => 0,
+            "byte_offset_in_fresh_local_index" => 0,
+            "byte_offset_in_local_index" => 0,
             "byte_offset_in_local_paths_to_push" => 0,
             "byte_offset_in_local_paths_to_delete" => 0,
             "deleted_directory_stack_top_byte_offset" => null,
@@ -469,33 +468,49 @@ class PushPlan
      * Appends one FileIndexProcessor entry in the JSONL format consumed by the
      * index diff.
      *
-     * @param array<string,mixed> $index_entry Filesystem path details from FileIndexProcessor.
+     * @param array<string,mixed> $file_index_processor_entry Filesystem path details from FileIndexProcessor.
      */
-    private function append_fresh_local_index_entry(array $index_entry): void
+    private function append_fresh_local_index_entry(array $file_index_processor_entry): void
     {
-        if ($index_entry["type"] === "other") {
+        if ($file_index_processor_entry["type"] === "other") {
             throw new RuntimeException(
-                "Cannot push the unsupported local path: " . base64_encode($index_entry["path"]) . "."
+                "Cannot push the unsupported local path: "
+                . base64_encode($file_index_processor_entry["path"])
+                . "."
             );
         }
-        if ($index_entry["type"] === "dir" && !array_key_exists("empty", $index_entry)) {
+        if (
+            $file_index_processor_entry["type"] === "dir"
+            && !array_key_exists("empty", $file_index_processor_entry)
+        ) {
             throw new RuntimeException(
-                "Could not inspect the local directory: " . base64_encode($index_entry["path"]) . "."
+                "Could not inspect the local directory: "
+                . base64_encode($file_index_processor_entry["path"])
+                . "."
             );
         }
 
-        $local_path = substr($index_entry["path"], strlen($this->filesystem_root) + 1);
+        $local_relative_path = substr(
+            $file_index_processor_entry["path"],
+            strlen($this->filesystem_root) + 1
+        );
         $fresh_local_index_entry = [
-            "path" => base64_encode($local_path),
-            "ctime" => $index_entry["ctime"],
-            "size" => $index_entry["size"],
-            "type" => $index_entry["type"],
+            "path" => base64_encode($local_relative_path),
+            "ctime" => $file_index_processor_entry["ctime"],
+            "size" => $file_index_processor_entry["size"],
+            "type" => $file_index_processor_entry["type"],
         ];
-        if ($index_entry["type"] === "dir") {
-            $fresh_local_index_entry["empty"] = $index_entry["empty"];
+        if ($file_index_processor_entry["type"] === "dir") {
+            $fresh_local_index_entry["empty"] = $file_index_processor_entry["empty"];
         }
-        $line = json_encode($fresh_local_index_entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-        if (fwrite($this->fresh_local_index_handle, $line) !== strlen($line)) {
+        $fresh_local_index_json_line = json_encode(
+            $fresh_local_index_entry,
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+        ) . "\n";
+        if (
+            fwrite($this->fresh_local_index_handle, $fresh_local_index_json_line)
+            !== strlen($fresh_local_index_json_line)
+        ) {
             throw new RuntimeException("Failed to write a fresh local index entry.");
         }
     }
@@ -513,56 +528,56 @@ class PushPlan
         /** @var IndexDiffCursor $cursor */
         $cursor = $this->cursor["position"];
 
-        $byte_offset_in_fresh_index = $cursor["byte_offset_in_fresh_index"];
-        $byte_offset_in_previous_local_index = $cursor["byte_offset_in_previous_local_index"];
+        $byte_offset_in_fresh_local_index = $cursor["byte_offset_in_fresh_local_index"];
+        $byte_offset_in_local_index = $cursor["byte_offset_in_local_index"];
         $deleted_directory_stack_top_byte_offset = $cursor["deleted_directory_stack_top_byte_offset"];
         $local_paths_to_push_changed = false;
         $local_paths_to_delete_changed = false;
         $deleted_directories_stack_changed = false;
 
         if (!$this->fresh_local_index_entry_loaded) {
-            $this->fresh_local_index_entry = $this->parse_next_index_entry($this->fresh_local_index_handle);
+            $this->fresh_local_index_entry = $this->read_next_index_entry($this->fresh_local_index_handle);
             $this->fresh_local_index_entry_loaded = true;
         }
-        if (!$this->previous_local_index_lookahead_entry_loaded) {
-            $this->previous_local_index_lookahead_entry = $this->parse_next_index_entry(
-                $this->previous_local_index_handle
+        if (!$this->local_index_lookahead_entry_loaded) {
+            $this->local_index_lookahead_entry = $this->read_next_index_entry(
+                $this->local_index_file_handle
             );
-            $this->previous_local_index_lookahead_entry_loaded = true;
+            $this->local_index_lookahead_entry_loaded = true;
         }
-        $entry_fresh_index = $this->fresh_local_index_entry;
-        $entry_previous_local_index = $this->previous_local_index_lookahead_entry;
+        $fresh_local_index_entry = $this->fresh_local_index_entry;
+        $local_index_entry = $this->local_index_lookahead_entry;
 
-        if ($entry_fresh_index !== null || $entry_previous_local_index !== null) {
+        if ($fresh_local_index_entry !== null || $local_index_entry !== null) {
             // Base64 does not preserve byte order ('0' sorts before 'A'
             // in ASCII but encodes a higher value), so ordering uses the
             // decoded path bytes.
-            if ($entry_previous_local_index === null) {
+            if ($local_index_entry === null) {
                 $path_comparison = -1;
-            } elseif ($entry_fresh_index === null) {
+            } elseif ($fresh_local_index_entry === null) {
                 $path_comparison = 1;
             } else {
-                $path_comparison = strcmp($entry_fresh_index["path"], $entry_previous_local_index["path"]);
+                $path_comparison = strcmp($fresh_local_index_entry["path"], $local_index_entry["path"]);
             }
 
-            $current_shape = null;
+            $fresh_local_index_entry_shape = null;
             if ($path_comparison <= 0) {
-                $current_shape = $this->entry_shape($entry_fresh_index);
+                $fresh_local_index_entry_shape = $this->index_entry_shape($fresh_local_index_entry);
             }
 
-            $previous_local_index_shape = null;
+            $local_index_entry_shape = null;
             if ($path_comparison >= 0) {
-                $previous_local_index_shape = $this->entry_shape($entry_previous_local_index);
+                $local_index_entry_shape = $this->index_entry_shape($local_index_entry);
 
                 // Byte sorting can put a sibling such as `a-other` before
                 // `a/child`. Every retained non-empty directory has a later
-                // descendant, so adjacent previous-index entries can pass at
+                // descendant, so adjacent local index entries can pass at
                 // most the top sibling range.
                 if ($this->deleted_directory_stack_entry !== null) {
                     $descendant_prefix = $this->deleted_directory_stack_entry["path"] . "/";
                     if (
-                        strpos($entry_previous_local_index["path"], $descendant_prefix) !== 0
-                        && strcmp($entry_previous_local_index["path"], $descendant_prefix) > 0
+                        strpos($local_index_entry["path"], $descendant_prefix) !== 0
+                        && strcmp($local_index_entry["path"], $descendant_prefix) > 0
                     ) {
                         $deleted_directory_stack_top_byte_offset = $this->deleted_directory_stack_entry["previous_byte_offset"];
                         $this->deleted_directory_stack_entry = $this->read_deleted_directory_stack_entry(
@@ -577,85 +592,88 @@ class PushPlan
                 // pushed. A new non-empty directory is represented by its
                 // descendants.
                 if (
-                    $current_shape !== "non_empty_directory"
-                    && !$this->path_conflicts_with_excluded_paths($entry_fresh_index["path"])
+                    $fresh_local_index_entry_shape !== "non_empty_directory"
+                    && !$this->path_conflicts_with_excluded_paths($fresh_local_index_entry["path"])
                 ) {
-                    $this->append_local_path_to_push($entry_fresh_index);
+                    $this->append_local_path_to_push($fresh_local_index_entry);
                     $local_paths_to_push_changed = true;
                 }
             } elseif ($path_comparison > 0) {
                 // A deleted non-empty directory emits one root. Its later
                 // descendant entries are already covered by that path.
                 if (
-                    !$this->path_conflicts_with_excluded_paths($entry_previous_local_index["path"])
+                    !$this->path_conflicts_with_excluded_paths($local_index_entry["path"])
                     && !$this->deleted_directory_stack_covers_path(
-                        $entry_previous_local_index["path"],
+                        $local_index_entry["path"],
                         $this->deleted_directory_stack_entry
                     )
                 ) {
-                    $this->append_local_path_to_delete($entry_previous_local_index["path"]);
+                    $this->append_local_path_to_delete($local_index_entry["path"]);
                     $local_paths_to_delete_changed = true;
-                    if ($previous_local_index_shape === "non_empty_directory") {
+                    if ($local_index_entry_shape === "non_empty_directory") {
                         $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
-                            $entry_previous_local_index["path"],
+                            $local_index_entry["path"],
                             $deleted_directory_stack_top_byte_offset
                         );
                         $deleted_directories_stack_changed = true;
                     }
                 }
             } else {
-                $current_is_file_or_symlink = $current_shape === "file" || $current_shape === "symlink";
-                $previous_local_index_is_file_or_symlink = $previous_local_index_shape === "file" || $previous_local_index_shape === "symlink";
-                $non_empty_directory_becomes_empty = $current_shape === "empty_directory"
-                    && $previous_local_index_shape === "non_empty_directory";
-                $empty_directory_needs_push = $current_shape === "empty_directory"
-                    && $previous_local_index_shape !== "empty_directory";
+                $fresh_local_index_entry_is_file_or_symlink = $fresh_local_index_entry_shape === "file"
+                    || $fresh_local_index_entry_shape === "symlink";
+                $local_index_entry_is_file_or_symlink = $local_index_entry_shape === "file"
+                    || $local_index_entry_shape === "symlink";
+                $non_empty_directory_becomes_empty = $fresh_local_index_entry_shape === "empty_directory"
+                    && $local_index_entry_shape === "non_empty_directory";
+                $empty_directory_needs_push = $fresh_local_index_entry_shape === "empty_directory"
+                    && $local_index_entry_shape !== "empty_directory";
                 // File and symlink changes are defined by type, ctime, and
                 // size. Other index values do not select a path for upload.
-                $changed_file_or_symlink_needs_push = $current_is_file_or_symlink
+                $changed_file_or_symlink_needs_push = $fresh_local_index_entry_is_file_or_symlink
                     && (
-                        $entry_fresh_index["ctime"] !== $entry_previous_local_index["ctime"]
-                        || $entry_fresh_index["size"] !== $entry_previous_local_index["size"]
-                        || $entry_fresh_index["type"] !== $entry_previous_local_index["type"]
+                        $fresh_local_index_entry["ctime"] !== $local_index_entry["ctime"]
+                        || $fresh_local_index_entry["size"] !== $local_index_entry["size"]
+                        || $fresh_local_index_entry["type"] !== $local_index_entry["type"]
                     );
-                $needs_delete = $current_is_file_or_symlink !== $previous_local_index_is_file_or_symlink
+                $needs_delete =
+                    $fresh_local_index_entry_is_file_or_symlink !== $local_index_entry_is_file_or_symlink
                     || $non_empty_directory_becomes_empty;
                 $needs_push = $empty_directory_needs_push
                     || $changed_file_or_symlink_needs_push;
-                $path_is_excluded = $this->path_conflicts_with_excluded_paths($entry_fresh_index["path"]);
+                $path_is_excluded = $this->path_conflicts_with_excluded_paths($fresh_local_index_entry["path"]);
 
                 if (
                     $needs_delete
                     && !$path_is_excluded
                     && !$this->deleted_directory_stack_covers_path(
-                        $entry_previous_local_index["path"],
+                        $local_index_entry["path"],
                         $this->deleted_directory_stack_entry
                     )
                 ) {
-                    $this->append_local_path_to_delete($entry_previous_local_index["path"]);
+                    $this->append_local_path_to_delete($local_index_entry["path"]);
                     $local_paths_to_delete_changed = true;
-                    if ($previous_local_index_shape === "non_empty_directory") {
+                    if ($local_index_entry_shape === "non_empty_directory") {
                         $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
-                            $entry_previous_local_index["path"],
+                            $local_index_entry["path"],
                             $deleted_directory_stack_top_byte_offset
                         );
                         $deleted_directories_stack_changed = true;
                     }
                 }
                 if ($needs_push && !$path_is_excluded) {
-                    $this->append_local_path_to_push($entry_fresh_index);
+                    $this->append_local_path_to_push($fresh_local_index_entry);
                     $local_paths_to_push_changed = true;
                 }
             }
 
             if ($path_comparison <= 0) {
-                $byte_offset_in_fresh_index = ftell($this->fresh_local_index_handle);
-                $this->fresh_local_index_entry = $this->parse_next_index_entry($this->fresh_local_index_handle);
+                $byte_offset_in_fresh_local_index = ftell($this->fresh_local_index_handle);
+                $this->fresh_local_index_entry = $this->read_next_index_entry($this->fresh_local_index_handle);
             }
             if ($path_comparison >= 0) {
-                $byte_offset_in_previous_local_index = ftell($this->previous_local_index_handle);
-                $this->previous_local_index_lookahead_entry = $this->parse_next_index_entry(
-                    $this->previous_local_index_handle
+                $byte_offset_in_local_index = ftell($this->local_index_file_handle);
+                $this->local_index_lookahead_entry = $this->read_next_index_entry(
+                    $this->local_index_file_handle
                 );
             }
         }
@@ -669,7 +687,7 @@ class PushPlan
         }
 
         $complete = $this->fresh_local_index_entry === null
-            && $this->previous_local_index_lookahead_entry === null;
+            && $this->local_index_lookahead_entry === null;
         if ($complete) {
             $deleted_directory_stack_top_byte_offset = null;
             $this->deleted_directory_stack_entry = null;
@@ -678,8 +696,8 @@ class PushPlan
             ? ["phase" => "complete"]
             : [
                 "phase" => "diffing",
-                "byte_offset_in_fresh_index" => $byte_offset_in_fresh_index,
-                "byte_offset_in_previous_local_index" => $byte_offset_in_previous_local_index,
+                "byte_offset_in_fresh_local_index" => $byte_offset_in_fresh_local_index,
+                "byte_offset_in_local_index" => $byte_offset_in_local_index,
                 "byte_offset_in_local_paths_to_push" => ftell($this->local_paths_to_push_handle),
                 "byte_offset_in_local_paths_to_delete" => ftell($this->local_paths_to_delete_handle),
                 "deleted_directory_stack_top_byte_offset" => $deleted_directory_stack_top_byte_offset,
@@ -701,8 +719,8 @@ class PushPlan
             $this->file_index_processor->close();
         }
         $this->close_fresh_local_index_handle();
-        if (is_resource($this->previous_local_index_handle)) {
-            fclose($this->previous_local_index_handle);
+        if (is_resource($this->local_index_file_handle)) {
+            fclose($this->local_index_file_handle);
         }
         if (is_resource($this->local_paths_to_push_handle)) {
             fclose($this->local_paths_to_push_handle);
@@ -713,14 +731,14 @@ class PushPlan
         if (is_resource($this->deleted_directories_stack_handle)) {
             fclose($this->deleted_directories_stack_handle);
         }
-        $this->previous_local_index_handle = null;
+        $this->local_index_file_handle = null;
         $this->local_paths_to_push_handle = null;
         $this->local_paths_to_delete_handle = null;
         $this->deleted_directories_stack_handle = null;
         $this->fresh_local_index_entry = null;
         $this->fresh_local_index_entry_loaded = false;
-        $this->previous_local_index_lookahead_entry = null;
-        $this->previous_local_index_lookahead_entry_loaded = false;
+        $this->local_index_lookahead_entry = null;
+        $this->local_index_lookahead_entry_loaded = false;
         $this->deleted_directory_stack_entry = null;
         $this->closed = true;
     }
@@ -744,45 +762,58 @@ class PushPlan
      * but before storing its next cursor. Truncating to the saved offset
      * removes only that uncommitted tail before the plan continues.
      *
-     * @param string $path        Path to the push-plan output file.
-     * @param int    $byte_offset Durable byte offset at which writing resumes.
+     * @param string $push_plan_output_file Path to the push-plan output file.
+     * @param int    $byte_offset           Durable byte offset at which writing resumes.
      * @return resource Writable output handle positioned at the durable offset.
      */
-    private function open_and_truncate_and_seek(string $path, int $byte_offset)
+    private function open_push_plan_output_file_at_byte_offset(
+        string $push_plan_output_file,
+        int $byte_offset
+    )
     {
-        $handle = fopen($path, "c+b");
-        if (!$handle) {
-            throw new RuntimeException("Failed to open push plan output for writing: {$path}");
+        $push_plan_output_file_handle = fopen($push_plan_output_file, "c+b");
+        if (!$push_plan_output_file_handle) {
+            throw new RuntimeException("Failed to open push plan output for writing: {$push_plan_output_file}");
         }
-        if (!ftruncate($handle, $byte_offset) || fseek($handle, $byte_offset) !== 0) {
-            fclose($handle);
-            throw new RuntimeException("Failed to truncate and seek push plan output {$path} to byte {$byte_offset}.");
+        if (
+            !ftruncate($push_plan_output_file_handle, $byte_offset)
+            || fseek($push_plan_output_file_handle, $byte_offset) !== 0
+        ) {
+            fclose($push_plan_output_file_handle);
+            throw new RuntimeException(
+                "Failed to truncate and seek push plan output "
+                . "{$push_plan_output_file} to byte {$byte_offset}."
+            );
         }
-        return $handle;
+        return $push_plan_output_file_handle;
     }
 
     /**
-     * Positions an index handle at its durable cursor offset.
+     * Positions an index file handle at its durable byte offset.
      *
      * The plan owns immutable index files, and records their consumed byte
      * offsets only after finishing the corresponding step.
      *
-     * @param resource $handle      Open index handle to position.
-     * @param int      $byte_offset Durable byte offset saved in the cursor.
-     * @param string   $description Human-readable index name used in failures.
+     * @param resource $index_file_handle Open index file handle to position.
+     * @param int      $byte_offset       Durable byte offset saved in the cursor.
+     * @param string   $index_description Human-readable index name used in failures.
      */
-    private function seek_to_cursor($handle, int $byte_offset, string $description): void
+    private function seek_index_file_to_byte_offset(
+        $index_file_handle,
+        int $byte_offset,
+        string $index_description
+    ): void
     {
-        if (fseek($handle, $byte_offset) !== 0) {
-            throw new RuntimeException("Failed to seek the {$description} to byte {$byte_offset}.");
+        if (fseek($index_file_handle, $byte_offset) !== 0) {
+            throw new RuntimeException("Failed to seek the {$index_description} to byte {$byte_offset}.");
         }
     }
 
     /**
      * Returns the logical entry kind used by the transition table.
      *
-     * @param array $entry {
-     *     Parsed local index entry.
+     * @param array $index_entry {
+     *     Parsed index entry.
      *
      *     @type string $path  Decoded filesystem path.
      *     @type string $type  Entry type: `file`, `link`, or `dir`.
@@ -790,18 +821,18 @@ class PushPlan
      *     @type int    $size  Indexed size used for change detection.
      *     @type bool   $empty Whether a directory is empty. Present for directory entries.
      * }
-     * @phpstan-param array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool} $entry
+     * @phpstan-param array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool} $index_entry
      * @return 'file'|'symlink'|'empty_directory'|'non_empty_directory'
      */
-    private function entry_shape(array $entry): string
+    private function index_entry_shape(array $index_entry): string
     {
-        if ($entry["type"] === "file") {
+        if ($index_entry["type"] === "file") {
             return "file";
         }
-        if ($entry["type"] === "link") {
+        if ($index_entry["type"] === "link") {
             return "symlink";
         }
-        return $entry["empty"] ? "empty_directory" : "non_empty_directory";
+        return $index_entry["empty"] ? "empty_directory" : "non_empty_directory";
     }
 
     /**
@@ -809,7 +840,7 @@ class PushPlan
      *
      * Base64 keeps arbitrary filesystem path bytes representable in JSON.
      *
-     * @param array $entry {
+     * @param array $fresh_local_index_entry {
      *     Fresh local index entry selected for push.
      *
      *     @type string $path  Decoded filesystem path.
@@ -817,20 +848,25 @@ class PushPlan
      *     @type int    $size  Indexed size used for change detection.
      *     @type int    $ctime Indexed change timestamp.
      * }
-     * @phpstan-param array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool} $entry
+     * @phpstan-param array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool} $fresh_local_index_entry
      */
-    private function append_local_path_to_push(array $entry): void
+    private function append_local_path_to_push(array $fresh_local_index_entry): void
     {
-        $line = json_encode(
+        $local_path_to_push_json_line = json_encode(
             [
-                "path" => base64_encode($entry["path"]),
-                "type" => $entry["type"] === "link" ? "symlink" : ($entry["type"] === "dir" ? "directory" : "file"),
-                "size" => $entry["size"],
-                "ctime" => $entry["ctime"],
+                "path" => base64_encode($fresh_local_index_entry["path"]),
+                "type" => $fresh_local_index_entry["type"] === "link"
+                    ? "symlink"
+                    : ($fresh_local_index_entry["type"] === "dir" ? "directory" : "file"),
+                "size" => $fresh_local_index_entry["size"],
+                "ctime" => $fresh_local_index_entry["ctime"],
             ],
             JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
         ) . "\n";
-        if (fwrite($this->local_paths_to_push_handle, $line) !== strlen($line)) {
+        if (
+            fwrite($this->local_paths_to_push_handle, $local_path_to_push_json_line)
+            !== strlen($local_path_to_push_json_line)
+        ) {
             throw new RuntimeException("Short write on local push path list {$this->local_paths_to_push}, is the disk full?");
         }
     }
@@ -980,13 +1016,13 @@ class PushPlan
     }
 
     /**
-     * Reads and decodes the next local index entry.
+     * Reads and decodes the next index entry.
      *
-     * A null handle represents a missing previous local index.
+     * A null index file handle represents a missing local index.
      * The indexer's entry schema is trusted; only file reads, JSON decoding,
      * and base64 path decoding are handled here as fallible operations.
      *
-     * @param resource|null $handle Open local index handle, or null when no previous local index exists.
+     * @param resource|null $index_file_handle Open index file handle, or null when no local index exists.
      * @return array|null {
      *     Decoded index entry, or null at EOF or when the handle is null.
      *
@@ -998,35 +1034,37 @@ class PushPlan
      * }
      * @phpstan-return array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool}|null
      */
-    private function parse_next_index_entry($handle): ?array
+    private function read_next_index_entry($index_file_handle): ?array
     {
-        if (!$handle) {
+        if (!$index_file_handle) {
             return null;
         }
-        $raw_line = fgets($handle);
-        if ($raw_line === false) {
-            if (!feof($handle)) {
-                throw new RuntimeException("Failed to read a local index line.");
+        $index_entry_json = fgets($index_file_handle);
+        if ($index_entry_json === false) {
+            if (!feof($index_file_handle)) {
+                throw new RuntimeException("Failed to read an index line.");
             }
             return null;
         }
 
         try {
-            $entry = json_decode($raw_line, true, 512, JSON_THROW_ON_ERROR);
+            $index_entry = json_decode($index_entry_json, true, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException $exception) {
             throw new RuntimeException(
-                "Unexpected index line, it is not valid JSON: " . substr($raw_line, 0, 120),
+                "Unexpected index line, it is not valid JSON: " . substr($index_entry_json, 0, 120),
                 0,
                 $exception
             );
         }
-        /** @var array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool} $entry */
-        $path = base64_decode($entry["path"], true);
-        if ($path === false) {
-            throw new RuntimeException("The index path is not valid base64: " . substr($raw_line, 0, 120));
+        /** @var array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool} $index_entry */
+        $local_relative_path = base64_decode($index_entry["path"], true);
+        if ($local_relative_path === false) {
+            throw new RuntimeException(
+                "The index path is not valid base64: " . substr($index_entry_json, 0, 120)
+            );
         }
-        $entry["path"] = $path;
-        return $entry;
+        $index_entry["path"] = $local_relative_path;
+        return $index_entry;
     }
 
 }

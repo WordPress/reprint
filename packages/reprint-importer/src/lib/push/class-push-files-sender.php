@@ -10,8 +10,8 @@
  * PushFilesSender owns the only caller-visible push lifecycle. Its caller holds
  * the Reprint process lock while the sender creates and removes the target push
  * session, drives its internal PushPlan, streams the selected paths, commits the
- * push, and saves the completed fresh local index as the previous local index
- * for this remote Reprint API URL. The target owns the
+ * push, and saves the completed fresh local index as the local index for this
+ * remote Reprint API URL. The target owns the
  * upload cursor for every path and for the deletion list. Durable sender state
  * retains the top-level phase, the selected path-list cursor, and learned
  * request limits and the PushPlan cursor needed after a process restart.
@@ -56,13 +56,14 @@
  *
  * A new sender calls `push_create` to learn target-owned exclusions before
  * starting PushPlan. The plan builds the fresh local index and diffs it against
- * the previous local index for this remote Reprint API URL, one bounded step
- * at a time. That index is saved by the previous successful push and also read
- * by files-diff. After planning
+ * the local index for this remote Reprint API URL, one bounded step at a time.
+ * That index contains the most recent fresh scan the sender finished saving
+ * after the target confirmed its corresponding files-push commit, and is also
+ * read by files-diff. After planning
  * completes, local files, symlinks, and empty directories stream through
  * multipart requests. The raw deletion list follows, and repeated `push_commit`
- * calls let the target install the work in bounded steps. A confirmed commit
- * enters another phase which saves the fresh local index as the previous local
+ * calls let the target install the work in bounded steps. A target-confirmed
+ * commit enters another phase which saves the fresh local index as the local
  * index for this remote Reprint API URL through a swap file. Index completion,
  * plan completion, local-index saving, and plan discard each have a separate
  * durable phase. A stopped process therefore repeats only an idempotent
@@ -72,9 +73,9 @@
  * PushPlan. PushFilesSender stores that cursor after every completed planning
  * step but never interprets its internal phase or offsets. The sender creates
  * the active plan directory before planning and removes the whole directory
- * only after success or target-session removal. The previous local index for
- * this remote Reprint API URL remains beside sender.json. Once the plan result
- * is saved or discarded, the sender clears its cursor before removing the
+ * only after success or target-session removal. The local index for this remote
+ * Reprint API URL remains in the remote state directory. Once the plan result
+ * is saved or discarded, the sender clears its cursor before removing the plan
  * directory without reopening PushPlan.
  *
  * ## Resume after local changes
@@ -123,7 +124,7 @@
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_previous_local_index'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
@@ -136,8 +137,8 @@ final class PushFilesSender
     /** @var string Sender-owned active plan directory. */
     private string $plan_directory;
 
-    /** @var string Previous local index for this remote Reprint API URL. */
-    private string $previous_local_index;
+    /** @var string Local index file for this remote Reprint API URL. */
+    private string $local_index_file;
 
     /** @var string Path where the serialized sender state is stored. */
     private string $state_path;
@@ -365,7 +366,8 @@ final class PushFilesSender
         $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->plan_directory = $this->push_state_directory . '/plan';
-        $this->previous_local_index = $this->push_state_directory . '/previous_local_index.jsonl';
+        $remote_state_directory = dirname($this->push_state_directory);
+        $this->local_index_file = $remote_state_directory . '/local_index.jsonl';
         $this->state_path = $this->push_state_directory . '/sender.json';
         $this->excluded_paths_path = $this->push_state_directory . '/excluded_paths.json';
         $this->request_sizer_options = $request_sizer_options;
@@ -414,8 +416,8 @@ final class PushFilesSender
             case 'committing':
                 $this->commit_push();
                 break;
-            case 'saving_previous_local_index':
-                $this->save_previous_local_index();
+            case 'saving_local_index':
+                $this->save_local_index();
                 break;
             case 'completing':
                 $this->complete_push();
@@ -588,7 +590,7 @@ final class PushFilesSender
         $this->plan = PushPlan::start(
             $this->plan_directory,
             $this->filesystem_root,
-            $this->previous_local_index,
+            $this->local_index_file,
             $this->excluded_paths_path
         );
         $this->state['push_plan_cursor'] = $this->plan->get_cursor();
@@ -1184,7 +1186,7 @@ final class PushFilesSender
         if ($response['send_next_request']) {
             return;
         }
-        $this->state['phase'] = 'saving_previous_local_index';
+        $this->state['phase'] = 'saving_local_index';
         $this->store_state($this->state);
     }
 
@@ -1195,13 +1197,13 @@ final class PushFilesSender
      * deliberate whole-index copy is safe and leaves readers on either the old
      * or complete new index.
      */
-    private function save_previous_local_index(): void
+    private function save_local_index(): void
     {
-        $fresh_local_index = $this->plan->get_fresh_local_index_path();
+        $fresh_local_index_file = $this->plan->get_fresh_local_index_path();
         try {
             $this->copy_through_swap_file(
-                $fresh_local_index,
-                $this->previous_local_index
+                $fresh_local_index_file,
+                $this->local_index_file
             );
         } catch (RuntimeException $exception) {
             $this->fail('local_io_error', $exception->getMessage());
