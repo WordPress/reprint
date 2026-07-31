@@ -187,7 +187,6 @@ their parent directories.
         │   ├── remote-index.wal
         │   ├── remote-index.next.jsonl
         │   ├── fetch-list.jsonl
-        │   ├── skipped-fetch-list.jsonl
         │   ├── volatile-files.json
         │   ├── domains.json
         │   ├── sql-stats.json
@@ -208,7 +207,6 @@ Use these path names:
 | Remote index WAL | `$remote_index_wal_path` |
 | Next remote index file | `$next_remote_index_file` |
 | Fetch list file | `$fetch_list_file` |
-| Skipped fetch list file | `$skipped_fetch_list_file` |
 | Volatile files file | `$volatile_files_file` |
 | Domains file | `$domains_file` |
 | SQL statistics file | `$sql_stats_file` |

@@ -468,7 +468,7 @@ function stream_pull(): void {
         // bytes and not strictly needed for the site to boot. The
         // uploads-proxy mu-plugin redirects missing /wp-content/uploads/*
         // to the source site so media still renders. Users can opt
-        // into a follow-up files-pull --filter=skipped-earlier later.
+        // into a follow-up uploads-only files-pull later.
         '--filter=essential-files',
         // /wordpress already has Playground's fresh WP install. The
         // flat-docroot stage symlinks the imported tree on top, and

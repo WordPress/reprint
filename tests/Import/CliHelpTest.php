@@ -19,7 +19,6 @@ class CliHelpTest extends TestCase
 
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
-        $this->assertStringContainsString('--filter=MODE', $output);
         $this->assertStringContainsString('--remap SOURCE TARGET', $output);
         $this->assertStringContainsString('--only=SOURCE', $output);
         $this->assertStringContainsString('--exclude=SOURCE', $output);
@@ -40,6 +39,17 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('pull/remote-index.next.jsonl', $output);
         $this->assertStringContainsString('Remote index', $output);
         $this->assertStringContainsString('Next remote index', $output);
+    }
+
+    public function testFilterOptionIsHiddenFromCommandHelp(): void
+    {
+        foreach (array('pull', 'pull-files', 'files-pull') as $command) {
+            $this->assertStringNotContainsString(
+                '--filter',
+                $this->runHelp($command),
+                $command
+            );
+        }
     }
 
     public function testPullDbHelpShowsRequiredAndDatabaseOptions(): void

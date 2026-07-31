@@ -8,7 +8,6 @@ require_once __DIR__ . '/../../importer/import.php';
 
 class PullFilterFakeClient extends \ImportClient
 {
-    private bool $create_skipped_list;
     public int $files_pulled = 0;
     public int $preflight_runs = 0;
     public int $files_pull_runs = 0;
@@ -20,9 +19,8 @@ class PullFilterFakeClient extends \ImportClient
     /** @var resource|null */
     private $terminal_progress_stream = null;
 
-    public function __construct(string $state_dir, string $filesystem_root, bool $create_skipped_list)
+    public function __construct(string $state_dir, string $filesystem_root)
     {
-        $this->create_skipped_list = $create_skipped_list;
         parent::__construct('http://fake.invalid', $state_dir, $filesystem_root);
     }
 
@@ -79,6 +77,12 @@ class PullFilterFakeClient extends \ImportClient
                 "database" => [
                     "wp" => [
                         "wp_version" => "6.8",
+                        "paths_urls" => [
+                            "content_dir" => "/var/www/html/wp-content",
+                            "uploads" => [
+                                "basedir" => "/var/www/html/wp-content/uploads",
+                            ],
+                        ],
                     ],
                 ],
                 "runtime" => [
@@ -101,14 +105,6 @@ class PullFilterFakeClient extends \ImportClient
         }
 
         $this->files_pull_runs++;
-        if ($this->create_skipped_list) {
-            file_put_contents(
-                $this->pull_state_directory . '/skipped-fetch-list.jsonl',
-                "{\"path\":\"" . base64_encode('/wp-content/uploads/2024/01/photo.jpg') . "\"}\n",
-            );
-        } else {
-            @unlink($this->pull_state_directory . '/skipped-fetch-list.jsonl');
-        }
 
         $state = $this->get_state();
         $state->active_resumable_command->command_name = "files-pull";
@@ -229,9 +225,9 @@ class PullFilterOptionTest extends TestCase
         rmdir($dir);
     }
 
-    private function makeClient(bool $create_skipped_list): PullFilterFakeClient
+    private function makeClient(): PullFilterFakeClient
     {
-        return new PullFilterFakeClient($this->stateDir, $this->filesystem_root, $create_skipped_list);
+        return new PullFilterFakeClient($this->stateDir, $this->filesystem_root);
     }
 
     private function readState(): array
@@ -244,12 +240,12 @@ class PullFilterOptionTest extends TestCase
 
     private function writeState(array $state): void
     {
-        \write_current_pull_state($this->makeClient(false), $state);
+        \write_current_pull_state($this->makeClient(), $state);
     }
 
     public function testPullRejectsSkippedEarlierFilterBeforePersistingIt(): void
     {
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         try {
             ob_start();
@@ -273,7 +269,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullDoesNotAdvancePastFailedPreflight(): void
     {
-        $client = new PullFailingPreflightFakeClient($this->stateDir, $this->filesystem_root, false);
+        $client = new PullFailingPreflightFakeClient($this->stateDir, $this->filesystem_root);
 
         try {
             ob_start();
@@ -322,7 +318,7 @@ class PullFilterOptionTest extends TestCase
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
         ]);
 
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run([
@@ -353,7 +349,7 @@ class PullFilterOptionTest extends TestCase
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
         ]);
 
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run([
@@ -384,7 +380,7 @@ class PullFilterOptionTest extends TestCase
         ]);
         file_put_contents($this->stateDir . '/db.sql', "SELECT 1;\n");
 
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         try {
             ob_start();
@@ -411,7 +407,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testInvalidPullOptionsFailBeforeStateIsPersisted(): void
     {
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         try {
             ob_start();
@@ -431,7 +427,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullFilesSummaryReportsNoChangedFilesPulled(): void
     {
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
         $client->captureTerminalProgress();
 
         $client->run([
@@ -445,7 +441,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullFilesSummaryReportsChangedFilePulled(): void
     {
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
         $client->files_pulled = 1;
         $client->captureTerminalProgress();
 
@@ -460,25 +456,9 @@ class PullFilterOptionTest extends TestCase
         );
     }
 
-    public function testPullFilesSummaryReportsDeferredFilesPending(): void
-    {
-        $client = $this->makeClient(true);
-        $client->captureTerminalProgress();
-
-        $client->run([
-            "command" => "pull-files",
-            "filter" => "essential-files",
-        ]);
-
-        $this->assertStringContainsString(
-            '0 changed files pulled, deferred files pending',
-            $client->terminalProgressOutput(),
-        );
-    }
-
     public function testPullFilesRunsOnlyPreflightAndFilesStages(): void
     {
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run([
@@ -494,12 +474,12 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame(0, $client->db_apply_runs);
         $this->assertSame('pull-files', $state["pull_pipeline"]["started_by_command"]);
         $this->assertSame('files-pull', $state["pull_pipeline"]["last_completed_stage"]);
-        $this->assertSame('essential-files', $state["pull_pipeline"]["files_filter"]);
+        $this->assertSame('essential-files', $state["filter"]);
     }
 
     public function testPullFilesDoesNotAdvancePastFailedPreflight(): void
     {
-        $client = new PullFailingPreflightFakeClient($this->stateDir, $this->filesystem_root, false);
+        $client = new PullFailingPreflightFakeClient($this->stateDir, $this->filesystem_root);
 
         try {
             ob_start();
@@ -541,7 +521,7 @@ class PullFilterOptionTest extends TestCase
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
         ]);
 
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run(["command" => "pull-files"]);
@@ -564,7 +544,7 @@ class PullFilterOptionTest extends TestCase
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
         ]);
 
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run(["command" => "pull-files"]);
@@ -592,7 +572,7 @@ class PullFilterOptionTest extends TestCase
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
         ]);
 
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         try {
             ob_start();
@@ -613,7 +593,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testRerunningCompletedPullFilesStartsFreshFilesDelta(): void
     {
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run(["command" => "pull-files"]);
@@ -628,7 +608,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullAfterCompletedPullFilesStartsFreshFilesDelta(): void
     {
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run(["command" => "pull-files"]);
@@ -647,7 +627,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testPullDbRunsPreflightDownloadAndApplyStages(): void
     {
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run([
@@ -683,7 +663,7 @@ class PullFilterOptionTest extends TestCase
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
         ]);
 
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         try {
             ob_start();
@@ -719,7 +699,7 @@ class PullFilterOptionTest extends TestCase
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
         ]);
 
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run([
@@ -747,7 +727,7 @@ class PullFilterOptionTest extends TestCase
             "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
         ]);
 
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run([
@@ -766,7 +746,7 @@ class PullFilterOptionTest extends TestCase
 
     public function testInvalidPullDbOptionsFailBeforeStateIsPersisted(): void
     {
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         try {
             ob_start();
@@ -784,9 +764,9 @@ class PullFilterOptionTest extends TestCase
         $this->assertFileDoesNotExist($this->pullStateDirectory . '/state.json');
     }
 
-    public function testPullWithEssentialFilesPersistsDeferredFilesState(): void
+    public function testPullWithEssentialFilesPersistsFilter(): void
     {
-        $client = $this->makeClient(true);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run([
@@ -798,16 +778,15 @@ class PullFilterOptionTest extends TestCase
 
         $state = $this->readState();
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
-        $this->assertSame('essential-files', $state["pull_pipeline"]["files_filter"]);
-        $this->assertTrue($state["pull_pipeline"]["skipped_pending"]);
         $this->assertTrue($state["pull_pipeline"]["has_completed_once"]);
         $this->assertSame('essential-files', $state["filter"]);
-        $this->assertFileExists($this->pullStateDirectory . '/skipped-fetch-list.jsonl');
+        $this->assertArrayNotHasKey('files_filter', $state["pull_pipeline"]);
+        $this->assertArrayNotHasKey('skipped_pending', $state["pull_pipeline"]);
     }
 
     public function testPullWithoutFilterRecordsFullDownloadMode(): void
     {
-        $client = $this->makeClient(false);
+        $client = $this->makeClient();
 
         ob_start();
         $client->run([
@@ -818,16 +797,39 @@ class PullFilterOptionTest extends TestCase
 
         $state = $this->readState();
         $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
-        $this->assertSame('none', $state["pull_pipeline"]["files_filter"]);
-        $this->assertFalse($state["pull_pipeline"]["skipped_pending"]);
         $this->assertTrue($state["pull_pipeline"]["has_completed_once"]);
         $this->assertSame('none', $state["filter"]);
-        $this->assertFileDoesNotExist($this->pullStateDirectory . '/skipped-fetch-list.jsonl');
+        $this->assertArrayNotHasKey('files_filter', $state["pull_pipeline"]);
+        $this->assertArrayNotHasKey('skipped_pending', $state["pull_pipeline"]);
+    }
+
+    public function testCompletedPullCanChangeFileFilter(): void
+    {
+        $client = $this->makeClient();
+
+        ob_start();
+        $client->run([
+            "command" => "pull",
+            "filter" => "essential-files",
+            "runtime" => "none",
+        ]);
+        $client->run([
+            "command" => "pull",
+            "filter" => "none",
+            "runtime" => "none",
+        ]);
+        ob_end_clean();
+
+        $state = $this->readState();
+        $this->assertSame(2, $client->files_pull_runs);
+        $this->assertSame(2, $client->db_sync_runs);
+        $this->assertSame('none', $state["filter"]);
+        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
     }
 
     public function testPullDerivesFlatDocumentRootFromFlattenTo(): void
     {
-        $client = new PullBridgeFakeClient($this->stateDir, $this->filesystem_root, false);
+        $client = new PullBridgeFakeClient($this->stateDir, $this->filesystem_root);
         $flatten_to = $this->tempDir . '/flattened-site';
 
         ob_start();
@@ -847,77 +849,4 @@ class PullFilterOptionTest extends TestCase
         $this->assertSame($flatten_to, $client->apply_runtime_options["flat_document_root"]);
     }
 
-    public function testRepullAfterSkippedEarlierTailUsesCompletedFilesPullState(): void
-    {
-        // The deferred "skipped-earlier" tail belongs to a files-pull that
-        // has finished. Once that lifecycle state is truthful, a completed
-        // pull can delta re-pull without bypassing the mid-flight guard.
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "complete",
-                "current_stage" => null,
-            ],
-            "filter" => "skipped-earlier",
-            "pull_pipeline" => [
-                "started_by_command" => "pull",
-                "stage_sequence" => ["preflight", "files-pull", "db-pull", "db-apply"],
-                "last_completed_stage" => "db-apply",
-                "files_filter" => "essential-files",
-                "skipped_pending" => true,
-            ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-        ]);
-
-        $client = $this->makeClient(false);
-
-        ob_start();
-        $client->run([
-            "command" => "pull",
-            "filter" => "essential-files",
-            "runtime" => "none",
-        ]);
-        ob_end_clean();
-
-        $state = $this->readState();
-        $this->assertSame('db-apply', $state["pull_pipeline"]["last_completed_stage"]);
-        $this->assertSame('essential-files', $state["filter"]);
-    }
-
-    public function testRepullAfterInterruptedSkippedEarlierTailIsNotBlocked(): void
-    {
-        // An interrupted skipped-earlier tail leaves completion_state="partial"
-        // with filter=skipped-earlier. A new essential-files pull must still be
-        // allowed: the filter-change guard must not treat the terminal tail as
-        // a mid-flight sync.
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "partial",
-                "current_stage" => "fetch-skipped",
-            ],
-            "filter" => "skipped-earlier",
-            "pull_pipeline" => [
-                "started_by_command" => "pull",
-                "stage_sequence" => ["preflight", "files-pull", "db-pull", "db-apply"],
-                "last_completed_stage" => "db-apply",
-                "files_filter" => "essential-files",
-                "skipped_pending" => true,
-            ],
-            "preflight" => ["http_code" => 200, "data" => ["ok" => true]],
-        ]);
-
-        $client = $this->makeClient(false);
-
-        ob_start();
-        $client->run([
-            "command" => "pull",
-            "filter" => "essential-files",
-            "runtime" => "none",
-        ]);
-        ob_end_clean();
-
-        $state = $this->readState();
-        $this->assertSame('essential-files', $state["filter"]);
-    }
 }

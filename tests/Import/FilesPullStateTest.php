@@ -167,48 +167,6 @@ class FilesPullStateTest extends TestCase
     }
 
     /**
-     * The deferred skipped-files tail reopens a completed files-pull, and a
-     * successful tail must restore the completed status before returning.
-     */
-    public function testSkippedEarlierTailRestoresCompletedStatus()
-    {
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "complete",
-                "current_stage" => null,
-            ],
-            "filter" => "essential-files",
-        ]);
-        file_put_contents(
-            $this->pullStateDirectory . '/skipped-fetch-list.jsonl',
-            json_encode([
-                "path" => base64_encode('/wp-content/uploads/2024/01/photo.jpg'),
-            ], JSON_UNESCAPED_SLASHES) . "\n",
-        );
-
-        $client = new CompletedFileFetchClient(
-            'http://fake.url',
-            $this->stateDir,
-            $this->filesystem_root,
-        );
-
-        ob_start();
-        $client->run([
-            "command" => "files-pull",
-            "filter" => "skipped-earlier",
-        ]);
-        ob_end_clean();
-
-        $state = $this->readState();
-        $this->assertEquals("complete", $state["active_resumable_command"]["completion_state"]);
-        $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
-        $this->assertNull($state["active_resumable_command"]["current_stage"]);
-        $this->assertEquals("skipped-earlier", $state["filter"]);
-        $this->assertFileDoesNotExist($this->pullStateDirectory . '/skipped-fetch-list.jsonl');
-    }
-
-    /**
      * After --abort, the state should not be "complete".
      */
     public function testAbortClearsCompletedStatus()
@@ -273,53 +231,6 @@ class FilesPullStateTest extends TestCase
             "After abort + re-run, the sync should start fresh, not report 'already complete'",
         );
         $this->assertEquals("files-pull", $state["active_resumable_command"]["command_name"]);
-    }
-
-    /**
-     * After a full `pull`, active_resumable_command points at the last stage
-     * (db-apply), not files-pull, but pull_pipeline records a deferred tail. A
-     * standalone skipped-earlier run must recover the completed files-pull and
-     * fetch the tail rather than throwing "no completed sync with skipped
-     * files".
-     */
-    public function testSkippedEarlierAfterCompositePullAdoptsFilesPullState(): void
-    {
-        file_put_contents(
-            $this->pullStateDirectory . '/skipped-fetch-list.jsonl',
-            $this->indexLine('/wp-content/uploads/2024/01/photo.jpg', 1000, 100),
-        );
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "db-apply",
-                "completion_state" => "complete",
-            ],
-            "filter" => "skipped-earlier",
-            "pull_pipeline" => [
-                "files_filter" => "essential-files",
-                "skipped_pending" => true,
-            ],
-        ]);
-
-        [$client, $reflection] = $this->prepareClient();
-        $filterProp = $reflection->getProperty('filter');
-        $filterProp->setValue($client, 'skipped-earlier');
-
-        try {
-            $reflection->getMethod('run_files_pull')->invoke($client);
-        } catch (\Exception $e) {
-            // Expected: the fetch fails against the fake URL. The point is that
-            // it got PAST the "no completed sync with skipped files" guard.
-            $this->assertStringNotContainsString(
-                'no completed sync with skipped files',
-                $e->getMessage(),
-            );
-        }
-
-        // The checkpoint was restored to the completed files-pull and the
-        // deferred-tail fetch started.
-        $state = $this->readState();
-        $this->assertSame('files-pull', $state["active_resumable_command"]["command_name"]);
-        $this->assertSame('fetch-skipped', $state["active_resumable_command"]["current_stage"]);
     }
 
     // ---------------------------------------------------------------
@@ -461,27 +372,5 @@ class FilesPullStateTest extends TestCase
             file_get_contents($localFile),
             "Fetch stage must overwrite existing files that were placed in the fetch list",
         );
-    }
-}
-
-/**
- * Test double that completes a file_fetch request without real network I/O.
- */
-class CompletedFileFetchClient extends \ImportClient
-{
-    protected function fetch_streaming(
-        string $url,
-        ?string $cursor,
-        StreamingContext $context,
-        ?array $post_data = null,
-        ?string $endpoint = null
-    ): void {
-        ($context->on_chunk)([
-            "headers" => [
-                "x-chunk-type" => "completion",
-                "x-status" => "complete",
-            ],
-            "body" => "",
-        ]);
     }
 }

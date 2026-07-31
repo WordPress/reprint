@@ -45,7 +45,6 @@ class PullState
     public FileDiffProgressState $diff;
     public RemoteFileIndexCursorState $index;
     public FetchListProgressState $fetch;
-    public FetchListProgressState $fetch_skipped;
     /** @var string|null Path to the file being written for crash recovery. */
     public ?string $current_file = null;
     /** @var int|null Expected bytes written to the current file. */
@@ -83,7 +82,6 @@ class PullState
         $this->diff = new FileDiffProgressState();
         $this->index = new RemoteFileIndexCursorState();
         $this->fetch = new FetchListProgressState();
-        $this->fetch_skipped = new FetchListProgressState();
         $this->files_pull_summary = new FilesPullSummaryState();
         $this->apply = new DatabaseApplyCommandState();
         $this->tuning = new AdaptiveTuningState();
@@ -112,7 +110,6 @@ class PullState
         $state->diff = FileDiffProgressState::from_array($data['diff']);
         $state->index = RemoteFileIndexCursorState::from_array($data['index']);
         $state->fetch = FetchListProgressState::from_array($data['fetch']);
-        $state->fetch_skipped = FetchListProgressState::from_array($data['fetch_skipped']);
         $state->current_file = $data['current_file'];
         $state->current_file_bytes = $data['current_file_bytes'];
         $state->sql_bytes = $data['sql_bytes'];
@@ -150,7 +147,6 @@ class PullState
             'diff' => $this->diff->to_array(),
             'index' => $this->index->to_array(),
             'fetch' => $this->fetch->to_array(),
-            'fetch_skipped' => $this->fetch_skipped->to_array(),
             'current_file' => $this->current_file,
             'current_file_bytes' => $this->current_file_bytes,
             'sql_bytes' => $this->sql_bytes,

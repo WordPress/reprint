@@ -251,10 +251,10 @@ php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
     --filter=essential-files
 ```
 
-The pipeline proceeds as usual through indexing and diffing, but skips uploads. When the essential
-files are done, the sync marks itself **complete**. The skipped file list stays on disk at
-`$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/skipped-fetch-list.jsonl`.
-At this point you can apply the database and bring the site online.
+The pipeline rewrites this preset to exclude the `:wp-uploads:` path prefix,
+then proceeds through the normal index, diff, and fetch stages. When the
+essential files are done, the sync marks itself **complete**. At this point you
+can apply the database and bring the site online.
 
 ```bash
 # Step 2: download the uploads
@@ -266,12 +266,15 @@ The three filter values:
 
 - `--filter=none` (default): download all files.
 - `--filter=essential-files`: skip uploads, download only code/config/themes/plugins.
-- `--filter=skipped-earlier`: download only files that a prior `--filter=essential-files` run skipped.
+- `--filter=skipped-earlier`: include only the `:wp-uploads:` path prefix. The
+  name is retained for compatibility; a prior `essential-files` run is not
+  required.
 
 The uploads directory is detected from preflight data (`uploads.basedir`), falling back to
 `wp-content/uploads/` if unavailable.
 
-`files-pull` and `pull-files` also accept repeatable path-prefix selections:
+The presets use the same repeatable path-prefix options available directly on
+`files-pull` and `pull-files`:
 
 ```bash
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
@@ -280,7 +283,9 @@ php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 
 `--only=SOURCE` supplies an included source prefix and `--exclude=SOURCE`
 supplies an excluded source prefix. Both accept WordPress path tokens or
-absolute source paths. Exclusions win when the prefixes overlap.
+absolute source paths, and exclusions win when the prefixes overlap. Switching
+filters after a completed run starts a new filtered delta against the shared
+remote index; there is no separate skipped-file list or fetch stage.
 
 #### Pull only files.
 
@@ -581,7 +586,7 @@ The file contains a flat JSON object:
 | `steps`   | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
 | `command` | `string \| null`  | Current command name (`preflight`, `files-pull`, `db-pull`, etc.). |
 | `status`  | `string`          | One of `in_progress`, `partial`, `complete`, `error`, `aborted`. |
-| `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`, `fetch-skipped`), or `null`. Derived from the internal state's `stage` field. |
+| `phase`   | `string \| null`  | Sub-phase within the command (e.g. `index`, `diff`, `fetch`), or `null`. Derived from the internal state's `stage` field. |
 | `error`   | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
 | `ts`      | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
 
@@ -643,12 +648,6 @@ fresh.
     "next_offset": 1024,
     "batch_file": null,
     "cursor": "..."               // file_fetch cursor
-  },
-  "fetch_skipped": {              // used when --filter=skipped-earlier
-    "offset": 0,
-    "next_offset": 0,
-    "batch_file": null,
-    "cursor": null
   },
 
   // Crash recovery: if the importer dies mid-write, these let it

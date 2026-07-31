@@ -21,8 +21,6 @@ class PullStateTest extends TestCase
             'started_by_command' => 'pull',
             'stage_sequence' => ['preflight', 'files-pull'],
             'last_completed_stage' => 'preflight',
-            'files_filter' => 'essential-files',
-            'skipped_pending' => true,
             'has_completed_once' => false,
         ];
         $data['apply']['statements_executed'] = 12;
