@@ -298,14 +298,12 @@ class Pull
                 $state->diff = new FileDiffProgressState();
                 $state->index = new RemoteFileIndexCursorState();
                 $state->fetch = new FetchListProgressState();
-                $state->fetch_skipped = new FetchListProgressState();
                 $state->files_pull_summary = new FilesPullSummaryState();
                 $state->files_pull_path_selection_fingerprint = null;
                 $this->client->save_state();
                 foreach ([
                     "{$pull_state_directory}/remote-index.next.jsonl",
                     "{$pull_state_directory}/fetch-list.jsonl",
-                    "{$pull_state_directory}/skipped-fetch-list.jsonl",
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -442,10 +440,6 @@ class Pull
                 $this->run_until_complete('files-pull', function () {
                     $this->client->run_files_pull();
                 });
-                $skipped_pending =
-                    $options['filter'] === 'essential-files' &&
-                    $this->client->has_skipped_files_pending();
-                $this->client->set_pull_files_state($options['filter'], $skipped_pending);
                 $files_pulled = $this->client->get_state()->files_pull_summary->files_pulled;
                 $pulled_label = $files_pulled === 1 ? 'file' : 'files';
                 $summary = sprintf(
@@ -453,9 +447,6 @@ class Pull
                     number_format($files_pulled),
                     $pulled_label,
                 );
-                if ($skipped_pending) {
-                    $summary .= ", deferred files pending";
-                }
                 $this->print_done($stage, $summary);
                 break;
 
@@ -802,8 +793,6 @@ class Pull
         $state->pull_pipeline->started_by_command = $command;
         $state->pull_pipeline->stage_sequence = [];
         $state->pull_pipeline->last_completed_stage = null;
-        $state->pull_pipeline->files_filter = null;
-        $state->pull_pipeline->skipped_pending = false;
         $state->pull_pipeline->has_completed_once = true;
         $state->active_resumable_command->command_name = null;
         $state->active_resumable_command->completion_state = null;
@@ -815,7 +804,6 @@ class Pull
             $state->current_file_bytes = null;
             $state->diff = new FileDiffProgressState();
             $state->fetch = new FetchListProgressState();
-            $state->fetch_skipped = new FetchListProgressState();
             $state->files_pull_summary = new FilesPullSummaryState();
         }
         if ($reset_file_selection_state) {
@@ -834,7 +822,6 @@ class Pull
         if ($reset_file_transfer_state) {
             $paths[] = $pull_state_directory . "/remote-index.next.jsonl";
             $paths[] = $pull_state_directory . "/fetch-list.jsonl";
-            $paths[] = $pull_state_directory . "/skipped-fetch-list.jsonl";
         }
         if ($reset_db_state) {
             $paths[] = $state_dir . "/db.sql";
@@ -982,11 +969,6 @@ class Pull
         $this->progress->print_line(
             "\n{$green}{$bold}Done.{$r} {$dim}Files in {$filesystem_root}{$r}\n"
         );
-        if ($this->client->get_state()->pull_pipeline->skipped_pending) {
-            $this->progress->print_line(
-                "{$dim}Deferred files remain. The skipped fetch list was preserved on disk for a follow-up sync.{$r}\n"
-            );
-        }
     }
 
     /**

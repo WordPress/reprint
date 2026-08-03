@@ -190,8 +190,6 @@ class PullMetadataTest extends TestCase
             'pull_pipeline' => [
                 'stage_sequence' => ['preflight', 'files-pull', 'db-pull', 'db-apply'],
                 'last_completed_stage' => 'db-apply',
-                'files_filter' => 'essential-files',
-                'skipped_pending' => true,
                 'has_completed_once' => true,
             ],
         ]);
@@ -213,8 +211,6 @@ class PullMetadataTest extends TestCase
             ],
             'pull_pipeline' => [
                 'last_completed_stage' => null,
-                'files_filter' => null,
-                'skipped_pending' => false,
                 'has_completed_once' => true,
             ],
         ]);

@@ -8,9 +8,7 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/import.php';
 
 /**
  * Verify that files_done and files_total progress counters are correct
- * across multiple invocations (exit-code-2 restarts), with and without
- * the essential-files filter (which splits the fetch list into a
- * main list and a skipped list).
+ * across multiple invocations (exit-code-2 restarts).
  */
 class FetchListProgressTest extends TestCase
 {
@@ -154,7 +152,7 @@ class FetchListProgressTest extends TestCase
 
         $method = $reflection->getMethod('fetch_files_from_list');
         try {
-            $method->invoke($client, $listFile, 'fetch');
+            $method->invoke($client, $listFile);
         } catch (\Exception $e) {
             // Expected: network error
         }
@@ -188,7 +186,7 @@ class FetchListProgressTest extends TestCase
 
         try {
             $reflection->getMethod('fetch_files_from_list')
-                ->invoke($client, $listFile, 'fetch');
+                ->invoke($client, $listFile);
         } catch (\Exception $e) {
             // Expected
         }
@@ -224,7 +222,7 @@ class FetchListProgressTest extends TestCase
 
         try {
             $reflection->getMethod('fetch_files_from_list')
-                ->invoke($client, $listFile, 'fetch');
+                ->invoke($client, $listFile);
         } catch (\Exception $e) {
             // Expected
         }
@@ -252,7 +250,7 @@ class FetchListProgressTest extends TestCase
 
         [$client1, $ref1] = $this->prepareClient();
         try {
-            $ref1->getMethod('fetch_files_from_list')->invoke($client1, $listFile, 'fetch');
+            $ref1->getMethod('fetch_files_from_list')->invoke($client1, $listFile);
         } catch (\Exception $e) {}
 
         $c1 = $this->readCounters($client1, $ref1);
@@ -271,7 +269,7 @@ class FetchListProgressTest extends TestCase
 
         [$client2, $ref2] = $this->prepareClient();
         try {
-            $ref2->getMethod('fetch_files_from_list')->invoke($client2, $listFile, 'fetch');
+            $ref2->getMethod('fetch_files_from_list')->invoke($client2, $listFile);
         } catch (\Exception $e) {}
 
         $c2 = $this->readCounters($client2, $ref2);
@@ -280,34 +278,6 @@ class FetchListProgressTest extends TestCase
 
         // done only goes up
         $this->assertGreaterThan($c1['done'], $c2['done']);
-    }
-
-    public function testSkippedListHasOwnCounters()
-    {
-        $this->writeFetchList(50);
-        $skippedList = $this->pullStateDirectory . '/skipped-fetch-list.jsonl';
-        $this->writeFetchList(200, $skippedList);
-        $offset20 = $this->byteOffsetAfterLines($skippedList, 20);
-
-        $this->writeState([
-            "active_resumable_command" => [
-                "command_name" => "files-pull",
-                "completion_state" => "in_progress",
-                "current_stage" => "fetch-skipped",
-            ],
-            "fetch_skipped" => ["offset" => $offset20, "next_offset" => $offset20, "batch_file" => null, "batch_entries" => 0, "cursor" => null],
-        ]);
-
-        [$client, $reflection] = $this->prepareClient("skipped-earlier");
-
-        try {
-            $reflection->getMethod('fetch_files_from_list')
-                ->invoke($client, $skippedList, 'fetch_skipped');
-        } catch (\Exception $e) {}
-
-        $counters = $this->readCounters($client, $reflection);
-        $this->assertSame(200, $counters['total']);
-        $this->assertSame(20, $counters['done']);
     }
 
     public function testCountNewlinesMatchesLineCount()
@@ -367,7 +337,7 @@ class FetchListProgressTest extends TestCase
 
         try {
             $reflection->getMethod('fetch_files_from_list')
-                ->invoke($client, $listFile, 'fetch');
+                ->invoke($client, $listFile);
         } catch (\Exception $e) {}
 
         // Simulate 5 files written in this invocation

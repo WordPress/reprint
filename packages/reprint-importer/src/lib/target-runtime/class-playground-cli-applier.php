@@ -154,8 +154,6 @@ class PlaygroundCliApplier implements RuntimeApplier
         $runtime_file_mounts = [
             'REPRINT_PULL_STATE_FILE'
                 => '/tmp/reprint/state.json',
-            'REPRINT_PULL_SKIPPED_FETCH_LIST_FILE'
-                => '/tmp/reprint/skipped-fetch-list.jsonl',
         ];
 
         foreach ($runtime_file_mounts as $constant_name => $vfs_path) {

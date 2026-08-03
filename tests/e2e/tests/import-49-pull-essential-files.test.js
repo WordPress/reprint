@@ -2,8 +2,8 @@
  * Test 49: Pull --filter=essential-files
  *
  * Verifies that `reprint pull` accepts `--filter=essential-files`,
- * completes the main pull pipeline, imports the database, and leaves
- * the skipped-file tail recorded in pull state for later retrieval.
+ * completes the main pull pipeline, imports the database, and excludes
+ * uploads through the normal path-filter pipeline.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -84,30 +84,19 @@ describe('Import: Pull essential-files', { timeout: 180000 }, () => {
             `Expected exit 0, got ${result.exitCode}\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
     });
 
-    it('state records deferred files in the pull metadata', () => {
+    it('state records the completed filter preset', () => {
         const stateFile = join(pullStateDirectory(tempDir, importUrl()), 'state.json');
         assert.ok(existsSync(stateFile), 'Expected pull/state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assertPullPipelineComplete(state);
-        assert.equal(state.pull_pipeline.files_filter, 'essential-files');
-        assert.equal(state.pull_pipeline.skipped_pending, true);
+        assert.equal(state.filter, 'essential-files');
     });
 
-    it('skipped fetch list remains on disk', () => {
-        const skippedList = join(
-            pullStateDirectory(tempDir, importUrl()),
-            'skipped-fetch-list.jsonl',
-        );
-        assert.ok(existsSync(skippedList), 'Expected skipped fetch list to exist');
-        assert.ok(readFileSync(skippedList, 'utf-8').trim().length > 0,
-            'Expected skipped fetch list to be non-empty');
-    });
-
-    it('uploads were deferred from the fs-root', () => {
+    it('uploads were excluded from the fs-root', () => {
         const importedRoot = join(fsRootDir(tempDir), siteDir);
         for (const file of UPLOAD_FILES) {
             assert.ok(!existsSync(join(importedRoot, file)),
-                `Expected deferred upload to be absent: ${file}`);
+                `Expected excluded upload to be absent: ${file}`);
         }
     });
 

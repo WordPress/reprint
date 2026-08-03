@@ -254,6 +254,24 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css', false)));
     }
 
+    public function testFilterModesRewriteToUploadPathSelections(): void
+    {
+        $c = $this->withPaths(array(
+            'content_dir' => '/var/www/html/wp-content',
+            'uploads' => array('basedir' => '/mnt/uploads'),
+        ));
+
+        $this->set($c, 'filter', 'essential-files');
+        $this->call($c, 'prepare_files_pull_options', array(array(), false));
+        $this->assertSame(array(), (new \ReflectionClass($c))->getProperty('pull_only_files_with_path_prefixes')->getValue($c));
+        $this->assertSame(array('/mnt/uploads'), (new \ReflectionClass($c))->getProperty('pull_excluded_files_with_path_prefixes')->getValue($c));
+
+        $this->set($c, 'filter', 'skipped-earlier');
+        $this->call($c, 'prepare_files_pull_options', array(array(), false));
+        $this->assertSame(array('/mnt/uploads'), (new \ReflectionClass($c))->getProperty('pull_only_files_with_path_prefixes')->getValue($c));
+        $this->assertSame(array(), (new \ReflectionClass($c))->getProperty('pull_excluded_files_with_path_prefixes')->getValue($c));
+    }
+
     public function testChangingOnlyPrefixesWhileResumingFilesPullIsRejected(): void
     {
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
@@ -348,6 +366,38 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('Cannot change --only or --exclude while resuming files-pull');
         $this->runFilesPull(array('exclude' => array(':wp-uploads:')));
+    }
+
+    public function testRunDropsSkippedFieldsWithoutChangingPathSelectionState(): void
+    {
+        file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
+        $fingerprint = $this->pathSelectionFingerprint(
+            array(),
+            array('/var/www/html/wp-content/uploads')
+        );
+        $this->writeFilesPullState(array(
+            'filter' => 'essential-files',
+            'files_pull_path_selection_fingerprint' => $fingerprint,
+        ));
+        $state = $this->readState();
+        $state['fetch_skipped'] = (new \Reprint\Importer\State\FetchListProgressState())->to_array();
+        $state['pull_pipeline']['files_filter'] = 'essential-files';
+        $state['pull_pipeline']['skipped_pending'] = false;
+        file_put_contents(
+            $this->pullStateDirectory . '/state.json',
+            json_encode($state, JSON_PRETTY_PRINT)
+        );
+
+        $this->runFilesPull(array('filter' => 'essential-files'));
+
+        $state = $this->readState();
+        $this->assertSame(
+            $fingerprint,
+            $state['files_pull_path_selection_fingerprint'] ?? null
+        );
+        $this->assertArrayNotHasKey('fetch_skipped', $state);
+        $this->assertArrayNotHasKey('files_filter', $state['pull_pipeline']);
+        $this->assertArrayNotHasKey('skipped_pending', $state['pull_pipeline']);
     }
 
     public function testPullOnlyFilesPrefixesReplaceRootsAndIgnoreUnselectedRemap(): void

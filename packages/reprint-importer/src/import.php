@@ -213,9 +213,6 @@ class ImportClient
     /** @var string Path to pull/fetch-list.jsonl — files to download, computed by comparing the next remote index with the remote index. */
     private $fetch_list_file;
 
-    /** @var string Path to pull/skipped-fetch-list.jsonl — files skipped by --filter, downloaded later with --filter=skipped-earlier. */
-    private $skipped_fetch_list_file;
-
     /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
 
@@ -305,14 +302,16 @@ class ImportClient
     private $fs_root_nonempty_behavior = 'error';
 
     /**
-     * Controls which files are downloaded during files-pull.
+     * Selects a path-filter preset for files-pull.
      *
      *   "none"             — download everything (default)
      *   "essential-files"  — skip uploads, download only code/config/themes/plugins
-     *   "skipped-earlier"  — download only files that a prior --filter=essential-files skipped
+     *   "skipped-earlier"  — download only uploads
      *
-     * Set via --filter=<value>, persisted in state so it survives across
-     * resume cycles within the same run.
+     * The presets are translated into the same include and exclude path
+     * prefixes used by --only and --exclude. Set via --filter=<value> and
+     * persisted in state so it survives across resume cycles within the same
+     * run.
      */
     private $filter = "none";
 
@@ -452,8 +451,6 @@ class ImportClient
             $this->pull_state_directory . "/remote-index.next.jsonl";
         $this->fetch_list_file =
             $this->pull_state_directory . "/fetch-list.jsonl";
-        $this->skipped_fetch_list_file =
-            $this->pull_state_directory . "/skipped-fetch-list.jsonl";
         $this->audit_log_file = $this->state_dir . "/audit.log";
         $this->volatile_files_file = $this->pull_state_directory . "/volatile-files.json";
         $this->progress_file = $this->state_dir . "/progress.json";
@@ -573,14 +570,6 @@ class ImportClient
         $this->save_state();
     }
 
-    /** Record the pull's file filter and whether deferred files remain. */
-    public function set_pull_files_state(string $filter, bool $skipped_pending): void
-    {
-        $this->get_state()->pull_pipeline->files_filter = $filter;
-        $this->get_state()->pull_pipeline->skipped_pending = $skipped_pending;
-        $this->save_state();
-    }
-
     /**
      * Resolve file-selection options after preflight is available.
      */
@@ -600,6 +589,12 @@ class ImportClient
             $excluded_raw = [$excluded_raw];
         }
 
+        if ($this->filter === "essential-files") {
+            $excluded_raw[] = ":wp-uploads:";
+        } elseif ($this->filter === "skipped-earlier") {
+            $only_raw[] = ":wp-uploads:";
+        }
+
         $this->pull_only_files_with_path_prefixes = [];
         $this->pull_excluded_files_with_path_prefixes = [];
         if (!empty($only_raw)) {
@@ -614,14 +609,6 @@ class ImportClient
         if ($assert_remap) {
             $this->assert_resolved_path_mappings_consistent();
         }
-    }
-
-    /** True when the skipped-fetch list exists and still has entries. */
-    public function has_skipped_files_pending(): bool
-    {
-        return
-            file_exists($this->skipped_fetch_list_file) &&
-            filesize($this->skipped_fetch_list_file) > 0;
     }
 
     /**
@@ -908,17 +895,14 @@ class ImportClient
             $this->fs_root_nonempty_behavior = $this->get_state()->fs_root_nonempty_behavior ?? 'error';
         }
 
-        // Persist filter in state so it survives across resume cycles.
+        // Persist the path-filter preset in state so it survives across resume cycles.
         //
         //   --filter=none             download everything (default)
         //   --filter=essential-files   skip uploads, download code/config/themes/plugins
-        //   --filter=skipped-earlier   download only files skipped by a prior essential-files run
+        //   --filter=skipped-earlier   download only uploads
         //
         // Changing the filter mid-flight is not allowed.  The user must either
         // start fresh (--abort) or finish the current sync before switching.
-        // Exceptions: essential-files may advance to skipped-earlier once
-        // complete, and skipped-earlier (a terminal tail-fetch) may always give
-        // way to a fresh full sync.
         if (isset($options["filter"])) {
             $next = $options["filter"];
             if (
@@ -932,12 +916,9 @@ class ImportClient
             }
             $prev = $this->get_state()->filter ?? null;
             $status = $this->get_state()->active_resumable_command->completion_state ?? null;
-            // Leaving a skipped-earlier tail-fetch for another sync is a fresh
-            // cycle, not a mid-flight filter change.
             $is_mid_flight =
                 $prev !== null &&
                 $prev !== $next &&
-                $prev !== "skipped-earlier" &&
                 $status !== null &&
                 $status !== "complete";
             if ($is_mid_flight) {
@@ -945,6 +926,11 @@ class ImportClient
                     "Cannot change --filter from '{$prev}' to '{$next}' while a sync is in progress. " .
                         "Finish the current sync or use --abort to start over.",
                 );
+            }
+            if ($prev !== null && $prev !== $next && $status === "complete") {
+                // A completed path selection can be followed by a different
+                // selection as a fresh delta against the shared remote index.
+                $this->clear_files_pull_progress();
             }
             $this->filter = $next;
             $this->get_state()->filter = $this->filter;
@@ -1983,17 +1969,12 @@ class ImportClient
             @unlink($this->fetch_list_file);
             $this->audit_log("FILE DELETE | {$this->fetch_list_file}");
         }
-        if (file_exists($this->skipped_fetch_list_file)) {
-            @unlink($this->skipped_fetch_list_file);
-            $this->audit_log("FILE DELETE | {$this->skipped_fetch_list_file}");
-        }
         if (file_exists($this->volatile_files_file)) {
             @unlink($this->volatile_files_file);
             $this->audit_log("FILE DELETE | {$this->volatile_files_file}");
         }
         $this->get_state()->index = new RemoteFileIndexCursorState();
         $this->get_state()->fetch = new FetchListProgressState();
-        $this->get_state()->fetch_skipped = new FetchListProgressState();
 
         $this->save_state();
     }
@@ -2603,25 +2584,6 @@ class ImportClient
     {
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
 
-        // A full `pull` leaves active_resumable_command on its last stage
-        // (db-apply), not files-pull, so a standalone skipped-earlier run can't
-        // tell that files-pull finished with a deferred tail. Recover that from
-        // the pipeline's skipped_pending flag and restore the files-pull
-        // checkpoint. Once the fetch starts it persists command_name=files-pull,
-        // so on the resume passes this recovery is skipped and won't clobber the
-        // checkpoint.
-        if (
-            $this->filter === "skipped-earlier" &&
-            $state_command !== "files-pull" &&
-            $this->get_state()->pull_pipeline->skipped_pending
-        ) {
-            $this->get_state()->active_resumable_command->command_name = "files-pull";
-            $this->get_state()->active_resumable_command->completion_state = "complete";
-            $this->get_state()->active_resumable_command->current_stage = null;
-            $this->save_state();
-            $state_command = "files-pull";
-        }
-
         $current_status =
             $state_command === "files-pull"
                 ? $this->get_state()->active_resumable_command->completion_state ?? null
@@ -2638,94 +2600,24 @@ class ImportClient
         // Already completed.
         if ($current_status === "complete") {
             $this->remove_remote_index_wal();
-            $has_skipped =
-                file_exists($this->skipped_fetch_list_file) &&
-                filesize($this->skipped_fetch_list_file) > 0;
-
-            // --filter=skipped-earlier: download only the files that a prior
-            // --filter=essential-files run skipped.  This is the only way to
-            // resume downloading those files — no implicit behavior.
-            if ($this->filter === "skipped-earlier") {
-                if (!$has_skipped) {
-                    throw new RuntimeException(
-                        "--filter=skipped-earlier was requested but there is no skipped file list. " .
-                            "Run files-pull with --filter=essential-files first.",
-                    );
-                }
-                $this->audit_log(
-                    "FETCH SKIPPED | files-pull was complete — downloading previously skipped files",
-                    true,
-                );
-                $this->progress->show_lifecycle_line("Downloading previously skipped files\n");
-                $this->output_progress([
-                    "type" => "lifecycle",
-                    "event" => "starting",
-                    "command" => "files-pull",
-                    "stage" => "fetch-skipped",
-                    "message" => "Downloading previously skipped files",
-                ], true);
-                $this->get_state()->active_resumable_command->completion_state = "in_progress";
-                $this->get_state()->active_resumable_command->current_stage = "fetch-skipped";
-                $this->get_state()->files_pull_path_selection_fingerprint =
-                    $this->files_pull_path_selection_fingerprint();
-                $this->get_state()->files_pull_summary = new FilesPullSummaryState();
-                $this->save_state();
-                $this->open_remote_index_wal();
-                $this->run_files_pull_pipeline();
-                // The deferred tail reopens a completed files-pull. Once the
-                // tail finishes, restore the completed status so later filter
-                // changes are judged against the actual lifecycle state.
-                if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
-                    return;
-                }
-                $this->get_state()->active_resumable_command->completion_state = "complete";
-                $this->save_state();
-                $this->remove_remote_index_wal();
-                return;
-            }
-
             $remote_index_entry_count = $this->remote_index_entry_count();
             $this->progress->clear_progress_line();
 
-            $skipped_note = $has_skipped
-                ? " (some files were skipped — re-run with --filter=skipped-earlier to download them)"
-                : "";
             $this->audit_log(
-                sprintf("files-pull already complete: %d remote index entries%s", $remote_index_entry_count, $skipped_note),
+                sprintf("files-pull already complete: %d remote index entries", $remote_index_entry_count),
                 true,
             );
 
             $this->progress->show_lifecycle_line("files-pull already complete: {$remote_index_entry_count} remote index entries\n");
-            if ($has_skipped) {
-                $this->progress->show_lifecycle_line("Some files were skipped. Re-run with --filter=skipped-earlier to download them.\n");
-            } else {
-                $this->progress->show_lifecycle_line("To re-sync, run with --abort first to clear state.\n");
-            }
+            $this->progress->show_lifecycle_line("To re-sync, run with --abort first to clear state.\n");
             $this->output_progress([
                 "type" => "lifecycle",
                 "event" => "already_complete",
                 "command" => "files-pull",
                 "files_indexed" => $remote_index_entry_count,
-                "has_skipped" => $has_skipped,
                 "message" => "files-pull already complete: {$remote_index_entry_count} remote index entries",
             ], true);
             return;
-        }
-
-        // --filter=skipped-earlier is only valid after a completed
-        // --filter=essential-files run. Reject it as a fresh start, but allow
-        // resuming a skipped-files fetch that is already under way: a
-        // multi-batch fetch returns status="partial" and is re-run, at which
-        // point stage is "fetch-skipped" and the resume flows through the
-        // $has_progress path below (and completes via the shared tail).
-        if (
-            $this->filter === "skipped-earlier" &&
-            ($this->get_state()->active_resumable_command->current_stage ?? null) !== "fetch-skipped"
-        ) {
-            throw new RuntimeException(
-                "--filter=skipped-earlier was requested but there is no completed sync with skipped files. " .
-                    "Run files-pull with --filter=essential-files first.",
-            );
         }
 
         // Filter out "." and ".." explicitly: standard PHP scandir() returns them,
@@ -2792,7 +2684,6 @@ class ImportClient
             $this->get_state()->diff = new FileDiffProgressState();
             $this->get_state()->index = new RemoteFileIndexCursorState();
             $this->get_state()->fetch = new FetchListProgressState();
-            $this->get_state()->fetch_skipped = new FetchListProgressState();
             $this->get_state()->files_pull_summary = new FilesPullSummaryState();
             $this->save_state();
 
@@ -2907,12 +2798,6 @@ class ImportClient
                     "FILE DELETE | {$this->fetch_list_file} | clearing before diff stage",
                 );
             }
-            if (file_exists($this->skipped_fetch_list_file)) {
-                @unlink($this->skipped_fetch_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_fetch_list_file} | clearing before diff stage",
-                );
-            }
             $this->save_state();
             $stage = "diff";
         }
@@ -2928,18 +2813,7 @@ class ImportClient
             $has_files_to_fetch =
                 file_exists($this->fetch_list_file) &&
                 filesize($this->fetch_list_file) > 0;
-            $has_skipped =
-                file_exists($this->skipped_fetch_list_file) &&
-                filesize($this->skipped_fetch_list_file) > 0;
-
-            // Determine the first fetch stage to run.
-            if ($has_files_to_fetch) {
-                $stage = "fetch";
-            } elseif ($has_skipped) {
-                $stage = "fetch-skipped";
-            } else {
-                $stage = null;
-            }
+            $stage = $has_files_to_fetch ? "fetch" : null;
             $this->get_state()->active_resumable_command->current_stage = $stage;
             $this->save_state();
 
@@ -2966,19 +2840,10 @@ class ImportClient
                     "FILE DELETE | {$this->fetch_list_file} | no files to fetch",
                 );
             }
-            if (!$has_skipped && file_exists($this->skipped_fetch_list_file)) {
-                @unlink($this->skipped_fetch_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_fetch_list_file} | no skipped files to fetch",
-                );
-            }
         }
 
         if ($stage === "fetch") {
-            $complete = $this->fetch_files_from_list(
-                $this->fetch_list_file,
-                "fetch",
-            );
+            $complete = $this->fetch_files_from_list($this->fetch_list_file);
             if (!$complete) {
                 $this->get_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state();
@@ -2993,61 +2858,8 @@ class ImportClient
                 );
             }
 
-            $has_skipped =
-                file_exists($this->skipped_fetch_list_file) &&
-                filesize($this->skipped_fetch_list_file) > 0;
-
-            if ($has_skipped && $this->filter === "essential-files") {
-                // Essential files are done — mark the sync as complete.
-                // The skipped list stays on disk for a later
-                // --filter=skipped-earlier run.
-                $this->get_state()->active_resumable_command->current_stage = null;
-                $this->save_state();
-                $this->audit_log(
-                    "ESSENTIAL FILES COMPLETE | skipped files listed in {$this->skipped_fetch_list_file} — run with --filter=skipped-earlier to download them",
-                    true,
-                );
-                $stage = null;
-            } elseif ($has_skipped) {
-                // Skipped list exists but filter is "none" — download now.
-                $this->get_state()->active_resumable_command->current_stage = "fetch-skipped";
-                $this->save_state();
-                $stage = "fetch-skipped";
-                $this->audit_log(
-                    "ESSENTIAL FILES COMPLETE | transitioning to skipped files",
-                    true,
-                );
-                $this->write_progress_file();
-            } else {
-                $this->get_state()->active_resumable_command->current_stage = null;
-                $this->save_state();
-                $stage = null;
-            }
-        }
-
-        if ($stage === "fetch-skipped") {
-            $complete = $this->fetch_files_from_list(
-                $this->skipped_fetch_list_file,
-                "fetch_skipped",
-            );
-            if (!$complete) {
-                $this->get_state()->active_resumable_command->completion_state = "partial";
-                $this->save_state();
-                return;
-            }
             $this->get_state()->active_resumable_command->current_stage = null;
-            $this->get_state()->fetch_skipped = new FetchListProgressState();
-            // Tail fully fetched; clear the flag so a later skipped-earlier run
-            // doesn't treat the now-empty tail as pending.
-            $this->get_state()->pull_pipeline->skipped_pending = false;
             $this->save_state();
-
-            if (file_exists($this->skipped_fetch_list_file)) {
-                @unlink($this->skipped_fetch_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->skipped_fetch_list_file} | skipped files fetch complete",
-                );
-            }
         }
 
         // Recreate intermediate path symlinks so the full symlink chain
@@ -3815,13 +3627,11 @@ class ImportClient
         $indexed_count = count($size_by_path);
         $indexed_bytes = array_sum($size_by_path);
 
-        // Walk the fetch list(s) to count pending files. The download
+        // Walk the fetch list to count pending files. The fetch
         // list only stores paths, so look up sizes from the map above.
         // Files before the fetch byte offset have already been downloaded.
         $pending_count = 0;
         $pending_bytes = 0;
-        $skipped_pending_count = 0;
-        $skipped_pending_bytes = 0;
 
         // Count pending in the main fetch list
         $fetch_offset = $this->get_state()->fetch->offset ?? 0;
@@ -3855,36 +3665,6 @@ class ImportClient
             }
         }
 
-        // Count pending in the skipped fetch list (uploads filtered out by --filter=essential-files)
-        $skipped_offset = $this->get_state()->fetch_skipped->offset ?? 0;
-        $skipped_list = $this->skipped_fetch_list_file;
-        if (is_file($skipped_list)) {
-            $handle = fopen($skipped_list, "r");
-            if ($handle) {
-                if ($skipped_offset > 0) {
-                    fseek($handle, $skipped_offset);
-                }
-                while (($line = fgets($handle)) !== false) {
-                    $line = trim($line);
-                    if ($line === "") {
-                        continue;
-                    }
-                    $data = json_decode($line, true);
-                    if (!is_array($data)) {
-                        continue;
-                    }
-                    $path_encoded = $data["path"] ?? "";
-                    $path = base64_decode($path_encoded, true);
-                    if ($path === false || $path === "") {
-                        continue;
-                    }
-                    $skipped_pending_count++;
-                    $skipped_pending_bytes += $size_by_path[$path] ?? 0;
-                }
-                fclose($handle);
-            }
-        }
-
         $result = [
             "indexed" => [
                 "files" => $indexed_count,
@@ -3895,13 +3675,6 @@ class ImportClient
                 "bytes" => $pending_bytes,
             ],
         ];
-        if ($skipped_pending_count > 0 || is_file($skipped_list)) {
-            $result["pending_skipped"] = [
-                "files" => $skipped_pending_count,
-                "bytes" => $skipped_pending_bytes,
-            ];
-        }
-
         echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
     }
 
@@ -4277,7 +4050,7 @@ class ImportClient
      *
      * The proxy is active in two cases:
      * - files-pull is still incomplete
-     * - a prior --filter=essential-files run left skipped uploads on disk
+     * - the essential-files preset is active
      */
     private function maybe_enable_remote_upload_proxy(RuntimeManifest $manifest, array $preflight_data): void
     {
@@ -4300,8 +4073,6 @@ class ImportClient
             ?: $this->pull_state_directory;
         $manifest->constants["REPRINT_PULL_STATE_FILE"] =
             rtrim($pull_state_directory, "/") . "/state.json";
-        $manifest->constants["REPRINT_PULL_SKIPPED_FETCH_LIST_FILE"] =
-            rtrim($pull_state_directory, "/") . "/skipped-fetch-list.jsonl";
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
@@ -4317,15 +4088,12 @@ class ImportClient
     /**
      * Decide whether runtime should proxy missing uploads from the source.
      *
-     * Once files-pull is fully complete and no skipped uploads remain, the
-     * proxy is disabled so requests are served only from local files.
+     * Once files-pull is fully complete under another preset, the proxy is
+     * disabled so requests are served only from local files.
      */
     private function should_enable_remote_upload_proxy(): bool
     {
-        if (
-            file_exists($this->skipped_fetch_list_file) &&
-            filesize($this->skipped_fetch_list_file) > 0
-        ) {
+        if ($this->get_state()->filter === "essential-files") {
             return true;
         }
 
@@ -5918,10 +5686,9 @@ class ImportClient
      */
     private function fetch_file_batch(
         ?array $post_data,
-        ?string $cursor,
-        string $state_key = "fetch"
+        ?string $cursor
     ): bool {
-        $fetch_state = $this->get_fetch_list_progress_state($state_key);
+        $fetch_state = $this->get_state()->fetch;
         $cursor = $cursor ?? $fetch_state->cursor;
         $complete = false;
         $chunks_since_save = 0;
@@ -5990,8 +5757,7 @@ class ImportClient
             &$cursor,
             &$complete,
             &$chunks_since_save,
-            $context,
-            $state_key
+            $context
         ) {
             if ($this->shutdown_requested) {
                 throw new RuntimeException("Shutdown requested");
@@ -6129,7 +5895,7 @@ class ImportClient
                     ) {
                         throw new RuntimeException('Failed to flush the remote index WAL.');
                     }
-                    $this->get_fetch_list_progress_state($state_key)->cursor = $cursor;
+                    $this->get_state()->fetch->cursor = $cursor;
                     $this->save_state();
                     $chunks_since_save = 0;
                 }
@@ -6151,8 +5917,7 @@ class ImportClient
             // whose cursor is not durable yet. Keep the checkpoint saved by
             // the last complete part; the next invocation truncates any later
             // bytes before resuming.
-            $durable_cursor =
-                $this->get_fetch_list_progress_state($state_key)->cursor;
+            $durable_cursor = $this->get_state()->fetch->cursor;
             $this->assert_can_resume_after_interrupted_response(
                 "file_fetch",
                 $cursor_before,
@@ -6177,7 +5942,7 @@ class ImportClient
             $wall_time,
             $context->response_stats ?? [],
         );
-        $this->get_fetch_list_progress_state($state_key)->cursor = $cursor;
+        $this->get_state()->fetch->cursor = $cursor;
         $this->apply_remote_index_wal();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
@@ -6476,35 +6241,6 @@ class ImportClient
             throw new RuntimeException("Failed to open fetch list file");
         }
 
-        // When --filter=essential-files is active, uploads go to a separate
-        // "skipped" list so only essential files are fetched in this run.
-        $skipped_fetch_list_file_handle = null;
-        $remote_uploads_directory_absolute_path = null;
-        if ($this->filter === "essential-files") {
-            if ($fetch_list_file_mode === "w") {
-                $this->audit_log(
-                    "FILE CREATE | {$this->skipped_fetch_list_file} | building skipped fetch list (uploads)",
-                );
-            } else {
-                $this->audit_log(
-                    "FILE APPEND | {$this->skipped_fetch_list_file} | resuming skipped fetch list build",
-                );
-            }
-            $skipped_fetch_list_file_handle = fopen(
-                $this->skipped_fetch_list_file,
-                $fetch_list_file_mode,
-            );
-            if (!$skipped_fetch_list_file_handle) {
-                fclose($fetch_list_file_handle);
-                throw new RuntimeException("Failed to open skipped fetch list file");
-            }
-            $remote_uploads_directory_absolute_path = $this->get_uploads_basedir();
-            $this->audit_log(
-                "FILTER | essential-files | uploads_basedir=" .
-                    ($remote_uploads_directory_absolute_path ?? "(fallback: wp-content/uploads/)"),
-            );
-        }
-
         $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
         if (!$next_remote_index_file_handle) {
             fclose($fetch_list_file_handle);
@@ -6575,30 +6311,13 @@ class ImportClient
                     $remote_index_entry["size"] !== $next_remote_index_entry["size"] ||
                     $remote_index_entry["type"] !== $next_remote_index_entry["type"]
                 ) {
-                    // The path is represented in both indexes but changed on the remote.
                     // Re-download it when selected — the remote index confirms
                     // that an earlier files-pull accounted for this path, so
                     // preserve-local does not protect it.
                     if ($this->is_selected_for_pulling($next_remote_index_entry["path"], true)) {
-                        $selected_fetch_list_file_handle = (
-                            $skipped_fetch_list_file_handle !== null &&
-                            (
-                                $remote_uploads_directory_absolute_path !== null
-                                    ? path_is_within_root(
-                                        $next_remote_index_entry["path"],
-                                        $remote_uploads_directory_absolute_path
-                                    )
-                                    : strpos(
-                                        $next_remote_index_entry["path"],
-                                        "wp-content/uploads/"
-                                    ) !== false
-                            )
-                        )
-                            ? $skipped_fetch_list_file_handle
-                            : $fetch_list_file_handle;
                         $this->append_to_fetch_list(
                             $next_remote_index_entry["path"],
-                            $selected_fetch_list_file_handle,
+                            $fetch_list_file_handle,
                         );
                     }
                 }
@@ -6621,25 +6340,9 @@ class ImportClient
                     $this->audit_log($preserve_local_skip_reason, true);
                     $this->emit_skip_progress($next_remote_index_entry["path"]);
                 } else {
-                    $selected_fetch_list_file_handle = (
-                        $skipped_fetch_list_file_handle !== null &&
-                        (
-                            $remote_uploads_directory_absolute_path !== null
-                                ? path_is_within_root(
-                                    $next_remote_index_entry["path"],
-                                    $remote_uploads_directory_absolute_path
-                                )
-                                : strpos(
-                                    $next_remote_index_entry["path"],
-                                    "wp-content/uploads/"
-                                ) !== false
-                        )
-                    )
-                        ? $skipped_fetch_list_file_handle
-                        : $fetch_list_file_handle;
                     $this->append_to_fetch_list(
                         $next_remote_index_entry["path"],
-                        $selected_fetch_list_file_handle,
+                        $fetch_list_file_handle,
                     );
                 }
             }
@@ -6677,9 +6380,6 @@ class ImportClient
         }
         fclose($next_remote_index_file_handle);
         fclose($fetch_list_file_handle);
-        if ($skipped_fetch_list_file_handle !== null) {
-            fclose($skipped_fetch_list_file_handle);
-        }
 
         $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
         $this->get_state()->diff->last_consumed_remote_index_entry_path =
@@ -6690,13 +6390,6 @@ class ImportClient
         return !$this->shutdown_requested;
     }
 
-    /**
-     * Download files from a prepared list.
-     *
-     * @param string $list_file   Path to the JSONL fetch list to process.
-     * @param string $state_key   Key in $this->state that holds fetch progress
-     *                            (e.g. "fetch" or "fetch_skipped").
-     */
     /**
      * Count newlines in a file using buffered reads.  Much faster than
      * fgets() on large JSONL files because it never allocates per-line
@@ -6729,10 +6422,13 @@ class ImportClient
         return $count;
     }
 
-    private function fetch_files_from_list(
-        string $list_file,
-        string $state_key
-    ): bool {
+    /**
+     * Download files from a prepared list.
+     *
+     * @param string $list_file Path to the JSONL fetch list to process.
+     */
+    private function fetch_files_from_list(string $list_file): bool
+    {
         if (!file_exists($list_file)) {
             return true;
         }
@@ -6745,13 +6441,13 @@ class ImportClient
         // These survive across batches within one invocation and are
         // recomputed on restart from the state file's byte offset.
         if ($this->fetch_list_total === null) {
-            $offset = $this->get_fetch_list_progress_state($state_key)->offset;
+            $offset = $this->get_state()->fetch->offset;
             $this->fetch_list_total = $this->count_newlines($list_file);
             $this->fetch_list_done = $offset > 0
                 ? $this->count_newlines($list_file, $offset)
                 : 0;
         }
-        $fetch_state = $this->get_fetch_list_progress_state($state_key);
+        $fetch_state = $this->get_state()->fetch;
         $batch_file = $fetch_state->batch_file;
         $batch_offset = $fetch_state->offset;
         $next_offset = $fetch_state->next_offset;
@@ -6769,13 +6465,13 @@ class ImportClient
             $next_offset = $batch["next_offset"];
             $batch_entries = $batch["entries"];
             $cursor = null;
-            $this->set_fetch_list_progress_state($state_key, FetchListProgressState::from_array([
+            $this->get_state()->fetch = FetchListProgressState::from_array([
                 "offset" => $batch_offset,
                 "next_offset" => $next_offset,
                 "batch_file" => $batch_file,
                 "batch_entries" => $batch_entries,
                 "cursor" => null,
-            ]));
+            ]);
             $this->save_state();
         }
 
@@ -6787,7 +6483,7 @@ class ImportClient
             ),
         ];
 
-        $complete = $this->fetch_file_batch($post_data, $cursor, $state_key);
+        $complete = $this->fetch_file_batch($post_data, $cursor);
         if (!$complete) {
             return false;
         }
@@ -6807,40 +6503,16 @@ class ImportClient
         $this->get_state()->files_pull_summary->files_pulled += $batch_entries;
         $this->files_pulled = 0;
 
-        $this->set_fetch_list_progress_state($state_key, FetchListProgressState::from_array([
+        $this->get_state()->fetch = FetchListProgressState::from_array([
             "offset" => $next_offset,
             "next_offset" => $next_offset,
             "batch_file" => null,
             "batch_entries" => 0,
             "cursor" => null,
-        ]));
+        ]);
         $this->save_state();
 
         return $next_offset >= filesize($list_file);
-    }
-
-    private function get_fetch_list_progress_state(string $state_key): FetchListProgressState
-    {
-        if ($state_key === "fetch") {
-            return $this->get_state()->fetch;
-        }
-        if ($state_key === "fetch_skipped") {
-            return $this->get_state()->fetch_skipped;
-        }
-        throw new InvalidArgumentException("Unknown fetch state key: {$state_key}");
-    }
-
-    private function set_fetch_list_progress_state(string $state_key, FetchListProgressState $state): void
-    {
-        if ($state_key === "fetch") {
-            $this->get_state()->fetch = $state;
-            return;
-        }
-        if ($state_key === "fetch_skipped") {
-            $this->get_state()->fetch_skipped = $state;
-            return;
-        }
-        throw new InvalidArgumentException("Unknown fetch state key: {$state_key}");
     }
 
     /**
@@ -7005,23 +6677,6 @@ class ImportClient
         }
 
         return $max_request;
-    }
-
-    /**
-     * Return the uploads basedir from preflight data (e.g. "/wp-content/uploads").
-     *
-     */
-    private function get_uploads_basedir(): ?string
-    {
-        $paths_urls = $this->get_state()->preflight["data"]["database"]["wp"]["paths_urls"] ?? null;
-        if (!is_array($paths_urls)) {
-            return null;
-        }
-        $basedir = $paths_urls["uploads"]["basedir"] ?? null;
-        if (!is_string($basedir) || $basedir === "") {
-            return null;
-        }
-        return rtrim($basedir, "/");
     }
 
     /**
@@ -11324,6 +10979,19 @@ class ImportClient
             return new PullState();
         }
 
+        if (
+            array_key_exists("fetch_skipped", $state) &&
+            isset($state["pull_pipeline"]) &&
+            is_array($state["pull_pipeline"]) &&
+            array_key_exists("files_filter", $state["pull_pipeline"]) &&
+            array_key_exists("skipped_pending", $state["pull_pipeline"])
+        ) {
+            unset(
+                $state["fetch_skipped"],
+                $state["pull_pipeline"]["files_filter"],
+                $state["pull_pipeline"]["skipped_pending"]
+            );
+        }
         $state = $this->decode_state_paths($state);
 
         return PullState::from_array($state);
@@ -11769,7 +11437,7 @@ if (
             'target' => 'filter',
             'placeholder' => 'MODE',
             'valid_values' => ['none', 'essential-files', 'skipped-earlier'],
-            'help' => 'Filter which files to download (pull/pull-files: none|essential-files; files-pull also supports skipped-earlier)',
+            'help' => null,
             'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
@@ -12443,9 +12111,6 @@ if (
                 "interrupted, re-run the same command to resume from where it left off.\n" .
                 "Running pull again after completion performs a delta sync.\n" .
                 "\n" .
-                "Use --filter=essential-files to defer uploads and other large wp-content\n" .
-                "entries while still completing the rest of the pull.\n" .
-                "\n" .
                 "The ?site-export-api query parameter is added automatically if missing,\n" .
                 "so you can pass just the site URL.\n",
             "extra" =>
@@ -12459,11 +12124,6 @@ if (
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-user=root --target-db=wp_local \\\n" .
                 "    --new-site-url=http://localhost:8881\n" .
-                "\n" .
-                "  # Complete the main pull now, defer the heavier file tail:\n" .
-                "  reprint pull https://example.com \\\n" .
-                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
-                "    --filter=essential-files --target-engine=sqlite --runtime=none\n" .
                 "\n" .
                 "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n" .
                 "  reprint pull https://example.com \\\n" .
@@ -12575,12 +12235,6 @@ if (
                 "\n" .
                 "Runs files-index internally to write the next remote index.\n",
             "extra" =>
-                "Filter modes:\n" .
-                "  none             Pull all files (default)\n" .
-                "  essential-files   Skip uploads, pull only code/config/themes/plugins.\n" .
-                "                    The skipped file list is saved for later retrieval.\n" .
-                "  skipped-earlier   Pull only files skipped by a prior essential-files run.\n" .
-                "\n" .
                 "Path selection:\n" .
                 "  --only=SOURCE      Include only this source path prefix; repeatable.\n" .
                 "  --exclude=SOURCE   Exclude this source path prefix; repeatable.\n" .
@@ -12594,8 +12248,6 @@ if (
                 "                                           Next remote index\n" .
                 "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/fetch-list.jsonl\n" .
                 "                                           Files pending download\n" .
-                "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/skipped-fetch-list.jsonl\n" .
-                "                                           Files skipped by --filter=essential-files\n" .
                 "  remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json\n" .
                 "                                           Resumable pull state\n" .
                 "  audit.log                       Audit log\n",

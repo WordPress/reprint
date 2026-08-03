@@ -139,7 +139,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         return file_get_contents($this->outputDir . '/runtime.php');
     }
 
-    public function testApplyRuntimeAddsProxyWhenSkippedUploadsRemain(): void
+    public function testApplyRuntimeAddsProxyForEssentialFilesFilter(): void
     {
         $client = $this->makeClient();
         $this->writeState([
@@ -149,11 +149,6 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             ],
             'filter' => 'essential-files',
         ]);
-        file_put_contents(
-            $client->pull_state_directory . '/skipped-fetch-list.jsonl',
-            json_encode(['path' => '/wp-content/uploads/2024/01/photo.jpg']) . "\n",
-        );
-
         $this->loadClientState($client);
         $runtime = $this->runApplyRuntime($client);
         $resolvedPullStateDirectory =
@@ -170,10 +165,8 @@ class RemoteUploadProxyRuntimeTest extends TestCase
                 . "/state.json');",
             $runtime,
         );
-        $this->assertStringContainsString(
-            "define('REPRINT_PULL_SKIPPED_FETCH_LIST_FILE', '"
-                . $resolvedPullStateDirectory
-                . "/skipped-fetch-list.jsonl');",
+        $this->assertStringNotContainsString(
+            "REPRINT_PULL_SKIPPED_FETCH_LIST_FILE",
             $runtime,
         );
         $this->assertStringContainsString(
