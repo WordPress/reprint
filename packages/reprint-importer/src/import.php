@@ -691,11 +691,11 @@ class ImportClient
         $this->pull_excluded_files_with_path_prefixes = [];
         if (!empty($only_raw)) {
             $this->pull_only_files_with_path_prefixes =
-                $this->resolve_pull_files_path_prefixes($only_raw, "only");
+                $this->resolve_remote_paths($only_raw, "only");
         }
         if (!empty($excluded_raw)) {
             $this->pull_excluded_files_with_path_prefixes =
-                $this->resolve_pull_files_path_prefixes($excluded_raw, "exclude");
+                $this->resolve_remote_paths($excluded_raw, "exclude");
         }
 
         if ($assert_remap) {
@@ -2548,7 +2548,7 @@ class ImportClient
              * Ask the exporter to omit source rows that should not enter the local clone.
              *
              * The protocol is intentionally data-shaped instead of exporter-defined
-             * tokens: table_name_without_prefix is resolved against the source site's table prefix,
+             * tokens: table_name_without_prefix is resolved against the remote site's table prefix,
              * column is matched against the source table metadata, and value_base64 lets
              * the exporter compare with FROM_BASE64(...) without interpolating the raw
              * value into SQL. _edit_lock is ephemeral editor session state and would
@@ -4083,7 +4083,7 @@ class ImportClient
      * Reads the detected webhost from state (set during preflight), runs the
      * appropriate host analyzer to produce a runtime manifest, then applies
      * it using the chosen runtime applier. The manifest captures what the
-     * source site needs (constants, INI directives, error handlers);
+     * remote site needs (constants, INI directives, error handlers);
      * the applier writes the files the target server needs to fulfill those
      * requirements.
      *
@@ -4115,7 +4115,7 @@ class ImportClient
         if (!is_array($entry) || empty($entry["data"])) {
             throw new RuntimeException(
                 "apply-runtime requires a prior preflight run. " .
-                "Run 'preflight' first to capture the source site's environment."
+                "Run 'preflight' first to capture the remote site's environment."
             );
         }
 
@@ -4393,7 +4393,7 @@ class ImportClient
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
             "condition" => "file_not_found",
-            "description" => "Proxy missing uploads from the source site until files-pull completes",
+            "description" => "Proxy missing uploads from the remote site until files-pull completes",
         ];
         $this->audit_log(
             "APPLY-RUNTIME | enabled remote upload proxy ({$base_url})",
@@ -4459,7 +4459,7 @@ class ImportClient
      * where each WordPress component actually lives, rather than blindly
      * scanning filesystem root top-level entries.
      *
-     * This is essential when the source site uses a non-standard layout
+     * This is essential when the remote site uses a non-standard layout
      * (e.g. WP Cloud with ABSPATH=/srv/htdocs and WP_CONTENT_DIR=/tmp/__wp__/wp-content)
      * and the target needs a conventional wp-admin/, wp-includes/,
      * wp-content/, wp-load.php structure.
@@ -5062,7 +5062,7 @@ class ImportClient
         $parsed_url = parse_url($this->remote_reprint_api_url);
         if (!$parsed_url || !isset($parsed_url['scheme'], $parsed_url['host'])) {
             throw new InvalidArgumentException(
-                "--new-site-url requires a valid export URL to derive the source site origin.",
+                "--new-site-url requires a valid export URL to derive the remote site origin.",
             );
         }
 
@@ -7725,7 +7725,7 @@ class ImportClient
         $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
         $sql_statements_counted = (int) ($this->get_state()->sql_statements_counted ?? 0);
 
-        // Auto-detect the source site domain from the export URL so it
+        // Auto-detect the remote site domain from the export URL so it
         // always appears in pull/domains.json even if the SQL dump
         // hasn't been fully scanned yet.
         if ($domain_collector) {
@@ -8538,7 +8538,7 @@ class ImportClient
      *
      * Example:
      *
-     * Source site:
+     * remote site:
      *
      *   /srv/source-site/
      *   `-- wp-content/
@@ -8874,7 +8874,7 @@ class ImportClient
     {
         $filesystem_root = rtrim($this->get_filesystem_root_path(), "/");
 
-        $source_tokens = $this->wp_source_path_tokens();
+        $source_tokens = $this->remote_path_tokens();
         $target_tokens = ["fs-root" => $filesystem_root];
 
         $rules = [];
@@ -8920,8 +8920,8 @@ class ImportClient
      * Unknown paths are omitted because both WP_CONTENT_DIR and the directory path
      * are needed to decide whether the directory lives outside WP_CONTENT_DIR.
      *
-     * @param array<string,string|null> $source_tokens From wp_source_path_tokens().
-     * @return array<string,string> Directory name => real source path, for
+     * @param array<string,string|null> $source_tokens From remote_path_tokens().
+     * @return array<string,string> Directory name => absolute remote path, for
      *                              directories outside WP_CONTENT_DIR only.
      */
     private function content_directories_outside_wp_content(array $source_tokens): array
@@ -8943,31 +8943,27 @@ class ImportClient
     }
 
     /**
-     * Resolve raw file path sources into a deduped list of real source absolute
-     * prefixes. Each source is a `:token:` template (e.g.
-     * `:wp-content:`, `:wp-uploads:`) or a raw absolute path,
-     * resolved through the same source token table (wp_source_path_tokens)
-     * as --remap.
+     * Resolves :token:-based path locators into absolute paths on the remote site.
      *
-     * For example, when `:wp-plugins:` maps to `/custom/plugins`:
+     * For example, when `:wp-plugins:` maps to `/htdocs/wp-content/plugins`:
      *
-     *     $prefixes = $this->resolve_pull_files_path_prefixes(
+     *     $prefixes = $this->resolve_remote_paths(
      *         [':wp-plugins:', ':wp-plugins:/woocommerce', '/var/custom/data'],
      *         'only'
      *     );
      *
-     *     // Returns ['/custom/plugins', '/var/custom/data'].
+     *     // Returns ['/htdocs/wp-content/plugins', '/var/custom/data'].
      *
      * @param array<int,string> $raw_sources Raw SOURCE values from the CLI.
      * @param string            $option_name CLI option name used in errors.
-     * @return array<int,string> Real source prefixes (deduped).
+     * @return array<int,string> Absolute remote path prefixes (deduped).
      */
-    private function resolve_pull_files_path_prefixes(
+    private function resolve_remote_paths(
         array $raw_sources,
         string $option_name
     ): array
     {
-        $source_tokens = $this->wp_source_path_tokens();
+        $source_tokens = $this->remote_path_tokens();
 
         $prefixes = [];
         foreach ($raw_sources as $src) {
@@ -9054,7 +9050,7 @@ class ImportClient
     }
 
     /**
-     * The source site's real paths from preflight data, as remap/path-selection token
+     * Remote site's real paths from preflight data, as remap/path-selection token
      * name => absolute path (wp-content, wp-plugins, wp-mu-plugins, wp-uploads,
      * abspath).
      *
@@ -9063,7 +9059,7 @@ class ImportClient
      * data-gatherer: any entry may be null when preflight lacks it (no
      * content_dir, abspath undetermined).
      */
-    private function wp_source_path_tokens(): array
+    private function remote_path_tokens(): array
     {
         $preflight = $this->get_state()->preflight["data"] ?? [];
         $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
@@ -9100,7 +9096,7 @@ class ImportClient
      * Resolve a --remap/--only/--exclude path argument into an absolute path.
      *
      * Substitutes a known leading `:token:` (see the token tables in
-     * resolve_remap and resolve_pull_files_path_prefixes) with its
+     * resolve_remap and resolve_remote_paths) with its
      * value, then trims trailing slashes. The result must be a valid absolute
      * path with no `.`/`..` segments; a relative path or an unknown token (left
      * unsubstituted) fails that check. Referencing a token whose value is
