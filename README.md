@@ -271,6 +271,17 @@ The three filter values:
 The uploads directory is detected from preflight data (`uploads.basedir`), falling back to
 `wp-content/uploads/` if unavailable.
 
+`files-pull` and `pull-files` also accept repeatable path-prefix selections:
+
+```bash
+php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
+    --only=:wp-content: --exclude=:wp-uploads:
+```
+
+`--only=SOURCE` supplies an included source prefix and `--exclude=SOURCE`
+supplies an excluded source prefix. Both accept WordPress path tokens or
+absolute source paths. Exclusions win when the prefixes overlap.
+
 #### Pull only files.
 
 `pull-files` runs the file side of the high-level pull pipeline:
@@ -287,11 +298,11 @@ php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 
 It accepts the `pull` file filters (`--filter=none` and
 `--filter=essential-files`) plus the same path selection options as
-`files-pull`, including repeated `--only` values:
+`files-pull`, including repeated `--only` and `--exclude` values:
 
 ```bash
 php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
-    --only=:wp-content: --only=:wp-plugins:
+    --only=:wp-content: --exclude=:wp-uploads:
 ```
 
 #### Pull only the database.

@@ -296,7 +296,7 @@ class Pull
                 $state->fetch = new FetchListProgressState();
                 $state->fetch_skipped = new FetchListProgressState();
                 $state->files_pull_summary = new FilesPullSummaryState();
-                $state->files_pull_only_fingerprint = null;
+                $state->files_pull_path_selection_fingerprint = null;
                 $this->client->save_state();
                 foreach ([
                     "{$pull_state_directory}/remote-index.next.jsonl",
@@ -816,7 +816,7 @@ class Pull
         }
         if ($reset_file_selection_state) {
             $state->index = new RemoteFileIndexCursorState();
-            $state->files_pull_only_fingerprint = null;
+            $state->files_pull_path_selection_fingerprint = null;
         }
         if ($reset_db_state) {
             $state->sql_bytes = null;

@@ -7,11 +7,11 @@ use PHPUnit\Framework\TestCase;
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
- * --only: the diff must reconcile only within the --only file path prefixes. A next remote index built
- * with --only lists selected paths only, so the delete drains in
- * compare_remote_indexes_and_build_fetch_list() would otherwise wrongly delete
- * every unselected remote index entry. Guard both drains so unselected local files +
- * index entries survive, while selected orphans are still deleted (delta).
+ * Path selection: the diff must reconcile only within the selected path
+ * prefixes. --only scopes the downloaded next remote index, while --exclude
+ * is applied locally to that index. The delete drains in
+ * compare_remote_indexes_and_build_fetch_list() must keep unselected local
+ * files and remote index entries while still deleting selected orphans.
  */
 class OnlyFilesPathPrefixDiffTest extends TestCase
 {
@@ -106,8 +106,11 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         return $paths;
     }
 
-    /** Mirror FilesPullStateTest: load state + preserve-local, then set the --only file path prefixes. */
-    private function prepareClient(array $pull_only_files_with_path_prefixes): array
+    /** Load state + preserve-local, then set the file path selection. */
+    private function prepareClient(
+        array $pull_only_files_with_path_prefixes,
+        array $pull_excluded_files_with_path_prefixes = []
+    ): array
     {
         $state = [
             "active_resumable_command" => [
@@ -130,6 +133,7 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $r->getProperty('is_tty')->setValue($client, false);
         $r->getProperty('fs_root_nonempty_behavior')->setValue($client, 'preserve-local');
         $r->getProperty('pull_only_files_with_path_prefixes')->setValue($client, $pull_only_files_with_path_prefixes);
+        $r->getProperty('pull_excluded_files_with_path_prefixes')->setValue($client, $pull_excluded_files_with_path_prefixes);
         return [$client, $r];
     }
 
@@ -161,6 +165,90 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         // Selected orphan file AND its index entry are deleted.
         $this->assertFileDoesNotExist($orphan);
         $this->assertNotContains('/wp-content/old/orphan.txt', $this->readRemoteIndexEntryPaths());
+    }
+
+    public function testExcludeFilesPrefixDiffKeepsExcludedOrphan(): void
+    {
+        $this->writeIndex(
+            'remote-index.jsonl',
+            $this->indexLine('/wp-content/uploads/local-only.jpg', 1000, 100)
+        );
+        $this->writeIndex('remote-index.next.jsonl', '');
+        $excluded = $this->seedLocalFile('/wp-content/uploads/local-only.jpg');
+
+        [$client, $reflection] = $this->prepareClient(
+            [],
+            ['/wp-content/uploads']
+        );
+        $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+
+        $this->assertFileExists($excluded);
+        $this->assertContains(
+            '/wp-content/uploads/local-only.jpg',
+            $this->readRemoteIndexEntryPaths()
+        );
+    }
+
+    public function testExcludeFilesPrefixPrunesFetchListFromFullNextRemoteIndex(): void
+    {
+        $this->writeIndex('remote-index.jsonl', '');
+        $this->writeIndex(
+            'remote-index.next.jsonl',
+            $this->indexLine('/wp-content/themes/flavor/style.css', 1000, 100)
+            . $this->indexLine('/wp-content/uploads/photo.jpg', 1000, 100)
+        );
+
+        [$client, $reflection] = $this->prepareClient(
+            [],
+            ['/wp-content/uploads']
+        );
+        $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+
+        $fetchListLines = file(
+            $this->pullStateDirectory . '/fetch-list.jsonl',
+            FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES
+        );
+        $fetchPaths = array_map(
+            static function (string $line): string {
+                $entry = json_decode($line, true);
+                return base64_decode($entry['path'], true);
+            },
+            $fetchListLines
+        );
+
+        $this->assertSame(
+            ['/wp-content/themes/flavor/style.css'],
+            $fetchPaths
+        );
+        $this->assertStringContainsString(
+            base64_encode('/wp-content/uploads/photo.jpg'),
+            file_get_contents($this->pullStateDirectory . '/remote-index.next.jsonl')
+        );
+    }
+
+    public function testRemoteFollowedPathOutsideOnlyScopeIsFetched(): void
+    {
+        // The exporter applies the --only roots before building this index, but
+        // following a selected symlink may add its target outside those roots.
+        // The importer must fetch that target while still using --only to scope
+        // deletions from the prior remote index.
+        $this->writeIndex('remote-index.jsonl', '');
+        $this->writeIndex(
+            'remote-index.next.jsonl',
+            $this->indexLine('/shared/themes/indice/style.css', 1000, 10)
+        );
+
+        [$client, $reflection] = $this->prepareClient(['/wp-content/plugins']);
+        $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
+
+        $fetch_entry = json_decode(
+            trim(file_get_contents($this->pullStateDirectory . '/fetch-list.jsonl')),
+            true
+        );
+        $this->assertSame(
+            '/shared/themes/indice/style.css',
+            base64_decode($fetch_entry['path'], true)
+        );
     }
 
     public function testOnlyRootItselfSurvivesTheDeleteDrains(): void

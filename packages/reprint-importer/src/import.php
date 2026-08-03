@@ -420,6 +420,12 @@ class ImportClient
      */
     private $pull_only_files_with_path_prefixes = [];
 
+    /**
+     * @var array<int,string> Resolved `--exclude` file paths: a list of real
+     * source absolute path prefixes omitted from files-pull.
+     */
+    private $pull_excluded_files_with_path_prefixes = [];
+
     /** @var AdaptiveTuner|null Adjusts request pacing based on server response times and errors. */
     private $tuner = null;
 
@@ -676,8 +682,20 @@ class ImportClient
         if (is_string($only_raw)) {
             $only_raw = [$only_raw];
         }
+        $excluded_raw = $options["exclude"] ?? [];
+        if (is_string($excluded_raw)) {
+            $excluded_raw = [$excluded_raw];
+        }
+
+        $this->pull_only_files_with_path_prefixes = [];
+        $this->pull_excluded_files_with_path_prefixes = [];
         if (!empty($only_raw)) {
-            $this->pull_only_files_with_path_prefixes = $this->resolve_pull_only_files_with_path_prefixes($only_raw);
+            $this->pull_only_files_with_path_prefixes =
+                $this->resolve_remote_paths($only_raw, "only");
+        }
+        if (!empty($excluded_raw)) {
+            $this->pull_excluded_files_with_path_prefixes =
+                $this->resolve_remote_paths($excluded_raw, "exclude");
         }
 
         if ($assert_remap) {
@@ -2530,7 +2548,7 @@ class ImportClient
              * Ask the exporter to omit source rows that should not enter the local clone.
              *
              * The protocol is intentionally data-shaped instead of exporter-defined
-             * tokens: table_name_without_prefix is resolved against the source site's table prefix,
+             * tokens: table_name_without_prefix is resolved against the remote site's table prefix,
              * column is matched against the source table metadata, and value_base64 lets
              * the exporter compare with FROM_BASE64(...) without interpolating the raw
              * value into SQL. _edit_lock is ephemeral editor session state and would
@@ -2701,7 +2719,7 @@ class ImportClient
             $current_status !== "complete";
 
         $this->replay_remote_index_wal();
-        $this->assert_files_pull_only_unchanged_while_resuming($has_progress);
+        $this->assert_files_pull_path_selection_unchanged_while_resuming($has_progress);
         $this->assert_local_followed_symlinks_root_unchanged();
 
         // Already completed.
@@ -2735,7 +2753,8 @@ class ImportClient
                 ], true);
                 $this->get_state()->active_resumable_command->completion_state = "in_progress";
                 $this->get_state()->active_resumable_command->current_stage = "fetch-skipped";
-                $this->get_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
+                $this->get_state()->files_pull_path_selection_fingerprint =
+                    $this->files_pull_path_selection_fingerprint();
                 $this->get_state()->files_pull_summary = new FilesPullSummaryState();
                 $this->save_state();
                 $this->open_remote_index_wal();
@@ -2855,7 +2874,8 @@ class ImportClient
             $this->get_state()->active_resumable_command->command_name = "files-pull";
             $this->get_state()->active_resumable_command->completion_state = "in_progress";
             $this->get_state()->active_resumable_command->current_stage = "index";
-            $this->get_state()->files_pull_only_fingerprint = $this->files_pull_only_fingerprint();
+            $this->get_state()->files_pull_path_selection_fingerprint =
+                $this->files_pull_path_selection_fingerprint();
             $this->get_state()->diff = new FileDiffProgressState();
             $this->get_state()->index = new RemoteFileIndexCursorState();
             $this->get_state()->fetch = new FetchListProgressState();
@@ -4063,7 +4083,7 @@ class ImportClient
      * Reads the detected webhost from state (set during preflight), runs the
      * appropriate host analyzer to produce a runtime manifest, then applies
      * it using the chosen runtime applier. The manifest captures what the
-     * source site needs (constants, INI directives, error handlers);
+     * remote site needs (constants, INI directives, error handlers);
      * the applier writes the files the target server needs to fulfill those
      * requirements.
      *
@@ -4095,7 +4115,7 @@ class ImportClient
         if (!is_array($entry) || empty($entry["data"])) {
             throw new RuntimeException(
                 "apply-runtime requires a prior preflight run. " .
-                "Run 'preflight' first to capture the source site's environment."
+                "Run 'preflight' first to capture the remote site's environment."
             );
         }
 
@@ -4373,7 +4393,7 @@ class ImportClient
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
             "condition" => "file_not_found",
-            "description" => "Proxy missing uploads from the source site until files-pull completes",
+            "description" => "Proxy missing uploads from the remote site until files-pull completes",
         ];
         $this->audit_log(
             "APPLY-RUNTIME | enabled remote upload proxy ({$base_url})",
@@ -4439,7 +4459,7 @@ class ImportClient
      * where each WordPress component actually lives, rather than blindly
      * scanning filesystem root top-level entries.
      *
-     * This is essential when the source site uses a non-standard layout
+     * This is essential when the remote site uses a non-standard layout
      * (e.g. WP Cloud with ABSPATH=/srv/htdocs and WP_CONTENT_DIR=/tmp/__wp__/wp-content)
      * and the target needs a conventional wp-admin/, wp-includes/,
      * wp-content/, wp-load.php structure.
@@ -5042,7 +5062,7 @@ class ImportClient
         $parsed_url = parse_url($this->remote_reprint_api_url);
         if (!$parsed_url || !isset($parsed_url['scheme'], $parsed_url['host'])) {
             throw new InvalidArgumentException(
-                "--new-site-url requires a valid export URL to derive the source site origin.",
+                "--new-site-url requires a valid export URL to derive the remote site origin.",
             );
         }
 
@@ -6620,8 +6640,9 @@ class ImportClient
                 $remote_index_entry !== null &&
                 strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) < 0
             ) {
-                // The remote index is a union across files-pull --only runs.
-                if ($this->is_selected_for_pulling($remote_index_entry["path"])) {
+                // The remote index is a union across files-pull path selections.
+                // Keep entries outside this run's selection.
+                if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
                     $remote_absolute_path = $remote_index_entry["path"];
                     $this->apply_remote_deletion_locally($remote_absolute_path);
                     $this->delete_remote_index_entry($remote_absolute_path);
@@ -6642,37 +6663,42 @@ class ImportClient
                     $remote_index_entry["type"] !== $next_remote_index_entry["type"]
                 ) {
                     // The path is represented in both indexes but changed on the remote.
-                    // Always re-download — the remote index confirms that an earlier
-                    // files-pull accounted for this path, so preserve-local does not
-                    // protect it.
-                    $selected_fetch_list_file_handle = (
-                        $skipped_fetch_list_file_handle !== null &&
-                        (
-                            $remote_uploads_directory_absolute_path !== null
-                                ? path_is_within_root(
-                                    $next_remote_index_entry["path"],
-                                    $remote_uploads_directory_absolute_path
-                                )
-                                : strpos(
-                                    $next_remote_index_entry["path"],
-                                    "wp-content/uploads/"
-                                ) !== false
+                    // Re-download it when selected — the remote index confirms
+                    // that an earlier files-pull accounted for this path, so
+                    // preserve-local does not protect it.
+                    if ($this->is_selected_for_pulling($next_remote_index_entry["path"], true)) {
+                        $selected_fetch_list_file_handle = (
+                            $skipped_fetch_list_file_handle !== null &&
+                            (
+                                $remote_uploads_directory_absolute_path !== null
+                                    ? path_is_within_root(
+                                        $next_remote_index_entry["path"],
+                                        $remote_uploads_directory_absolute_path
+                                    )
+                                    : strpos(
+                                        $next_remote_index_entry["path"],
+                                        "wp-content/uploads/"
+                                    ) !== false
+                            )
                         )
-                    )
-                        ? $skipped_fetch_list_file_handle
-                        : $fetch_list_file_handle;
-                    $this->append_to_fetch_list(
-                        $next_remote_index_entry["path"],
-                        $selected_fetch_list_file_handle,
-                    );
+                            ? $skipped_fetch_list_file_handle
+                            : $fetch_list_file_handle;
+                        $this->append_to_fetch_list(
+                            $next_remote_index_entry["path"],
+                            $selected_fetch_list_file_handle,
+                        );
+                    }
                 }
                 $last_consumed_remote_index_entry_path =
                     $remote_index_entry["path"];
                 $remote_index_entry =
                     $this->read_remote_index_entry($remote_index_file_handle);
             } elseif (
-                $remote_index_entry === null ||
-                strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) > 0
+                $this->is_selected_for_pulling($next_remote_index_entry["path"], true) &&
+                (
+                    $remote_index_entry === null ||
+                    strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) > 0
+                )
             ) {
                 $preserve_local_skip_reason =
                     $this->should_skip_for_preserve_local(
@@ -6722,7 +6748,7 @@ class ImportClient
         }
 
         while ($remote_index_entry !== null) {
-            if ($this->is_selected_for_pulling($remote_index_entry["path"])) {
+            if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
                 $remote_absolute_path = $remote_index_entry["path"];
                 $this->apply_remote_deletion_locally($remote_absolute_path);
                 $this->delete_remote_index_entry($remote_absolute_path);
@@ -7699,7 +7725,7 @@ class ImportClient
         $sql_stats_file = $this->pull_state_directory . "/sql-stats.json";
         $sql_statements_counted = (int) ($this->get_state()->sql_statements_counted ?? 0);
 
-        // Auto-detect the source site domain from the export URL so it
+        // Auto-detect the remote site domain from the export URL so it
         // always appears in pull/domains.json even if the SQL dump
         // hasn't been fully scanned yet.
         if ($domain_collector) {
@@ -8512,7 +8538,7 @@ class ImportClient
      *
      * Example:
      *
-     * Source site:
+     * remote site:
      *
      *   /srv/source-site/
      *   `-- wp-content/
@@ -8703,49 +8729,52 @@ class ImportClient
     }
 
     /**
-     * Refuse to resume a files-pull after changing --only.
+     * Refuse to resume a files-pull after changing its path selection.
      *
-     * The in-progress next remote index cursor/file was built from one directory[]
-     * allowlist. Switching the selected source path prefixes mid-resume would
-     * mix indexes from different traversals. Completed runs are allowed to use
-     * different --only prefixes because the remote index is intentionally a union
-     * across files-pull --only runs.
+     * --only determines the next remote index traversal, while --exclude determines
+     * which entries enter the later fetch list. Keep both fixed for the complete
+     * in-progress lifecycle rather than allowing a resumed stage to cross a path-
+     * selection boundary. Completed runs may use a different selection because the
+     * remote index is intentionally a union across them.
      */
-    private function assert_files_pull_only_unchanged_while_resuming(bool $has_progress): void
+    private function assert_files_pull_path_selection_unchanged_while_resuming(bool $has_progress): void
     {
         if (!$has_progress) {
             return;
         }
 
-        $fingerprint = $this->files_pull_only_fingerprint();
-        $previous = $this->get_state()->files_pull_only_fingerprint ?? null;
+        $fingerprint = $this->files_pull_path_selection_fingerprint();
+        $previous = $this->get_state()->files_pull_path_selection_fingerprint;
 
-        if ($previous !== null && $previous !== $fingerprint) {
+        if ($previous !== $fingerprint) {
             throw new RuntimeException(
-                "Cannot change --only while resuming files-pull. " .
-                    "Use the original --only values, or use --abort to start a new files-pull.",
+                "Cannot change --only or --exclude while resuming files-pull. " .
+                    "Use the original path selections, or use --abort to start a new files-pull.",
             );
-        }
-
-        // Older in-progress state may not have this guard persisted yet. Record
-        // the current value so subsequent resumes cannot drift.
-        if ($previous === null) {
-            $this->get_state()->files_pull_only_fingerprint = $fingerprint;
-            $this->save_state();
         }
     }
 
     /**
-     * Stable fingerprint for the resolved --only file path prefixes.
+     * Stable fingerprint for the resolved file path selection.
      *
-     * Prefix order is part of the fingerprint because it determines the first
-     * list_dir used to start the traversal.
+     * Included-prefix order is significant because it determines the first
+     * list_dir used to start the traversal. Excluded-prefix order is not, so
+     * it is normalized before hashing.
      */
-    private function files_pull_only_fingerprint(): string
+    private function files_pull_path_selection_fingerprint(): string
     {
+        $excluded_path_prefixes = $this->pull_excluded_files_with_path_prefixes;
+        sort($excluded_path_prefixes, SORT_STRING);
+
         return hash(
             "sha256",
-            json_encode($this->pull_only_files_with_path_prefixes, JSON_UNESCAPED_SLASHES),
+            json_encode(
+                [
+                    "only_path_prefixes" => $this->pull_only_files_with_path_prefixes,
+                    "excluded_path_prefixes" => $excluded_path_prefixes,
+                ],
+                JSON_UNESCAPED_SLASHES
+            ),
         );
     }
 
@@ -8820,7 +8849,7 @@ class ImportClient
     {
         $filesystem_root = rtrim($this->get_filesystem_root_path(), "/");
 
-        $source_tokens = $this->wp_source_path_tokens();
+        $source_tokens = $this->remote_path_tokens();
         $target_tokens = ["fs-root" => $filesystem_root];
 
         $rules = [];
@@ -8860,13 +8889,14 @@ class ImportClient
      * Find plugins, mu-plugins, and uploads directories that WordPress reports
      * outside WP_CONTENT_DIR.
      *
-     * When wp-content is selected with --only or --remap, these directories are not
-     * covered by WP_CONTENT_DIR itself, so callers need to handle them separately.
+     * When wp-content is selected by a file path option or --remap, these
+     * directories are not covered by WP_CONTENT_DIR itself, so callers need
+     * to handle them separately.
      * Unknown paths are omitted because both WP_CONTENT_DIR and the directory path
      * are needed to decide whether the directory lives outside WP_CONTENT_DIR.
      *
-     * @param array<string,string|null> $source_tokens From wp_source_path_tokens().
-     * @return array<string,string> Directory name => real source path, for
+     * @param array<string,string|null> $source_tokens From remote_path_tokens().
+     * @return array<string,string> Directory name => absolute remote path, for
      *                              directories outside WP_CONTENT_DIR only.
      */
     private function content_directories_outside_wp_content(array $source_tokens): array
@@ -8888,30 +8918,41 @@ class ImportClient
     }
 
     /**
-     * Resolve raw `--only` sources into a deduped list of real source absolute
-     * prefixes selected for files-pull. Each source is a `:token:` template (e.g.
-     * `:wp-content:`, `:wp-uploads:`) or a raw absolute path,
-     * resolved through the same source token table (wp_source_path_tokens)
-     * as --remap.
+     * Resolves :token:-based path locators into absolute paths on the remote site.
      *
-     * @param array<int,string> $only_raw Raw SOURCE values from the CLI.
-     * @return array<int,string> Real source prefixes (deduped).
+     * For example, when `:wp-plugins:` maps to `/htdocs/wp-content/plugins`:
+     *
+     *     $prefixes = $this->resolve_remote_paths(
+     *         [':wp-plugins:', ':wp-plugins:/woocommerce', '/var/custom/data'],
+     *         'only'
+     *     );
+     *
+     *     // Returns ['/htdocs/wp-content/plugins', '/var/custom/data'].
+     *
+     * @param array<int,string> $raw_sources Raw SOURCE values from the CLI.
+     * @param string            $option_name CLI option name used in errors.
+     * @return array<int,string> Absolute remote path prefixes (deduped).
      */
-    private function resolve_pull_only_files_with_path_prefixes(array $only_raw): array
+    private function resolve_remote_paths(
+        array $raw_sources,
+        string $option_name
+    ): array
     {
-        $source_tokens = $this->wp_source_path_tokens();
+        $source_tokens = $this->remote_path_tokens();
 
         $prefixes = [];
-        foreach ($only_raw as $src) {
+        foreach ($raw_sources as $src) {
             if ($src === "") {
-                throw new InvalidArgumentException("--only source cannot be empty");
+                throw new InvalidArgumentException(
+                    "--{$option_name} source cannot be empty"
+                );
             }
 
             $resolved = $this->resolve_token_path($src, $source_tokens);
             $prefixes[$resolved] = true;
 
-            // Selecting content_dir with --only also pulls in any plugins, mu-plugins,
-            // or uploads directory outside WP_CONTENT_DIR so files-pull enumerates it too.
+            // Selecting content_dir also selects any plugins, mu-plugins, or
+            // uploads directory outside WP_CONTENT_DIR.
             if ($resolved === $source_tokens["wp-content"]) {
                 foreach ($this->content_directories_outside_wp_content($source_tokens) as $source) {
                     $prefixes[$source] = true;
@@ -8919,8 +8960,8 @@ class ImportClient
             }
         }
 
-        // Drop any prefix already covered by a broader one (e.g. wp-content and wp-content/plugins)
-        // A files-pull --only run doesn't need to walk the same subtree twice.
+        // Drop any prefix already covered by a broader one (for example,
+        // wp-content and wp-content/plugins).
         $sources = array_keys($prefixes);
         $minimal = [];
         foreach ($sources as $path) {
@@ -8942,32 +8983,52 @@ class ImportClient
     }
 
     /**
-     * Whether a remote absolute path is selected by the active --only file path
-     * prefixes. With no --only flag, every path is selected. A selected root is
-     * excluded because a filtered next remote index lists its contents, not the root.
+     * Whether a path is selected by the active --only and --exclude prefixes.
+     *
+     * The exporter has already applied --only to entries in the next remote
+     * index, including followed symlink targets outside an --only prefix. Other
+     * paths are checked against --only locally. An included root itself is not
+     * selected because the next remote index lists its contents, not the root
+     * entry. Exclusions always win.
+     *
+     * @param bool $is_next_remote_index_entry Whether the path came from the
+     *                                         current next remote index.
      */
-    private function is_selected_for_pulling(string $remote_absolute_path): bool
+    private function is_selected_for_pulling(
+        string $path,
+        bool $is_next_remote_index_entry
+    ): bool
     {
-        if (empty($this->pull_only_files_with_path_prefixes)) {
-            return true;
-        }
+        if (!$is_next_remote_index_entry) {
+            $selected = empty($this->pull_only_files_with_path_prefixes);
 
-        $remote_absolute_path = rtrim($remote_absolute_path, "/");
-        foreach ($this->pull_only_files_with_path_prefixes as $pull_only_files_prefix) {
-            $pull_only_files_prefix = rtrim($pull_only_files_prefix, "/");
-            if ($remote_absolute_path === $pull_only_files_prefix) {
+            foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
+                $remainder = self::path_remainder_under($path, $prefix);
+                if ($remainder === "") {
+                    return false;
+                }
+                if ($remainder !== null) {
+                    $selected = true;
+                    break;
+                }
+            }
+
+            if (!$selected) {
                 return false;
             }
-            if (path_is_within_root($remote_absolute_path, $pull_only_files_prefix)) {
-                return true;
+        }
+
+        foreach ($this->pull_excluded_files_with_path_prefixes as $prefix) {
+            if (self::path_remainder_under($path, $prefix) !== null) {
+                return false;
             }
         }
 
-        return false;
+        return true;
     }
 
     /**
-     * The source site's real paths from preflight data, as remap/--only token
+     * Remote site's real paths from preflight data, as remap/path-selection token
      * name => absolute path (wp-content, wp-plugins, wp-mu-plugins, wp-uploads,
      * abspath).
      *
@@ -8976,7 +9037,7 @@ class ImportClient
      * data-gatherer: any entry may be null when preflight lacks it (no
      * content_dir, abspath undetermined).
      */
-    private function wp_source_path_tokens(): array
+    private function remote_path_tokens(): array
     {
         $preflight = $this->get_state()->preflight["data"] ?? [];
         $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
@@ -9010,10 +9071,10 @@ class ImportClient
     }
 
     /**
-     * Resolve a --remap/--only path argument into an absolute path.
+     * Resolve a --remap/--only/--exclude path argument into an absolute path.
      *
      * Substitutes a known leading `:token:` (see the token tables in
-     * resolve_remap and resolve_pull_only_files_with_path_prefixes) with its
+     * resolve_remap and resolve_remote_paths) with its
      * value, then trims trailing slashes. The result must be a valid absolute
      * path with no `.`/`..` segments; a relative path or an unknown token (left
      * unsubstituted) fails that check. Referencing a token whose value is
@@ -12006,6 +12067,16 @@ if (
                 'repeat for several. Default pulls everything',
             'commands' => ['pull-files', 'files-pull'],
         ],
+        [
+            'name' => 'exclude',
+            'type' => 'value-or-next',
+            'target' => 'exclude',
+            'placeholder' => 'SOURCE',
+            'repeatable' => true,
+            'help' => 'Omit SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path) from the file pull; ' .
+                'repeat for several',
+            'commands' => ['pull-files', 'files-pull'],
+        ],
 
         // ── flat-docroot options ────────────────────────────────
         [
@@ -12558,7 +12629,7 @@ if (
                 "\n" .
                 "  reprint pull-files https://example.com \\\n" .
                 "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
-                "    --only=:wp-content: --only=:wp-plugins:\n",
+                "    --only=:wp-content: --exclude=:wp-uploads:\n",
         ],
         "pull-db" => [
             "level" => "high",
@@ -12643,6 +12714,11 @@ if (
                 "  essential-files   Skip uploads, pull only code/config/themes/plugins.\n" .
                 "                    The skipped file list is saved for later retrieval.\n" .
                 "  skipped-earlier   Pull only files skipped by a prior essential-files run.\n" .
+                "\n" .
+                "Path selection:\n" .
+                "  --only=SOURCE      Include only this source path prefix; repeatable.\n" .
+                "  --exclude=SOURCE   Exclude this source path prefix; repeatable.\n" .
+                "  Exclusions win when include and exclude prefixes overlap.\n" .
                 "\n" .
                 "Output files:\n" .
                 "  (filesystem root)/                       Downloaded files\n" .

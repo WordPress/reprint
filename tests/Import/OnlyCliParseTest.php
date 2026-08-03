@@ -5,11 +5,10 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 /**
- * --only reuses the existing `value-or-next` option type (like --new-site-url),
- * but is repeatable because commas are valid path bytes. The parser lives
- * inside the CLI bootstrap guard (not require-able), so this exercises the real
- * binary and asserts `--only` is recognized in both `--only=VAL` and
- * `--only VAL` forms.
+ * --only and --exclude reuse the existing `value-or-next` option type (like
+ * --new-site-url), but are repeatable because commas are valid path bytes. The
+ * parser lives inside the CLI bootstrap guard (not require-able), so this
+ * exercises the real binary.
  */
 class OnlyCliParseTest extends TestCase
 {
@@ -95,6 +94,7 @@ $log = %s;
 file_put_contents($log, json_encode(array(
     'endpoint' => $_GET['endpoint'] ?? null,
     'directory' => $_GET['directory'] ?? null,
+    'exclude_path' => $_GET['exclude_path'] ?? null,
 ), JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND);
 
 $boundary = 'reprint-test-boundary';
@@ -339,6 +339,37 @@ PHP, var_export($requestsLog, true)));
             '/var/www/html/wp-content/uploads/2025',
             '/var/www/html/wp-content/themes',
         ), $fileIndexRequest['directory'] ?? null);
+    }
+
+    public function testRepeatedExcludeOptionsStayOutOfFileIndexRequest(): void
+    {
+        $requestsLog = $this->tempDir . '/requests.jsonl';
+        $remoteUrl = $this->startDirectoryCaptureServer($requestsLog);
+        $this->writePreflightState($remoteUrl, true);
+
+        $output = $this->runCli(array(
+            'files-pull',
+            $remoteUrl,
+            '--exclude',
+            ':wp-content:/cache',
+            '--exclude',
+            ':wp-uploads:',
+            '--state-dir=' . $this->tempDir . '/state',
+            '--fs-root=' . $this->tempDir . '/fs',
+        ));
+
+        $this->assertStringNotContainsString('"status":"error"', $output);
+
+        $fileIndexRequest = null;
+        foreach ($this->capturedRequests($requestsLog) as $request) {
+            if (($request['endpoint'] ?? null) === 'file_index') {
+                $fileIndexRequest = $request;
+                break;
+            }
+        }
+
+        $this->assertNotNull($fileIndexRequest, "files-pull should request file_index. Output:\n{$output}");
+        $this->assertNull($fileIndexRequest['exclude_path'] ?? null);
     }
 
     public function testOnlyOptionKeepsCommaInsideSourcePath(): void

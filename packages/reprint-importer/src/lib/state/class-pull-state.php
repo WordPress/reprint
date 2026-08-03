@@ -369,7 +369,8 @@ class PullState
     public ?int $max_allowed_packet = null;
     /** @var string|null Fingerprint of resolved path mappings; guards files-pull reuse. */
     public ?string $resolved_path_mappings_fingerprint = null;
-    public ?string $files_pull_only_fingerprint = null;
+    /** @var string|null Files-pull path-selection fingerprint; guards resume. */
+    public ?string $files_pull_path_selection_fingerprint = null;
     public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
@@ -436,7 +437,7 @@ class PullState
         $state->user_agent = $data['user_agent'];
         $state->max_allowed_packet = $data['max_allowed_packet'];
         $state->resolved_path_mappings_fingerprint = $data['resolved_path_mappings_fingerprint'];
-        $state->files_pull_only_fingerprint = $data['files_pull_only_fingerprint'];
+        $state->files_pull_path_selection_fingerprint = $data['files_pull_path_selection_fingerprint'];
         $state->files_pull_summary = FilesPullSummaryState::from_array($data['files_pull_summary']);
         $state->db_index = DatabaseTableIndexState::from_array($data['db_index']);
         $state->diff = FileDiffProgressState::from_array($data['diff']);
@@ -474,7 +475,7 @@ class PullState
             'user_agent' => $this->user_agent,
             'max_allowed_packet' => $this->max_allowed_packet,
             'resolved_path_mappings_fingerprint' => $this->resolved_path_mappings_fingerprint,
-            'files_pull_only_fingerprint' => $this->files_pull_only_fingerprint,
+            'files_pull_path_selection_fingerprint' => $this->files_pull_path_selection_fingerprint,
             'files_pull_summary' => $this->files_pull_summary->to_array(),
             'db_index' => $this->db_index->to_array(),
             'diff' => $this->diff->to_array(),
