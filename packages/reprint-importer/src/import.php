@@ -2749,50 +2749,6 @@ class ImportClient
         $this->save_state();
 
         $this->open_remote_index_wal();
-        $this->run_files_pull_pipeline();
-
-        // Pipeline returns early with partial status if interrupted
-        if (($this->get_state()->active_resumable_command->completion_state ?? null) === "partial") {
-            return;
-        }
-
-        $this->get_state()->active_resumable_command->completion_state = "complete";
-        $this->save_state();
-        $this->remove_remote_index_wal();
-
-        $this->progress->clear_progress_line();
-        $remote_index_entry_count = $this->remote_index_entry_count();
-        $label = $is_delta ? "files-pull (delta)" : "files-pull";
-
-        $this->audit_log(
-            sprintf("%s complete: %d remote index entries", $label, $remote_index_entry_count),
-            true,
-        );
-
-        $this->progress->show_lifecycle_line("{$label} complete: {$remote_index_entry_count} remote index entries\n");
-        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
-        $this->output_progress([
-            "type" => "lifecycle",
-            "event" => "complete",
-            "command" => "files-pull",
-            "delta" => $is_delta,
-            "files_indexed" => $remote_index_entry_count,
-            "audit_log" => $this->audit_log_file,
-            "message" => "{$label} complete: {$remote_index_entry_count} remote index entries",
-        ], true);
-
-        $this->report_volatile_files();
-    }
-
-    /**
-     * Next remote index → remote index comparison → fetch pipeline used by both
-     * initial and delta syncs.
-     *
-     * Reads the current stage from state and runs each stage in sequence.
-     * Returns early (with partial status) if any stage doesn't complete.
-     */
-    private function run_files_pull_pipeline(): void
-    {
         $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
 
         if ($stage === "index") {
@@ -2889,6 +2845,33 @@ class ImportClient
         if ($this->follow_symlinks) {
             $this->recreate_intermediate_symlinks();
         }
+
+        $this->get_state()->active_resumable_command->completion_state = "complete";
+        $this->save_state();
+        $this->remove_remote_index_wal();
+
+        $this->progress->clear_progress_line();
+        $remote_index_entry_count = $this->remote_index_entry_count();
+        $label = $is_delta ? "files-pull (delta)" : "files-pull";
+
+        $this->audit_log(
+            sprintf("%s complete: %d remote index entries", $label, $remote_index_entry_count),
+            true,
+        );
+
+        $this->progress->show_lifecycle_line("{$label} complete: {$remote_index_entry_count} remote index entries\n");
+        $this->progress->show_lifecycle_line("Audit log: {$this->audit_log_file}\n");
+        $this->output_progress([
+            "type" => "lifecycle",
+            "event" => "complete",
+            "command" => "files-pull",
+            "delta" => $is_delta,
+            "files_indexed" => $remote_index_entry_count,
+            "audit_log" => $this->audit_log_file,
+            "message" => "{$label} complete: {$remote_index_entry_count} remote index entries",
+        ], true);
+
+        $this->report_volatile_files();
     }
 
     /**
