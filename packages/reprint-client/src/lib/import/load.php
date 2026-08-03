@@ -1,5 +1,6 @@
 <?php
 
+require_once __DIR__ . '/../filesystem/class-pulled-file-context.php';
 require_once __DIR__ . '/functions.php';
 require_once __DIR__ . '/class-streaming-context.php';
 require_once __DIR__ . '/class-preserve-local-skip-exception.php';

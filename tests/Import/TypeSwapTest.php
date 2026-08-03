@@ -57,18 +57,37 @@ class TypeSwapTest extends TestCase
         rmdir($dir);
     }
 
-    /**
-     * create_directory_if_missing should remove a symlink that blocks directory creation.
-     */
-    public function testEnsureDirectoryPathRemovesBlockingSymlink()
+    private function newClient(): \ImportClient
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        ( new \ReflectionClass($client) )->getProperty('pulled_filesystem')->setValue(
+            $client,
+            new \Reprint\Importer\Filesystem\PulledFilesystem(
+                $this->tempDir . '/fs-root',
+                [],
+                null,
+                'error',
+                [],
+            ),
+        );
+        return $client;
+    }
 
-        $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('create_directory_if_missing');
+    /**
+     * PulledFilesystem should remove a symlink that blocks directory creation.
+     */
+    public function testCreateLocalDirectoryRemovesBlockingSymlink()
+    {
+        $filesystem = new \Reprint\Importer\Filesystem\PulledFilesystem(
+            $this->tempDir . '/fs-root',
+            [],
+            null,
+            'error',
+            [],
+        );
 
         // Resolve the fs-root path so it matches the realpath() check
-        // inside create_directory_if_missing (on macOS, /var -> /private/var).
+        // inside PulledFilesystem (on macOS, /var -> /private/var).
         $fsRoot = realpath($this->tempDir . '/fs-root');
 
         // Create a symlink at a path where we want a real directory
@@ -78,8 +97,8 @@ class TypeSwapTest extends TestCase
         symlink($targetDir, $symlinkPath);
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
-        // create_directory_if_missing for a child should replace the symlink with a real dir
-        $method->invoke($client, $fsRoot . '/some-dir/child');
+        // Creating a child should replace the symlink with a real directory.
+        $filesystem->create_local_directory($fsRoot . '/some-dir/child');
 
         $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');
         $this->assertTrue(is_dir($symlinkPath), 'Should be a real directory now');
@@ -87,11 +106,17 @@ class TypeSwapTest extends TestCase
     }
 
     /**
-     * create_directory_if_missing should not follow a symlink beyond the filesystem root.
+     * Creating a local directory must not follow a symlink beyond the filesystem root.
      */
-    public function testEnsureDirectoryPathRejectsExternalSymlink(): void
+    public function testCreateLocalDirectoryRejectsExternalSymlink(): void
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $filesystem = new \Reprint\Importer\Filesystem\PulledFilesystem(
+            $this->tempDir . '/fs-root',
+            [],
+            null,
+            'error',
+            [],
+        );
         $fsRoot = realpath($this->tempDir . '/fs-root');
         $this->assertIsString($fsRoot);
 
@@ -99,10 +124,10 @@ class TypeSwapTest extends TestCase
         mkdir($externalDirectory, 0755);
         symlink($externalDirectory, $fsRoot . '/shared-directory');
 
-        $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('create_directory_if_missing');
         try {
-            $method->invoke($client, $fsRoot . '/shared-directory/child');
+            $filesystem->create_local_directory(
+                $fsRoot . '/shared-directory/child'
+            );
             $this->fail('A symlink outside the filesystem root was followed.');
         } catch (\RuntimeException $exception) {
             $this->assertStringContainsString('outside filesystem root', $exception->getMessage());
@@ -116,7 +141,7 @@ class TypeSwapTest extends TestCase
      */
     public function testFileChunkReplacesSymlinkToDirectory()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = $this->newClient();
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -156,11 +181,11 @@ class TypeSwapTest extends TestCase
     }
 
     /**
-     * A directory chunk should replace a symlink-to-file with a real directory.
+     * A directory part should replace a symlink-to-file with a real directory.
      */
     public function testDirectoryChunkReplacesSymlinkToFile()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = $this->newClient();
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -171,9 +196,9 @@ class TypeSwapTest extends TestCase
         symlink($realFile, $symlinkPath);
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
-        // Send a directory chunk at the same path
+        // Send a directory part at the same path
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_directory_chunk');
+        $method = $reflection->getMethod('handle_directory_part');
 
         $chunk = [
             'headers' => [
@@ -191,12 +216,12 @@ class TypeSwapTest extends TestCase
     /**
      * After replacing a symlink with a directory, nested files should be writable.
      *
-     * Simulates the scenario: symlink at path A is replaced by a directory chunk,
+     * Simulates the scenario: symlink at path A is replaced by a directory part,
      * then a file chunk arrives at A/sub/file.txt.
      */
     public function testFileChunkUnderFormerSymlink()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = $this->newClient();
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -209,8 +234,8 @@ class TypeSwapTest extends TestCase
 
         $reflection = new \ReflectionClass($client);
 
-        // Step 1: directory chunk replaces the symlink
-        $dirMethod = $reflection->getMethod('handle_directory_chunk');
+        // Step 1: directory part replaces the symlink
+        $dirMethod = $reflection->getMethod('handle_directory_part');
         $dirMethod->invoke($client, [
             'headers' => [
                 'x-directory-path' => base64_encode('/parent'),
@@ -244,15 +269,21 @@ class TypeSwapTest extends TestCase
     }
 
     /**
-     * create_directory_if_missing should replace a symlink with a full real directory
+     * PulledFilesystem should replace a symlink with a full real directory
      * hierarchy when creating deeply nested paths.
      */
-    public function testNestedFileUnderExistingSymlinkViaEnsureDirectory()
+    public function testCreateLocalDirectoryReplacesAncestorSymlink()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $filesystem = new \Reprint\Importer\Filesystem\PulledFilesystem(
+            $this->tempDir . '/fs-root',
+            [],
+            null,
+            'error',
+            [],
+        );
 
         // Resolve the fs-root path so it matches the realpath() check
-        // inside create_directory_if_missing (on macOS, /var -> /private/var).
+        // inside PulledFilesystem (on macOS, /var -> /private/var).
         $fsRoot = realpath($this->tempDir . '/fs-root');
 
         // Create a symlink at the top-level path component
@@ -262,10 +293,7 @@ class TypeSwapTest extends TestCase
         symlink($targetDir, $symlinkPath);
         $this->assertTrue(is_link($symlinkPath), 'Precondition: symlink exists');
 
-        // Call create_directory_if_missing for a deeply nested path
-        $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('create_directory_if_missing');
-        $method->invoke($client, $fsRoot . '/top/sub/deep');
+        $filesystem->create_local_directory($fsRoot . '/top/sub/deep');
 
         $this->assertFalse(is_link($symlinkPath), 'Symlink should be removed');
         $this->assertTrue(is_dir($symlinkPath), 'top should be a real directory');

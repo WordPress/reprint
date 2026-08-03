@@ -134,6 +134,16 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $r->getProperty('fs_root_nonempty_behavior')->setValue($client, 'preserve-local');
         $r->getProperty('pull_only_files_with_path_prefixes')->setValue($client, $pull_only_files_with_path_prefixes);
         $r->getProperty('pull_excluded_files_with_path_prefixes')->setValue($client, $pull_excluded_files_with_path_prefixes);
+        $r->getProperty('pulled_filesystem')->setValue(
+            $client,
+            new \Reprint\Importer\Filesystem\PulledFilesystem(
+                $this->filesystem_root,
+                [],
+                null,
+                'preserve-local',
+                $pull_only_files_with_path_prefixes,
+            ),
+        );
         return [$client, $r];
     }
 

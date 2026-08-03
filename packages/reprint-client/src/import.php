@@ -10,7 +10,7 @@
  * - Three-phase pull: files, SQL, then file deltas
  */
 
-use Reprint\Importer\PreserveLocalSkipException;
+use Reprint\Importer\Filesystem\PulledFilesystem;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\Remote\RemoteExportApiClient;
 use Reprint\Importer\State\DatabaseApplyCommandState;
@@ -36,7 +36,6 @@ use function WordPress\Reprint\Exporter\path_is_same_as_or_descendant_of;
 use function WordPress\Reprint\Exporter\path_is_descendant_of;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
-use function WordPress\Reprint\Exporter\relative_path_under;
 use function WordPress\Reprint\Exporter\trim_right_slash;
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\write_local_index_update;
@@ -65,6 +64,10 @@ require_once __DIR__ . '/lib/wp-stubs.php';
 
 // Streaming protocol parsers.
 require_once __DIR__ . '/lib/protocol/class-multipart-stream-parser.php';
+
+// Remote-to-local filesystem projection and safe local mutations.
+require_once __DIR__ . '/lib/filesystem/class-pulled-file-context.php';
+require_once __DIR__ . '/lib/filesystem/class-pulled-filesystem.php';
 
 // Remote export API transport.
 require_once __DIR__ . '/lib/remote/load.php';
@@ -388,6 +391,9 @@ class ImportClient
     /** @var Pull Orchestrates high-level pull pipelines. */
     private Pull $pull;
 
+    /** @var PulledFilesystem Projects remote paths and entries onto the local filesystem. */
+    private PulledFilesystem $pulled_filesystem;
+
     /** @var int Cumulative count of index entries written (survives retries). */
     private $next_remote_index_entries_counted = 0;
 
@@ -618,6 +624,14 @@ class ImportClient
         if ($assert_remap) {
             $this->assert_resolved_path_mappings_consistent();
         }
+
+        $this->pulled_filesystem = new PulledFilesystem(
+            $this->filesystem_root,
+            $this->resolved_path_mappings,
+            $this->local_followed_symlinks_root,
+            $this->fs_root_nonempty_behavior,
+            $this->get_export_directories(),
+        );
     }
 
     /**
@@ -652,7 +666,7 @@ class ImportClient
     /**
      * Load the volatile files tracker from disk.
      *
-     * @return array<string, int> Map of path => change count
+     * @return array<string, int> Map of base64-encoded remote absolute path => change count
      */
     private function load_volatile_files(): array
     {
@@ -688,29 +702,33 @@ class ImportClient
 
     /**
      * Record that a file changed during streaming.
-     * Increments the change counter for the given path.
+     * Increments the change counter for the given remote absolute path.
      */
-    private function record_volatile_file(string $path): void
+    private function record_volatile_file(string $remote_absolute_path): void
     {
         $files = $this->load_volatile_files();
-        $count = ($files[$path] ?? 0) + 1;
-        $files[$path] = $count;
+        $remote_absolute_path_base64 = base64_encode($remote_absolute_path);
+        $count = ($files[$remote_absolute_path_base64] ?? 0) + 1;
+        $files[$remote_absolute_path_base64] = $count;
         $this->save_volatile_files($files);
-        $this->audit_log("VOLATILE | path={$path} | count={$count}");
+        $this->audit_log(
+            "VOLATILE | path={$remote_absolute_path} | count={$count}"
+        );
     }
 
     /**
-     * Clear a file from the volatile tracker after a successful download.
+     * Clear a remote absolute path from the volatile tracker after a successful download.
      */
-    private function clear_volatile_file(string $path): void
+    private function clear_volatile_file(string $remote_absolute_path): void
     {
         $files = $this->load_volatile_files();
-        if (!isset($files[$path])) {
+        $remote_absolute_path_base64 = base64_encode($remote_absolute_path);
+        if (!isset($files[$remote_absolute_path_base64])) {
             return;
         }
-        unset($files[$path]);
+        unset($files[$remote_absolute_path_base64]);
         $this->save_volatile_files($files);
-        $this->audit_log("VOLATILE CLEARED | path={$path}");
+        $this->audit_log("VOLATILE CLEARED | path={$remote_absolute_path}");
     }
 
     /**
@@ -731,12 +749,17 @@ class ImportClient
 
         $this->progress->show_lifecycle_line("{$count} file(s) changed during sync and need re-syncing (run files-pull again):\n");
 
-        foreach ($files as $path => $changes) {
+        foreach ($files as $remote_absolute_path_base64 => $changes) {
             $suffix = $changes >= 3
                 ? " (changed {$changes} times — may be too volatile to sync)"
                 : " (changed {$changes} time" . ($changes > 1 ? "s" : "") . ")";
-            $this->audit_log("  VOLATILE FILE | path={$path} | count={$changes}");
-            $this->progress->show_lifecycle_line("  {$path}{$suffix}\n");
+            $this->audit_log(
+                "  VOLATILE FILE | path={$remote_absolute_path_base64} | " .
+                    "count={$changes}"
+            );
+            $this->progress->show_lifecycle_line(
+                "  {$remote_absolute_path_base64}{$suffix}\n"
+            );
         }
 
         $this->output_progress(
@@ -761,6 +784,14 @@ class ImportClient
             "path" => $path,
             "message" => "[skip] " . $path,
         ], true);
+    }
+
+    /** Write filesystem-operation messages produced by PulledFilesystem. */
+    private function audit_pulled_filesystem_operation_messages(): void
+    {
+        foreach ($this->pulled_filesystem->drain_operation_messages() as $message) {
+            $this->audit_log($message, true);
+        }
     }
 
     /**
@@ -2917,6 +2948,12 @@ class ImportClient
             );
         }
 
+        if (!isset($this->pulled_filesystem)) {
+            throw new LogicException(
+                "File pull options must be prepared before running files-pull.",
+            );
+        }
+
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
 
         $current_status =
@@ -3588,9 +3625,10 @@ class ImportClient
             }
 
             try {
-                $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
-                    $remote_absolute_path
-                );
+                $local_absolute_path = $this->pulled_filesystem
+                    ->map_remote_absolute_path_to_local_absolute_path(
+                        $remote_absolute_path
+                    );
             } catch (RuntimeException $e) {
                 $this->audit_log(
                     "INTERMEDIATE SYMLINK SKIP: invalid path {$remote_absolute_path}: " . $e->getMessage(),
@@ -3599,7 +3637,7 @@ class ImportClient
                 continue;
             }
 
-            // Repoint through the same seam regular symlink chunks use, so the
+            // Repoint through the same seam regular symlink parts use, so the
             // link targets wherever the content actually landed (filesystem root,
             // remapped, or placed under the local followed symlinks root) instead of the raw source spelling.
             $symlink_target = $this->rewrite_symlink_target_for_local_filesystem(
@@ -3617,8 +3655,10 @@ class ImportClient
             $parent = dirname($local_absolute_path);
             if (!is_dir($parent)) {
                 try {
-                    $this->create_directory_if_missing($parent);
+                    $this->pulled_filesystem->create_local_directory($parent);
+                    $this->audit_pulled_filesystem_operation_messages();
                 } catch (RuntimeException $e) {
+                    $this->audit_pulled_filesystem_operation_messages();
                     $this->audit_log(
                         "INTERMEDIATE SYMLINK SKIP: failed to prepare parent for {$remote_absolute_path}: " .
                             $e->getMessage(),
@@ -3645,12 +3685,10 @@ class ImportClient
             }
 
             // Validate that the symlink target doesn't escape the filesystem root.
-            $root = $this->filesystem_root;
             try {
-                $this->assert_symlink_target_within_root(
+                $this->pulled_filesystem->assert_local_symlink_target_within_filesystem_root(
                     dirname($local_absolute_path),
                     $symlink_target,
-                    $root
                 );
             } catch (RuntimeException $e) {
                 $this->audit_log(
@@ -6119,13 +6157,13 @@ class ImportClient
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
             if ($chunk_type === "metadata") {
-                $this->handle_metadata_chunk($chunk);
+                $this->handle_metadata_part($chunk);
             } elseif ($chunk_type === "file") {
                 $this->handle_file_chunk($chunk, $context);
             } elseif ($chunk_type === "directory") {
-                $this->handle_directory_chunk($chunk);
+                $this->handle_directory_part($chunk);
             } elseif ($chunk_type === "symlink") {
-                $this->handle_symlink_chunk($chunk);
+                $this->handle_symlink_part($chunk);
             } elseif ($chunk_type === "missing") {
                 $path = base64_decode($chunk["headers"]["x-file-path"] ?? "");
                 if ($path) {
@@ -6133,9 +6171,9 @@ class ImportClient
                 }
                 // @TODO: Cleanup the local file that we may have started downloading.
             } elseif ($chunk_type === "error") {
-                $this->handle_error_chunk($chunk, "files", $context);
+                $this->handle_error_part($chunk, "files", $context);
             } elseif ($chunk_type === "progress") {
-                $this->handle_progress($chunk, "files");
+                $this->handle_progress_part($chunk, "files");
             } elseif ($chunk_type === "completion") {
                 $complete =
                     ($chunk["headers"]["x-status"] ?? "") === "complete";
@@ -6465,9 +6503,9 @@ class ImportClient
                     $this->progress->show_progress_line("Scanning remote files");
                 }
             } elseif ($chunk_type === "progress") {
-                $this->handle_progress($chunk, "index");
+                $this->handle_progress_part($chunk, "index");
             } elseif ($chunk_type === "metadata") {
-                $this->handle_metadata_chunk($chunk);
+                $this->handle_metadata_part($chunk);
             } elseif ($chunk_type === "completion") {
                 $next_remote_index_is_complete =
                     ($chunk["headers"]["x-status"] ?? "") === "complete";
@@ -6492,7 +6530,7 @@ class ImportClient
                             : null,
                 ];
             } elseif ($chunk_type === "error") {
-                $this->handle_error_chunk($chunk, "index", $context);
+                $this->handle_error_part($chunk, "index", $context);
             }
         };
 
@@ -6674,7 +6712,7 @@ class ImportClient
                 )
             ) {
                 $preserve_local_skip_reason =
-                    $this->should_skip_for_preserve_local(
+                    $this->pulled_filesystem->preserve_local_skip_reason(
                         $next_remote_index_entry["path"],
                     );
                 if ($preserve_local_skip_reason) {
@@ -7050,9 +7088,10 @@ class ImportClient
             return null;
         }
         try {
-            $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
-                $remote_deletion_root
-            );
+            $local_absolute_path = $this->pulled_filesystem
+                ->map_remote_absolute_path_to_local_absolute_path(
+                    $remote_deletion_root
+                );
         } catch (RuntimeException $e) {
             $this->audit_log(
                 "Security: refusing to delete invalid path '{$remote_deletion_root}': " . $e->getMessage(),
@@ -7064,7 +7103,12 @@ class ImportClient
             return $local_absolute_path;
         }
 
-        if ($this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)) {
+        if (
+            $this->pulled_filesystem
+                ->remove_local_absolute_path_without_following_symlinks(
+                    $local_absolute_path
+                )
+        ) {
             $this->audit_log("Deleted: {$remote_deletion_root}", false);
             return $local_absolute_path;
         }
@@ -7152,46 +7196,6 @@ class ImportClient
         // Every parent still has an entry in the new index, so only the
         // original missing entry should be deleted.
         return $missing_remote_path;
-    }
-
-    /**
-     * Remove a local absolute path recursively without traversing symlink targets.
-     *
-     * Symlinks are always unlinked as links. Directories are traversed
-     * depth-first.
-     */
-    private function remove_local_absolute_path_without_following_symlinks(
-        string $local_absolute_path
-    ): bool {
-        if (!file_exists($local_absolute_path) && !is_link($local_absolute_path)) {
-            return true;
-        }
-
-        if (is_link($local_absolute_path) || is_file($local_absolute_path)) {
-            return true === @unlink($local_absolute_path);
-        }
-
-        if (is_dir($local_absolute_path)) {
-            $entries = @scandir($local_absolute_path);
-            if ($entries === false) {
-                return false;
-            }
-            foreach ($entries as $entry) {
-                if ($entry === "." || $entry === "..") {
-                    continue;
-                }
-                if (
-                    !$this->remove_local_absolute_path_without_following_symlinks(
-                        wp_join_unix_paths($local_absolute_path, $entry)
-                    )
-                ) {
-                    return false;
-                }
-            }
-            return true === @rmdir($local_absolute_path);
-        }
-
-        return true === @unlink($local_absolute_path);
     }
 
     /**
@@ -7506,7 +7510,7 @@ class ImportClient
                         $this->progress->show_progress_line($sql_progress, $sql_fraction);
 
                     } elseif ($chunk_type === "progress") {
-                        $this->handle_progress($chunk, "sql");
+                        $this->handle_progress_part($chunk, "sql");
                     } elseif ($chunk_type === "completion") {
                         $complete =
                             ($chunk["headers"]["x-status"] ?? "") ===
@@ -7544,7 +7548,7 @@ class ImportClient
                             true,
                         );
                     } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "sql", $context);
+                        $this->handle_error_part($chunk, "sql", $context);
                     }
                 };
 
@@ -7987,7 +7991,7 @@ class ImportClient
                             }
                         }
                     } elseif ($chunk_type === "progress") {
-                        $this->handle_progress($chunk, "db-index");
+                        $this->handle_progress_part($chunk, "db-index");
                     } elseif ($chunk_type === "completion") {
                         $complete =
                             ($chunk["headers"]["x-status"] ?? "") ===
@@ -8029,7 +8033,7 @@ class ImportClient
                             true,
                         );
                     } elseif ($chunk_type === "error") {
-                        $this->handle_error_chunk($chunk, "db-index", $context);
+                        $this->handle_error_part($chunk, "db-index", $context);
                     }
                 };
 
@@ -8083,37 +8087,6 @@ class ImportClient
         }
     }
 
-
-    /**
-     * Assert that a symlink target resolves to a path within $root.
-     *
-     * For absolute targets, the target itself must be under $root.
-     * For relative targets, the resolved path (parent dir + target) must be
-     * under $root. We normalize ".." segments without touching the filesystem,
-     * since the target may not exist yet.
-     *
-     * @throws RuntimeException if the target escapes the root.
-     */
-    private function assert_symlink_target_within_root(
-        string $symlink_parent_dir,
-        string $target,
-        string $root
-    ): void {
-        if (str_starts_with($target, "/")) {
-            // Absolute target: must be under root
-            $resolved = normalize_path($target);
-        } else {
-            // Relative target: resolve against the symlink's parent directory
-            $resolved = normalize_path(wp_join_unix_paths($symlink_parent_dir, $target));
-        }
-
-        if (!path_is_same_as_or_descendant_of($resolved, $root)) {
-            throw new RuntimeException(
-                "Security: symlink target escapes filesystem root: {$target} " .
-                "(resolves to {$resolved}, root is {$root})"
-            );
-        }
-    }
 
     /**
      * Rewrite a remote symlink target for the local filesystem when possible.
@@ -8171,9 +8144,10 @@ class ImportClient
 
         // Repoint to where the target's content is placed by the same pull
         // mapping used for file chunks, so the symlink does not dangle.
-        $local_absolute_target = $this->map_remote_absolute_path_to_local_absolute_path(
-            $remote_absolute_target
-        );
+        $local_absolute_target = $this->pulled_filesystem
+            ->map_remote_absolute_path_to_local_absolute_path(
+                $remote_absolute_target
+            );
         $local_relative_target = self::compute_relative_path(
             dirname($local_absolute_path),
             $local_absolute_target
@@ -8669,49 +8643,10 @@ class ImportClient
     }
 
     /**
-     * Map a remote absolute path to a local absolute path under the filesystem
-     * root. Symlink traversal checks prevent writes outside the filesystem root.
-     *
-     * With --remap active, a matched remote absolute path is routed to its
-     * mapped local absolute path. An unmatched path remains nested beneath
-     * --fs-root, as in an identity pull mapping.
+     * Handle a metadata part from a multipart response.
      */
-    private function map_remote_absolute_path_to_local_absolute_path(
-        string $remote_absolute_path
-    ): string {
-        assert_valid_path($remote_absolute_path, "remote absolute path");
-        $local_absolute_path = null;
-        $longest_remote_prefix_length = -1;
-        foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
-            $remainder = path_remainder_under($remote_absolute_path, $remote_prefix);
-            if ($remainder !== null && strlen($remote_prefix) > $longest_remote_prefix_length) {
-                $local_absolute_path = wp_join_unix_paths($local_prefix, $remainder);
-                $longest_remote_prefix_length = strlen($remote_prefix);
-            }
-        }
-        if ($local_absolute_path !== null) {
-            return $local_absolute_path;
-        }
-
-        // Following symlinks is currently the only way paths outside the original export scope reach this mapper.
-        // Use the same local followed symlinks root for copied content and rewritten symlink targets so the links do not dangle.
-        if ($this->local_followed_symlinks_root !== null
-            && !$this->path_is_within_original_export_scope($remote_absolute_path)) {
-            return wp_join_unix_paths(
-                $this->local_followed_symlinks_root,
-                $remote_absolute_path
-            );
-        }
-
-        return wp_join_unix_paths($this->filesystem_root, $remote_absolute_path);
-    }
-
-
-    /**
-     * Handle a metadata chunk from multipart response.
-     */
-    private function handle_metadata_chunk(array $chunk): void {
-        $headers = $chunk["headers"];
+    private function handle_metadata_part(array $part): void {
+        $headers = $part["headers"];
         $filesystem_root = base64_decode($headers["x-filesystem-root"] ?? "", true);
 
         if ($filesystem_root) {
@@ -8720,65 +8655,33 @@ class ImportClient
     }
 
     /**
-     * Handle a file chunk from multipart response.
+     * Handle a file chunk from a multipart response.
      */
     private function handle_file_chunk(
         array $chunk,
         StreamingContext $context
     ): void {
-        $headers = $chunk["headers"];
-        $raw_header = $headers["x-file-path"] ?? "";
-        $path = base64_decode($raw_header, true);
-        $is_first = ($headers["x-first-chunk"] ?? "0") === "1";
-        $is_last = ($headers["x-last-chunk"] ?? "0") === "1";
-
-        if ($path === false || $path === "") {
-            if ($raw_header !== "") {
-                $this->audit_log(
-                    "Warning: base64_decode failed for x-file-path header: " .
-                        substr($raw_header, 0, 100),
-                    true,
-                );
-            }
+        $result = $this->pulled_filesystem->write_local_file_chunk($chunk, $context);
+        if ($result["warning"] !== null) {
+            $this->audit_log($result["warning"], true);
             return;
         }
 
-        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path($path);
+        $path = $result["remote_absolute_path"];
+        if ($path === null) {
+            return;
+        }
 
-        // Open file on first chunk
-        if ($is_first) {
-            // Reset skip flag for each new file
-            $context->skip_current_file = false;
-
-            if (
-                (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&
-                (!is_file($local_absolute_path) || is_link($local_absolute_path))
-            ) {
-                if (
-                    !$this->remove_local_absolute_path_without_following_symlinks(
-                        $local_absolute_path
-                    )
-                ) {
-                    throw new RuntimeException(
-                        "Failed to replace path with file: {$path}",
-                    );
-                }
-            }
-
-            // Check if file exists locally
-            $exists_locally = file_exists($local_absolute_path);
-            $local_size = $exists_locally ? filesize($local_absolute_path) : 0;
-            $file_size = (int) ($headers["x-file-size"] ?? 0);
-
-            // Log file pull with useful context
+        if ($result["started"] !== null) {
+            $started = $result["started"];
             $this->audit_log(
                 sprintf(
                     "File: %s (remote_size=%d, ctime=%d, local_exists=%s, local_size=%d)",
                     $path,
-                    $file_size,
-                    (int) ($headers["x-file-ctime"] ?? 0),
-                    $exists_locally ? "yes" : "no",
-                    $local_size,
+                    $started["remote_size"],
+                    $started["ctime"],
+                    $started["local_exists"] ? "yes" : "no",
+                    $started["local_size"],
                 ),
                 false,
             );
@@ -8796,7 +8699,7 @@ class ImportClient
                 "type" => "file_progress",
                 "files_done" => $files_done,
                 "path" => $path,
-                "size" => $file_size,
+                "size" => $started["remote_size"],
                 "message" => $file_progress_message,
             ];
             if ($this->fetch_list_total !== null) {
@@ -8805,117 +8708,44 @@ class ImportClient
             $this->output_progress($progress_record);
         }
 
-        // Skip body/close for files being preserved
-        if ($context->skip_current_file) {
+        $this->audit_pulled_filesystem_operation_messages();
+
+        if ($result["skip_message"] !== null) {
+            $this->audit_log($result["skip_message"], true);
+            $this->emit_skip_progress($path);
             return;
         }
 
-        // Open file handle on first chunk
-        if ($is_first) {
-            // Close previous file if any
-            if ($context->file_handle) {
-                fclose($context->file_handle);
-                if ($context->file_ctime && $context->file_path) {
-                    touch($context->file_path, $context->file_ctime);
-                }
-            }
-
-            // Create parent directory if needed
-            $dir = dirname($local_absolute_path);
-            if (!is_dir($dir)) {
-                // Check if any component of the path exists as a file and remove it
-                try {
-                    $this->create_directory_if_missing($dir);
-                } catch (PreserveLocalSkipException $e) {
-                    $context->skip_current_file = true;
-                    $this->audit_log($e->getMessage(), true);
-                    $this->emit_skip_progress($path);
-                    return;
-                }
-            }
-
-            // Open new file
-            $context->file_handle = fopen($local_absolute_path, "wb");
-            if (!$context->file_handle) {
-                $error = error_get_last();
-                throw new RuntimeException(
-                    "Failed to open file for writing: {$local_absolute_path}\n" .
-                        "Parent directory: {$dir}\n" .
-                        "Directory exists: " .
-                        (is_dir($dir) ? "yes" : "no") .
-                        "\n" .
-                        "Error: " .
-                        ($error["message"] ?? "unknown"),
-                );
-            }
-            $context->file_path = $local_absolute_path;
-            $context->file_ctime = (int) ($headers["x-file-ctime"] ?? 0);
-            $context->file_bytes_written = 0;  // Reset byte counter for new file
+        if (!$result["completed"]) {
+            return;
         }
 
-        // Write body data if present
-        if (isset($chunk["body"]) && $chunk["body"] !== "") {
-            if ($context->file_handle) {
-                $data = $chunk["body"];
-                $bytes = fwrite($context->file_handle, $data);
-                if ($bytes === false || $bytes !== strlen($data)) {
-                    throw new RuntimeException(
-                        "Write failed for {$context->file_path}: wrote " .
-                        ($bytes === false ? "0" : $bytes) . "/" . strlen($data) .
-                        " bytes (disk full?)"
-                    );
-                }
-                $context->file_bytes_written += $bytes;
-            }
+        if ($result["index_entry"] !== null) {
+            $index_entry = $result["index_entry"];
+            $this->pull_index_journal->record_remote_upsert(
+                $index_entry["path"],
+                $index_entry["ctime"],
+                $index_entry["size"],
+                $index_entry["type"],
+                $result["local_absolute_path"],
+            );
+            $this->files_pulled++;
+            $this->clear_volatile_file($path);
+            $this->audit_log(
+                sprintf("  Indexed (wrote %d bytes)", $result["final_size"]),
+                false,
+            );
+        } elseif ($result["file_changed"]) {
+            $this->audit_log(
+                "  File changed during stream; index not updated",
+                true,
+            );
         }
 
-        // Close on last chunk
-        if ($is_last && $context->file_handle) {
-            fclose($context->file_handle);
-
-            // Set file modification time
-            if ($context->file_ctime && $context->file_path) {
-                touch($context->file_path, $context->file_ctime);
-            }
-
-            // Index update (JSON lines)
-            $file_size = (int) ($headers["x-file-size"] ?? 0);
-            $final_size = file_exists($context->file_path)
-                ? filesize($context->file_path)
-                : 0;
-
-            $file_changed = ($headers["x-file-changed"] ?? "0") === "1";
-
-            if ($context->file_ctime && !$file_changed) {
-                $this->pull_index_journal->record_remote_upsert(
-                    $path,
-                    $context->file_ctime,
-                    $file_size,
-                    "file",
-                    $context->file_path,
-                );
-                $this->files_pulled++; // Count completed files only
-                $this->clear_volatile_file($path);
-                $this->audit_log(
-                    sprintf("  Indexed (wrote %d bytes)", $final_size),
-                    false,
-                );
-            } elseif ($file_changed) {
-                $this->audit_log(
-                    "  File changed during stream; index not updated",
-                    true,
-                );
-            }
-
-            $context->file_handle = null;
-            $context->file_path = null;
-            $context->file_ctime = null;
-            $context->file_bytes_written = 0;
-            // Clear crash recovery tracking - file is complete
-            $this->get_state()->current_file = null;
-            $this->get_state()->current_file_bytes = null;
-        }
+        $this->get_state()->current_file = null;
+        $this->get_state()->current_file_bytes = null;
     }
+
 
     /**
      * Build a short display path for progress messages: strip leading slash,
@@ -8931,429 +8761,120 @@ class ImportClient
         return $rel;
     }
 
-    /**
-     * Check whether any component of the path (between the filesystem root
-     * and the remote absolute path) is a symlink. In preserve-local mode this is used
-     * to prevent creating new content through symlinked directories — their
-     * contents belong to shared hosting infrastructure and must not be
-     * modified.
-     */
-    private function should_skip_for_preserve_local(string $remote_absolute_path): ?string
+    /** Handle a directory part from a multipart response. */
+    private function handle_directory_part(array $part): void
     {
-        if ($this->fs_root_nonempty_behavior !== 'preserve-local') {
-            return null;
-        }
-
-        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
-            $remote_absolute_path
-        );
-
-        // Skip if anything already exists at this path — regular file, symlink
-        // (even to a file), or directory.  This preserves hosting symlinks like
-        // wp-load.php -> __wp__/wp-load.php and drop-in symlinks like
-        // object-cache.php -> ../../wordpress/drop-ins/...
-        if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
-            return "PRESERVE-LOCAL skip file (exists): {$remote_absolute_path}";
-        }
-
-        // Skip if parent directory is not writable or if any directory component
-        // in the path is a symlink.  We never create new files through symlinks —
-        // the symlink and its target contents are shared hosting infrastructure.
-        $dir = dirname($local_absolute_path);
-        if (is_dir($dir) && !is_writable($dir)) {
-            return "PRESERVE-LOCAL skip file (dir not writable): {$remote_absolute_path}";
-        }
-        if ($this->path_traverses_symlink($dir)) {
-            return "PRESERVE-LOCAL skip file (symlink in path): {$remote_absolute_path}";
-        }
-
-        return null;
-    }
-
-    private function path_traverses_symlink(string $path): bool
-    {
-        $root = $this->filesystem_root;
-        $relative = relative_path_under($path, $root);
-        if ($relative === null || $relative === "") {
-            return false;
-        }
-
-        $current = $root;
-        foreach (explode("/", $relative) as $part) {
-            if ($part === "") {
-                continue;
-            }
-            $current = wp_join_unix_paths($current, $part);
-            if (is_link($current)) {
-                return true;
-            }
-            if (!file_exists($current)) {
-                break;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Create a directory path when missing, removing blockers.
-     *
-     * @param string $dir Directory path to create
-     * @throws RuntimeException if directory cannot be created or is outside allowed path
-     */
-    private function create_directory_if_missing(string $dir): void
-    {
-        // Security: Ensure path is under the filesystem root
-        $real_filesystem_root = $this->filesystem_root;
-
-        // Resolve the nearest existing ancestor while retaining any missing tail.
-        $resolved_directory = realpath_with_missing_tail($dir);
-        if (!path_is_same_as_or_descendant_of($resolved_directory, $real_filesystem_root)) {
-            // In preserve-local mode, a path that resolves outside the
-            // filesystem root is expected when a directory like wp-content/plugins
-            // is symlinked to a shared hosting location.  Skip gracefully
-            // instead of treating it as a security violation.
-            if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                throw new PreserveLocalSkipException(
-                    "PRESERVE-LOCAL: path resolves outside filesystem root via symlink: {$dir}",
-                );
-            }
-            throw new RuntimeException(
-                "Security: Refusing to create directory outside filesystem root: {$dir}",
-            );
-        }
-
-        if (is_dir($dir) && !is_link($dir)) {
-            if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($dir)) {
-                throw new PreserveLocalSkipException(
-                    "PRESERVE-LOCAL: directory not writable: {$dir}",
-                );
-            }
+        $result = $this->pulled_filesystem
+            ->create_local_directory_from_remote_directory_part($part);
+        $this->audit_pulled_filesystem_operation_messages();
+        if ($result["warning"] !== null) {
+            $this->audit_log($result["warning"], true);
             return;
         }
 
-        $relative = relative_path_under($dir, $real_filesystem_root);
-        if ($relative === null) {
-            throw new RuntimeException(
-                "Security: Refusing to create directory outside filesystem root: {$dir}",
-            );
-        }
-
-        if ($relative === "") {
+        $path = $result["remote_absolute_path"];
+        if ($path === null) {
             return;
         }
 
-        $current = $real_filesystem_root;
-        foreach (explode("/", $relative) as $part) {
-            if ($part === "") {
-                continue;
-            }
-            $current = wp_join_unix_paths($current, $part);
-
-            if (is_link($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    // Never create directories through symlinks — the symlink
-                    // and its target contents are shared hosting infrastructure
-                    // that must not be modified.
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: symlink in directory path: {$current}",
-                    );
-                }
-                $this->audit_log(
-                    "Removing symlink blocking directory: {$current}",
-                    true,
-                );
-                if (!unlink($current)) {
-                    throw new RuntimeException(
-                        "Failed to remove symlink blocking directory: {$current}",
-                    );
-                }
-                // Clear cached realpath so the subsequent realpath() check
-                // sees the new directory instead of the removed symlink.
-                clearstatcache(true, $current);
-            }
-
-            // Remove file if blocking directory creation
-            if (is_file($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: file blocks directory creation: {$current}",
-                    );
-                }
-                $this->audit_log(
-                    "Removing file blocking directory: {$current}",
-                    true,
-                );
-                if (!unlink($current)) {
-                    throw new RuntimeException(
-                        "Failed to remove file blocking directory: {$current}",
-                    );
-                }
-            }
-
-            // Create directory if it doesn't exist
-            if (is_dir($current)) {
-                if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($current)) {
-                    throw new PreserveLocalSkipException(
-                        "PRESERVE-LOCAL: directory not writable: {$current}",
-                    );
-                }
-            } elseif (!mkdir($current, 0755) && !is_dir($current)) {
-                throw new RuntimeException(
-                    "Failed to create directory: {$current}\n" .
-                        "Error: " .
-                        (error_get_last()["message"] ?? "unknown"),
-                );
-            }
-
-            $resolved = realpath($current);
-            if ($resolved === false || !path_is_same_as_or_descendant_of($resolved, $real_filesystem_root)) {
-                throw new RuntimeException(
-                    "Security: Refusing to create directory outside filesystem root: {$current}",
-                );
-            }
-        }
-    }
-
-    /**
-     * Handle a directory chunk (create empty directory).
-     */
-    private function handle_directory_chunk(array $chunk): void
-    {
-        $headers = $chunk["headers"];
-        $raw_header = $headers["x-directory-path"] ?? "";
-        $remote_absolute_path = base64_decode($raw_header, true);
-        $ctime = (int) ($headers["x-directory-ctime"] ?? 0);
-
-        if ($remote_absolute_path === false || $remote_absolute_path === "") {
-            if ($raw_header !== "") {
-                $this->audit_log(
-                    "Warning: base64_decode failed for x-directory-path header: " .
-                        substr($raw_header, 0, 100),
-                    true,
-                );
-            }
-            return;
+        if ($result["skip_message"] !== null) {
+            $this->audit_log($result["skip_message"], true);
+            $this->emit_skip_progress($path);
+        } else {
+            $this->audit_log("Directory: {$path}", false);
         }
 
-        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
-            $remote_absolute_path
-        );
-
-        // In preserve-local mode, if the directory already exists (as a real
-        // directory or via a symlink to a directory), keep it as-is.
-        // Also skip if any parent component is a symlink — we never create
-        // new directories through symlinked paths.
-        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (is_dir($local_absolute_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$remote_absolute_path}", true);
-                $this->emit_skip_progress($remote_absolute_path);
-                if ($ctime > 0) {
-                    $this->pull_index_journal->record_remote_upsert($remote_absolute_path, $ctime, 0, "dir");
-                }
-                return;
-            }
-            if ($this->path_traverses_symlink($local_absolute_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$remote_absolute_path}", true);
-                $this->emit_skip_progress($remote_absolute_path);
-                if ($ctime > 0) {
-                    $this->pull_index_journal->record_remote_upsert($remote_absolute_path, $ctime, 0, "dir");
-                }
-                return;
-            }
-        }
-
-        if (
-            (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&
-            (!is_dir($local_absolute_path) || is_link($local_absolute_path))
-        ) {
-            if (
-                !$this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)
-            ) {
-                throw new RuntimeException(
-                    "Failed to replace path with directory: {$remote_absolute_path}",
-                );
-            }
-        }
-
-        // Create directory, removing any files that block the path
-        try {
-            $this->create_directory_if_missing($local_absolute_path);
-        } catch (PreserveLocalSkipException $e) {
-            $this->audit_log($e->getMessage(), true);
-            $this->emit_skip_progress($remote_absolute_path);
-            return;
-        }
-
-        $this->audit_log("Directory: {$remote_absolute_path}", false);
-
-        if ($ctime > 0) {
+        if ($result["ctime"] > 0 && (
+            $result["skip_message"] === null
+            || str_starts_with($result["skip_message"], "PRESERVE-LOCAL skip directory (")
+        )) {
             $this->pull_index_journal->record_remote_upsert(
-                $remote_absolute_path,
-                $ctime,
+                $path,
+                $result["ctime"],
                 0,
                 "dir",
-                $local_absolute_path
+                $result["skip_message"] === null
+                    ? $result["local_absolute_path"]
+                    : null,
             );
         }
     }
 
-    /**
-     * Recreates a symlink from the export stream in the local filesystem.
-     *
-     * Decodes the base64-encoded path and target from the chunk headers,
-     * validates that the target stays within the filesystem root (preventing
-     * directory traversal), then creates the symlink.  Failures are logged
-     * to the audit log and reported as symlink_error progress events — they
-     * do not halt the pull.
-     *
-     * @param array $chunk Multipart chunk with x-symlink-path, x-symlink-target,
-     *                     and x-symlink-ctime headers (all base64-encoded).
-     */
-    private function handle_symlink_chunk(array $chunk): void
-    {
-        $headers = $chunk["headers"];
-        $raw_path = $headers["x-symlink-path"] ?? "";
-        $path = base64_decode($raw_path, true);
-        $target = base64_decode($headers["x-symlink-target"] ?? "", true);
-        $ctime = (int) ($headers["x-symlink-ctime"] ?? 0);
 
-        // Skip if path or target is missing/empty
+    /** Handle a symlink part from a multipart response. */
+    private function handle_symlink_part(array $part): void
+    {
+        $headers = $part["headers"];
+        $path = base64_decode($headers["x-symlink-path"] ?? "", true);
+        $target = base64_decode($headers["x-symlink-target"] ?? "", true);
         if ($path === false || $path === "" || $target === false || $target === "") {
-            if ($raw_path !== "" && ($path === false || $path === "")) {
-                $this->audit_log(
-                    "Warning: base64_decode failed for x-symlink-path header: " .
-                        substr($raw_path, 0, 100),
-                    true,
-                );
+            $result = $this->pulled_filesystem
+                ->create_local_symlink_from_remote_symlink_part($part, "");
+            if ($result["warning"] !== null) {
+                $this->audit_log($result["warning"], true);
             }
             return;
         }
 
-        $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path($path);
+        $local_absolute_path = $this->pulled_filesystem
+            ->map_remote_absolute_path_to_local_absolute_path($path);
         $target_for_local = $this->rewrite_symlink_target_for_local_filesystem(
             $path,
             $local_absolute_path,
             $target,
         );
-
-        // In preserve-local mode, if something already exists at the symlink
-        // path, keep it — whether it's a file, directory, or another symlink.
-        // Also skip if any parent component is a symlink — we never create
-        // new content through symlinked directories.
-        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
-            if ($this->path_traverses_symlink(dirname($local_absolute_path))) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
-        }
-
-        // Validate that the symlink target doesn't escape the filesystem root.
-        $root = $this->filesystem_root;
-        try {
-            $this->assert_symlink_target_within_root(
-                dirname($local_absolute_path),
+        $result = $this->pulled_filesystem
+            ->create_local_symlink_from_remote_symlink_part(
+                $part,
                 $target_for_local,
-                $root
             );
-        } catch (RuntimeException $e) {
-            $this->audit_log($e->getMessage(), true);
-            $this->output_progress([
-                "type" => "symlink_error",
-                "path" => $path,
-                "target" => $target_for_local,
-                "error" => $e->getMessage(),
-                "message" => "Symlink error: {$path} -> {$target}",
-            ]);
+        $this->audit_pulled_filesystem_operation_messages();
+
+        if ($result["skip_message"] !== null) {
+            $this->audit_log($result["skip_message"], true);
+            $this->emit_skip_progress($path);
             return;
         }
 
-        // Remove existing file/symlink if present
-        if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
-            if (
-                !$this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)
-            ) {
+        if ($result["error"] !== null) {
+            if (str_starts_with($result["error"], "Security:")) {
+                $this->audit_log($result["error"], true);
+            } elseif ($result["error"] === "Failed to replace existing path") {
                 $this->audit_log(
                     "Failed to remove existing path for symlink: {$local_absolute_path}",
                     true,
                 );
-                $this->output_progress([
-                    "type" => "symlink_error",
-                    "path" => $path,
-                    "target" => $target_for_local,
-                    "error" => "Failed to replace existing path",
-                    "message" => "Symlink error: {$path} -> {$target}",
-                ]);
-                return;
-            }
-        }
-
-        // Create parent directory
-        $dir = dirname($local_absolute_path);
-        if (!is_dir($dir)) {
-            try {
-                $this->create_directory_if_missing($dir);
-            } catch (PreserveLocalSkipException $e) {
-                $this->audit_log($e->getMessage(), true);
-                $this->emit_skip_progress($path);
-                return;
-            } catch (RuntimeException $e) {
-                // Log error and skip this symlink
+            } elseif ($result["error"] === "Failed to create parent directory") {
                 $this->audit_log(
-                    "Failed to create directory for symlink: {$dir}",
+                    "Failed to create directory for symlink: " . dirname($local_absolute_path),
                     true,
                 );
-                $this->output_progress([
-                    "type" => "symlink_error",
-                    "path" => $path,
-                    "target" => $target_for_local,
-                    "error" => "Failed to create parent directory",
-                    "message" => "Symlink error: {$path} -> {$target}",
-                ]);
-                return;
+            } else {
+                $this->audit_log(
+                    "Failed to create symlink: {$local_absolute_path} -> {$target_for_local}",
+                    true,
+                );
             }
-        }
-
-        // Create symlink
-        $symlink_result = symlink($target_for_local, $local_absolute_path);
-        if (true !== $symlink_result || !is_link($local_absolute_path)) {
-            // Log error and skip this symlink
-            $this->audit_log(
-                "Failed to create symlink: {$local_absolute_path} -> {$target_for_local}",
-                true,
-            );
             $this->output_progress([
                 "type" => "symlink_error",
                 "path" => $path,
                 "target" => $target_for_local,
-                "error" => "Failed to create symlink",
+                "error" => $result["error"],
                 "message" => "Symlink error: {$path} -> {$target}",
             ]);
             return;
         }
 
-        // Try to set the ctime (may not work on all systems)
-        if ($ctime > 0) {
-            @touch($local_absolute_path, $ctime);
-        }
-
         $this->audit_log("Symlink: {$path} -> {$target_for_local}", false);
-
-        if ($ctime > 0) {
+        if ($result["ctime"] > 0) {
             $this->pull_index_journal->record_remote_upsert(
                 $path,
-                $ctime,
+                $result["ctime"],
                 0,
                 "link",
-                $local_absolute_path
+                $result["local_absolute_path"],
             );
         }
-
         $this->output_progress([
             "type" => "symlink",
             "path" => $path,
@@ -9362,15 +8883,16 @@ class ImportClient
         ]);
     }
 
+
     /**
-     * Handle an error chunk from the server.
+     * Handle an error part from the server.
      */
-    private function handle_error_chunk(
-        array $chunk,
+    private function handle_error_part(
+        array $part,
         string $phase,
         StreamingContext $context
     ): void {
-        $body = $chunk["body"] ?? "";
+        $body = $part["body"] ?? "";
         $data = json_decode($body, true);
         if (!$data) {
             $this->audit_log(
@@ -9382,21 +8904,58 @@ class ImportClient
         }
 
         $error_type = $data["error_type"] ?? "unknown";
-        $path = $data["path"] ?? "";
         $message = $data["message"] ?? "Error";
-
-        $this->audit_log(
-            "REMOTE ERROR | phase={$phase} | type={$error_type} | path={$path} | message={$message}",
+        $remote_absolute_path_base64 = array_key_exists("path", $data)
+            ? $data["path"]
+            : "";
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol validation exceptions are CLI text, not HTML output.
+        if (!is_string($remote_absolute_path_base64)) {
+            throw new RuntimeException(
+                "Remote error part path must be a base64 string; observed type " .
+                    gettype($remote_absolute_path_base64) . "."
+            );
+        }
+        $remote_absolute_path = base64_decode(
+            $remote_absolute_path_base64,
             true,
         );
+        if ($remote_absolute_path === false) {
+            throw new RuntimeException(
+                "Remote error part path must contain valid base64; observed " .
+                    strlen($remote_absolute_path_base64) .
+                    " bytes whose first 100 bytes encode as " .
+                    base64_encode(substr($remote_absolute_path_base64, 0, 100)) .
+                    "."
+            );
+        }
 
         $is_file_error = in_array(
             $error_type,
-            ["file_changed", "file_missing", "file_open", "file_read"],
+            ["file_changed", "file_missing", "file_open", "file_read", "file_seek"],
             true,
         );
-        if ($path !== "" && $is_file_error) {
-            $local_absolute_path = $this->filesystem_root . $path;
+        if ($remote_absolute_path === "" && $is_file_error) {
+            throw new RuntimeException(
+                "Remote file error part of type {$error_type} must contain a " .
+                "remote absolute path; observed an empty path."
+            );
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        if ($remote_absolute_path !== "") {
+            assert_valid_path($remote_absolute_path, "remote absolute path");
+        }
+
+        $this->audit_log(
+            "REMOTE ERROR | phase={$phase} | type={$error_type} | " .
+                "path={$remote_absolute_path} | message={$message}",
+            true,
+        );
+
+        if ($is_file_error) {
+            $local_absolute_path = $this->pulled_filesystem
+                ->map_remote_absolute_path_to_local_absolute_path(
+                    $remote_absolute_path
+                );
             if ($context->file_handle && $context->file_path === $local_absolute_path) {
                 fclose($context->file_handle);
                 $context->file_handle = null;
@@ -9405,37 +8964,50 @@ class ImportClient
                 $context->file_bytes_written = 0;
             }
 
-            if (file_exists($local_absolute_path)) {
-                @unlink($local_absolute_path);
+            if (
+                !$this->pulled_filesystem
+                    ->remove_local_absolute_path_without_following_symlinks(
+                        $local_absolute_path
+                    )
+            ) {
+                $this->audit_log(
+                    "Failed to remove incomplete local path: {$local_absolute_path}",
+                    true,
+                );
             }
-            $this->pull_index_journal->record_remote_invalidation($path);
+            $this->pull_index_journal->record_remote_invalidation(
+                $remote_absolute_path
+            );
 
             if ($error_type === "file_changed") {
-                $this->record_volatile_file($path);
+                $this->record_volatile_file($remote_absolute_path);
             }
         }
 
-        $error_progress_message = "Remote error: {$error_type} " . ($path !== "" ? $path : "");
+        $error_progress_message = "Remote error: {$error_type} " .
+            ($remote_absolute_path !== "" ? $remote_absolute_path : "");
         $this->progress->show_progress_line($error_progress_message);
+        $json_error_progress_message =
+            "Remote error: {$error_type} {$remote_absolute_path_base64}";
         $this->output_progress(
             [
                 "type" => "error",
                 "phase" => $phase,
                 "error_type" => $error_type,
-                "path" => $path,
+                "path" => $remote_absolute_path_base64,
                 "error_message" => $message,
-                "message" => $error_progress_message,
+                "message" => $json_error_progress_message,
             ],
             true,
         );
     }
 
     /**
-     * Handle progress chunk.
+     * Handle a progress part.
      */
-    private function handle_progress(array $chunk, string $phase): void
+    private function handle_progress_part(array $part, string $phase): void
     {
-        $body = $chunk["body"] ?? "";
+        $body = $part["body"] ?? "";
         $data = json_decode($body, true);
         if (!$data) {
             return;
@@ -9484,22 +9056,6 @@ class ImportClient
             );
         }
         return $dirs;
-    }
-
-    /**
-     * Whether $path falls under one of the ORIGINAL export directories (the
-     * --include prefixes, or the base roots without --include) — i.e. it was going to
-     * be pulled anyway. Evaluated against the pre-follow scope; a followed
-     * target outside all of these is "escaping" and eligible for symlink bundling.
-     */
-    private function path_is_within_original_export_scope(string $path): bool
-    {
-        foreach ($this->get_export_directories() as $root) {
-            if (path_is_same_as_or_descendant_of($path, $root)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**

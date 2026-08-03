@@ -135,6 +135,17 @@ class CurlTimeoutRecoveryTest extends TestCase
         $ttyProperty = $reflection->getProperty('is_tty');
         $ttyProperty->setValue($client, false);
 
+        $reflection->getProperty('pulled_filesystem')->setValue(
+            $client,
+            new \Reprint\Importer\Filesystem\PulledFilesystem(
+                $this->filesystem_root,
+                [],
+                null,
+                'preserve-local',
+                [],
+            ),
+        );
+
         return [$client, $reflection];
     }
 

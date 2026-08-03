@@ -2,21 +2,18 @@
 
 namespace Reprint\Importer;
 
-/**
- * Context object passed to streaming callbacks.
- */
-class StreamingContext {
+use Reprint\Importer\Filesystem\PulledFileContext;
 
-    public $on_chunk = null;
-    public $file_handle = null;
-    public $file_path = null;
-    public $file_ctime = null;
-    // Crash recovery: track bytes written for current file
-    public $file_bytes_written = 0;
-    // Last response stats from completion chunk
-    public $response_stats = [];
-    // Stream integrity
-    public $saw_completion = false;
-    // When true, skip writing the current file (preserve-local mode)
-    public $skip_current_file = false;
+/**
+ * Context retained while one streaming response is processed.
+ */
+class StreamingContext extends PulledFileContext {
+	/** @var callable|null */
+	public $on_chunk = null;
+
+	/** @var array<string,mixed>|null Last response statistics from the completion part. */
+	public $response_stats = array();
+
+	/** @var bool Whether the response contained its completion part. */
+	public $saw_completion = false;
 }

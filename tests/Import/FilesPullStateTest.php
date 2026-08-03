@@ -137,12 +137,48 @@ class FilesPullStateTest extends TestCase
         $behaviorProp = $reflection->getProperty('fs_root_nonempty_behavior');
         $behaviorProp->setValue($client, 'preserve-local');
 
+        $reflection->getProperty('pulled_filesystem')->setValue(
+            $client,
+            new \Reprint\Importer\Filesystem\PulledFilesystem(
+                $this->filesystem_root,
+                [],
+                null,
+                'preserve-local',
+                [],
+            ),
+        );
+
         return [$client, $reflection];
     }
 
     // ---------------------------------------------------------------
     // State transition tests
     // ---------------------------------------------------------------
+
+    /** Running files-pull without prepared options must fail before changing state. */
+    public function testFilesPullRequiresPreparedOptions(): void
+    {
+        $this->writeState([
+            "active_resumable_command" => [
+                "command_name" => null,
+                "completion_state" => null,
+            ],
+        ]);
+        $state_file = $this->pullStateDirectory . '/state.json';
+        $state_before_run = file_get_contents($state_file);
+
+        try {
+            $this->makeClient()->run_files_pull();
+            $this->fail('Expected files-pull to reject unprepared file options.');
+        } catch (\LogicException $exception) {
+            $this->assertSame(
+                'File pull options must be prepared before running files-pull.',
+                $exception->getMessage(),
+            );
+        }
+
+        $this->assertSame($state_before_run, file_get_contents($state_file));
+    }
 
     /**
      * A completed files-pull should refuse to re-run.

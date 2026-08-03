@@ -28,13 +28,29 @@ class FileBodyStreamingTest extends TestCase
         parent::tearDown();
     }
 
-    public function testFilePartBodiesAreWrittenIncrementally(): void
+    private function newClient(): \ImportClient
     {
         $client = new \ImportClient(
             'http://fake.url',
             $this->tempDir . '/state',
             $this->tempDir . '/fs-root',
         );
+        ( new \ReflectionClass($client) )->getProperty('pulled_filesystem')->setValue(
+            $client,
+            new \Reprint\Importer\Filesystem\PulledFilesystem(
+                $this->tempDir . '/fs-root',
+                [],
+                null,
+                'error',
+                [],
+            ),
+        );
+        return $client;
+    }
+
+    public function testFilePartBodiesAreWrittenIncrementally(): void
+    {
+        $client = $this->newClient();
         $reflection = new \ReflectionClass($client);
         $reflection->getProperty('is_tty')->setValue($client, true);
 
@@ -99,11 +115,7 @@ class FileBodyStreamingTest extends TestCase
      */
     public function testMidFileResumeAppendsRemainingBytesWithoutDuplication(): void
     {
-        $client = new \ImportClient(
-            'http://fake.url',
-            $this->tempDir . '/state',
-            $this->tempDir . '/fs-root',
-        );
+        $client = $this->newClient();
         $reflection = new \ReflectionClass($client);
         $reflection->getProperty('is_tty')->setValue($client, true);
 

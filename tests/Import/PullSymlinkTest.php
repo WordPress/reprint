@@ -54,12 +54,28 @@ class PullSymlinkTest extends TestCase
         rmdir($dir);
     }
 
-    public function testSymlinkIsCreated()
+    private function newClient(): \ImportClient
     {
         $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        ( new \ReflectionClass($client) )->getProperty('pulled_filesystem')->setValue(
+            $client,
+            new \Reprint\Importer\Filesystem\PulledFilesystem(
+                $this->tempDir . '/fs-root',
+                [],
+                null,
+                'error',
+                [],
+            ),
+        );
+        return $client;
+    }
+
+    public function testSymlinkIsCreated()
+    {
+        $client = $this->newClient();
 
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_symlink_chunk');
+        $method = $reflection->getMethod('handle_symlink_part');
 
         $chunk = [
             'headers' => [
@@ -109,10 +125,10 @@ class PullSymlinkTest extends TestCase
      */
     public function testRelativeSymlinkEscapingRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = $this->newClient();
 
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_symlink_chunk');
+        $method = $reflection->getMethod('handle_symlink_part');
 
         $chunk = [
             'headers' => [
@@ -135,10 +151,10 @@ class PullSymlinkTest extends TestCase
      */
     public function testChainedSymlinksEscapingRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = $this->newClient();
 
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_symlink_chunk');
+        $method = $reflection->getMethod('handle_symlink_part');
 
         // First symlink: /site/__wp__ -> ../wordpress/core
         // Resolved: /wordpress/core — still within root, so this is fine.
@@ -177,10 +193,10 @@ class PullSymlinkTest extends TestCase
      */
     public function testAbsoluteSymlinkOutsideRootRejected()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = $this->newClient();
 
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_symlink_chunk');
+        $method = $reflection->getMethod('handle_symlink_part');
 
         $chunk = [
             'headers' => [
@@ -202,10 +218,10 @@ class PullSymlinkTest extends TestCase
      */
     public function testRelativeSymlinkWithinRootCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = $this->newClient();
 
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_symlink_chunk');
+        $method = $reflection->getMethod('handle_symlink_part');
 
         $chunk = [
             'headers' => [
@@ -228,11 +244,11 @@ class PullSymlinkTest extends TestCase
      */
     public function testAbsoluteSymlinkWithinRootCreated()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = $this->newClient();
         $root = realpath($this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_symlink_chunk');
+        $method = $reflection->getMethod('handle_symlink_part');
 
         $chunk = [
             'headers' => [
@@ -251,10 +267,10 @@ class PullSymlinkTest extends TestCase
 
     public function testSymlinkWithMissingDataSkipped()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = $this->newClient();
 
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_symlink_chunk');
+        $method = $reflection->getMethod('handle_symlink_part');
 
         // Missing path
         $chunk1 = [
@@ -289,7 +305,7 @@ class PullSymlinkTest extends TestCase
 
     public function testSymlinkReplacesExistingFile()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = $this->newClient();
 
         // Create a regular file
         $filePath = $this->tempDir . '/fs-root/test/link';
@@ -299,7 +315,7 @@ class PullSymlinkTest extends TestCase
 
         // Create symlink at same location
         $reflection = new \ReflectionClass($client);
-        $method = $reflection->getMethod('handle_symlink_chunk');
+        $method = $reflection->getMethod('handle_symlink_part');
 
         $chunk = [
             'headers' => [
