@@ -38,13 +38,16 @@ final class PullIndexWalTest extends TestCase
         $this->removeTree($this->root);
     }
 
-    public function testAppliedBatchLeavesThePullIndexWalMarkerUntilCompletion(): void
+    public function testAppliedBatchAdvancesBothIndexesAndLeavesTheMarker(): void
     {
+        mkdir($this->fileRoot . '/site');
+        file_put_contents($this->fileRoot . '/site/file.txt', 'hello');
         $client = $this->client();
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('upsert_remote_index_entry')->invoke(
+        $reflection->getMethod('record_pulled_path')->invoke(
             $client,
             '/site/file.txt',
+            (string) realpath($this->fileRoot . '/site/file.txt'),
             42,
             5,
             'file'
@@ -58,6 +61,15 @@ final class PullIndexWalTest extends TestCase
             '/site/file.txt',
             $this->firstRemoteIndexEntryPath()
         );
+        $localIndexEntries = $this->readLocalIndex();
+        $this->assertSame(['site/file.txt'], array_keys($localIndexEntries));
+        $localStat = lstat($this->fileRoot . '/site/file.txt');
+        $this->assertIsArray($localStat);
+        $this->assertSame(
+            (int) $localStat['ctime'],
+            $localIndexEntries['site/file.txt']['ctime']
+        );
+        $this->assertSame(5, $localIndexEntries['site/file.txt']['size']);
 
         $reflection->getMethod('remove_pull_index_wal')->invoke($client);
         $this->assertFileDoesNotExist($pullIndexWalPath);
@@ -74,9 +86,12 @@ final class PullIndexWalTest extends TestCase
             5,
             'file'
         );
+        $filesystemRoot = realpath($this->fileRoot);
+        $this->assertIsString($filesystemRoot);
         $reflection->getMethod('wal_append_successful_deletion')->invoke(
             $client,
-            '/site/file.txt'
+            '/site/file.txt',
+            $filesystemRoot . '/site/file.txt'
         );
         $reflection->getMethod('wal_append_remote_index_invalidation')->invoke(
             $client,
@@ -90,6 +105,8 @@ final class PullIndexWalTest extends TestCase
             . "\n"
             . '{"op":"-","remote_absolute_path_b64":"'
             . base64_encode('/site/file.txt')
+            . '","local_relative_path_b64":"'
+            . base64_encode('site/file.txt')
             . '"}'
             . "\n"
             . '{"op":"-","remote_absolute_path_b64":"'
@@ -260,6 +277,24 @@ final class PullIndexWalTest extends TestCase
             },
             $lines
         );
+    }
+
+    /** @return array<string,array<string,mixed>> */
+    private function readLocalIndex(): array
+    {
+        $lines = file(
+            dirname($this->pullStateDirectory) . '/local_index.jsonl',
+            FILE_IGNORE_NEW_LINES
+        );
+        $this->assertIsArray($lines);
+        $entries = [];
+        foreach ($lines as $line) {
+            $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+            $path = base64_decode( (string) $entry['path']);
+            $this->assertIsString($path);
+            $entries[$path] = $entry;
+        }
+        return $entries;
     }
 
     private function removeTree(string $path): void

@@ -232,7 +232,8 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertIsArray($errorRecord);
         $this->assertSame(
             'files-diff requires <remote-state-directory>/local_index.jsonl. '
-            . 'files-push writes it after the target confirms commit for the same '
+            . 'files-pull writes it from completed local mutations; files-push '
+            . 'writes it after the target finishes applying the push. Use the same '
             . 'remote Reprint API URL and state directory.',
             $errorRecord['error'] ?? null
         );
@@ -251,7 +252,8 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertIsArray($errorRecord);
         $this->assertSame(
             'files-diff requires <remote-state-directory>/local_index.jsonl. '
-            . 'files-push writes it after the target confirms commit for the same '
+            . 'files-pull writes it from completed local mutations; files-push '
+            . 'writes it after the target finishes applying the push. Use the same '
             . 'remote Reprint API URL and state directory.',
             $errorRecord['error'] ?? null
         );

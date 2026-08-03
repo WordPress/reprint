@@ -57,6 +57,7 @@ final class ReprintProcessLockTest extends TestCase
         $expected_paths = [
             'state_dir' => $this->root . '/state',
             'pull_state_directory' => $pull_state_directory,
+            'local_index_file' => $remote_state_directory . '/local_index.jsonl',
             'pull_state_file' => $pull_state_directory . '/state.json',
             'remote_index_file' => $pull_state_directory . '/remote-index.jsonl',
             'pull_index_wal_path' => $pull_state_directory . '/index.wal',

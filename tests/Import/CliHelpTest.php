@@ -37,6 +37,11 @@ class CliHelpTest extends TestCase
 
         $this->assertStringContainsString('pull/remote-index.jsonl', $output);
         $this->assertStringContainsString('pull/remote-index.next.jsonl', $output);
+        $this->assertStringContainsString('local_index.jsonl', $output);
+        $this->assertStringContainsString(
+            'completed pull mutations',
+            $output
+        );
         $this->assertStringContainsString('Remote index', $output);
         $this->assertStringContainsString('Next remote index', $output);
     }
@@ -132,6 +137,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('local index', $output);
+        $this->assertStringContainsString('files-pull advances', $output);
         $this->assertStringContainsString('target confirms', $output);
         $this->assertStringContainsString('push operation plan', $output);
         $this->assertStringContainsString('default-skipped paths', $output);

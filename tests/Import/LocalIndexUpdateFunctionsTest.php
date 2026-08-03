@@ -9,8 +9,6 @@ use PHPUnit\Framework\TestCase;
 use function Reprint\Importer\merge_local_index_mutations;
 
 require_once __DIR__ . '/../../importer/import.php';
-require_once __DIR__
-    . '/../../packages/reprint-importer/src/lib/local-index-update-functions.php';
 
 final class LocalIndexUpdateFunctionsTest extends TestCase
 {
