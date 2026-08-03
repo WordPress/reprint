@@ -86,18 +86,10 @@ class OnlyFilesPathPrefixTest extends TestCase
 
     private function pathSelectionFingerprint(array $included, array $excluded = array()): string
     {
-        $onlyFingerprint = hash(
-            'sha256',
-            json_encode($included, JSON_UNESCAPED_SLASHES)
-        );
-        if ($excluded === array()) {
-            return $onlyFingerprint;
-        }
-
         sort($excluded, SORT_STRING);
         return hash('sha256', json_encode(array(
-            'only_fingerprint' => $onlyFingerprint,
-            'exclude' => $excluded,
+            'only_path_prefixes' => $included,
+            'excluded_path_prefixes' => $excluded,
         ), JSON_UNESCAPED_SLASHES));
     }
 
@@ -269,7 +261,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/plugins'));
         $original_fingerprint = $this->call($c, 'files_pull_path_selection_fingerprint');
 
-        $c->get_state()->files_pull_only_fingerprint = $original_fingerprint;
+        $c->get_state()->files_pull_path_selection_fingerprint = $original_fingerprint;
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
 
         $this->expectException(\RuntimeException::class);
@@ -282,7 +274,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
 
         $this->set($c, 'pull_excluded_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
-        $c->get_state()->files_pull_only_fingerprint =
+        $c->get_state()->files_pull_path_selection_fingerprint =
             $this->call($c, 'files_pull_path_selection_fingerprint');
         $this->set($c, 'pull_excluded_files_with_path_prefixes', array('/var/www/html/wp-content/plugins'));
 
@@ -295,7 +287,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     {
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
 
-        $c->get_state()->files_pull_only_fingerprint = 'different';
+        $c->get_state()->files_pull_path_selection_fingerprint = 'different';
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
 
         $this->call($c, 'assert_files_pull_path_selection_unchanged_while_resuming', array(false));
@@ -306,7 +298,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     public function testRunRejectsChangingOnlyPrefixesWhileFilesPullIsInProgress(): void
     {
         $this->writeFilesPullState(array(
-            'files_pull_only_fingerprint' => $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
+            'files_pull_path_selection_fingerprint' => $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
 
         $this->expectException(\RuntimeException::class);
@@ -318,7 +310,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     {
         file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
         $this->writeFilesPullState(array(
-            'files_pull_only_fingerprint' => $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
+            'files_pull_path_selection_fingerprint' => $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
 
         $this->runFilesPull(array('only' => array(':wp-content:/plugins')));
@@ -327,23 +319,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->assertSame('complete', $state['active_resumable_command']['completion_state'] ?? null);
         $this->assertSame(
             $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
-            $state['files_pull_only_fingerprint'] ?? null
-        );
-    }
-
-    public function testRunRecordsOnlyFingerprintForInProgressFilesPullState(): void
-    {
-        file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
-        $this->writeFilesPullState(array(
-            'files_pull_only_fingerprint' => null,
-        ));
-
-        $this->runFilesPull(array('only' => array(':wp-content:/plugins')));
-
-        $state = $this->readState();
-        $this->assertSame(
-            $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
-            $state['files_pull_only_fingerprint'] ?? null
+            $state['files_pull_path_selection_fingerprint'] ?? null
         );
     }
 
@@ -354,7 +330,7 @@ class OnlyFilesPathPrefixTest extends TestCase
                 'completion_state' => 'complete',
                 'current_stage' => null,
             ),
-            'files_pull_only_fingerprint' => $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
+            'files_pull_path_selection_fingerprint' => $this->pathSelectionFingerprint(array('/var/www/html/wp-content/plugins')),
         ));
 
         $this->runFilesPull(array('only' => array(':wp-uploads:')));
@@ -366,7 +342,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     public function testRunRejectsAddingExclusionsToInProgressOnlyState(): void
     {
         $this->writeFilesPullState(array(
-            'files_pull_only_fingerprint' => $this->pathSelectionFingerprint(array()),
+            'files_pull_path_selection_fingerprint' => $this->pathSelectionFingerprint(array()),
         ));
 
         $this->expectException(\RuntimeException::class);

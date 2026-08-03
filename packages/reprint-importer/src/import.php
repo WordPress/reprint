@@ -2753,7 +2753,7 @@ class ImportClient
                 ], true);
                 $this->get_state()->active_resumable_command->completion_state = "in_progress";
                 $this->get_state()->active_resumable_command->current_stage = "fetch-skipped";
-                $this->get_state()->files_pull_only_fingerprint =
+                $this->get_state()->files_pull_path_selection_fingerprint =
                     $this->files_pull_path_selection_fingerprint();
                 $this->get_state()->files_pull_summary = new FilesPullSummaryState();
                 $this->save_state();
@@ -2874,7 +2874,7 @@ class ImportClient
             $this->get_state()->active_resumable_command->command_name = "files-pull";
             $this->get_state()->active_resumable_command->completion_state = "in_progress";
             $this->get_state()->active_resumable_command->current_stage = "index";
-            $this->get_state()->files_pull_only_fingerprint =
+            $this->get_state()->files_pull_path_selection_fingerprint =
                 $this->files_pull_path_selection_fingerprint();
             $this->get_state()->diff = new FileDiffProgressState();
             $this->get_state()->index = new RemoteFileIndexCursorState();
@@ -8744,20 +8744,13 @@ class ImportClient
         }
 
         $fingerprint = $this->files_pull_path_selection_fingerprint();
-        $previous = $this->get_state()->files_pull_only_fingerprint ?? null;
+        $previous = $this->get_state()->files_pull_path_selection_fingerprint;
 
-        if ($previous !== null && $previous !== $fingerprint) {
+        if ($previous !== $fingerprint) {
             throw new RuntimeException(
                 "Cannot change --only or --exclude while resuming files-pull. " .
                     "Use the original path selections, or use --abort to start a new files-pull.",
             );
-        }
-
-        // Older in-progress state may not have this guard persisted yet. Record
-        // the current value so subsequent resumes cannot drift.
-        if ($previous === null) {
-            $this->get_state()->files_pull_only_fingerprint = $fingerprint;
-            $this->save_state();
         }
     }
 
@@ -8770,13 +8763,6 @@ class ImportClient
      */
     private function files_pull_path_selection_fingerprint(): string
     {
-        $only_fingerprint = $this->files_pull_only_fingerprint();
-        if (empty($this->pull_excluded_files_with_path_prefixes)) {
-            // Keep the original --only value so an in-progress pull started by
-            // an older importer can resume without rewriting its state.
-            return $only_fingerprint;
-        }
-
         $excluded_path_prefixes = $this->pull_excluded_files_with_path_prefixes;
         sort($excluded_path_prefixes, SORT_STRING);
 
@@ -8784,22 +8770,11 @@ class ImportClient
             "sha256",
             json_encode(
                 [
-                    "only_fingerprint" => $only_fingerprint,
-                    "exclude" => $excluded_path_prefixes,
+                    "only_path_prefixes" => $this->pull_only_files_with_path_prefixes,
+                    "excluded_path_prefixes" => $excluded_path_prefixes,
                 ],
                 JSON_UNESCAPED_SLASHES
             ),
-        );
-    }
-
-    /**
-     * Stable fingerprint for the resolved --only file path prefixes.
-     */
-    private function files_pull_only_fingerprint(): string
-    {
-        return hash(
-            "sha256",
-            json_encode($this->pull_only_files_with_path_prefixes, JSON_UNESCAPED_SLASHES),
         );
     }
 
