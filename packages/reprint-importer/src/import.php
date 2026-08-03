@@ -847,10 +847,20 @@ class ImportClient
         // files-diff and files-push use local push state and must not load
         // or write the pull command's pull/state.json file.
         if ($command === "files-diff") {
+            if (is_file($this->remote_index_wal_path)) {
+                throw new RuntimeException(
+                    "Finish or abort the interrupted files-pull before running files-diff."
+                );
+            }
             $this->run_files_diff($options);
             return;
         }
         if ($command === "files-push") {
+            if (is_file($this->remote_index_wal_path)) {
+                throw new RuntimeException(
+                    "Finish or abort the interrupted files-pull before running files-push."
+                );
+            }
             $this->run_files_push($options, $process_lock);
             return;
         }
@@ -2582,6 +2592,14 @@ class ImportClient
      */
     public function run_files_pull(): void
     {
+        $sender_state_path = dirname($this->pull_state_directory)
+            . "/push/sender.json";
+        if (is_file($sender_state_path)) {
+            throw new RuntimeException(
+                "Finish the unfinished files-push before running files-pull."
+            );
+        }
+
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
 
         $current_status =
@@ -2676,6 +2694,9 @@ class ImportClient
                 );
             }
 
+            // The marker blocks files-diff and files-push before the first
+            // pull checkpoint can make this lifecycle resumable.
+            $this->open_remote_index_wal();
             $this->get_state()->active_resumable_command->command_name = "files-pull";
             $this->get_state()->active_resumable_command->completion_state = "in_progress";
             $this->get_state()->active_resumable_command->current_stage = "index";
