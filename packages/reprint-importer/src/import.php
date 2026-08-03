@@ -6642,7 +6642,7 @@ class ImportClient
             ) {
                 // The remote index is a union across files-pull path selections.
                 // Keep entries outside this run's selection.
-                if ($this->is_selected_for_pulling($remote_index_entry["path"])) {
+                if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
                     $remote_absolute_path = $remote_index_entry["path"];
                     $this->apply_remote_deletion_locally($remote_absolute_path);
                     $this->delete_remote_index_entry($remote_absolute_path);
@@ -6666,7 +6666,7 @@ class ImportClient
                     // Re-download it when selected — the remote index confirms
                     // that an earlier files-pull accounted for this path, so
                     // preserve-local does not protect it.
-                    if (!$this->is_excluded_from_pulling($next_remote_index_entry["path"])) {
+                    if ($this->is_selected_for_pulling($next_remote_index_entry["path"], true)) {
                         $selected_fetch_list_file_handle = (
                             $skipped_fetch_list_file_handle !== null &&
                             (
@@ -6694,7 +6694,7 @@ class ImportClient
                 $remote_index_entry =
                     $this->read_remote_index_entry($remote_index_file_handle);
             } elseif (
-                !$this->is_excluded_from_pulling($next_remote_index_entry["path"]) &&
+                $this->is_selected_for_pulling($next_remote_index_entry["path"], true) &&
                 (
                     $remote_index_entry === null ||
                     strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) > 0
@@ -6748,7 +6748,7 @@ class ImportClient
         }
 
         while ($remote_index_entry !== null) {
-            if ($this->is_selected_for_pulling($remote_index_entry["path"])) {
+            if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
                 $remote_absolute_path = $remote_index_entry["path"];
                 $this->apply_remote_deletion_locally($remote_absolute_path);
                 $this->delete_remote_index_entry($remote_absolute_path);
@@ -8985,43 +8985,46 @@ class ImportClient
     /**
      * Whether a path is selected by the active --only and --exclude prefixes.
      *
-     * An included root itself is not selected because an --only next remote index
-     * lists its contents, not the root entry. Exclusions win over inclusions.
+     * The exporter has already applied --only to entries in the next remote
+     * index, including followed symlink targets outside an --only prefix. Other
+     * paths are checked against --only locally. An included root itself is not
+     * selected because the next remote index lists its contents, not the root
+     * entry. Exclusions always win.
+     *
+     * @param bool $is_next_remote_index_entry Whether the path came from the
+     *                                         current next remote index.
      */
-    private function is_selected_for_pulling(string $path): bool
+    private function is_selected_for_pulling(
+        string $path,
+        bool $is_next_remote_index_entry
+    ): bool
     {
-        $selected = empty($this->pull_only_files_with_path_prefixes);
+        if (!$is_next_remote_index_entry) {
+            $selected = empty($this->pull_only_files_with_path_prefixes);
 
-        foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
-            $remainder = self::path_remainder_under($path, $prefix);
-            if ($remainder === "") {
+            foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
+                $remainder = self::path_remainder_under($path, $prefix);
+                if ($remainder === "") {
+                    return false;
+                }
+                if ($remainder !== null) {
+                    $selected = true;
+                    break;
+                }
+            }
+
+            if (!$selected) {
                 return false;
             }
-            if ($remainder !== null) {
-                $selected = true;
-                break;
-            }
         }
 
-        if (!$selected) {
-            return false;
-        }
-
-        return !$this->is_excluded_from_pulling($path);
-    }
-
-    /**
-     * Whether a path falls inside one of the active --exclude prefixes.
-     */
-    private function is_excluded_from_pulling(string $path): bool
-    {
         foreach ($this->pull_excluded_files_with_path_prefixes as $prefix) {
             if (self::path_remainder_under($path, $prefix) !== null) {
-                return true;
+                return false;
             }
         }
 
-        return false;
+        return true;
     }
 
     /**

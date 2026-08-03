@@ -230,13 +230,13 @@ class OnlyFilesPathPrefixTest extends TestCase
     {
         $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
         // No --only: every file path is selected (keeps the diff deleting orphans).
-        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/anything/at/all.php')));
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/anything/at/all.php', false)));
 
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content'));
-        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css')));
-        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-config.php')));
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css', false)));
+        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-config.php', false)));
         // Byte-order sibling must not match the prefix.
-        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content.bak/x')));
+        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content.bak/x', false)));
     }
 
     public function testIncludeAndExcludePathPrefixSelection(): void
@@ -245,13 +245,13 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->set($c, 'pull_only_files_with_path_prefixes', array('/var/www/html/wp-content'));
         $this->set($c, 'pull_excluded_files_with_path_prefixes', array('/var/www/html/wp-content/uploads'));
 
-        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css')));
-        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/uploads/a.jpg')));
-        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-config.php')));
-        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/uploads.backup/a.jpg')));
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css', false)));
+        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/uploads/a.jpg', false)));
+        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-config.php', false)));
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/uploads.backup/a.jpg', false)));
 
         $this->set($c, 'pull_excluded_files_with_path_prefixes', array('/'));
-        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css')));
+        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/themes/a.css', false)));
     }
 
     public function testChangingOnlyPrefixesWhileResumingFilesPullIsRejected(): void
