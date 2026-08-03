@@ -1,5 +1,8 @@
 <?php
 
+use function Reprint\Importer\apply_curl_ca_bundle;
+use function Reprint\Importer\apply_curl_proxy_from_environment;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Transport errors are CLI/API values, never HTML output.
 
 /**
@@ -283,11 +286,11 @@ class MultipartPushStreamClient
         $header_lines[] = 'Expect:';
 
         $this->curl_handle = curl_init($request_url);
-        if (function_exists('reprint_apply_curl_proxy_from_env')) {
-            reprint_apply_curl_proxy_from_env($this->curl_handle);
+        if (function_exists('Reprint\\Importer\\apply_curl_proxy_from_environment')) {
+            apply_curl_proxy_from_environment($this->curl_handle);
         }
-        if (function_exists('reprint_apply_curl_ca_bundle')) {
-            reprint_apply_curl_ca_bundle($this->curl_handle);
+        if (function_exists('Reprint\\Importer\\apply_curl_ca_bundle')) {
+            apply_curl_ca_bundle($this->curl_handle);
         }
         curl_setopt_array($this->curl_handle, [
             CURLOPT_UPLOAD => true,
@@ -804,11 +807,11 @@ class MultipartPushStreamClient
             $lines[] = $name . ': ' . $value;
         }
         $handle = curl_init($url);
-        if (function_exists('reprint_apply_curl_proxy_from_env')) {
-            reprint_apply_curl_proxy_from_env($handle);
+        if (function_exists('Reprint\\Importer\\apply_curl_proxy_from_environment')) {
+            apply_curl_proxy_from_environment($handle);
         }
-        if (function_exists('reprint_apply_curl_ca_bundle')) {
-            reprint_apply_curl_ca_bundle($handle);
+        if (function_exists('Reprint\\Importer\\apply_curl_ca_bundle')) {
+            apply_curl_ca_bundle($handle);
         }
         $response_body = '';
         $response_too_large = false;

@@ -3,6 +3,10 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use Reprint\Importer\CurlTimeoutException;
+use Reprint\Importer\InterruptedResponseException;
+use Reprint\Importer\StreamingContext;
+use Reprint\Importer\TransientInterruptionException;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -372,18 +376,18 @@ class CurlTimeoutRecoveryTest extends TestCase
 
     public function testInterruptionExceptionHierarchy()
     {
-        $interrupted = new \InterruptedResponseException("Response ended early");
+        $interrupted = new InterruptedResponseException("Response ended early");
         $this->assertInstanceOf(\RuntimeException::class, $interrupted);
         $this->assertNotInstanceOf(
-            \TransientInterruptionException::class,
+            TransientInterruptionException::class,
             $interrupted,
         );
 
-        $transient = new \TransientInterruptionException("Connection reset");
-        $this->assertInstanceOf(\InterruptedResponseException::class, $transient);
+        $transient = new TransientInterruptionException("Connection reset");
+        $this->assertInstanceOf(InterruptedResponseException::class, $transient);
 
-        $timeout = new \CurlTimeoutException("Operation timed out");
-        $this->assertInstanceOf(\TransientInterruptionException::class, $timeout);
+        $timeout = new CurlTimeoutException("Operation timed out");
+        $this->assertInstanceOf(TransientInterruptionException::class, $timeout);
     }
 
     // ---------------------------------------------------------------
@@ -415,7 +419,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "abc",
-            new \TransientInterruptionException("Response ended early"),
+            new TransientInterruptionException("Response ended early"),
         );
         $this->assertEquals(
             1,
@@ -428,7 +432,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "abc",
-            new \TransientInterruptionException("Response ended early"),
+            new TransientInterruptionException("Response ended early"),
         );
         $this->assertEquals(
             2,
@@ -457,7 +461,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "def",
-            new \TransientInterruptionException("Response ended early"),
+            new TransientInterruptionException("Response ended early"),
         );
         $this->assertEquals(
             0,
@@ -488,7 +492,7 @@ class CurlTimeoutRecoveryTest extends TestCase
             "sql_chunk",
             "abc",
             "abc",
-            new \TransientInterruptionException("Response ended early"),
+            new TransientInterruptionException("Response ended early"),
         );
     }
 
@@ -578,12 +582,12 @@ class TimeoutTestClient extends \ImportClient
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
-        \StreamingContext $context,
+        StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
         ++$this->streaming_requests;
-        throw new \CurlTimeoutException(
+        throw new CurlTimeoutException(
             "cURL error: Operation timed out after 300001 milliseconds with 0 bytes received"
         );
     }
@@ -599,7 +603,7 @@ class InterruptedAfterStreamedPartCloseClient extends \ImportClient
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
-        \StreamingContext $context,
+        StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
@@ -641,7 +645,7 @@ class SuccessTestClient extends \ImportClient
     protected function fetch_streaming(
         string $url,
         ?string $cursor,
-        \StreamingContext $context,
+        StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {

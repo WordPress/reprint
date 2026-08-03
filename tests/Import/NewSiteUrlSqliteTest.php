@@ -3,6 +3,8 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use function Reprint\Importer\register_sqlite_function;
+use function Reprint\Importer\resolve_sqlite_integration_path;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -133,7 +135,7 @@ class NewSiteUrlSqliteTest extends TestCase
         ]);
 
         $sqlite_pdo = $pdo->get_connection()->get_pdo();
-        \register_sqlite_function($sqlite_pdo, 'FROM_BASE64', function ($data) {
+        register_sqlite_function($sqlite_pdo, 'FROM_BASE64', function ($data) {
             return $data === null ? null : base64_decode($data);
         });
 

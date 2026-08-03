@@ -3,12 +3,13 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use function Reprint\Importer\apply_curl_proxy_from_environment;
 
 require_once __DIR__ . '/../../importer/import.php';
 
 /**
  * Spawns a minimal HTTP forward proxy on an ephemeral port and confirms
- * that reprint_apply_curl_proxy_from_env() routes a real cURL request
+ * that apply_curl_proxy_from_environment() routes a real cURL request
  * through it when ALL_PROXY is exported.
  */
 class CurlProxyFromEnvTest extends TestCase
@@ -89,7 +90,7 @@ class CurlProxyFromEnvTest extends TestCase
         $targetUrl = 'http://reprint-test.invalid/does-not-matter';
 
         $ch = curl_init($targetUrl);
-        $applied = reprint_apply_curl_proxy_from_env($ch);
+        $applied = apply_curl_proxy_from_environment($ch);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, 10);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
@@ -116,7 +117,7 @@ class CurlProxyFromEnvTest extends TestCase
     {
         putenv('ALL_PROXY');
         $ch = curl_init('http://127.0.0.1:' . $this->proxyPort);
-        $applied = reprint_apply_curl_proxy_from_env($ch);
+        $applied = apply_curl_proxy_from_environment($ch);
         curl_close($ch);
         $this->assertNull($applied);
     }
@@ -125,7 +126,7 @@ class CurlProxyFromEnvTest extends TestCase
     {
         putenv('ALL_PROXY=');
         $ch = curl_init('http://127.0.0.1:' . $this->proxyPort);
-        $applied = reprint_apply_curl_proxy_from_env($ch);
+        $applied = apply_curl_proxy_from_environment($ch);
         curl_close($ch);
         $this->assertNull($applied);
     }
