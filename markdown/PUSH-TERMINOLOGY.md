@@ -248,7 +248,9 @@ Call the single pull-side write-ahead log the **remote index WAL**. It lives at
 Applied batch records are cleared, but the empty WAL remains as a marker until
 files-pull completes. A retained WAL is consumed only while resuming or
 aborting the interrupted files-pull, including through a high-level pull
-command; unrelated commands do not consume it.
+command. Files-diff and files-push reject the unfinished files-pull instead of
+consuming its WAL. Files-pull rejects an unfinished files-push while
+`<remote-state-directory>/push/sender.json` exists.
 
 ## Local index and push state
 
