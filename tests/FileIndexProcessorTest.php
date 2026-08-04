@@ -41,6 +41,8 @@ final class FileIndexProcessorTest extends TestCase {
         $this->assertContains('empty', $this->relativePaths($resumed['entries'], $docroot));
         $this->assertContains('a-link', $this->relativePaths($resumed['entries'], $docroot));
         $this->assertContains('nested/b.txt', $this->relativePaths($resumed['entries'], $docroot));
+        $this->assertNotContains('nested', $this->relativePaths($resumed['entries'], $docroot));
+        $this->assertNotContains('wp-content', $this->relativePaths($resumed['entries'], $docroot));
         $link_stat = lstat($docroot . '/a-link');
         $this->assertIsArray($link_stat);
         foreach ($resumed['entries'] as $index_entry) {

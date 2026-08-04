@@ -506,6 +506,25 @@ class ImportClient
         int $remote_path_size,
         string $remote_path_type
     ): void {
+        if ($remote_path_type !== "dir") {
+            // The remote index WAL stays path-sorted. Record every ancestor
+            // before its file or symlink so its streaming merger can apply the
+            // batch without reordering records.
+            $remote_parent_directories = [];
+            $remote_parent_directory = dirname($remote_absolute_path);
+            while ($remote_parent_directory !== "/" && $remote_parent_directory !== ".") {
+                $remote_parent_directories[] = $remote_parent_directory;
+                $remote_parent_directory = dirname($remote_parent_directory);
+            }
+            foreach (array_reverse($remote_parent_directories) as $remote_parent_directory) {
+                $this->record_remote_index_wal_upsert(
+                    $remote_parent_directory,
+                    $remote_path_ctime,
+                    0,
+                    "dir",
+                );
+            }
+        }
         $this->record_remote_index_wal_upsert(
             $remote_absolute_path,
             $remote_path_ctime,
@@ -6295,7 +6314,15 @@ class ImportClient
             ) {
                 // The remote index is a union across files-pull path selections.
                 // Keep entries outside this run's selection.
-                if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
+                if (
+                    $this->is_selected_for_pulling($remote_index_entry["path"], false)
+                    && !(
+                        $remote_index_entry["type"] === "dir"
+                        && $this->next_remote_index_contains_remote_absolute_path_prefix(
+                            $remote_index_entry["path"]
+                        )
+                    )
+                ) {
                     $remote_absolute_path = $remote_index_entry["path"];
                     $this->apply_remote_deletion_locally($remote_absolute_path);
                     $this->delete_remote_index_entry($remote_absolute_path);

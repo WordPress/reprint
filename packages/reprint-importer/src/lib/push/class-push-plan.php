@@ -160,7 +160,8 @@ class PushPlan
             $plan->filesystem_root,
             false,
             false,
-            $plan->plan_directory
+            $plan->plan_directory,
+            true
         );
         $plan->cursor = [
             "plan_directory" => $plan->plan_directory,
@@ -304,7 +305,8 @@ class PushPlan
             json_encode($cursor["file_index_cursor"], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
             false,
             false,
-            $this->plan_directory
+            $this->plan_directory,
+            true
         );
     }
 
