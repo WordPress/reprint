@@ -28,6 +28,7 @@ use function Reprint\Importer\apply_curl_proxy_from_environment;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
+use function Reprint\Importer\sort_index_file;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
@@ -70,8 +71,7 @@ require_once __DIR__ . '/lib/host/load.php';
 // Load target runtime appliers (consume a manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
 
-// External merge sort for large index files when exec() is unavailable
-require_once __DIR__ . '/lib/external-merge-sort.php';
+require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
 
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
@@ -2766,7 +2766,7 @@ class ImportClient
                     return;
                 }
             }
-            $this->sort_index_file($this->next_remote_index_file);
+            $this->sort_next_remote_index_file();
             $this->get_state()->active_resumable_command->current_stage = "diff";
             $this->get_state()->diff = new FileDiffProgressState();
             if (file_exists($this->fetch_list_file)) {
@@ -2967,7 +2967,7 @@ class ImportClient
             $this->discover_symlink_targets();
         }
 
-        $this->sort_index_file($this->next_remote_index_file);
+        $this->sort_next_remote_index_file();
         $this->get_state()->active_resumable_command->completion_state = "complete";
         $this->get_state()->active_resumable_command->current_stage = null;
         $this->save_state();
@@ -9644,190 +9644,17 @@ class ImportClient
     }
 
     /**
-     * Check if a function is available (not disabled).
+     * Sort the next remote index before a command reads it.
      */
-    private function function_available(string $name): bool
+    private function sort_next_remote_index_file(): void
     {
-        if (!function_exists($name)) {
-            return false;
-        }
-        $disabled = ini_get("disable_functions");
-        if ($disabled === false || trim($disabled) === "") {
-            return true;
-        }
-        $list = array_map("trim", explode(",", $disabled));
-        return !in_array($name, $list, true);
-    }
-
-
-    /**
-     * Fast-path index sort via shell exec.
-     *
-     * Prepends a hex-encoded sort key to each line, shells out to `sort(1)`,
-     * strips the keys, and deduplicates.  This handles arbitrarily large
-     * files with no PHP memory pressure.
-     *
-     * @param string $path         The JSONL index file to sort.
-     * @param string $tmp          Temporary output path for the sorted result.
-     * @return bool True if the exec-based sort succeeded (and $path was replaced).
-     */
-    private function try_exec_sort(string $path, string $tmp): bool
-    {
-        if (!$this->function_available("exec")) {
-            return false;
-        }
-
-        $keyed = $path . ".keyed";
-        $sorted_keyed = $path . ".keyed.sorted";
-        $in = fopen($path, "r");
-        $out = fopen($keyed, "w");
-        if (!$in || !$out) {
-            if ($in) {
-                fclose($in);
-            }
-            if ($out) {
-                fclose($out);
-            }
-            $this->audit_log("Failed to prepare keyed index file, falling back to PHP sort");
-            return false;
-        }
-        $lines_read = 0;
-        while (($line = fgets($in)) !== false) {
-            $line = rtrim($line, "\r\n");
-            if ($line === "") {
-                continue;
-            }
-            $entry = $this->parse_index_line($line);
-            if ($entry === null) {
-                continue;
-            }
-            $key = bin2hex($entry["path"]);
-            fwrite($out, $key . "\t" . $line . "\n");
-            if (++$lines_read % 500 === 0) {
-                $this->progress->tick_spinner();
-            }
-        }
-        fclose($in);
-        fclose($out);
-
-        $cmd =
-            "LC_ALL=C sort -t '\t' -k1,1 " .
-            escapeshellarg($keyed) .
-            " > " .
-            escapeshellarg($sorted_keyed);
-        $output = [];
-        $code = 0;
-        exec($cmd, $output, $code);
-        if ($code !== 0) {
-            @unlink($keyed);
-            @unlink($sorted_keyed);
-            $this->audit_log("exec() sort failed (exit code {$code}), falling back to PHP sort");
-            return false;
-        }
-
-        $sorted_in = fopen($sorted_keyed, "r");
-        $sorted_out = fopen($tmp, "w");
-        if (!$sorted_in || !$sorted_out) {
-            if ($sorted_in) {
-                fclose($sorted_in);
-            }
-            if ($sorted_out) {
-                fclose($sorted_out);
-            }
-            @unlink($keyed);
-            @unlink($sorted_keyed);
-            $this->audit_log("Failed to open sorted index files, falling back to PHP sort");
-            return false;
-        }
-
-        $prev_key = null;
-        $lines_stripped = 0;
-        while (($line = fgets($sorted_in)) !== false) {
-            $pos = strpos($line, "\t");
-            if ($pos === false) {
-                continue;
-            }
-            $key = substr($line, 0, $pos);
-            $data = substr($line, $pos + 1);
-            if ($data === "") {
-                continue;
-            }
-            // Deduplicate: skip entries with the same path as the previous one.
-            // This handles overlapping symlink targets that index the same files.
-            if ($key === $prev_key) {
-                continue;
-            }
-            $prev_key = $key;
-            fwrite($sorted_out, $data);
-            if (++$lines_stripped % 500 === 0) {
-                $this->progress->tick_spinner();
-            }
-        }
-        fclose($sorted_in);
-        fclose($sorted_out);
-        @unlink($keyed);
-        @unlink($sorted_keyed);
-        if (!rename($tmp, $path)) {
-            throw new RuntimeException("Failed to replace sorted index file");
-        }
-        return true;
-    }
-
-    /**
-     * Sorts an index file by path and removes duplicate entries.
-     *
-     * Tries the fast path first: prepends a hex-encoded sort key to each line,
-     * shells out to `sort(1)`, then strips the keys.  This handles arbitrarily
-     * large files with no PHP memory pressure.  If exec() is unavailable or
-     * the sort command fails, falls back to an in-memory usort() — which
-     * requires roughly 5x the file size in available memory.
-     *
-     * Duplicates arise from overlapping symlink targets that index the same
-     * files; they are removed during the final write pass.
-     *
-     * @param string $path The JSONL index file to sort in place.
-     */
-    private function sort_index_file(string $path): void
-    {
-        if (!file_exists($path)) {
-            return;
-        }
-        if (filesize($path) === 0) {
+        if (sort_index_file($this->next_remote_index_file)) {
             return;
         }
 
-        $tmp = $path . ".sorted";
-
-        // Fast path: shell out to `sort` for O(n log n) with no memory
-        // pressure.  If anything goes wrong, fall through to the pure-PHP
-        // external merge sort below.
-        if ($this->try_exec_sort($path, $tmp)) {
-            return;
-        }
-
-        // Pure-PHP fallback: external merge sort.  Splits the file into
-        // memory-sized chunks, sorts each in memory, then streams a k-way
-        // merge.  Handles files of any size without exec().
-        $mem_limit_raw = ini_get("memory_limit");
-        $mem_limit = ($mem_limit_raw === "-1" || $mem_limit_raw === "" || $mem_limit_raw === "0")
-            ? 0
-            : parse_size($mem_limit_raw);
-        $mem_used = memory_get_usage(true);
-        $available = $mem_limit > 0
-            ? (int) (($mem_limit - $mem_used) * 0.6)
-            : 256 * 1024 * 1024;
-
-        $key_extractor = function (string $line): ?string {
-            $entry = $this->parse_index_line($line);
-            return $entry !== null ? $entry['path'] : null;
-        };
-        $sorter = new ExternalMergeSort(
-            $key_extractor,
-            max(1024, (int) ($available * 0.8)),
-            true,
-            dirname($path),
+        throw new RuntimeException(
+            "Cannot sort the next remote index because it does not exist: {$this->next_remote_index_file}",
         );
-        $sorter->sort($path);
     }
 
     /**
