@@ -368,7 +368,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->runFilesPull(array('exclude' => array(':wp-uploads:')));
     }
 
-    public function testRunDropsSkippedFieldsWithoutChangingPathSelectionState(): void
+    public function testRunRejectsSkippedFieldsFromThePreviousStateSchema(): void
     {
         file_put_contents($this->pullStateDirectory . '/remote-index.next.jsonl', '');
         $fingerprint = $this->pathSelectionFingerprint(
@@ -388,16 +388,9 @@ class OnlyFilesPathPrefixTest extends TestCase
             json_encode($state, JSON_PRETTY_PRINT)
         );
 
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('unexpected fetch_skipped');
         $this->runFilesPull(array('filter' => 'essential-files'));
-
-        $state = $this->readState();
-        $this->assertSame(
-            $fingerprint,
-            $state['files_pull_path_selection_fingerprint'] ?? null
-        );
-        $this->assertArrayNotHasKey('fetch_skipped', $state);
-        $this->assertArrayNotHasKey('files_filter', $state['pull_pipeline']);
-        $this->assertArrayNotHasKey('skipped_pending', $state['pull_pipeline']);
     }
 
     public function testPullOnlyFilesPrefixesReplaceRootsAndIgnoreUnselectedRemap(): void

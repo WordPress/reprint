@@ -10983,19 +10983,6 @@ class ImportClient
             return new PullState();
         }
 
-        if (
-            array_key_exists("fetch_skipped", $state) &&
-            isset($state["pull_pipeline"]) &&
-            is_array($state["pull_pipeline"]) &&
-            array_key_exists("files_filter", $state["pull_pipeline"]) &&
-            array_key_exists("skipped_pending", $state["pull_pipeline"])
-        ) {
-            unset(
-                $state["fetch_skipped"],
-                $state["pull_pipeline"]["files_filter"],
-                $state["pull_pipeline"]["skipped_pending"]
-            );
-        }
         $state = $this->decode_state_paths($state);
 
         return PullState::from_array($state);
