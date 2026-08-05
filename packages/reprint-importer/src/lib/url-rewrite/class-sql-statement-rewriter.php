@@ -10,10 +10,10 @@
  * Column-aware: for each FROM_BASE64() match, determines which column it belongs
  * to and passes the appropriate content type hint to StructuredDataUrlRewriter.
  * WordPress core columns known to contain block markup (post_content, comment_content,
- * etc.) get the 'block_markup' hint so BlockMarkupUrlProcessor handles HTML
- * attributes, block comment JSON, and CSS url(). All other columns default to
- * auto-detect structured containers and use byte-literal source-base
- * replacement for ambiguous leaf text.
+ * etc.) get the 'block_markup' hint so raw text uses byte-literal source-base
+ * replacement while BlockMarkupUrlProcessor handles tags and block-comment
+ * attributes. All other columns auto-detect structured containers and use the
+ * same byte-literal replacement for ambiguous leaf text.
  *
  * Column resolution walks the lexer output directly. Both INSERT and UPDATE
  * statements emitted by MySQLDumpProducer follow a constrained set of shapes
@@ -30,10 +30,10 @@ class SqlStatementRewriter
     private array $db_columns_with_block_markup;
 
     /**
-     * WordPress core columns that contain block markup and benefit from
-     * BlockMarkupUrlProcessor over literal source-base rewriting. Keyed by table suffix
-     * (without prefix) — the constructor prepends the actual table_prefix to
-     * build full table names for exact matching.
+     * WordPress core columns that contain block markup and need structured tag
+     * and block-attribute rewriting in addition to literal text replacement.
+     * Keyed by table suffix (without prefix) — the constructor prepends the
+     * actual table_prefix to build full table names for exact matching.
      *
      * @TODO: Make this extensible, find a way to treat the relevant columns from plugin tables.
      */
@@ -197,10 +197,10 @@ class SqlStatementRewriter
             ? $this->get_content_type($table, $column)
             : null;
 
-        // Rewrite URLs in the value. Known block-markup columns go through
-        // the structured block parser so alternate URL spellings (for example
-        // escaped JSON, uppercase schemes/hosts, and IDNs) are handled by the
-        // URL model instead of byte-level replacement.
+        // Rewrite URLs in the value. Known block-markup columns use literal
+        // replacement for raw text and the structured block parser for tags
+        // and block attributes, where the URL model handles alternate URL
+        // spellings such as escaped JSON, uppercase schemes/hosts, and IDNs.
         return $content_type === StructuredDataUrlRewriter::BLOCK_MARKUP
             ? $this->url_rewriter->rewrite_known_block_markup_value($value)
             : $this->url_rewriter->rewrite($value, $content_type);

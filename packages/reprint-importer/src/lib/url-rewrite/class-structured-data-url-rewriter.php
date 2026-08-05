@@ -17,15 +17,15 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  *    iterate string values and recurse on each
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
- * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → BlockMarkupUrlProcessor (block_markup hint) or a byte-literal
- *    source-base replacement (default)
+ * 3. Leaf text → byte-literal source-base replacement. With a block_markup
+ *    hint, raw text is rewritten first and BlockMarkupUrlProcessor then handles
+ *    URL-bearing tags and block-comment attributes.
  *
  * HTML is never auto-detected — the caller must explicitly pass
  * content_type='block_markup' for values known to contain HTML/block markup.
  * The hint propagates through recursive calls so that leaf strings inside
- * serialized PHP, JSON, or base64 eventually reach the same block-markup
- * parser.
+ * serialized PHP or JSON receive the same treatment. Nested Base64 content is
+ * left unchanged.
  */
 class StructuredDataUrlRewriter
 {
@@ -183,7 +183,8 @@ class StructuredDataUrlRewriter
      *
      * @param string      $value        The decoded database value.
      * @param string|null $content_type Content type hint: null (auto-detect, plain text default),
-     *                                  'block_markup' (use BlockMarkupUrlProcessor), or 'skip' (no-op).
+     *                                  'block_markup' (literal text replacement plus structured
+     *                                  tag and block-attribute replacement), or 'skip' (no-op).
      * @return string The rewritten value, or the original if no changes were made.
      */
     public function rewrite(string $value, ?string $content_type = null): string
@@ -397,12 +398,10 @@ class StructuredDataUrlRewriter
     /**
      * Rewrite a decoded value already known by the SQL layer to be block markup.
      *
-     * Block markup owns HTML attributes, block-comment JSON, CSS url() values,
-     * text URLs, entity decoding, URL casing, and IDN canonicalization. This
-     * intentionally routes through the structured parser instead of doing a
-     * literal source-base replacement, because one database value may contain
-     * multiple spellings of the same URL that only the parser can recognize as
-     * equivalent.
+     * Raw text uses byte-literal source-base replacement so surrounding CSS,
+     * shortcodes, and other unknown syntax remain unchanged. The structured
+     * parser handles URL-bearing HTML attributes, block-comment attributes,
+     * CSS in style attributes, URL casing, and IDN canonicalization.
      */
     public function rewrite_known_block_markup_value(string $value): string
     {
