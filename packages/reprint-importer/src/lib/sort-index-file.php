@@ -15,6 +15,7 @@ require_once __DIR__ . '/external-merge-sort.php';
  * `sort(1)`, then strips the keys. This handles arbitrarily large files with
  * no PHP memory pressure. When exec() is unavailable or the command fails,
  * the fallback uses an external merge sort with bounded memory.
+ * Paths may be remote absolute paths or local relative paths.
  *
  * Duplicates arise from overlapping symlink targets that index the same
  * files; they are removed during the final write pass.
@@ -53,7 +54,10 @@ function sort_index_file(string $path): bool
             throw new RuntimeException('Invalid index path (base64 decode failed)');
         }
 
-        assert_valid_path($path, 'index path');
+        assert_valid_path(
+            $path[0] === '/' ? $path : '/' . $path,
+            'index path'
+        );
         return $path;
     };
 

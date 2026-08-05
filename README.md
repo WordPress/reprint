@@ -535,8 +535,11 @@ Reprint uses `$STATE_DIR` exactly as supplied. Consumers that want the state
 hidden can choose a directory named `.reprint`; Reprint does not append that
 name itself. State-directory-wide command progress and the audit log live
 directly in the state directory. The retained local index lives at
-`remotes/<md5-of-trimmed-remote-reprint-api-url>/local_index.jsonl`. Pull and
-push operation state live in the sibling `pull/` and `push/` directories.
+`remotes/<md5-of-trimmed-remote-reprint-api-url>/local_index.jsonl`.
+`files-pull` advances it for each completed local mutation without scanning
+unrelated paths; `files-push` replaces it only after the target confirms
+commit. Pull and push operation state live in the sibling `pull/`
+and `push/` directories.
 State-directory-wide and pull filenames do not begin with a dot or repeat the
 scope supplied by their parent directory.
 

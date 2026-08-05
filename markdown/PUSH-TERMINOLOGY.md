@@ -56,14 +56,15 @@ local relative path to a push-root-relative path.
   state directory. Its entries use local relative paths and locally observed
   type, size, ctime, and directory emptiness. The remote Reprint API URL selects
   the remote state directory; a different filesystem root uses a different
-  state directory. Files-push atomically replaces the local index only after
-  the target confirms commit. Use `$local_index_file`.
+  state directory. Files-pull advances only the entries for completed local
+  mutations; files-push atomically replaces the local index only after the
+  target confirms commit. Use `$local_index_file`.
 - A **fresh local index** is the current filesystem-root scan created while
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
 - The **pull index WAL** records completed pull mutations awaiting application
-  to the remote index.
+  to the remote and local indexes.
 - A **pull plan** lists remote absolute paths still scheduled for download or
   deletion. A **push plan** maps local relative paths to push-root-relative
   paths.
@@ -243,21 +244,27 @@ push-session and commit locks.
 
 Call the single pull-side write-ahead log the **pull index WAL**. It lives at
 `<remote-state-directory>/pull/index.wal`; use
-`pull/index.wal`,
-`$pull_index_wal_path`, and `$pull_index_wal_handle`.
-Applied batch records are cleared, but the empty WAL remains as a marker until
-files-pull completes. A retained WAL is consumed only while resuming or
-aborting the interrupted files-pull, including through a high-level pull
-command. Files-diff and files-push reject the unfinished files-pull instead of
-consuming its WAL. Files-pull rejects an unfinished files-push while
+`pull/index.wal`, `$pull_index_wal_path`, and
+`$pull_index_wal_handle`. Each record always carries the remote index
+projection and also carries the local index projection when files-pull
+completed a non-skipped local mutation beneath the filesystem root. Applying
+a batch updates the remote index first, then the local index, and clears the
+records only after both replacements finish.
+
+The empty WAL remains as a marker until files-pull completes. A retained WAL
+is consumed only while resuming or aborting the interrupted files-pull,
+including through a high-level pull command. Files-diff and files-push reject
+the unfinished files-pull instead of consuming its WAL.
+Files-pull rejects an unfinished files-push while
 `<remote-state-directory>/push/sender.json` exists.
 
 ## Local index and push state
 
 The local index is `<remote-state-directory>/local_index.jsonl`.
-`files-diff` and PushPlan read it. PushFilesSender replaces it only after the
-target confirms commit. Planning and active push state remain under
-`<remote-state-directory>/push/`.
+`files-diff` and PushPlan read it. Files-pull advances it only for local paths
+changed by completed file, directory, symlink, or deletion mutations.
+PushFilesSender replaces it only after the target confirms commit. Planning
+and active push state remain under `<remote-state-directory>/push/`.
 
 Use these names verbatim:
 
@@ -283,9 +290,11 @@ copies the sender-owned exclusions to `plan/excluded_paths.json` when it starts.
 `fresh_local_index.jsonl`, `local_paths_to_push.jsonl`,
 `local_paths_to_delete`, and `deleted_directories_stack.jsonl` live inside it.
 
-The local index contains the most recent fresh filesystem-root scan the sender
-finished saving after the target confirmed its corresponding files-push
-commit. PushPlan diffs its fresh local index against the local index its caller
+The local index contains the fresh filesystem-root scan the sender saved after
+a target-confirmed files-push commit, advanced path by path by later completed
+files-pull mutations.
+Files-pull does not scan unrelated paths or accept their pending local changes.
+PushPlan diffs its fresh local index against the local index its caller
 supplies. `byte_offset_in_local_index` is the position from which its current
 lookahead entry is read again after resume.
 
@@ -340,8 +349,9 @@ reports `complete`, `restart`, or `failed`.
 
 The local-only command is `files-diff`. Its `remote Reprint API URL` and
 `filesystem root` have the same meanings as for `files-push`. It reads
-`<remote-state-directory>/local_index.jsonl`, which files-push writes after the
-target confirms commit, and never changes it.
+`<remote-state-directory>/local_index.jsonl`, which files-pull advances after
+completed local mutations and files-push writes after the target confirms
+commit. Files-diff never changes it.
 
 Each JSONL change record has `command: "files-diff"`, an `action` of `push` or
 `delete`, and `path_b64`. A push record also has the local path `type`, `size`,

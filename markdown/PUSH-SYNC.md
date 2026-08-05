@@ -7,9 +7,10 @@ the end maps it to a PR stack.
 
 ## Shape of a push
 
-1. The local machine knows what changed locally since the last target-confirmed
-   push to this remote (files, deletions, database rows), by comparing against
-   the local paths and rows stored after that push.
+1. The local machine knows what changed locally since the local index for this
+   remote was advanced by completed pull mutations or replaced after a
+   target-confirmed push, and since the database rows were stored after that
+   push.
 2. It shows a summary of local uploads and deletions. The user confirms that
    local should win for those paths and rows.
 3. It transfers everything into a private push directory on the remote — file bytes,
@@ -88,10 +89,26 @@ uses a different state directory for each filesystem root:
     <state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push/previously_pushed_rows.jsonl   (phase two)
 
 The local index records local relative paths and the locally observed type,
-size, ctime, and directory emptiness from the most recent fresh scan the sender
-finished saving after the target confirmed its corresponding files-push
-commit. Besides planning the next push, it feeds the local `files-diff` command,
-which reports the same comparison without pushing.
+size, ctime, and directory emptiness. A target-confirmed files-push replaces it
+with the sender's fresh scan. A later files-pull advances only the local paths
+that it actually changes. Besides planning the next push, the index feeds the
+local `files-diff` command, which reports the same comparison without pushing.
+
+Files-pull records each completed file, directory, symlink, or deletion in
+`<remote-state-directory>/pull/index.wal`. Each record carries the
+remote index projection and, for a non-skipped path beneath the filesystem
+root, the mapped local relative path plus its locally observed type, size, and
+ctime. Applying a batch updates the remote index first, advances the local
+index second, and clears the WAL only after both replacements finish. Resume
+and abort replay the same batch.
+
+This is deliberately not a post-pull filesystem scan. Path selection, filters,
+remapping, preserve-local behavior, and failed local mutations leave unrelated
+local index entries unchanged, so pending local additions, edits, and
+deletions remain visible to files-diff and files-push. The merge applies the
+sorted path mutations directly and removes an indexed subtree when its root is
+deleted or replaced. Non-empty directories remain implicit. A successful
+initial pull with no local mutations creates an empty local index.
 
 `PushPlan` first builds a path-sorted fresh local index, then derives the local
 paths to push and delete by diffing it against the local index its caller
@@ -289,7 +306,9 @@ state:
 
 ```text
 <state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/
-  local_index.jsonl                     index saved after target-confirmed commit
+  local_index.jsonl                     retained filesystem-root snapshot for pull, diff, and push
+  pull/
+    index.wal                           completed pull mutations awaiting application to both indexes
   push/
     excluded_paths.json                 sender-owned target exclusions
     sender.json                         active push state
@@ -461,8 +480,9 @@ receiver cursors or tentative upload positions.
 `reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR` reports a local
 minimized push operation plan before target exclusions: the local paths a
 files-push would send or delete, compared against
-`<remote-state-directory>/local_index.jsonl`. Files-push replaces that local
-index after the target confirms commit. The remote state directory is
+`<remote-state-directory>/local_index.jsonl`. Files-pull advances that local
+index after completed local mutations, and files-push replaces it after the
+target confirms commit. The remote state directory is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`, so another URL
 query cannot reuse the index. A different filesystem root uses a different
 state directory. The command accepts only `--state-dir` and `--fs-root`; it
@@ -609,7 +629,8 @@ Files first, database second, each PR small and stacked in this order:
     and reports completion, continuation, restart, or failure without retrying.
 12. **`reprint files-diff`** — a local-only command that reports the paths a
     files-push would send or delete against the local index for that remote
-    Reprint API URL, without contacting the target.
+    Reprint API URL, without contacting the target. Files-pull advances that
+    index only for completed local mutations through its pull index WAL.
 13. **`reprint push`** — the high-level command that adds a change summary,
     confirmation boundary, database work, transfer, commit, and resume.
 14. **Budgets and resumable limits** — push requests stay bounded by two

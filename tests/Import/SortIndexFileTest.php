@@ -131,6 +131,19 @@ final class SortIndexFileTest extends TestCase
         $this->assertFalse(sort_index_file($this->temporary_directory . '/missing.jsonl'));
     }
 
+    public function testSortsLocalIndexRelativePaths(): void
+    {
+        $path = $this->temporary_directory . '/local-index.jsonl';
+        file_put_contents($path, implode("\n", [
+            $this->index_line('zebra', 3),
+            $this->index_line('apple', 2),
+            $this->index_line('banana', 4),
+        ]));
+
+        $this->assertTrue(sort_index_file($path));
+        $this->assertSame(['apple', 'banana', 'zebra'], $this->index_paths($path));
+    }
+
     public function testImporterRejectsAMissingNextRemoteIndex(): void
     {
         $client = new \ImportClient(
