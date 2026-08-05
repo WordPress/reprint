@@ -43,7 +43,7 @@ class PullStateTest extends TestCase
         $state->pull_pipeline->started_by_command = 'pull';
         $state->diff->next_remote_index_byte_offset = 123;
         $state->diff->last_consumed_remote_index_entry_path = '/wp-content/index.php';
-        $state->diff->previous_next_remote_index_entry_path = '/wp-content/themes/twentytwenty/style.css';
+        $state->diff->last_processed_next_remote_index_entry_path = '/wp-content/themes/twentytwenty/style.css';
         $state->sql_statements_counted = 99;
 
         $array = $state->to_array();
@@ -55,7 +55,7 @@ class PullStateTest extends TestCase
         $this->assertSame('/wp-content/index.php', $array['diff']['last_consumed_remote_index_entry_path']);
         $this->assertSame(
             '/wp-content/themes/twentytwenty/style.css',
-            $array['diff']['previous_next_remote_index_entry_path']
+            $array['diff']['last_processed_next_remote_index_entry_path']
         );
         $this->assertSame(99, $array['sql_statements_counted']);
     }
