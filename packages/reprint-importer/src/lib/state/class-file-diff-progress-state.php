@@ -16,9 +16,6 @@ class FileDiffProgressState {
 
     public static function from_array(array $data): self
     {
-        if (!array_key_exists('previous_next_remote_index_entry_path', $data)) {
-            $data['previous_next_remote_index_entry_path'] = null;
-        }
         $state = new self();
         \reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->next_remote_index_byte_offset =

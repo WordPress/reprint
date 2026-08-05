@@ -6299,23 +6299,13 @@ class ImportClient
                 // Keep entries outside this run's selection.
                 if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
                     $remote_absolute_path = $remote_index_entry["path"];
-                    // Old indexes recorded non-empty directories. A descendant
-                    // in the next index means this directory still exists, so
-                    // remove only its obsolete index record.
-                    if (!(
-                        $remote_index_entry["type"] === "dir"
-                        && $this->next_remote_index_contains_remote_absolute_path_prefix(
-                            $remote_absolute_path
+                    $this->apply_remote_deletion_locally(
+                        $this->remote_absolute_path_to_delete(
+                            $remote_absolute_path,
+                            $previous_next_remote_index_entry_path,
+                            $next_remote_index_entry["path"],
                         )
-                    )) {
-                        $this->apply_remote_deletion_locally(
-                            $this->remote_absolute_path_to_delete(
-                                $remote_absolute_path,
-                                $previous_next_remote_index_entry_path,
-                                $next_remote_index_entry["path"],
-                            )
-                        );
-                    }
+                    );
                     $this->delete_remote_index_entry($remote_absolute_path);
                 }
                 $last_consumed_remote_index_entry_path =

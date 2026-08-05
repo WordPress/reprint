@@ -60,16 +60,6 @@ class PullStateTest extends TestCase
         $this->assertSame(99, $array['sql_statements_counted']);
     }
 
-    public function testStateAcceptsDiffProgressFromBeforeThePreviousNextPath(): void
-    {
-        $data = (new \PullState())->to_array();
-        unset($data['diff']['previous_next_remote_index_entry_path']);
-
-        $state = \PullState::from_array($data);
-
-        $this->assertNull($state->diff->previous_next_remote_index_entry_path);
-    }
-
     public function testStateObjectsDoNotExposeArrayOffsetMutation(): void
     {
         $state = new \PullState();

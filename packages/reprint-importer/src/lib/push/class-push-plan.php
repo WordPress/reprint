@@ -556,17 +556,14 @@ class PushPlan
 
         if ($fresh_local_index_entry !== null || $local_index_entry !== null) {
             // Base64 does not preserve byte order ('0' sorts before 'A'
-            // in ASCII but encodes a higher value). Component order keeps
-            // every descendant next to its parent before the next sibling.
+            // in ASCII but encodes a higher value), so ordering uses the
+            // decoded path bytes.
             if ($local_index_entry === null) {
                 $path_comparison = -1;
             } elseif ($fresh_local_index_entry === null) {
                 $path_comparison = 1;
             } else {
-                $path_comparison = $this->compare_local_relative_paths(
-                    $fresh_local_index_entry["path"],
-                    $local_index_entry["path"]
-                );
+                $path_comparison = strcmp($fresh_local_index_entry["path"], $local_index_entry["path"]);
             }
 
             $fresh_local_index_entry_shape = null;
@@ -579,17 +576,13 @@ class PushPlan
                 $local_index_entry_shape = $this->index_entry_shape($local_index_entry);
 
                 // Byte sorting can put a sibling such as `a-other` before
-                // `a/child`. Every retained non-empty directory has a later
-                // descendant, so adjacent local index entries can pass at
-                // most the top sibling range.
+                // `a/child`. Keep a deleted root while local index entries
+                // remain within that root's descendants.
                 if ($this->deleted_directory_stack_entry !== null) {
                     $descendant_prefix = $this->deleted_directory_stack_entry["path"] . "/";
                     if (
                         strpos($local_index_entry["path"], $descendant_prefix) !== 0
-                        && $this->compare_local_relative_paths(
-                            $local_index_entry["path"],
-                            $descendant_prefix
-                        ) > 0
+                        && strcmp($local_index_entry["path"], $descendant_prefix) > 0
                     ) {
                         $deleted_directory_stack_top_byte_offset = $this->deleted_directory_stack_entry["previous_byte_offset"];
                         $this->deleted_directory_stack_entry = $this->read_deleted_directory_stack_entry(
@@ -600,9 +593,7 @@ class PushPlan
             }
 
             if ($path_comparison < 0) {
-                // New files, symlinks, and empty directories need to be
-                // pushed. A new non-empty directory is represented by its
-                // descendants.
+                // New files, symlinks, and empty directories need to be pushed.
                 $fresh_local_index_entry_replaces_local_subtree = $local_index_entry !== null
                     && strpos(
                         $local_index_entry["path"],
@@ -625,26 +616,23 @@ class PushPlan
                         );
                     $deleted_directories_stack_changed = true;
                 }
-                if (
-                    $fresh_local_index_entry_shape !== "non_empty_directory"
-                    && !$this->path_conflicts_with_excluded_paths($fresh_local_index_entry["path"])
-                ) {
+                if (!$this->path_conflicts_with_excluded_paths($fresh_local_index_entry["path"])) {
                     $this->append_local_path_to_push($fresh_local_index_entry);
                     $local_paths_to_push_changed = true;
                 }
             } elseif ($path_comparison > 0) {
-                $local_directory_is_implied_by_fresh_descendant =
-                    $local_index_entry["type"] === "dir"
+                $local_empty_directory_is_implied_by_fresh_descendant =
+                    $local_index_entry_shape === "empty_directory"
                     && $this->fresh_index_contains_path_or_descendant(
                         $local_index_entry["path"]
                     );
                 $local_path_to_delete = $this->local_path_to_delete(
                     $local_index_entry["path"]
                 );
-                // A deleted non-empty directory emits one root. Its later
-                // descendant entries are already covered by that path.
+                // A sparse index entry derives one deleted root, covering its
+                // later descendant entries.
                 if (
-                    !$local_directory_is_implied_by_fresh_descendant
+                    !$local_empty_directory_is_implied_by_fresh_descendant
                     && !$this->path_conflicts_with_excluded_paths($local_path_to_delete)
                     && !$this->deleted_directory_stack_covers_path(
                         $local_index_entry["path"],
@@ -653,7 +641,7 @@ class PushPlan
                 ) {
                     $this->append_local_path_to_delete($local_path_to_delete);
                     $local_paths_to_delete_changed = true;
-                    if ($local_path_to_delete !== $local_index_entry["path"] || $local_index_entry_shape === "non_empty_directory") {
+                    if ($local_path_to_delete !== $local_index_entry["path"]) {
                         $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
                             $local_path_to_delete,
                             $deleted_directory_stack_top_byte_offset
@@ -666,8 +654,6 @@ class PushPlan
                     || $fresh_local_index_entry_shape === "symlink";
                 $local_index_entry_is_file_or_symlink = $local_index_entry_shape === "file"
                     || $local_index_entry_shape === "symlink";
-                $non_empty_directory_becomes_empty = $fresh_local_index_entry_shape === "empty_directory"
-                    && $local_index_entry_shape === "non_empty_directory";
                 $empty_directory_needs_push = $fresh_local_index_entry_shape === "empty_directory"
                     && $local_index_entry_shape !== "empty_directory";
                 // File and symlink changes are defined by type, ctime, and
@@ -679,8 +665,7 @@ class PushPlan
                         || $fresh_local_index_entry["type"] !== $local_index_entry["type"]
                     );
                 $needs_delete =
-                    $fresh_local_index_entry_is_file_or_symlink !== $local_index_entry_is_file_or_symlink
-                    || $non_empty_directory_becomes_empty;
+                    $fresh_local_index_entry_is_file_or_symlink !== $local_index_entry_is_file_or_symlink;
                 $needs_push = $empty_directory_needs_push
                     || $changed_file_or_symlink_needs_push;
                 $path_is_excluded = $this->path_conflicts_with_excluded_paths($fresh_local_index_entry["path"]);
@@ -695,13 +680,6 @@ class PushPlan
                 ) {
                     $this->append_local_path_to_delete($local_index_entry["path"]);
                     $local_paths_to_delete_changed = true;
-                    if ($local_index_entry_shape === "non_empty_directory") {
-                        $deleted_directory_stack_top_byte_offset = $this->append_deleted_directory_stack_entry(
-                            $local_index_entry["path"],
-                            $deleted_directory_stack_top_byte_offset
-                        );
-                        $deleted_directories_stack_changed = true;
-                    }
                 }
                 if ($needs_push && !$path_is_excluded) {
                     $this->append_local_path_to_push($fresh_local_index_entry);
@@ -858,31 +836,11 @@ class PushPlan
     }
 
     /**
-     * Compares local relative paths by components instead of raw bytes.
-     *
-     * This keeps a directory and all of its descendants together before a
-     * sibling such as `directory-other`.
-     */
-    private function compare_local_relative_paths(string $left_path, string $right_path): int
-    {
-        $left_components = explode("/", $left_path);
-        $right_components = explode("/", $right_path);
-        $shared_component_count = min(count($left_components), count($right_components));
-        for ($index = 0; $index < $shared_component_count; ++$index) {
-            $component_comparison = strcmp($left_components[$index], $right_components[$index]);
-            if ($component_comparison !== 0) {
-                return $component_comparison;
-            }
-        }
-        return count($left_components) <=> count($right_components);
-    }
-
-    /**
      * Returns the highest deleted directory without a fresh entry below it.
      *
      * Only the previous fresh entry and the current lookahead can neighbor a
-     * path in component order, so this derives one subtree root without
-     * retaining the tree.
+     * path in byte order, so this derives one subtree root without retaining
+     * the tree.
      */
     private function local_path_to_delete(string $local_relative_path): string
     {
@@ -936,7 +894,7 @@ class PushPlan
      *     @type bool   $empty Whether a directory is empty. Present for directory entries.
      * }
      * @phpstan-param array{path:string,type:'file'|'link'|'dir',ctime:int,size:int,empty?:bool} $index_entry
-     * @return 'file'|'symlink'|'empty_directory'|'non_empty_directory'
+     * @return 'file'|'symlink'|'empty_directory'
      */
     private function index_entry_shape(array $index_entry): string
     {
@@ -946,7 +904,7 @@ class PushPlan
         if ($index_entry["type"] === "link") {
             return "symlink";
         }
-        return $index_entry["empty"] ? "empty_directory" : "non_empty_directory";
+        return "empty_directory";
     }
 
     /**
