@@ -488,10 +488,60 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
+                $content_length = strlen($content);
+                $cursor = 0;
+                $rewritten_content = '';
+
+                // Rewrite only raw text between markup spans. The markup
+                // processor remains responsible for tags and block comments.
+                while ($cursor < $content_length) {
+                    $markup_start = strpos($content, '<', $cursor);
+                    if ($markup_start === false) {
+                        $rewritten_content .= $this->rewrite_freeform_urls(substr($content, $cursor));
+                        $cursor = $content_length;
+                        break;
+                    }
+
+                    $rewritten_content .= $this->rewrite_freeform_urls(
+                        substr($content, $cursor, $markup_start - $cursor)
+                    );
+
+                    if (substr($content, $markup_start, 4) === '<!--') {
+                        $comment_end = strpos($content, '-->', $markup_start + 4);
+                        $markup_end = $comment_end === false
+                            ? $content_length
+                            : $comment_end + 3;
+                    } else {
+                        $markup_end = $markup_start + 1;
+                        $quote = null;
+                        while ($markup_end < $content_length) {
+                            $byte = $content[$markup_end];
+                            if ($quote !== null) {
+                                if ($byte === $quote) {
+                                    $quote = null;
+                                }
+                            } elseif ($byte === '"' || $byte === "'") {
+                                $quote = $byte;
+                            } elseif ($byte === '>') {
+                                ++$markup_end;
+                                break;
+                            }
+                            ++$markup_end;
+                        }
+                    }
+
+                    $rewritten_content .= substr($content, $markup_start, $markup_end - $markup_start);
+                    $cursor = $markup_end;
+                }
+
+                $content = $rewritten_content;
                 $p = new BlockMarkupUrlProcessor( $content, $base_url );
                 while ( $p->next_url() ) {
                     $raw_url = $p->get_raw_url();
                     $token_type = $p->get_token_type() ?? '';
+                    if ($token_type === '#text') {
+                        continue;
+                    }
                     $cache_key = $this->mapping_cache_key . "\0" . self::BLOCK_MARKUP . "\0" . $token_type . "\0" . $raw_url;
                     $cached = $this->get_cached_rewrite_result($cache_key);
                     if ($cached !== null) {
@@ -535,82 +585,89 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
-                if ($this->freeform_base_url_mappings === []) {
-                    return $content;
-                }
-
-                // A valid top-level serialization is handled before this
-                // point. An array marker here belongs to an unknown
-                // surrounding syntax, where replacement could invalidate a
-                // byte-length declaration.
-                if (preg_match('/a:\d+:\{/', $content) === 1) {
-                    return $content;
-                }
-
-                $content_length = strlen($content);
-                $cursor = 0;
-                $output = '';
-
-                while ($cursor < $content_length) {
-                    $next_position = null;
-                    $next_mapping = null;
-
-                    foreach ($this->freeform_base_url_mappings as $mapping) {
-                        $search_offset = $cursor;
-                        while (true) {
-                            $position = strpos($content, $mapping['source_url'], $search_offset);
-                            if ($position === false) {
-                                break;
-                            }
-
-                            $has_start_boundary = $position === 0;
-                            if (!$has_start_boundary) {
-                                $previous_byte = $content[$position - 1];
-                                $has_start_boundary = ctype_space($previous_byte)
-                                    || strpos('"\'([{<>', $previous_byte) !== false
-                                    || substr($content, max(0, $position - 6), 6) === '&quot;'
-                                    || substr($content, max(0, $position - 5), 5) === '&#34;'
-                                    || strtolower(substr($content, max(0, $position - 6), 6)) === '&#x22;';
-                            }
-
-                            $source_url = $mapping['source_url'];
-                            $end_position = $position + strlen($source_url);
-                            $has_end_boundary = substr($source_url, -1) === '/'
-                                || $end_position === $content_length;
-                            if (!$has_end_boundary) {
-                                $next_byte = $content[$end_position];
-                                $has_end_boundary = ctype_space($next_byte)
-                                    || strpos('/?#\\"\'()[]{}<>,;', $next_byte) !== false;
-                            }
-
-                            if ($has_start_boundary && $has_end_boundary) {
-                                if ($next_position === null || $position < $next_position) {
-                                    $next_position = $position;
-                                    $next_mapping = $mapping;
-                                }
-                                break;
-                            }
-
-                            $search_offset = $position + 1;
-                        }
-                    }
-
-                    if ($next_position === null || $next_mapping === null) {
-                        break;
-                    }
-
-                    $output .= substr($content, $cursor, $next_position - $cursor);
-                    $output .= $next_mapping['replacement'];
-                    $cursor = $next_position + strlen($next_mapping['source_url']);
-                }
-
-                return $cursor === 0
-                    ? $content
-                    : $output . substr($content, $cursor);
+                return $this->rewrite_freeform_urls($content);
 
             default:
                 _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );
                 return '';
         }
+    }
+
+    /**
+     * Rewrite literal source bases without parsing or re-encoding surrounding bytes.
+     */
+    private function rewrite_freeform_urls(string $content): string
+    {
+        if ($this->freeform_base_url_mappings === []) {
+            return $content;
+        }
+
+        // A valid top-level serialization is handled before this point. An
+        // array marker here belongs to unknown surrounding syntax, where a
+        // replacement could invalidate a byte-length declaration.
+        if (preg_match('/a:\d+:\{/', $content) === 1) {
+            return $content;
+        }
+
+        $content_length = strlen($content);
+        $cursor = 0;
+        $output = '';
+
+        while ($cursor < $content_length) {
+            $next_position = null;
+            $next_mapping = null;
+
+            foreach ($this->freeform_base_url_mappings as $mapping) {
+                $search_offset = $cursor;
+                while (true) {
+                    $position = strpos($content, $mapping['source_url'], $search_offset);
+                    if ($position === false) {
+                        break;
+                    }
+
+                    $has_start_boundary = $position === 0;
+                    if (!$has_start_boundary) {
+                        $previous_byte = $content[$position - 1];
+                        $has_start_boundary = ctype_space($previous_byte)
+                            || strpos('"\'([{<>', $previous_byte) !== false
+                            || substr($content, max(0, $position - 6), 6) === '&quot;'
+                            || substr($content, max(0, $position - 5), 5) === '&#34;'
+                            || strtolower(substr($content, max(0, $position - 6), 6)) === '&#x22;';
+                    }
+
+                    $source_url = $mapping['source_url'];
+                    $end_position = $position + strlen($source_url);
+                    $has_end_boundary = substr($source_url, -1) === '/'
+                        || $end_position === $content_length;
+                    if (!$has_end_boundary) {
+                        $next_byte = $content[$end_position];
+                        $has_end_boundary = ctype_space($next_byte)
+                            || strpos('/?#\\"\'()[]{}<>,;', $next_byte) !== false;
+                    }
+
+                    if ($has_start_boundary && $has_end_boundary) {
+                        if ($next_position === null || $position < $next_position) {
+                            $next_position = $position;
+                            $next_mapping = $mapping;
+                        }
+                        break;
+                    }
+
+                    $search_offset = $position + 1;
+                }
+            }
+
+            if ($next_position === null || $next_mapping === null) {
+                break;
+            }
+
+            $output .= substr($content, $cursor, $next_position - $cursor);
+            $output .= $next_mapping['replacement'];
+            $cursor = $next_position + strlen($next_mapping['source_url']);
+        }
+
+        return $cursor === 0
+            ? $content
+            : $output . substr($content, $cursor);
     }
 }

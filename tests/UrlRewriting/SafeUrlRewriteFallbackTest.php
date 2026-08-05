@@ -167,6 +167,9 @@ class SafeUrlRewriteFallbackTest extends TestCase
         yield 'quoted minified CSS' => [
             '.hero{background:url("https://source.example/image.png");font-size:64px}',
         ];
+        yield 'HTML-entity quoted minified CSS' => [
+            '.hero{background:url(&quot;https://source.example/image.png&quot;);font-size:64px}',
+        ];
         yield 'shortcode' => [
             '[builder image="https://source.example/image.png";font="64px"]',
         ];
@@ -280,6 +283,21 @@ class SafeUrlRewriteFallbackTest extends TestCase
 
         $this->assertSame(
             $input,
+            $this->rewriteSqlValue($input, 'wp_posts', 'post_content')
+        );
+    }
+
+		public function testEmbeddedSerializationOnlySkipsItsOwnBlockTextNode(): void
+    {
+        $input = '<p>https://source.example/before.png</p>'
+            . '<pre><code>a:1:{s:3:"url";s:32:"https://source.example/image.png";}</code></pre>'
+            . '<p>https://source.example/after.png</p>';
+        $expected = '<p>https://destination.example/before.png</p>'
+            . '<pre><code>a:1:{s:3:"url";s:32:"https://source.example/image.png";}</code></pre>'
+            . '<p>https://destination.example/after.png</p>';
+
+        $this->assertSame(
+            $expected,
             $this->rewriteSqlValue($input, 'wp_posts', 'post_content')
         );
     }
