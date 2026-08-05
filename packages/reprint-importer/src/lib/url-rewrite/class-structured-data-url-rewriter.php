@@ -141,12 +141,27 @@ class StructuredDataUrlRewriter
 
             if ($freeform_mapping_is_valid) {
                 $target_origin = rtrim($to_url_string, '/');
-                $this->freeform_base_url_mappings[] = [
-                    'source_url' => $from_url_string,
-                    'replacement' => substr($from_url_string, -1) === '/'
-                        ? $target_origin . '/'
-                        : $target_origin,
-                ];
+                $source_host_variants = [];
+                $this->add_source_domain_variants($source_host_variants, $source_parts['host']);
+                $source_host_offset = strlen($source_parts['scheme']) + 3;
+                $source_before_host = substr($from_url_string, 0, $source_host_offset);
+                $source_after_host = substr(
+                    $from_url_string,
+                    $source_host_offset + strlen($source_parts['host'])
+                );
+
+                foreach (array_keys($source_host_variants) as $source_host_variant) {
+                    // Only the host spelling varies. The source path remains
+                    // byte-literal so its escaping and normalization cannot
+                    // change the meaning of surrounding syntax.
+                    $source_url = $source_before_host . $source_host_variant . $source_after_host;
+                    $this->freeform_base_url_mappings[] = [
+                        'source_url' => $source_url,
+                        'replacement' => substr($source_url, -1) === '/'
+                            ? $target_origin . '/'
+                            : $target_origin,
+                    ];
+                }
             }
         }
         usort(

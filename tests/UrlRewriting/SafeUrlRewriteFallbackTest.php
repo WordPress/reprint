@@ -245,6 +245,33 @@ class SafeUrlRewriteFallbackTest extends TestCase
         );
     }
 
+    public function testUnicodeSourceHostMatchesPunycodeHostWithoutChangingSuffixBytes(): void
+    {
+        $rewriter = $this->createRewriter([
+            'https://münich.example/blog' => self::TARGET_URL,
+        ]);
+
+        $this->assertSame(
+            self::TARGET_URL . '/my%20post',
+            $rewriter->rewrite('https://xn--mnich-kva.example/blog/my%20post')
+        );
+    }
+
+    public function testPunycodeSourceHostMatchesUnicodeHostInBlockText(): void
+    {
+        $input = '<p>https://münich.example/blog/żółć</p>';
+
+        $this->assertSame(
+            '<p>' . self::TARGET_URL . '/żółć</p>',
+            $this->rewriteSqlValue(
+                $input,
+                'wp_posts',
+                'post_content',
+                ['https://xn--mnich-kva.example/blog' => self::TARGET_URL]
+            )
+        );
+    }
+
     public function testAmbiguousTextLeavesTargetSubpathMappingUnchanged(): void
     {
         $input = 'https://source.example/article';
