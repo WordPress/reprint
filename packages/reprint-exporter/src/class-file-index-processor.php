@@ -15,7 +15,7 @@
  * directories and continues after those names. Directory names remain sorted
  * exactly as they were in endpoint_file_index() before this extraction.
  *
- * One step either produces one or more index entries for one filesystem path,
+ * One step either produces zero or more index entries for one filesystem path,
  * skips one path, reports one directory failure, or finishes one directory.
  * Following a symlink may produce additional intermediate-symlink entries in
  * the same step because they share the path's cursor boundary.
@@ -395,7 +395,15 @@ final class FileIndexProcessor {
         // Intermediate links and the inspected path belong to the same step
         // because the cursor cannot stop between them without losing one.
         $this->index_entries = $intermediate_symlinks;
-        $this->index_entries[] = $item;
+        // A descendant implies its non-empty ancestors. Keep explicit rows
+        // only for empty directories, which have no descendant to imply them.
+        if (
+            $type !== "dir"
+            || !isset($item["empty"])
+            || $item["empty"]
+        ) {
+            $this->index_entries[] = $item;
+        }
         $this->step_status = self::STATUS_INDEXED;
 
         // Depth-first traversal enters a new directory before returning to the

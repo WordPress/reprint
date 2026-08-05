@@ -245,7 +245,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/reprint-storage/state.json', $withCaches);
     }
 
-    public function testFileIndexRecordsPhysicalDirectoryEmptiness(): void
+    public function testFileIndexKeepsOnlyPhysicalEmptyDirectories(): void
     {
         $siteDir = $this->tempDir . '/site';
         mkdir($siteDir . '/empty', 0755, true);
@@ -271,9 +271,9 @@ final class FileIndexSkipDefaultsTest extends TestCase
             $this->assertIsBool($entry['empty'], $path);
         }
         $this->assertTrue($entries['empty']['empty']);
-        $this->assertFalse($entries['full']['empty']);
-        $this->assertFalse($entries['skipped-only']['empty']);
-        $this->assertFalse($entries['storage-parent']['empty']);
+        $this->assertArrayNotHasKey('full', $entries);
+        $this->assertArrayNotHasKey('skipped-only', $entries);
+        $this->assertArrayNotHasKey('storage-parent', $entries);
         $this->assertArrayNotHasKey('empty', $entries['file.txt']);
         $this->assertArrayNotHasKey('skipped-only/.git', $entries);
         $this->assertArrayNotHasKey('storage-parent/reprint-storage', $entries);

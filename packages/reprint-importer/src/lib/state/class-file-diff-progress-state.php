@@ -11,6 +11,9 @@ class FileDiffProgressState {
     /** @var string|null Last remote index entry path consumed at the current next remote index byte offset. */
     public ?string $last_consumed_remote_index_entry_path = null;
 
+    /** @var string|null Last next remote index entry processed before the current byte offset. */
+    public ?string $last_processed_next_remote_index_entry_path = null;
+
     public static function from_array(array $data): self
     {
         $state = new self();
@@ -19,6 +22,8 @@ class FileDiffProgressState {
             $data['next_remote_index_byte_offset'];
         $state->last_consumed_remote_index_entry_path =
             $data['last_consumed_remote_index_entry_path'];
+        $state->last_processed_next_remote_index_entry_path =
+            $data['last_processed_next_remote_index_entry_path'];
         return $state;
     }
 
@@ -29,6 +34,8 @@ class FileDiffProgressState {
                 $this->next_remote_index_byte_offset,
             'last_consumed_remote_index_entry_path' =>
                 $this->last_consumed_remote_index_entry_path,
+            'last_processed_next_remote_index_entry_path' =>
+                $this->last_processed_next_remote_index_entry_path,
         ];
     }
 }

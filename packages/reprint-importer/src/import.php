@@ -10,7 +10,6 @@
  * - Three-phase pull: files, SQL, then file deltas
  */
 
-use function WordPress\Filesystem\wp_join_unix_paths;
 use Reprint\Importer\CurlTimeoutException;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
@@ -23,12 +22,15 @@ use Reprint\Importer\State\RemoteFileIndexCursorState;
 use Reprint\Importer\StreamingContext;
 use Reprint\Importer\TransientInterruptionException;
 use Reprint\Importer\Tuning\AdaptiveTuner;
+
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
 use function Reprint\Importer\sort_index_file;
+use function WordPress\Filesystem\wp_join_unix_paths;
+use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
@@ -6227,6 +6229,8 @@ class ImportClient
             $file_diff_progress_state->next_remote_index_byte_offset;
         $last_consumed_remote_index_entry_path =
             $file_diff_progress_state->last_consumed_remote_index_entry_path;
+        $last_processed_next_remote_index_entry_path =
+            $file_diff_progress_state->last_processed_next_remote_index_entry_path;
         $fetch_list_file_mode = $next_remote_index_byte_offset > 0 ? "a" : "w";
         if ($fetch_list_file_mode === "w") {
             $this->audit_log(
@@ -6297,7 +6301,13 @@ class ImportClient
                 // Keep entries outside this run's selection.
                 if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
                     $remote_absolute_path = $remote_index_entry["path"];
-                    $this->apply_remote_deletion_locally($remote_absolute_path);
+                    $this->apply_remote_deletion_locally(
+                        $this->derive_remote_deletion_root_from_sparse_index(
+                            $remote_absolute_path,
+                            $last_processed_next_remote_index_entry_path,
+                            $next_remote_index_entry["path"],
+                        )
+                    );
                     $this->delete_remote_index_entry($remote_absolute_path);
                 }
                 $last_consumed_remote_index_entry_path =
@@ -6351,11 +6361,15 @@ class ImportClient
                 }
             }
 
+            $last_processed_next_remote_index_entry_path =
+                $next_remote_index_entry["path"];
             $next_remote_index_entries_processed++;
             if ($next_remote_index_entries_processed % 200 === 0) {
                 $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
                 $this->get_state()->diff->last_consumed_remote_index_entry_path =
                     $last_consumed_remote_index_entry_path;
+                $this->get_state()->diff->last_processed_next_remote_index_entry_path =
+                    $last_processed_next_remote_index_entry_path;
                 if (
                     $this->remote_index_wal_handle
                     && !fflush($this->remote_index_wal_handle)
@@ -6370,7 +6384,13 @@ class ImportClient
         while ($remote_index_entry !== null) {
             if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
                 $remote_absolute_path = $remote_index_entry["path"];
-                $this->apply_remote_deletion_locally($remote_absolute_path);
+                $this->apply_remote_deletion_locally(
+                    $this->derive_remote_deletion_root_from_sparse_index(
+                        $remote_absolute_path,
+                        $last_processed_next_remote_index_entry_path,
+                        null,
+                    )
+                );
                 $this->delete_remote_index_entry($remote_absolute_path);
             }
             $last_consumed_remote_index_entry_path =
@@ -6388,6 +6408,8 @@ class ImportClient
         $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
         $this->get_state()->diff->last_consumed_remote_index_entry_path =
             $last_consumed_remote_index_entry_path;
+        $this->get_state()->diff->last_processed_next_remote_index_entry_path =
+            $last_processed_next_remote_index_entry_path;
         $this->apply_remote_index_wal();
         $this->save_state();
 
@@ -6734,6 +6756,87 @@ class ImportClient
         }
 
         $this->audit_log("Failed to delete: {$remote_absolute_path}", true);
+    }
+
+    /**
+     * Derives the shallowest missing remote path that can be deleted locally.
+     *
+     * Whenever a path stored in the locally saved remote index is missing from the
+     * currently downloaded remote index, we must figure out the blast radius. What
+     * exactly was deleted on the remote server? This function answers that
+     * question based on the:
+     *
+     * * original missing path
+     * * the nearest path before it in the new index, if any
+     * * the nearest path after it in the new index, if any
+     *
+     * For example:
+     *
+     *     Saved index:
+     *         /srv/site/wp-config.php
+     *         /srv/site/wp-content/index.php
+     *         /srv/site/wp-content/test.php
+     *         /srv/site/wp-settings.php
+     *
+     *     Newly downloaded index:
+     *         /srv/site/wp-config.php
+     *         /srv/site/wp-settings.php
+     *
+     * When we notice `/srv/site/wp-content/index.php` is not in the new index,
+     * this function is called with:
+     *
+     *     derive_remote_deletion_root_from_sparse_index(
+     *         missing_remote_path: "/srv/site/wp-content/index.php",
+     *         nearest_existing_path_before: "/srv/site/wp-config.php",
+     *         nearest_existing_path_after: "/srv/site/wp-settings.php"
+     *     )
+     *     // returns "/srv/site/wp-content"
+     *
+     * The neighboring paths show that `/srv` and `/srv/site` still contain files,
+     * but neither path is within `/srv/site/wp-content`.
+     *
+     * @param string      $missing_remote_path           Previously recorded path that is now missing.
+     * @param string|null $nearest_existing_path_before  Nearest existing path before the missing path, if any.
+     * @param string|null $nearest_existing_path_after   Nearest existing path after the missing path, if any.
+     *
+     * @return string The shallowest missing parent, or the original path when every parent still contains an entry.
+     */
+    private function derive_remote_deletion_root_from_sparse_index(
+        string $missing_remote_path,
+        ?string $nearest_existing_path_before,
+        ?string $nearest_existing_path_after
+    ): string {
+        // Use an invalid path that cannot match any validated remote path so
+        // both comparisons below always receive strings.
+        if (null === $nearest_existing_path_before) {
+            $nearest_existing_path_before = "/\0/";
+        }
+        if (null === $nearest_existing_path_after) {
+            $nearest_existing_path_after = "/\0/";
+        }
+        $missing_remote_path_components = wp_unix_path_segments($missing_remote_path);
+        $remote_parent_components = [];
+        $remote_parent_component_count = count($missing_remote_path_components) - 1;
+        // Find the shallowest parent absent from both neighboring entries.
+        for ($component_index = 0; $component_index < $remote_parent_component_count; ++$component_index) {
+            $remote_parent_components[] = $missing_remote_path_components[$component_index];
+            $path_prefix = wp_join_unix_paths("/", ...$remote_parent_components);
+            if (
+                !path_is_within_root(
+                    $nearest_existing_path_before,
+                    $path_prefix,
+                )
+                && !path_is_within_root(
+                    $nearest_existing_path_after,
+                    $path_prefix,
+                )
+            ) {
+                return $path_prefix;
+            }
+        }
+        // Every parent still has an entry in the new index, so only the
+        // original missing entry should be deleted.
+        return $missing_remote_path;
     }
 
     /**
@@ -10561,6 +10664,9 @@ class ImportClient
         $state["diff"]["last_consumed_remote_index_entry_path"] = $this->encode_state_path_value(
             $state["diff"]["last_consumed_remote_index_entry_path"] ?? null,
         );
+        $state["diff"]["last_processed_next_remote_index_entry_path"] = $this->encode_state_path_value(
+            $state["diff"]["last_processed_next_remote_index_entry_path"] ?? null,
+        );
         $state["fetch"]["batch_file"] = $this->encode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );
@@ -10592,6 +10698,9 @@ class ImportClient
     {
         $state["diff"]["last_consumed_remote_index_entry_path"] = $this->decode_state_path_value(
             $state["diff"]["last_consumed_remote_index_entry_path"] ?? null,
+        );
+        $state["diff"]["last_processed_next_remote_index_entry_path"] = $this->decode_state_path_value(
+            $state["diff"]["last_processed_next_remote_index_entry_path"] ?? null,
         );
         $state["fetch"]["batch_file"] = $this->decode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,

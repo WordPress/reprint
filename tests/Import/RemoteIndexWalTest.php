@@ -63,6 +63,55 @@ final class RemoteIndexWalTest extends TestCase
         $this->assertFileDoesNotExist($remoteIndexWalPath);
     }
 
+    public function testUpsertingFileDoesNotCreateParentDirectoryEntries(): void
+    {
+        $client = $this->client();
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getMethod('upsert_remote_index_entry')->invoke(
+            $client,
+            '/site/nested/file.txt',
+            42,
+            5,
+            'file'
+        );
+        $reflection->getMethod('apply_remote_index_wal')->invoke($client);
+
+        $this->assertSame(
+            ['/site/nested/file.txt'],
+            $this->remoteIndexEntryPaths()
+        );
+    }
+
+    public function testDeletedFileDerivesTheAbsentDirectoryRoot(): void
+    {
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $remoteAbsolutePathToDelete = $reflection
+            ->getMethod('derive_remote_deletion_root_from_sparse_index')
+            ->invoke(
+                $this->client(),
+                '/srv/site/gone/nested/file.txt',
+                '/srv/site/kept.txt',
+                null
+            );
+
+        $this->assertSame('/srv/site/gone', $remoteAbsolutePathToDelete);
+    }
+
+    public function testDeletedFileKeepsAParentWithAnotherNextIndexEntry(): void
+    {
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $remoteAbsolutePathToDelete = $reflection
+            ->getMethod('derive_remote_deletion_root_from_sparse_index')
+            ->invoke(
+                $this->client(),
+                '/srv/site/kept/old.txt',
+                '/srv/site/kept/current.txt',
+                null
+            );
+
+        $this->assertSame('/srv/site/kept/old.txt', $remoteAbsolutePathToDelete);
+    }
+
     public function testReplayDiscardsAnUnterminatedFinalRecord(): void
     {
         $completeRecord = json_encode([
@@ -143,17 +192,31 @@ final class RemoteIndexWalTest extends TestCase
 
     private function firstRemoteIndexEntryPath(): string
     {
+        $paths = $this->remoteIndexEntryPaths();
+        $path = $paths[0] ?? null;
+        $this->assertIsString($path);
+        return $path;
+    }
+
+    /** @return list<string> */
+    private function remoteIndexEntryPaths(): array
+    {
         $lines = file(
             $this->pullStateDirectory . '/remote-index.jsonl',
             FILE_IGNORE_NEW_LINES
         );
         $this->assertIsArray($lines);
-        $line = $lines[0] ?? null;
-        $this->assertIsString($line);
-        $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-        $path = base64_decode((string) $entry['path']);
-        $this->assertIsString($path);
-        return $path;
+        return array_map(
+            static function (string $line): string {
+                $entry = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+                $path = base64_decode((string) $entry['path']);
+                if (!is_string($path)) {
+                    throw new \RuntimeException('Failed to decode remote index path.');
+                }
+                return $path;
+            },
+            $lines
+        );
     }
 
     private function removeTree(string $path): void

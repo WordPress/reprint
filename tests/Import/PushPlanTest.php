@@ -13,7 +13,7 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/push/class-push
  * `empty` boolean from the indexer, against the local index.
  * The tests pin the resulting local_paths_to_push JSONL, raw NUL-delimited
  * local paths to delete, cursor replay, and every transition among files,
- * symlinks, empty directories, and non-empty directories.
+ * symlinks, and empty directories.
  */
 final class PushPlanTest extends TestCase
 {
@@ -110,7 +110,6 @@ final class PushPlanTest extends TestCase
     {
         $index = $this->writeIndex([
             'index.php' => [100, 5, 'file'],
-            'wp-content' => [100, 0, 'dir', false],
             'wp-content/themes/foo/style.css' => [150, 5, 'file'],
         ]);
 
@@ -135,18 +134,15 @@ final class PushPlanTest extends TestCase
         $this->assertIsInt($firstPath['ctime']);
     }
 
-    public function testPlanCopiesEveryFreshLocalIndexEntryAndExcludesOnlyPushAndDeletePaths(): void
+    public function testPlanRetainsACompactFreshLocalIndexAndExcludesOnlyPushAndDeletePaths(): void
     {
         $this->saveLocalIndex($this->writeIndex([
             'gone.txt' => [1, 1, 'file'],
-            'private' => [1, 0, 'dir', false],
             'private/gone.txt' => [1, 1, 'file'],
         ]));
         $current = $this->writeIndex([
             'empty' => [2, 0, 'dir', true],
-            'full' => [2, 0, 'dir', false],
             'full/child.txt' => [2, 5, 'file'],
-            'private' => [2, 0, 'dir', false],
             'private/current.txt' => [2, 7, 'file'],
             'public.txt' => [2, 6, 'file'],
         ]);
@@ -160,12 +156,12 @@ final class PushPlanTest extends TestCase
 
         $freshLocalIndexEntries = $this->indexEntries($this->planPath('fresh_local_index.jsonl'));
         $this->assertSame(
-            ['empty', 'full', 'full/child.txt', 'private', 'private/current.txt', 'public.txt'],
+            ['empty', 'full/child.txt', 'private/current.txt', 'public.txt'],
             array_keys($freshLocalIndexEntries)
         );
         $this->assertTrue($freshLocalIndexEntries['empty']['empty']);
-        $this->assertFalse($freshLocalIndexEntries['full']['empty']);
-        $this->assertFalse($freshLocalIndexEntries['private']['empty']);
+        $this->assertArrayNotHasKey('full', $freshLocalIndexEntries);
+        $this->assertArrayNotHasKey('private', $freshLocalIndexEntries);
         $this->assertArrayNotHasKey('empty', $freshLocalIndexEntries['public.txt']);
     }
 
@@ -223,25 +219,16 @@ final class PushPlanTest extends TestCase
                 'file' => [['value'], []],
                 'symlink' => [['value'], []],
                 'empty_directory' => [['value'], ['value']],
-                'non_empty_directory' => [['value/child.txt'], ['value']],
             ],
             'symlink' => [
                 'file' => [['value'], []],
                 'symlink' => [['value'], []],
                 'empty_directory' => [['value'], ['value']],
-                'non_empty_directory' => [['value/child.txt'], ['value']],
             ],
             'empty_directory' => [
                 'file' => [['value'], ['value']],
                 'symlink' => [['value'], ['value']],
                 'empty_directory' => [[], []],
-                'non_empty_directory' => [['value/child.txt'], []],
-            ],
-            'non_empty_directory' => [
-                'file' => [['value'], ['value']],
-                'symlink' => [['value'], ['value']],
-                'empty_directory' => [['value'], ['value']],
-                'non_empty_directory' => [['value/child.txt'], []],
             ],
         ];
 
@@ -265,9 +252,7 @@ final class PushPlanTest extends TestCase
     public function testDeletedSubtreeEmitsOnlyItsRootAsALocalPathToDelete(): void
     {
         $this->saveLocalIndex($this->writeIndex([
-            'gone' => [1, 0, 'dir', false],
             'gone/child.txt' => [1, 1, 'file'],
-            'gone/nested' => [1, 0, 'dir', false],
             'gone/nested/leaf.txt' => [1, 1, 'file'],
             'stays.txt' => [1, 1, 'file'],
         ]));
@@ -284,7 +269,6 @@ final class PushPlanTest extends TestCase
     public function testDeletedDirectoryStackAppendsWithoutGrowingTheCursor(): void
     {
         $this->saveLocalIndex($this->writeIndex([
-            'a' => [1, 0, 'dir', false],
             'a/child.txt' => [1, 1, 'file'],
             'b.txt' => [1, 1, 'file'],
         ]));
@@ -297,7 +281,6 @@ final class PushPlanTest extends TestCase
         $first_cursor = $this->planCursor();
         $this->assertSame(0, $first_cursor['deleted_directory_stack_top_byte_offset']);
 
-        $this->assertTrue($this->nextPlanStep($plan));
         $this->assertFalse($this->nextPlanStep($plan));
         $complete_cursor = $this->planCursor();
         $this->assertSame(['phase' => 'complete'], $complete_cursor);
@@ -310,7 +293,6 @@ final class PushPlanTest extends TestCase
     public function testSeenDeletedDirectorySurvivesAnInterleavedSiblingCursor(): void
     {
         $this->saveLocalIndex($this->writeIndex([
-            'a' => [1, 0, 'dir', false],
             'a/child.txt' => [1, 1, 'file'],
         ]));
         $entries = [];
@@ -334,7 +316,6 @@ final class PushPlanTest extends TestCase
     public function testReplacementRootSurvivesLexicallyInterleavedSiblingPaths(): void
     {
         $this->saveLocalIndex($this->writeIndex([
-            'a' => [1, 0, 'dir', false],
             'a/child.txt' => [1, 1, 'file'],
         ]));
         $current = $this->writeIndex([
@@ -539,6 +520,7 @@ final class PushPlanTest extends TestCase
             'byte_offset_in_local_paths_to_push',
             'byte_offset_in_local_paths_to_delete',
             'deleted_directory_stack_top_byte_offset',
+            'previous_fresh_local_index_entry_path',
         ], array_keys($cursor['position']));
         $this->assertSame(
             filesize($this->planPath('local_paths_to_push.jsonl')),
@@ -871,10 +853,7 @@ final class PushPlanTest extends TestCase
         if ($logicalType === 'empty_directory') {
             return $this->writeIndex(['value' => [$version, 0, 'dir', true]]);
         }
-        return $this->writeIndex([
-            'value' => [$version, 0, 'dir', false],
-            'value/child.txt' => [$version, $version, 'file'],
-        ]);
+        throw new InvalidArgumentException("Unknown logical index type: {$logicalType}");
     }
 
     /** @return array<string,array{0:int,1:int,2:string}> */
