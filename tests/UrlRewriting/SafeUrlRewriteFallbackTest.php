@@ -1,6 +1,7 @@
 <?php
 
 use PHPUnit\Framework\TestCase;
+use WordPress\DataLiberation\BlockMarkup\BlockMarkupProcessor;
 
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/load.php';
@@ -326,6 +327,55 @@ class SafeUrlRewriteFallbackTest extends TestCase
         $this->assertSame(
             $expected,
             $this->rewriteSqlValue($input, 'wp_posts', 'post_content')
+        );
+    }
+
+    public function testCompleteSerializedPhpInBlockAttributeIsRewrittenStructurally(): void
+    {
+        $serialized = serialize([
+            'url' => self::SOURCE_URL . '/image.png',
+        ]);
+        $input = '<!-- wp:example ' . json_encode(['payload' => $serialized]) . ' /-->';
+
+        $result = $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
+        $processor = new BlockMarkupProcessor($result);
+
+        $this->assertTrue($processor->next_block_delimiter());
+        $this->assertSame(
+            ['url' => self::TARGET_URL . '/image.png'],
+            unserialize($processor->get_block_attribute('payload'))
+        );
+    }
+
+    public function testCompleteSerializedPhpInNestedBlockAttributeIsRewrittenStructurally(): void
+    {
+        $serialized = serialize([
+            'url' => self::SOURCE_URL . '/image.png',
+        ]);
+        $input = '<!-- wp:example '
+            . json_encode(['settings' => ['payload' => $serialized]])
+            . ' /-->';
+
+        $result = $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
+        $processor = new BlockMarkupProcessor($result);
+
+        $this->assertTrue($processor->next_block_delimiter());
+        $settings = $processor->get_block_attribute('settings');
+        $this->assertIsArray($settings);
+        $this->assertSame(
+            ['url' => self::TARGET_URL . '/image.png'],
+            unserialize($settings['payload'])
+        );
+    }
+
+    public function testSerializedPhpMarkerInsideBlockAttributeProseRemainsUnchanged(): void
+    {
+        $payload = 'Example: a:1:{s:3:"url";s:32:"https://source.example/image.png";}';
+        $input = '<!-- wp:example ' . json_encode(['payload' => $payload]) . ' /-->';
+
+        $this->assertSame(
+            $input,
+            $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
         );
     }
 }

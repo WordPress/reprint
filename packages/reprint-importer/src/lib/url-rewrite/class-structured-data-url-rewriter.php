@@ -220,16 +220,8 @@ class StructuredDataUrlRewriter
         // validation once entered; this gate only skips first-byte shapes that
         // cannot expose serialized string values for rewriting.
         if ($this->could_be_php_serialization_with_strings($value)) {
-            $p = new PhpSerializationProcessor($value);
-            if (!$p->is_malformed()) {
-                while ($p->next_value()) {
-                    $original = $p->get_value();
-                    $rewritten = $this->rewrite($original, $content_type);
-                    if ($rewritten !== $original) {
-                        $p->set_value($rewritten);
-                    }
-                }
-                $rewritten_value = $p->get_updated_serialization();
+            $rewritten_value = $this->rewrite_php_serialization($value, $content_type);
+            if ($rewritten_value !== null) {
                 $this->set_cached_structured_rewrite($structured_cache_key, $content_type, $value, $rewritten_value);
                 return $rewritten_value;
             }
@@ -303,6 +295,29 @@ class StructuredDataUrlRewriter
             || $first_byte === 's'
             || $first_byte === 'O'
             || $first_byte === 'C';
+    }
+
+    /**
+     * Rewrite a complete PHP serialization without evaluating it.
+     *
+     * @return string|null Rewritten serialization, or null when malformed.
+     */
+    private function rewrite_php_serialization(string $value, string $content_type): ?string
+    {
+        $processor = new PhpSerializationProcessor($value);
+        if ($processor->is_malformed()) {
+            return null;
+        }
+
+        while ($processor->next_value()) {
+            $original = $processor->get_value();
+            $rewritten = $this->rewrite($original, $content_type);
+            if ($rewritten !== $original) {
+                $processor->set_value($rewritten);
+            }
+        }
+
+        return $processor->get_updated_serialization();
     }
 
     /**
@@ -502,6 +517,34 @@ class StructuredDataUrlRewriter
 
         switch ( $content_type ) {
             case self::BLOCK_MARKUP:
+                $block_processor = new BlockMarkupUrlProcessor($content, $base_url);
+                while ($block_processor->next_token()) {
+                    if ($block_processor->get_token_type() !== '#block-comment') {
+                        continue;
+                    }
+
+                    while ($block_processor->next_block_attribute()) {
+                        $attribute_value = $block_processor->get_block_attribute_value();
+                        if (
+                            !is_string($attribute_value)
+                            || !$this->could_be_php_serialization_with_strings($attribute_value)
+                        ) {
+                            continue;
+                        }
+
+                        $rewritten_attribute_value = $this->rewrite_php_serialization(
+                            $attribute_value,
+                            self::BLOCK_MARKUP
+                        );
+                        if (
+                            $rewritten_attribute_value !== null
+                            && $rewritten_attribute_value !== $attribute_value
+                        ) {
+                            $block_processor->set_block_attribute_value($rewritten_attribute_value);
+                        }
+                    }
+                }
+                $content = $block_processor->get_updated_html();
                 $content_length = strlen($content);
                 $cursor = 0;
                 $rewritten_content = '';
