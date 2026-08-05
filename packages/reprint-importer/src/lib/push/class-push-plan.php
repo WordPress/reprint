@@ -1,5 +1,9 @@
 <?php
 
+use function WordPress\Filesystem\wp_join_unix_paths;
+use function WordPress\Filesystem\wp_unix_path_segments;
+use function WordPress\Reprint\Exporter\path_is_within_root;
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
 
 /**
@@ -581,7 +585,10 @@ class PushPlan
                 if ($this->deleted_directory_stack_entry !== null) {
                     $descendant_prefix = $this->deleted_directory_stack_entry["path"] . "/";
                     if (
-                        strpos($local_index_entry["path"], $descendant_prefix) !== 0
+                        !path_is_within_root(
+                            $local_index_entry["path"],
+                            $this->deleted_directory_stack_entry["path"]
+                        )
                         && strcmp($local_index_entry["path"], $descendant_prefix) > 0
                     ) {
                         $deleted_directory_stack_top_byte_offset = $this->deleted_directory_stack_entry["previous_byte_offset"];
@@ -595,10 +602,11 @@ class PushPlan
             if ($path_comparison < 0) {
                 // New files, symlinks, and empty directories need to be pushed.
                 $fresh_local_index_entry_replaces_local_subtree = $local_index_entry !== null
-                    && strpos(
+                    && $local_index_entry["path"] !== $fresh_local_index_entry["path"]
+                    && path_is_within_root(
                         $local_index_entry["path"],
-                        $fresh_local_index_entry["path"] . "/"
-                    ) === 0;
+                        $fresh_local_index_entry["path"]
+                    );
                 if (
                     $fresh_local_index_entry_replaces_local_subtree
                     && !$this->path_conflicts_with_excluded_paths($fresh_local_index_entry["path"])
@@ -844,13 +852,15 @@ class PushPlan
      */
     private function local_path_to_delete(string $local_relative_path): string
     {
-        $components = explode("/", $local_relative_path);
-        $candidate_components = [];
-        for ($index = 0, $component_count = count($components) - 1; $index < $component_count; ++$index) {
-            $candidate_components[] = $components[$index];
-            $candidate_path = implode("/", $candidate_components);
-            if (!$this->fresh_index_contains_path_or_descendant($candidate_path)) {
-                return $candidate_path;
+        $local_relative_path_components = wp_unix_path_segments($local_relative_path);
+        $candidate_local_relative_path_components = [];
+        for ($index = 0, $component_count = count($local_relative_path_components) - 1; $index < $component_count; ++$index) {
+            $candidate_local_relative_path_components[] = $local_relative_path_components[$index];
+            $candidate_local_relative_path = wp_join_unix_paths(
+                ...$candidate_local_relative_path_components
+            );
+            if (!$this->fresh_index_contains_path_or_descendant($candidate_local_relative_path)) {
+                return $candidate_local_relative_path;
             }
         }
         return $local_relative_path;
@@ -861,7 +871,6 @@ class PushPlan
      */
     private function fresh_index_contains_path_or_descendant(string $local_relative_path): bool
     {
-        $local_relative_path_prefix = $local_relative_path . "/";
         foreach ([
             $this->previous_fresh_local_index_entry_path,
             $this->fresh_local_index_entry === null
@@ -869,10 +878,10 @@ class PushPlan
                 : $this->fresh_local_index_entry["path"],
         ] as $fresh_local_index_entry_path) {
             if (
-                $fresh_local_index_entry_path === $local_relative_path
-                || (
-                    is_string($fresh_local_index_entry_path)
-                    && strpos($fresh_local_index_entry_path, $local_relative_path_prefix) === 0
+                is_string($fresh_local_index_entry_path)
+                && path_is_within_root(
+                    $fresh_local_index_entry_path,
+                    $local_relative_path
                 )
             ) {
                 return true;
@@ -1031,7 +1040,9 @@ class PushPlan
      */
     private function deleted_directory_stack_covers_path(string $path, ?array $entry): bool
     {
-        return $entry !== null && strpos($path, $entry["path"] . "/") === 0;
+        return $entry !== null
+            && $path !== $entry["path"]
+            && path_is_within_root($path, $entry["path"]);
     }
 
     /**
@@ -1049,9 +1060,8 @@ class PushPlan
     {
         foreach ($this->excluded_paths as $excluded_path) {
             if (
-                $path === $excluded_path
-                || strpos($path, $excluded_path . "/") === 0
-                || strpos($excluded_path, $path . "/") === 0
+                path_is_within_root($path, $excluded_path)
+                || path_is_within_root($excluded_path, $path)
             ) {
                 return true;
             }
