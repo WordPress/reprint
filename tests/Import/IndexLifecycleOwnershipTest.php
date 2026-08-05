@@ -45,7 +45,7 @@ final class IndexLifecycleOwnershipTest extends TestCase
     ): void {
         mkdir($this->pullStateDirectory(), 0700, true);
         file_put_contents(
-            $this->pullStateDirectory() . '/remote-index.wal',
+            $this->pullStateDirectory() . '/index.wal',
             ''
         );
 

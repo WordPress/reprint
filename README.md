@@ -714,7 +714,7 @@ truncated or rotated, so it provides a complete history of the migration.
 ```
 [2025-01-15 10:30:01] VOLATILE | path=/srv/htdocs/wp-content/debug.log | count=1
 [2025-01-15 10:30:05] VOLATILE CLEARED | path=/srv/htdocs/wp-content/debug.log
-[2025-01-15 10:31:12] FILE TRUNCATE | /tmp/reprint-state/remotes/0123456789abcdef0123456789abcdef/pull/remote-index.wal | remote index WAL batch applied
+[2025-01-15 10:31:12] FILE TRUNCATE | /tmp/reprint-state/remotes/0123456789abcdef0123456789abcdef/pull/index.wal | pull index WAL batch applied
 ```
 
 Pass `--verbose` to also print audit log entries to the console as they happen.
