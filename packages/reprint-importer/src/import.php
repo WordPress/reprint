@@ -6916,7 +6916,7 @@ class ImportClient
         }
         $pull_index_wal_json_line = json_encode(
             [
-                "op" => "F",
+                "op" => "+",
                 "path" => base64_encode($remote_absolute_path),
                 "ctime" => $remote_path_ctime,
                 "size" => $remote_path_size,
@@ -6943,7 +6943,7 @@ class ImportClient
         }
         $pull_index_wal_json_line = json_encode(
             [
-                "op" => "D",
+                "op" => "-",
                 "path" => base64_encode($remote_absolute_path),
             ],
             JSON_UNESCAPED_SLASHES,
@@ -7135,7 +7135,7 @@ class ImportClient
     }
 
     /**
-     * Read one raw pull index WAL record (F/D).
+     * Read one raw pull index WAL record (`+` upsert or `-` deletion).
      */
     private function read_raw_pull_index_wal_record($pull_index_wal_file_handle): ?array
     {
@@ -7163,7 +7163,7 @@ class ImportClient
             if ($remote_absolute_path === false || $remote_absolute_path === "") {
                 throw new RuntimeException("Invalid pull index WAL path (base64 decode failed)");
             }
-            if ($pull_index_wal_operation === "D") {
+            if ($pull_index_wal_operation === "-") {
                 return [
                     "path" => $remote_absolute_path,
                     "delete" => true,
@@ -7172,7 +7172,7 @@ class ImportClient
                     "type" => null,
                 ];
             }
-            if ($pull_index_wal_operation === "F") {
+            if ($pull_index_wal_operation === "+") {
                 return [
                     "path" => $remote_absolute_path,
                     "delete" => false,

@@ -63,6 +63,41 @@ final class PullIndexWalTest extends TestCase
         $this->assertFileDoesNotExist($pullIndexWalPath);
     }
 
+    public function testRecordedMutationsUsePlusAndMinusOperations(): void
+    {
+        $client = $this->client();
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $reflection->getMethod('record_pull_index_wal_upsert')->invoke(
+            $client,
+            '/site/file.txt',
+            42,
+            5,
+            'file'
+        );
+        $reflection->getMethod('record_pull_index_wal_deletion')->invoke(
+            $client,
+            '/site/file.txt'
+        );
+
+        $expectedPullIndexWal =
+            '{"op":"+","path":"'
+            . base64_encode('/site/file.txt')
+            . '","ctime":42,"size":5,"type":"file"}'
+            . "\n"
+            . '{"op":"-","path":"'
+            . base64_encode('/site/file.txt')
+            . '"}'
+            . "\n";
+        $this->assertSame(
+            $expectedPullIndexWal,
+            file_get_contents($this->pullStateDirectory . '/index.wal')
+        );
+
+        $reflection->getMethod('apply_pull_index_wal')->invoke($client);
+        $this->assertSame([], $this->remoteIndexEntryPaths());
+        $reflection->getMethod('remove_pull_index_wal')->invoke($client);
+    }
+
     public function testUpsertingFileDoesNotCreateParentDirectoryEntries(): void
     {
         $client = $this->client();
@@ -115,7 +150,7 @@ final class PullIndexWalTest extends TestCase
     public function testReplayDiscardsAnUnterminatedFinalRecord(): void
     {
         $completeRecord = json_encode([
-            'op' => 'F',
+            'op' => '+',
             'path' => base64_encode('/site/complete.txt'),
             'ctime' => 42,
             'size' => 5,
@@ -123,7 +158,7 @@ final class PullIndexWalTest extends TestCase
         ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
         file_put_contents(
             $this->pullStateDirectory . '/index.wal',
-            $completeRecord . '{"op":"F","path":"'
+            $completeRecord . '{"op":"+","path":"'
         );
 
         $client = $this->client();
@@ -147,7 +182,7 @@ final class PullIndexWalTest extends TestCase
         file_put_contents(
             $this->pullStateDirectory . '/index.wal',
             json_encode([
-                'op' => 'F',
+                'op' => '+',
                 'path' => base64_encode('/site/aborted.txt'),
                 'ctime' => 42,
                 'size' => 5,
