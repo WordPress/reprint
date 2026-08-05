@@ -42,7 +42,7 @@ final class PullIndexWalTest extends TestCase
     {
         $client = $this->client();
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('record_pull_index_wal_upsert')->invoke(
+        $reflection->getMethod('upsert_remote_index_entry')->invoke(
             $client,
             '/site/file.txt',
             42,
@@ -67,24 +67,24 @@ final class PullIndexWalTest extends TestCase
     {
         $client = $this->client();
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('record_pull_index_wal_upsert')->invoke(
+        $reflection->getMethod('upsert_remote_index_entry')->invoke(
             $client,
             '/site/file.txt',
             42,
             5,
             'file'
         );
-        $reflection->getMethod('record_pull_index_wal_deletion')->invoke(
+        $reflection->getMethod('delete_remote_index_entry')->invoke(
             $client,
             '/site/file.txt'
         );
 
         $expectedPullIndexWal =
-            '{"op":"+","path":"'
+            '{"op":"+","remote_absolute_path_b64":"'
             . base64_encode('/site/file.txt')
-            . '","ctime":42,"size":5,"type":"file"}'
+            . '","remote_path_ctime":42,"remote_path_size":5,"remote_path_type":"file"}'
             . "\n"
-            . '{"op":"-","path":"'
+            . '{"op":"-","remote_absolute_path_b64":"'
             . base64_encode('/site/file.txt')
             . '"}'
             . "\n";
@@ -151,14 +151,14 @@ final class PullIndexWalTest extends TestCase
     {
         $completeRecord = json_encode([
             'op' => '+',
-            'path' => base64_encode('/site/complete.txt'),
-            'ctime' => 42,
-            'size' => 5,
-            'type' => 'file',
+            'remote_absolute_path_b64' => base64_encode('/site/complete.txt'),
+            'remote_path_ctime' => 42,
+            'remote_path_size' => 5,
+            'remote_path_type' => 'file',
         ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
         file_put_contents(
             $this->pullStateDirectory . '/index.wal',
-            $completeRecord . '{"op":"+","path":"'
+            $completeRecord . '{"op":"+","remote_absolute_path_b64":"'
         );
 
         $client = $this->client();
@@ -183,10 +183,10 @@ final class PullIndexWalTest extends TestCase
             $this->pullStateDirectory . '/index.wal',
             json_encode([
                 'op' => '+',
-                'path' => base64_encode('/site/aborted.txt'),
-                'ctime' => 42,
-                'size' => 5,
-                'type' => 'file',
+                'remote_absolute_path_b64' => base64_encode('/site/aborted.txt'),
+                'remote_path_ctime' => 42,
+                'remote_path_size' => 5,
+                'remote_path_type' => 'file',
             ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
         );
         \write_current_pull_state($this->client(), [

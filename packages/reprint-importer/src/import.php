@@ -484,12 +484,13 @@ class ImportClient
         int $remote_path_size,
         string $remote_path_type
     ): void {
-        $this->record_pull_index_wal_upsert(
-            $remote_absolute_path,
-            $remote_path_ctime,
-            $remote_path_size,
-            $remote_path_type,
-        );
+        $this->write_pull_index_wal_record([
+            "op" => "+",
+            "remote_absolute_path_b64" => base64_encode($remote_absolute_path),
+            "remote_path_ctime" => $remote_path_ctime,
+            "remote_path_size" => $remote_path_size,
+            "remote_path_type" => $remote_path_type,
+        ]);
     }
 
     /**
@@ -497,7 +498,43 @@ class ImportClient
      */
     private function delete_remote_index_entry(string $remote_absolute_path): void
     {
-        $this->record_pull_index_wal_deletion($remote_absolute_path);
+        $this->write_pull_index_wal_record([
+            "op" => "-",
+            "remote_absolute_path_b64" => base64_encode($remote_absolute_path),
+        ]);
+    }
+
+    /**
+     * Appends one complete record to the pull index WAL.
+     *
+     * @param array $pull_index_wal_record {
+     *     One completed remote-index mutation.
+     *
+     *     @type string $op                       `+` upsert or `-` deletion.
+     *     @type string $remote_absolute_path_b64 Base64 remote absolute path.
+     *     @type int    $remote_path_ctime        Remote ctime for `+`.
+     *     @type int    $remote_path_size         Remote size for `+`.
+     *     @type string $remote_path_type         Remote type for `+`.
+     * }
+     */
+    private function write_pull_index_wal_record(
+        array $pull_index_wal_record
+    ): void {
+        if (!$this->pull_index_wal_handle) {
+            $this->open_pull_index_wal();
+        }
+        $pull_index_wal_json_line = json_encode(
+            $pull_index_wal_record,
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+        ) . "\n";
+        if (
+            fwrite($this->pull_index_wal_handle, $pull_index_wal_json_line)
+            !== strlen($pull_index_wal_json_line)
+        ) {
+            throw new RuntimeException(
+                "Failed to write to the pull index WAL (disk full?)."
+            );
+        }
     }
 
     /** Replays a pull index WAL left by an interrupted batch. */
@@ -6902,61 +6939,6 @@ class ImportClient
         }
     }
 
-    /**
-     * Record an upsert in the pull index WAL.
-     */
-    private function record_pull_index_wal_upsert(
-        string $remote_absolute_path,
-        int $remote_path_ctime,
-        int $remote_path_size,
-        string $remote_path_type
-    ): void {
-        if (!$this->pull_index_wal_handle) {
-            $this->open_pull_index_wal();
-        }
-        $pull_index_wal_json_line = json_encode(
-            [
-                "op" => "+",
-                "path" => base64_encode($remote_absolute_path),
-                "ctime" => $remote_path_ctime,
-                "size" => $remote_path_size,
-                "type" => $remote_path_type,
-            ],
-            JSON_UNESCAPED_SLASHES,
-        );
-        if ($pull_index_wal_json_line !== false) {
-            $pull_index_wal_json_line .= "\n";
-            $pull_index_wal_bytes_written = fwrite($this->pull_index_wal_handle, $pull_index_wal_json_line);
-            if ($pull_index_wal_bytes_written !== strlen($pull_index_wal_json_line)) {
-                throw new RuntimeException("Failed to write to the pull index WAL (disk full?).");
-            }
-        }
-    }
-
-    /**
-     * Record a deletion in the pull index WAL.
-     */
-    private function record_pull_index_wal_deletion(string $remote_absolute_path): void
-    {
-        if (!$this->pull_index_wal_handle) {
-            $this->open_pull_index_wal();
-        }
-        $pull_index_wal_json_line = json_encode(
-            [
-                "op" => "-",
-                "path" => base64_encode($remote_absolute_path),
-            ],
-            JSON_UNESCAPED_SLASHES,
-        );
-        if ($pull_index_wal_json_line !== false) {
-            $pull_index_wal_json_line .= "\n";
-            $pull_index_wal_bytes_written = fwrite($this->pull_index_wal_handle, $pull_index_wal_json_line);
-            if ($pull_index_wal_bytes_written !== strlen($pull_index_wal_json_line)) {
-                throw new RuntimeException("Failed to write to the pull index WAL (disk full?).");
-            }
-        }
-    }
-
     /** Applies the current pull index WAL to the remote index. */
     private function apply_pull_index_wal(): void
     {
@@ -7155,7 +7137,8 @@ class ImportClient
                 throw new RuntimeException("Invalid pull index WAL line format");
             }
             $pull_index_wal_operation = $pull_index_wal_record["op"] ?? null;
-            $remote_absolute_path_base64 = $pull_index_wal_record["path"] ?? null;
+            $remote_absolute_path_base64 =
+                $pull_index_wal_record["remote_absolute_path_b64"] ?? null;
             if (!is_string($remote_absolute_path_base64) || $remote_absolute_path_base64 === "") {
                 throw new RuntimeException("Invalid pull index WAL path");
             }
@@ -7176,9 +7159,9 @@ class ImportClient
                 return [
                     "path" => $remote_absolute_path,
                     "delete" => false,
-                    "ctime" => (int) ($pull_index_wal_record["ctime"] ?? 0),
-                    "size" => (int) ($pull_index_wal_record["size"] ?? 0),
-                    "type" => (string) ($pull_index_wal_record["type"] ?? "file"),
+                    "ctime" => (int) ($pull_index_wal_record["remote_path_ctime"] ?? 0),
+                    "size" => (int) ($pull_index_wal_record["remote_path_size"] ?? 0),
+                    "type" => (string) ($pull_index_wal_record["remote_path_type"] ?? "file"),
                 ];
             }
         }
