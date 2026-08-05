@@ -493,10 +493,17 @@ class ImportClient
         ]);
     }
 
-    /**
-     * Delete an entry from the remote index.
-     */
-    private function delete_remote_index_entry(string $remote_absolute_path): void
+    /** Records a remote deletion which this pull applied locally. */
+    private function wal_append_successful_deletion(string $remote_absolute_path): void
+    {
+        $this->write_pull_index_wal_record([
+            "op" => "-",
+            "remote_absolute_path_b64" => base64_encode($remote_absolute_path),
+        ]);
+    }
+
+    /** Invalidates remote state which this pull did not account for locally. */
+    private function wal_append_remote_index_invalidation(string $remote_absolute_path): void
     {
         $this->write_pull_index_wal_record([
             "op" => "-",
@@ -6312,15 +6319,24 @@ class ImportClient
                 // The remote index is a union across files-pull path selections.
                 // Keep entries outside this run's selection.
                 if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
-                    $remote_absolute_path = $remote_index_entry["path"];
-                    $this->apply_remote_deletion_locally(
-                        $this->derive_remote_deletion_root_from_sparse_index(
-                            $remote_absolute_path,
-                            $last_processed_next_remote_index_entry_path,
-                            $next_remote_index_entry["path"],
-                        )
+                    $missing_remote_index_entry_path = $remote_index_entry["path"];
+                    $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
+                        $missing_remote_index_entry_path,
+                        $last_processed_next_remote_index_entry_path,
+                        $next_remote_index_entry["path"],
                     );
-                    $this->delete_remote_index_entry($remote_absolute_path);
+                    $local_absolute_path = $this->remove_remote_path_locally(
+                        $remote_deletion_root
+                    );
+                    if ($local_absolute_path === null) {
+                        $this->wal_append_remote_index_invalidation(
+                            $missing_remote_index_entry_path
+                        );
+                    } else {
+                        $this->wal_append_successful_deletion(
+                            $missing_remote_index_entry_path
+                        );
+                    }
                 }
                 $last_consumed_remote_index_entry_path =
                     $remote_index_entry["path"];
@@ -6395,15 +6411,24 @@ class ImportClient
 
         while ($remote_index_entry !== null) {
             if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
-                $remote_absolute_path = $remote_index_entry["path"];
-                $this->apply_remote_deletion_locally(
-                    $this->derive_remote_deletion_root_from_sparse_index(
-                        $remote_absolute_path,
-                        $last_processed_next_remote_index_entry_path,
-                        null,
-                    )
+                $missing_remote_index_entry_path = $remote_index_entry["path"];
+                $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
+                    $missing_remote_index_entry_path,
+                    $last_processed_next_remote_index_entry_path,
+                    null,
                 );
-                $this->delete_remote_index_entry($remote_absolute_path);
+                $local_absolute_path = $this->remove_remote_path_locally(
+                    $remote_deletion_root
+                );
+                if ($local_absolute_path === null) {
+                    $this->wal_append_remote_index_invalidation(
+                        $missing_remote_index_entry_path
+                    );
+                } else {
+                    $this->wal_append_successful_deletion(
+                        $missing_remote_index_entry_path
+                    );
+                }
             }
             $last_consumed_remote_index_entry_path =
                 $remote_index_entry["path"];
@@ -6739,35 +6764,39 @@ class ImportClient
     }
 
     /**
-     * Remove a local filesystem entry whose remote index entry is absent from the next
-     * remote index.
+     * Removes a remote deletion root from the mapped local filesystem.
+     *
+     * @return string|null The mapped local absolute path when it is absent
+     *                     after this call, or null when it could not be removed.
      */
-    private function apply_remote_deletion_locally(string $remote_absolute_path): void
-    {
-        if ($remote_absolute_path === "") {
-            return;
+    private function remove_remote_path_locally(
+        string $remote_deletion_root
+    ): ?string {
+        if ($remote_deletion_root === "") {
+            return null;
         }
         try {
             $local_absolute_path = $this->map_remote_absolute_path_to_local_absolute_path(
-                $remote_absolute_path
+                $remote_deletion_root
             );
         } catch (RuntimeException $e) {
             $this->audit_log(
-                "Security: refusing to delete invalid path '{$remote_absolute_path}': " . $e->getMessage(),
+                "Security: refusing to delete invalid path '{$remote_deletion_root}': " . $e->getMessage(),
                 true,
             );
-            return;
+            return null;
         }
         if (!file_exists($local_absolute_path) && !is_link($local_absolute_path)) {
-            return;
+            return $local_absolute_path;
         }
 
         if ($this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)) {
-            $this->audit_log("Deleted: {$remote_absolute_path}", false);
-            return;
+            $this->audit_log("Deleted: {$remote_deletion_root}", false);
+            return $local_absolute_path;
         }
 
-        $this->audit_log("Failed to delete: {$remote_absolute_path}", true);
+        $this->audit_log("Failed to delete: {$remote_deletion_root}", true);
+        return null;
     }
 
     /**
@@ -9466,7 +9495,7 @@ class ImportClient
             if (file_exists($local_absolute_path)) {
                 @unlink($local_absolute_path);
             }
-            $this->delete_remote_index_entry($path);
+            $this->wal_append_remote_index_invalidation($path);
 
             if ($error_type === "file_changed") {
                 $this->record_volatile_file($path);

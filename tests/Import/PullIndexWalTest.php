@@ -74,9 +74,13 @@ final class PullIndexWalTest extends TestCase
             5,
             'file'
         );
-        $reflection->getMethod('delete_remote_index_entry')->invoke(
+        $reflection->getMethod('wal_append_successful_deletion')->invoke(
             $client,
             '/site/file.txt'
+        );
+        $reflection->getMethod('wal_append_remote_index_invalidation')->invoke(
+            $client,
+            '/site/unreadable.txt'
         );
 
         $expectedPullIndexWal =
@@ -86,6 +90,10 @@ final class PullIndexWalTest extends TestCase
             . "\n"
             . '{"op":"-","remote_absolute_path_b64":"'
             . base64_encode('/site/file.txt')
+            . '"}'
+            . "\n"
+            . '{"op":"-","remote_absolute_path_b64":"'
+            . base64_encode('/site/unreadable.txt')
             . '"}'
             . "\n";
         $this->assertSame(
