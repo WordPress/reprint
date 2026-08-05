@@ -6776,7 +6776,7 @@ class ImportClient
     private function remote_absolute_path_to_delete(
         string $remote_absolute_path,
         ?string $previous_next_remote_index_entry_path,
-        ?string $next_remote_index_entry_path,
+        ?string $next_remote_index_entry_path
     ): string {
         $remote_path_components = explode("/", trim($remote_absolute_path, "/"));
         $remote_directory_components = [];
