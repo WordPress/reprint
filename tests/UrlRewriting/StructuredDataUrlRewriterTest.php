@@ -454,12 +454,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($input, $block_result);
     }
 
-    // --- Content type hint: null (default) uses plain text URL scanning ---
+    // --- Content type hint: null (default) uses byte-literal source-base rewriting ---
 
-    public function testDefaultHintUsesPlainTextUrlScanning(): void
+    public function testDefaultHintUsesLiteralSourceBaseRewriting(): void
     {
         $rewriter = $this->createRewriter();
-        // A plain URL string is handled by URLInTextProcessor.
+        // A plain URL string changes only at the configured source base.
         $input = 'Visit https://old-site.com/about for more.';
         $result = $rewriter->rewrite($input);
         $this->assertStringContainsString('https://new-site.com/about', $result);

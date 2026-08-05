@@ -193,11 +193,11 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
-    public function testUnknownColumnUsesPlainTextUrlScanning(): void
+    public function testUnknownColumnUsesLiteralSourceBaseRewriting(): void
     {
         $rewriter = $this->createRewriter();
-        // A plain URL in a non-block-markup column should use the plain-text
-        // URL scanner.
+        // A plain URL in a non-block-markup column uses literal source-base
+        // rewriting.
         $value = 'https://old-site.com/api/endpoint';
         $encoded = base64_encode($value);
         $sql = "INSERT INTO `wp_options` (`option_name`, `option_value`) VALUES(FROM_BASE64('" . base64_encode('siteurl') . "'), FROM_BASE64('{$encoded}'));";
@@ -472,8 +472,8 @@ class SqlStatementRewriterTest extends TestCase
         $result = $rewriter->rewrite($sql);
 
         // post_content in this unknown table should NOT get the block_markup
-        // hint — it falls back to auto-detect and uses the plain-text URL
-        // scanner for leaf text. This confirms the URL is still rewritten
+        // hint — it falls back to auto-detect and uses literal source-base
+        // rewriting for leaf text. This confirms the URL is still rewritten
         // without matching the table as "posts".
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
@@ -575,7 +575,7 @@ class SqlStatementRewriterTest extends TestCase
 
         // spoofed_posts.post_content → auto-detect (not block_markup): the
         // column name matches but the table doesn't, so it falls through to
-        // plain-text URL scanning.
+        // literal source-base rewriting.
         $sql_spoof = "INSERT INTO `spoofed_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
         $result_spoof = $rewriter->rewrite($sql_spoof);
         $values_spoof = $this->collectValues($result_spoof);

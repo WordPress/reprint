@@ -1,7 +1,6 @@
 <?php
 
 use WordPress\DataLiberation\BlockMarkup\BlockMarkupUrlProcessor;
-use WordPress\DataLiberation\URL\URLInTextProcessor;
 use WordPress\DataLiberation\URL\WPURL;
 
 use function WordPress\DataLiberation\URL\is_child_url_of;
@@ -19,8 +18,8 @@ use function WordPress\DataLiberation\URL\is_child_url_of;
  * 2. JSON → construct JsonStringIterator, if not malformed, iterate string
  *    values and recurse on each
  * 3. Base64 → decode, recurse on decoded content, re-encode if changed
- * 4. Leaf text → BlockMarkupUrlProcessor (block_markup hint) or
- *    URLInTextProcessor (default)
+ * 4. Leaf text → BlockMarkupUrlProcessor (block_markup hint) or a byte-literal
+ *    source-base replacement (default)
  *
  * HTML is never auto-detected — the caller must explicitly pass
  * content_type='block_markup' for values known to contain HTML/block markup.
@@ -37,6 +36,17 @@ class StructuredDataUrlRewriter
 
     /** @var string[] Source domains extracted from url_mapping keys, for quick-reject checks. */
     private array $source_domains;
+
+    /**
+     * URL mappings eligible for byte-literal replacement in ambiguous text.
+     *
+     * A mapping is eligible only when the target is an origin. Source paths
+     * are allowed because the source bytes are matched exactly and the
+     * unmatched URL suffix remains untouched.
+     *
+     * @var array<int, array{source_url: string, replacement: string}>
+     */
+    private array $freeform_base_url_mappings;
 
     /**
      * Pre-parsed url_mapping: each entry is
@@ -98,12 +108,53 @@ class StructuredDataUrlRewriter
         // (scheme/host/path tokenisation, punycode, etc.) and used to be
         // repeated on every leaf we rewrote.
         $this->parsed_mapping = [];
+        $this->freeform_base_url_mappings = [];
         foreach ($url_mapping as $from_url_string => $to_url_string) {
             $this->parsed_mapping[] = [
                 'from_url' => WPURL::parse($from_url_string),
                 'to_url'   => WPURL::parse($to_url_string),
             ];
+
+            $source_parts = parse_url($from_url_string);
+            $target_parts = parse_url($to_url_string);
+            $freeform_mapping_is_valid = is_array($source_parts) && is_array($target_parts);
+            if ($freeform_mapping_is_valid) {
+                foreach ([$source_parts, $target_parts] as $url_parts) {
+                    $scheme = strtolower( (string) ( $url_parts['scheme'] ?? '' ) );
+                    if (
+                        ( $scheme !== 'http' && $scheme !== 'https' )
+                        || empty($url_parts['host'])
+                        || isset($url_parts['user'])
+                        || isset($url_parts['pass'])
+                        || isset($url_parts['query'])
+                        || isset($url_parts['fragment'])
+                    ) {
+                        $freeform_mapping_is_valid = false;
+                        break;
+                    }
+                }
+            }
+            if ($freeform_mapping_is_valid) {
+                $target_path = $target_parts['path'] ?? '';
+                $freeform_mapping_is_valid = $target_path === '' || $target_path === '/';
+            }
+
+            if ($freeform_mapping_is_valid) {
+                $target_origin = rtrim($to_url_string, '/');
+                $this->freeform_base_url_mappings[] = [
+                    'source_url' => $from_url_string,
+                    'replacement' => substr($from_url_string, -1) === '/'
+                        ? $target_origin . '/'
+                        : $target_origin,
+                ];
+            }
         }
+        usort(
+            $this->freeform_base_url_mappings,
+            static function (array $first_mapping, array $second_mapping): int {
+                return strlen($second_mapping['source_url']) <=> strlen($first_mapping['source_url']);
+            }
+        );
         $this->mapping_cache_key = sha1(json_encode($url_mapping, JSON_UNESCAPED_SLASHES));
 
         // Default base_url: first from-url in the mapping. Preserves the
@@ -484,47 +535,78 @@ class StructuredDataUrlRewriter
                 return $p->get_updated_html();
 
             case self::PLAIN_TEXT:
-                $p = new URLInTextProcessor( $content, $base_url );
-                while ( $p->next_url() ) {
-                    $raw_url = $p->get_raw_url();
-                    $cache_key = $this->mapping_cache_key . "\0" . self::PLAIN_TEXT . "\0" . $raw_url;
-                    $cached = $this->get_cached_rewrite_result($cache_key);
-                    if ($cached !== null) {
-                        if ($cached !== false) {
-                            $p->set_raw_url($cached['raw_url']);
-                        }
-                        continue;
-                    }
-
-                    $parsed_url = $p->get_parsed_url();
-                    $converted = false;
-                    foreach ( $parsed_mapping as $mapping ) {
-                        if ( is_child_url_of( $parsed_url, $mapping['from_url'] ) ) {
-                            $converted = WPURL::replace_base_url(
-                                $parsed_url,
-                                array(
-                                    'old_base_url' => $base_url,
-                                    'new_base_url' => $mapping['to_url'],
-                                    'raw_url'      => $p->get_raw_url(),
-                                    'is_relative'  => false,
-                                )
-                            );
-                            break;
-                        }
-                    }
-
-                    $cache_value = false;
-                    if ($converted !== false) {
-                        $cache_value = [
-                            'raw_url'    => (string) $converted,
-                            'parsed_url' => $converted->new_url,
-                        ];
-                        $p->set_raw_url($cache_value['raw_url']);
-                    }
-                    $this->set_cached_rewrite_result($cache_key, $cache_value);
+                if ($this->freeform_base_url_mappings === []) {
+                    return $content;
                 }
 
-                return $p->get_updated_text();
+                // A valid top-level serialization is handled before this
+                // point. An array marker here belongs to an unknown
+                // surrounding syntax, where replacement could invalidate a
+                // byte-length declaration.
+                if (preg_match('/a:\d+:\{/', $content) === 1) {
+                    return $content;
+                }
+
+                $content_length = strlen($content);
+                $cursor = 0;
+                $output = '';
+
+                while ($cursor < $content_length) {
+                    $next_position = null;
+                    $next_mapping = null;
+
+                    foreach ($this->freeform_base_url_mappings as $mapping) {
+                        $search_offset = $cursor;
+                        while (true) {
+                            $position = strpos($content, $mapping['source_url'], $search_offset);
+                            if ($position === false) {
+                                break;
+                            }
+
+                            $has_start_boundary = $position === 0;
+                            if (!$has_start_boundary) {
+                                $previous_byte = $content[$position - 1];
+                                $has_start_boundary = ctype_space($previous_byte)
+                                    || strpos('"\'([{<>', $previous_byte) !== false
+                                    || substr($content, max(0, $position - 6), 6) === '&quot;'
+                                    || substr($content, max(0, $position - 5), 5) === '&#34;'
+                                    || strtolower(substr($content, max(0, $position - 6), 6)) === '&#x22;';
+                            }
+
+                            $source_url = $mapping['source_url'];
+                            $end_position = $position + strlen($source_url);
+                            $has_end_boundary = substr($source_url, -1) === '/'
+                                || $end_position === $content_length;
+                            if (!$has_end_boundary) {
+                                $next_byte = $content[$end_position];
+                                $has_end_boundary = ctype_space($next_byte)
+                                    || strpos('/?#\\"\'()[]{}<>,;', $next_byte) !== false;
+                            }
+
+                            if ($has_start_boundary && $has_end_boundary) {
+                                if ($next_position === null || $position < $next_position) {
+                                    $next_position = $position;
+                                    $next_mapping = $mapping;
+                                }
+                                break;
+                            }
+
+                            $search_offset = $position + 1;
+                        }
+                    }
+
+                    if ($next_position === null || $next_mapping === null) {
+                        break;
+                    }
+
+                    $output .= substr($content, $cursor, $next_position - $cursor);
+                    $output .= $next_mapping['replacement'];
+                    $cursor = $next_position + strlen($next_mapping['source_url']);
+                }
+
+                return $cursor === 0
+                    ? $content
+                    : $output . substr($content, $cursor);
 
             default:
                 _doing_it_wrong( __FUNCTION__, 'rewrite_urls() requires either block_markup or plain_text to be provided', '1.0.0' );

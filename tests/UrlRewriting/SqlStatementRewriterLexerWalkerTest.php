@@ -368,7 +368,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
         // No column list means we have nothing to map FROM_BASE64 offsets
         // against. The fast path returns null; the AST path runs with an
         // empty column_map, so every value gets the null content type and
-        // falls through to the plain-text URL rewriter. The URL must
+        // falls through to literal source-base rewriting. The URL must
         // still get rewritten.
         $plain = self::FROM . '/meta';
         $sql = sprintf(
@@ -383,7 +383,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
         $this->assertStringContainsString(
             self::TO,
             $values[0],
-            'plain-text URL must still be rewritten when column list is absent'
+            'plain-text source base must still be rewritten when column list is absent'
         );
         $this->assertStringNotContainsString(
             self::FROM,
@@ -399,8 +399,8 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
         // sits in, so block_markup-aware rewriting is impossible. Plain
         // text rewriting still happens — that's the conservative outcome
         // and the URL must come out updated. The block-markup HTML
-        // structure is preserved verbatim by URLInTextProcessor (it only
-        // rewrites the URL text, not the surrounding HTML).
+        // structure is preserved verbatim because only the literal source
+        // base bytes are replaced.
         $html = '<a href="' . self::FROM . '/page">link</a>';
         $sql = sprintf(
             "INSERT INTO `wp_posts` VALUES (1, 1, NOW(), NOW(), FROM_BASE64('%s'), 'title', 'excerpt', 'publish');",
@@ -418,7 +418,7 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
     public function testInsertWithoutColumnListMultiRowAllValuesRewritten(): void
     {
         // Multi-row INSERT without a column list. Every base64 value in
-        // every tuple must still get plain-text URL rewriting.
+        // every tuple must still get literal source-base rewriting.
         $a = self::FROM . '/a';
         $b = self::FROM . '/b';
         $c = self::FROM . '/c';

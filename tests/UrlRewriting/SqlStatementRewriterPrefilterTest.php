@@ -16,8 +16,7 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/loa
  * Most tests here verify the prefilter PROPERTY directly: for every column
  * value that carries a real URL, the encoded SQL must contain at least one
  * of the four substrings. This is a pure base64-arithmetic claim and is
- * independent of how the rewriter recognises URL boundaries (which is the
- * URLInTextProcessor's job — that has its own tests).
+ * independent of how the rewriter recognises safe source-base boundaries.
  *
  * A separate behavioural test then runs the full rewriter to confirm the
  * prefilter doesn't accidentally short-circuit cases that should rewrite.
@@ -260,7 +259,7 @@ class SqlStatementRewriterPrefilterTest extends TestCase
 
     /**
      * End-to-end: URL at every alignment, with a clean (space-prefixed)
-     * URL boundary so URLInTextProcessor consistently recognises the URL.
+     * URL boundary so the freeform fallback consistently recognises the URL.
      * This catches the case where the prefilter wrongly short-circuits a
      * statement that should rewrite.
      *

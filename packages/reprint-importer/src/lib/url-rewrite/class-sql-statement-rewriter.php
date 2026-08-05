@@ -12,15 +12,15 @@
  * WordPress core columns known to contain block markup (post_content, comment_content,
  * etc.) get the 'block_markup' hint so BlockMarkupUrlProcessor handles HTML
  * attributes, block comment JSON, and CSS url(). All other columns default to
- * auto-detect with URLInTextProcessor for leaf text, which is simpler and more
- * predictable for columns that contain serialized PHP, JSON, or plain strings.
+ * auto-detect structured containers and use byte-literal source-base
+ * replacement for ambiguous leaf text.
  *
  * Column resolution walks the lexer output directly. Both INSERT and UPDATE
  * statements emitted by MySQLDumpProducer follow a constrained set of shapes
  * the walker recognises; for any shape it doesn't, it returns null and every
- * FROM_BASE64() value falls back to plain-text URL rewriting (which is the
- * safe default anyway — block_markup is only ever assigned to a small set of
- * WordPress core columns).
+ * FROM_BASE64() value falls back to plain-text source-base rewriting (the safe
+ * default — block_markup is only assigned to a small set of WordPress core
+ * columns).
  */
 class SqlStatementRewriter
 {
@@ -31,7 +31,7 @@ class SqlStatementRewriter
 
     /**
      * WordPress core columns that contain block markup and benefit from
-     * BlockMarkupUrlProcessor over plain-text URL scanning. Keyed by table suffix
+     * BlockMarkupUrlProcessor over literal source-base rewriting. Keyed by table suffix
      * (without prefix) — the constructor prepends the actual table_prefix to
      * build full table names for exact matching.
      *
@@ -283,7 +283,7 @@ class SqlStatementRewriter
      * Anything else — INSERT … SELECT, INSERT … SET col=v, INSERT without a
      * column list, qualified names like `db`.`t`, multi-table UPDATE — returns
      * null. The caller treats null the same as an empty column_map: every
-     * FROM_BASE64() value falls through to plain-text URL rewriting, which
+     * FROM_BASE64() value falls through to literal source-base rewriting, which
      * is the safe default. URL rewriting still happens; only the
      * block_markup hint (relevant for ~5 WordPress core columns) is lost.
      *
