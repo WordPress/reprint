@@ -59,7 +59,7 @@ final class ReprintProcessLockTest extends TestCase
             'pull_state_directory' => $pull_state_directory,
             'pull_state_file' => $pull_state_directory . '/state.json',
             'remote_index_file' => $pull_state_directory . '/remote-index.jsonl',
-            'remote_index_wal_path' => $pull_state_directory . '/remote-index.wal',
+            'pull_index_wal_path' => $pull_state_directory . '/index.wal',
             'next_remote_index_file' => $pull_state_directory . '/remote-index.next.jsonl',
             'fetch_list_file' => $pull_state_directory . '/fetch-list.jsonl',
             'volatile_files_file' => $pull_state_directory . '/volatile-files.json',

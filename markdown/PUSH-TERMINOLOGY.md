@@ -62,7 +62,7 @@ local relative path to a push-root-relative path.
   planning a push. Use `$fresh_local_index_file`.
 - An **index entry** records one path, type, size, and ctime. Use
   `$index_entry`.
-- The **remote index WAL** records completed pull mutations awaiting application
+- The **pull index WAL** records completed pull mutations awaiting application
   to the remote index.
 - A **pull plan** lists remote absolute paths still scheduled for download or
   deletion. A **push plan** maps local relative paths to push-root-relative
@@ -184,7 +184,7 @@ their parent directories.
         ├── pull/
         │   ├── state.json
         │   ├── remote-index.jsonl
-        │   ├── remote-index.wal
+        │   ├── index.wal
         │   ├── remote-index.next.jsonl
         │   ├── fetch-list.jsonl
         │   ├── volatile-files.json
@@ -204,7 +204,7 @@ Use these path names:
 | Local index file | `$local_index_file` |
 | Pull state file | `$pull_state_file` |
 | Remote index file | `$remote_index_file` |
-| Remote index WAL | `$remote_index_wal_path` |
+| Pull index WAL | `$pull_index_wal_path` |
 | Next remote index file | `$next_remote_index_file` |
 | Fetch list file | `$fetch_list_file` |
 | Volatile files file | `$volatile_files_file` |
@@ -239,12 +239,12 @@ its caller supplies none. `PushFilesSender::start()` and
 `close()` does not release it. This local lock is separate from the receiver's
 push-session and commit locks.
 
-## Pull remote index WAL
+## Pull index WAL
 
-Call the single pull-side write-ahead log the **remote index WAL**. It lives at
-`<remote-state-directory>/pull/remote-index.wal`; use
-`pull/remote-index.wal`,
-`$remote_index_wal_path`, and `$remote_index_wal_handle`.
+Call the single pull-side write-ahead log the **pull index WAL**. It lives at
+`<remote-state-directory>/pull/index.wal`; use
+`pull/index.wal`,
+`$pull_index_wal_path`, and `$pull_index_wal_handle`.
 Applied batch records are cleared, but the empty WAL remains as a marker until
 files-pull completes. A retained WAL is consumed only while resuming or
 aborting the interrupted files-pull, including through a high-level pull

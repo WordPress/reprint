@@ -9,7 +9,7 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../importer/import.php';
 
-final class RemoteIndexWalTest extends TestCase
+final class PullIndexWalTest extends TestCase
 {
     private string $root;
     private string $stateDirectory;
@@ -19,7 +19,7 @@ final class RemoteIndexWalTest extends TestCase
     protected function setUp(): void
     {
         $this->root = sys_get_temp_dir()
-            . '/remote-index-wal-'
+            . '/pull-index-wal-'
             . bin2hex(random_bytes(6));
         $this->stateDirectory = $this->root . '/state';
         $remoteReprintApiUrl = 'https://example.com/?site-export-api';
@@ -38,29 +38,29 @@ final class RemoteIndexWalTest extends TestCase
         $this->removeTree($this->root);
     }
 
-    public function testAppliedBatchLeavesTheRemoteIndexWalMarkerUntilCompletion(): void
+    public function testAppliedBatchLeavesThePullIndexWalMarkerUntilCompletion(): void
     {
         $client = $this->client();
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('record_remote_index_wal_upsert')->invoke(
+        $reflection->getMethod('record_pull_index_wal_upsert')->invoke(
             $client,
             '/site/file.txt',
             42,
             5,
             'file'
         );
-        $reflection->getMethod('apply_remote_index_wal')->invoke($client);
+        $reflection->getMethod('apply_pull_index_wal')->invoke($client);
 
-        $remoteIndexWalPath = $this->pullStateDirectory . '/remote-index.wal';
-        $this->assertFileExists($remoteIndexWalPath);
-        $this->assertSame('', file_get_contents($remoteIndexWalPath));
+        $pullIndexWalPath = $this->pullStateDirectory . '/index.wal';
+        $this->assertFileExists($pullIndexWalPath);
+        $this->assertSame('', file_get_contents($pullIndexWalPath));
         $this->assertSame(
             '/site/file.txt',
             $this->firstRemoteIndexEntryPath()
         );
 
-        $reflection->getMethod('remove_remote_index_wal')->invoke($client);
-        $this->assertFileDoesNotExist($remoteIndexWalPath);
+        $reflection->getMethod('remove_pull_index_wal')->invoke($client);
+        $this->assertFileDoesNotExist($pullIndexWalPath);
     }
 
     public function testUpsertingFileDoesNotCreateParentDirectoryEntries(): void
@@ -74,7 +74,7 @@ final class RemoteIndexWalTest extends TestCase
             5,
             'file'
         );
-        $reflection->getMethod('apply_remote_index_wal')->invoke($client);
+        $reflection->getMethod('apply_pull_index_wal')->invoke($client);
 
         $this->assertSame(
             ['/site/nested/file.txt'],
@@ -122,19 +122,19 @@ final class RemoteIndexWalTest extends TestCase
             'type' => 'file',
         ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
         file_put_contents(
-            $this->pullStateDirectory . '/remote-index.wal',
+            $this->pullStateDirectory . '/index.wal',
             $completeRecord . '{"op":"F","path":"'
         );
 
         $client = $this->client();
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $reflection->getMethod('replay_remote_index_wal')->invoke($client);
+        $reflection->getMethod('replay_pull_index_wal')->invoke($client);
 
         $this->assertSame('/site/complete.txt', $this->firstRemoteIndexEntryPath());
         $this->assertSame(
             '',
             file_get_contents(
-                $this->pullStateDirectory . '/remote-index.wal'
+                $this->pullStateDirectory . '/index.wal'
             )
         );
     }
@@ -142,10 +142,10 @@ final class RemoteIndexWalTest extends TestCase
     /**
      * @dataProvider abortCommandProvider
      */
-    public function testAbortReplaysAndRemovesTheRemoteIndexWal(string $command): void
+    public function testAbortReplaysAndRemovesThePullIndexWal(string $command): void
     {
         file_put_contents(
-            $this->pullStateDirectory . '/remote-index.wal',
+            $this->pullStateDirectory . '/index.wal',
             json_encode([
                 'op' => 'F',
                 'path' => base64_encode('/site/aborted.txt'),
@@ -168,7 +168,7 @@ final class RemoteIndexWalTest extends TestCase
 
         $this->assertSame('/site/aborted.txt', $this->firstRemoteIndexEntryPath());
         $this->assertFileDoesNotExist(
-            $this->pullStateDirectory . '/remote-index.wal'
+            $this->pullStateDirectory . '/index.wal'
         );
     }
 
