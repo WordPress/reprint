@@ -86,7 +86,7 @@ final class RemoteIndexWalTest extends TestCase
     {
         $reflection = new \ReflectionClass(\ImportClient::class);
         $remoteAbsolutePathToDelete = $reflection
-            ->getMethod('remote_absolute_path_to_delete')
+            ->getMethod('derive_remote_deletion_root_from_sparse_index')
             ->invoke(
                 $this->client(),
                 '/srv/site/gone/nested/file.txt',
@@ -101,7 +101,7 @@ final class RemoteIndexWalTest extends TestCase
     {
         $reflection = new \ReflectionClass(\ImportClient::class);
         $remoteAbsolutePathToDelete = $reflection
-            ->getMethod('remote_absolute_path_to_delete')
+            ->getMethod('derive_remote_deletion_root_from_sparse_index')
             ->invoke(
                 $this->client(),
                 '/srv/site/kept/old.txt',

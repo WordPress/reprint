@@ -10,7 +10,6 @@
  * - Three-phase pull: files, SQL, then file deltas
  */
 
-use function WordPress\Filesystem\wp_join_unix_paths;
 use Reprint\Importer\CurlTimeoutException;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\Pull\PullFailureReportedException;
@@ -23,12 +22,15 @@ use Reprint\Importer\State\RemoteFileIndexCursorState;
 use Reprint\Importer\StreamingContext;
 use Reprint\Importer\TransientInterruptionException;
 use Reprint\Importer\Tuning\AdaptiveTuner;
+
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
 use function Reprint\Importer\sort_index_file;
+use function WordPress\Filesystem\wp_join_unix_paths;
+use function WordPress\Filesystem\wp_unix_path_segments;
 use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
@@ -6300,7 +6302,7 @@ class ImportClient
                 if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
                     $remote_absolute_path = $remote_index_entry["path"];
                     $this->apply_remote_deletion_locally(
-                        $this->remote_absolute_path_to_delete(
+                        $this->derive_remote_deletion_root_from_sparse_index(
                             $remote_absolute_path,
                             $last_processed_next_remote_index_entry_path,
                             $next_remote_index_entry["path"],
@@ -6383,7 +6385,7 @@ class ImportClient
             if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
                 $remote_absolute_path = $remote_index_entry["path"];
                 $this->apply_remote_deletion_locally(
-                    $this->remote_absolute_path_to_delete(
+                    $this->derive_remote_deletion_root_from_sparse_index(
                         $remote_absolute_path,
                         $last_processed_next_remote_index_entry_path,
                         null,
@@ -6757,48 +6759,84 @@ class ImportClient
     }
 
     /**
-     * Returns the highest absent remote directory containing a deleted entry.
+     * Derives the shallowest missing remote path that can be deleted locally.
      *
-     * The previous and current next-index entries bracket every path in the
-     * sorted stream. A path or descendant beside an ancestor means that
-     * ancestor still exists and deletion must continue below it.
+     * Whenever a path stored in the locally saved remote index is missing from the
+     * currently downloaded remote index, we must figure out the blast radius. What
+     * exactly was deleted on the remote server? This function answers that
+     * question based on the:
+     *
+     * * original missing path
+     * * the nearest path before it in the new index, if any
+     * * the nearest path after it in the new index, if any
+     *
+     * For example:
+     *
+     *     Saved index:
+     *         /srv/site/wp-config.php
+     *         /srv/site/wp-content/index.php
+     *         /srv/site/wp-content/test.php
+     *         /srv/site/wp-settings.php
+     *
+     *     Newly downloaded index:
+     *         /srv/site/wp-config.php
+     *         /srv/site/wp-settings.php
+     *
+     * When we notice `/srv/site/wp-content/index.php` is not in the new index,
+     * this function is called with:
+     *
+     *     derive_remote_deletion_root_from_sparse_index(
+     *         missing_remote_path: "/srv/site/wp-content/index.php",
+     *         nearest_existing_path_before: "/srv/site/wp-config.php",
+     *         nearest_existing_path_after: "/srv/site/wp-settings.php"
+     *     )
+     *     // returns "/srv/site/wp-content"
+     *
+     * The neighboring paths show that `/srv` and `/srv/site` still contain files,
+     * but neither path is within `/srv/site/wp-content`.
+     *
+     * @param string      $missing_remote_path           Previously recorded path that is now missing.
+     * @param string|null $nearest_existing_path_before  Nearest existing path before the missing path, if any.
+     * @param string|null $nearest_existing_path_after   Nearest existing path after the missing path, if any.
+     *
+     * @return string The shallowest missing parent, or the original path when every parent still contains an entry.
      */
-    private function remote_absolute_path_to_delete(
-        string $remote_absolute_path,
-        ?string $last_processed_next_remote_index_entry_path,
-        ?string $next_remote_index_entry_path
+    private function derive_remote_deletion_root_from_sparse_index(
+        string $missing_remote_path,
+        ?string $nearest_existing_path_before,
+        ?string $nearest_existing_path_after
     ): string {
-        $remote_path_components = explode("/", trim($remote_absolute_path, "/"));
-        $remote_directory_components = [];
-        $remote_path_component_count = count($remote_path_components) - 1;
-        for ($index = 0; $index < $remote_path_component_count; ++$index) {
-            $remote_directory_components[] = $remote_path_components[$index];
-            $remote_absolute_directory = "/" . implode("/", $remote_directory_components);
-            $remote_absolute_directory_prefix = $remote_absolute_directory . "/";
-            $directory_has_next_index_descendant = false;
-            foreach ([
-                $last_processed_next_remote_index_entry_path,
-                $next_remote_index_entry_path,
-            ] as $adjacent_next_remote_index_entry_path) {
-                if (
-                    $adjacent_next_remote_index_entry_path === $remote_absolute_directory
-                    || (
-                        is_string($adjacent_next_remote_index_entry_path)
-                        && str_starts_with(
-                            $adjacent_next_remote_index_entry_path,
-                            $remote_absolute_directory_prefix,
-                        )
-                    )
-                ) {
-                    $directory_has_next_index_descendant = true;
-                    break;
-                }
-            }
-            if (!$directory_has_next_index_descendant) {
-                return $remote_absolute_directory;
+        // Use an invalid path that cannot match any validated remote path so
+        // both comparisons below always receive strings.
+        if (null === $nearest_existing_path_before) {
+            $nearest_existing_path_before = "/\0/";
+        }
+        if (null === $nearest_existing_path_after) {
+            $nearest_existing_path_after = "/\0/";
+        }
+        $missing_remote_path_components = wp_unix_path_segments($missing_remote_path);
+        $remote_parent_components = [];
+        $remote_parent_component_count = count($missing_remote_path_components) - 1;
+        // Find the shallowest parent absent from both neighboring entries.
+        for ($component_index = 0; $component_index < $remote_parent_component_count; ++$component_index) {
+            $remote_parent_components[] = $missing_remote_path_components[$component_index];
+            $path_prefix = wp_join_unix_paths("/", ...$remote_parent_components);
+            if (
+                !path_is_within_root(
+                    $nearest_existing_path_before,
+                    $path_prefix,
+                )
+                && !path_is_within_root(
+                    $nearest_existing_path_after,
+                    $path_prefix,
+                )
+            ) {
+                return $path_prefix;
             }
         }
-        return $remote_absolute_path;
+        // Every parent still has an entry in the new index, so only the
+        // original missing entry should be deleted.
+        return $missing_remote_path;
     }
 
     /**
