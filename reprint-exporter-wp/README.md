@@ -4,9 +4,13 @@ When working from this monorepo checkout, run `composer install` in
 `reprint-exporter-wp/` to populate the bundled `vendor/` directory used by the
 plugin runtime. GitHub release ZIPs already include that vendor tree.
 
-## API Routing
+## API routing
 
-Many shared hosts (SiteGround, GoDaddy, etc.) block direct PHP execution inside `wp-content/plugins/` at the web server level, returning a 403 before the request ever reaches PHP. To work around this, export API requests are routed through WordPress's front controller (`index.php` at the site root), which hosts never block.
+### Pull route
+
+Many shared hosts block direct PHP execution inside `wp-content/plugins/` at
+the web server level. Pull requests therefore use WordPress's front controller
+at `https://example.com/?reprint-api`.
 
 ### How it works
 
@@ -21,6 +25,45 @@ When a request arrives at `https://example.com/?reprint-api` (or the legacy `?si
 5. Calls `exit` — WordPress never finishes booting
 
 This gives us a clean execution environment while using WordPress's front controller as the entry point.
+
+### Standalone push route
+
+Use the separate URL shown as **Push endpoint** in the plugin settings with
+`files-push`. It normally ends in:
+
+```text
+https://example.com/wp-content/plugins/reprint-exporter/push.php
+```
+
+```bash
+php reprint.phar files-push \
+  "https://example.com/?reprint-api" \
+  --state-dir=/path/to/reprint-state \
+  --fs-root=/path/to/local-tree \
+  --secret=the-connection-token \
+  --push-url="https://example.com/wp-content/plugins/reprint-exporter/push.php"
+```
+
+`push.php` does not load WordPress. A pushed plugin can therefore prevent
+WordPress from starting without preventing the next `files-push` from replacing
+that plugin. Every push operation still uses the same connection token and
+push-authorization rules as the WordPress route.
+
+The positional remote Reprint API URL still selects the remote state directory
+and shared local index used by `files-pull`, `files-diff`, and `files-push`.
+`--push-url` changes only where `files-push` sends its requests.
+
+While WordPress is healthy, the plugin copies the current token, authorization
+state, document root, reprint directory, exclusions, and push limits to the
+mode-0600 private file
+`<default-reprint-directory>/.reprint/push-config.json`. The standalone route
+reads that file and always adds its own installed directory to the excluded
+paths. Revoking push access keeps a disabled copy only so an authenticated
+`push_commit` can finish work which already has a durable checkpoint.
+
+A host which blocks direct execution of `push.php` cannot use the bundled
+recovery route until it allows that file or exposes another PHP route which does
+not load WordPress.
 
 ### Platform configuration
 
@@ -56,13 +99,21 @@ The supported options are:
 - `maximum_commit_entries` — the maximum number of bounded entries processed
   by one `push_commit` request. It defaults to 256.
 
+The plugin copies the path policy and numeric limits into the standalone push
+configuration. A callable `authenticate` option cannot be persisted. Platforms
+using custom authentication must expose their own push route outside WordPress
+instead of the bundled `push.php`; the plugin removes the bundled route's
+private configuration when that callback is present.
+
 ## Push access
 
 Connection tokens authorize downloads only by default. This also applies to
 tokens that already existed when the plugin was upgraded; no migration enables
 push access. A site administrator can grant push access from the plugin settings
 page. The grant stores a fingerprint of the current connection token, so rotating
-that token revokes the grant and requires fresh consent.
+that token revokes the grant and requires fresh consent. Enabling push also
+writes the private configuration required by the standalone push route; a
+failure to write it makes the settings update fail.
 
 Hosts can manage push access before active plugins load with an immutable boolean:
 

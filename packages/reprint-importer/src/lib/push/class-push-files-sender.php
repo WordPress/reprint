@@ -70,9 +70,11 @@
  * durable phase. A stopped process therefore repeats only an idempotent
  * boundary action rather than a group of unrelated transitions.
  *
- * sender.json owns the top-level phase and the cursor returned by
- * PushPlan. PushFilesSender stores that cursor after every completed planning
- * step but never interprets its internal phase or offsets. The sender creates
+ * sender.json owns the top-level phase, the push URL, and the cursor returned
+ * by PushPlan. Recording the push URL prevents a later process from resuming
+ * an active push through another route. PushFilesSender stores the plan cursor
+ * after every completed planning step but never interprets its internal phase
+ * or offsets. The sender creates
  * the active plan directory before planning and removes the whole directory
  * only after success or target-session removal. The local index for this remote
  * Reprint API URL remains in the remote state directory. Once the plan result
@@ -125,7 +127,7 @@
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{local_relative_path:string,push_root_relative_path:string,push_root_relative_path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',push_root_local_relative_path:string,push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,push_url:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',push_root_local_relative_path:string,push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
@@ -137,6 +139,9 @@ final class PushFilesSender
 
     /** @var string Local push state directory owned by this sender. */
     private string $push_state_directory;
+
+    /** @var string URL receiving this sender's push requests. */
+    private string $push_url;
 
     /** @var string Sender-owned active plan directory. */
     private string $plan_directory;
@@ -240,7 +245,7 @@ final class PushFilesSender
      *     @type string                  $filesystem_root         Required filesystem root directory.
      *     @type string                  $push_root               Required remote absolute push root.
      *     @type string                  $push_state_directory    Required local push state directory.
-     *     @type string                  $remote_reprint_api_url  Required remote Reprint API URL.
+     *     @type string                  $push_url                Required URL receiving push requests.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
      *     @type bool                    $allow_http              Explicit plain-HTTP opt-in. Default false.
      *     @type int|float|string        $chunk_bytes             Maximum bytes read from one local file. Default 4 MiB.
@@ -272,6 +277,7 @@ final class PushFilesSender
             $sender->push_stream_client = $sender->create_push_stream_client(null);
             $sender->state = [
                 'push_session_id' => bin2hex(random_bytes(16)),
+                'push_url' => $sender->push_url,
                 'phase' => 'creating',
                 'push_root_local_relative_path' => $sender->push_root_local_relative_path,
                 'push_plan_cursor' => null,
@@ -318,6 +324,11 @@ final class PushFilesSender
                 );
             }
             $sender->state = $state;
+            if ($state['push_url'] !== $sender->push_url) {
+                throw new InvalidArgumentException(
+                    'files-push must resume with the same push URL recorded by its active sender.'
+                );
+            }
             $sender->push_stream_client = $sender->create_push_stream_client($state);
             if ($state['push_plan_cursor'] !== null) {
                 $sender->plan = PushPlan::resume($state['push_plan_cursor']);
@@ -343,11 +354,15 @@ final class PushFilesSender
         /** @var string $push_root */
         $push_root = $options['push_root'];
         $push_state_directory = $options['push_state_directory'] ?? null;
+        $push_url = $options['push_url'] ?? null;
         if (!is_string($filesystem_root) || !is_dir($filesystem_root) || is_link($filesystem_root)) {
             throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
         }
         if (!is_string($push_state_directory) || $push_state_directory === '') {
             throw new InvalidArgumentException('PushFilesSender requires a push_state_directory.');
+        }
+        if (!is_string($push_url) || $push_url === '') {
+            throw new InvalidArgumentException('PushFilesSender requires a push_url.');
         }
         if (!$process_lock->is_held()) {
             throw new InvalidArgumentException('PushFilesSender requires a held Reprint process lock.');
@@ -358,7 +373,7 @@ final class PushFilesSender
         }
 
         $push_stream_client_options = [
-            'remote_reprint_api_url' => $options['remote_reprint_api_url'] ?? null,
+            'push_url' => $push_url,
             'hmac_client' => $options['hmac_client'] ?? null,
             'allow_http' => $options['allow_http'] ?? false,
         ];
@@ -376,6 +391,7 @@ final class PushFilesSender
         $this->push_root_local_relative_path = trim($push_root, '/');
         $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');
+        $this->push_url = rtrim($push_url, '?&');
         $this->plan_directory = $this->push_state_directory . '/plan';
         $remote_state_directory = dirname($this->push_state_directory);
         $this->local_index_file = $remote_state_directory . '/local_index.jsonl';

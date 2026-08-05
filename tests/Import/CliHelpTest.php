@@ -118,11 +118,13 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('--secret=TOKEN', $output);
+        $this->assertStringContainsString('--push-url=URL', $output);
         $this->assertStringContainsString('--force-http', $output);
         $this->assertStringContainsString('--verbose, -v', $output);
         $this->assertStringContainsString('low-level, files-only command', $output);
         $this->assertStringContainsString('existing filesystem root at --fs-root', $output);
         $this->assertStringContainsString('requires saved preflight data', $output);
+        $this->assertStringContainsString('same retained local index used by', $output);
         $this->assertStringContainsString('read or modify', $output);
         $this->assertStringNotContainsString('--abort', $output);
         $this->assertStringNotContainsString('--filter', $output);

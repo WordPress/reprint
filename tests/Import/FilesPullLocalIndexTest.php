@@ -189,7 +189,7 @@ final class FilesPullLocalIndexTest extends TestCase
                 'filesystem_root' => $this->rawFileRoot,
                 'push_root' => '/',
                 'push_state_directory' => $pushStateDirectory,
-                'remote_reprint_api_url' =>
+                'push_url' =>
                     $remoteReprintApiUrl,
                 'hmac_client' => new \Site_Export_HMAC_Client('secret'),
                 'allow_http' => true,

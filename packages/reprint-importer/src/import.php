@@ -1563,6 +1563,7 @@ class ImportClient
      *     Parsed files-push options and context.
      *
      *     @type string $secret             HMAC shared secret.
+     *     @type string $push_url           URL receiving push requests. Defaults to the remote Reprint API URL.
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
      * }
@@ -1609,7 +1610,7 @@ class ImportClient
             'filesystem_root' => $context['filesystem_root'],
             'push_root' => $push_root,
             'push_state_directory' => $context['push_state_directory'],
-            'remote_reprint_api_url' => $context['remote_reprint_api_url'],
+            'push_url' => $context['push_url'],
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['force_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,
@@ -1911,6 +1912,7 @@ class ImportClient
      *     Parsed files-push options.
      *
      *     @type string $secret     HMAC shared secret.
+     *     @type string $push_url   URL receiving push requests. Defaults to the remote Reprint API URL.
      *     @type bool   $force_http Whether the operator allowed a plain-HTTP target.
      * }
      * @phpstan-param array<string,mixed> $options
@@ -1918,10 +1920,11 @@ class ImportClient
      *     Validated files-push command context.
      *
      *     @type string $remote_reprint_api_url Remote Reprint API URL.
+     *     @type string $push_url              URL receiving push requests.
      *     @type string $filesystem_root  Resolved filesystem root being sent.
      *     @type string $push_state_directory Local push state directory.
      * }
-     * @phpstan-return array{remote_reprint_api_url:string,filesystem_root:string,push_state_directory:string}
+     * @phpstan-return array{remote_reprint_api_url:string,push_url:string,filesystem_root:string,push_state_directory:string}
      */
     public static function prepare_files_push_context(
         string $remote_reprint_api_url,
@@ -1933,9 +1936,18 @@ class ImportClient
         if (!is_string($secret) || $secret === '') {
             throw new InvalidArgumentException('files-push requires --secret=TOKEN.');
         }
+        $push_url = $options['push_url'] ?? $remote_reprint_api_url;
+        if (!is_string($push_url) || $push_url === '') {
+            throw new InvalidArgumentException('files-push requires --push-url to be a non-empty URL.');
+        }
         if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $remote_reprint_api_url) === 1) {
             throw new InvalidArgumentException(
                 'files-push does not accept SECRET_KEY in the remote Reprint API URL; pass --secret=TOKEN.'
+            );
+        }
+        if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $push_url) === 1) {
+            throw new InvalidArgumentException(
+                'files-push does not accept SECRET_KEY in the push URL; pass --secret=TOKEN.'
             );
         }
 
@@ -1945,14 +1957,25 @@ class ImportClient
             $filesystem_root,
             'files-push'
         );
-        $masked_remote_reprint_api_url =
-            self::mask_url_credentials($remote_reprint_api_url);
+        $masked_push_url = self::mask_url_credentials($push_url);
+        if (strpos($push_url, '#') !== false) {
+            throw new InvalidArgumentException(
+                'The files-push push URL must not contain a fragment: ' . $masked_push_url . '.'
+            );
+        }
+        $push_url_user = parse_url($push_url, PHP_URL_USER);
+        $push_url_password = parse_url($push_url, PHP_URL_PASS);
+        if (is_string($push_url_user) || is_string($push_url_password)) {
+            throw new InvalidArgumentException(
+                'The files-push push URL must not contain URL user-info: ' . $masked_push_url . '.'
+            );
+        }
         $force_http = $options['force_http'] ?? false;
-        $scheme = strtolower( (string) parse_url($remote_reprint_api_url, PHP_URL_SCHEME) );
+        $scheme = strtolower( (string) parse_url($push_url, PHP_URL_SCHEME) );
         if ($scheme !== 'https' && !( $scheme === 'http' && $force_http === true )) {
             throw new InvalidArgumentException(
-                'The files-push remote Reprint API URL must use HTTPS: ' . $masked_remote_reprint_api_url
-                . '. Pass --force-http only for a remote Reprint API URL you trust.'
+                'The files-push push URL must use HTTPS: ' . $masked_push_url
+                . '. Pass --force-http only for a push URL you trust.'
             );
         }
         $resolved_local_filesystem_root = realpath($filesystem_root);
@@ -1963,6 +1986,7 @@ class ImportClient
         }
         return [
             'remote_reprint_api_url' => rtrim($remote_reprint_api_url, '?&'),
+            'push_url' => rtrim($push_url, '?&'),
             'filesystem_root' => rtrim($resolved_local_filesystem_root, '/') ?: '/',
             'push_state_directory' => $push_state_directory,
         ];
@@ -11546,6 +11570,14 @@ if (
             'commands' => ['files-push'],
         ],
         [
+            'name' => 'push-url',
+            'type' => 'value',
+            'target' => 'push_url',
+            'placeholder' => 'URL',
+            'help' => 'URL receiving push requests; defaults to the remote Reprint API URL',
+            'commands' => ['files-push'],
+        ],
+        [
             'name' => 'abort',
             'type' => 'flag',
             'target' => 'abort',
@@ -12496,9 +12528,11 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--push-url=URL] [--force-http] [--verbose]",
             "description" =>
-                "Sends the existing filesystem root at --fs-root to the remote Reprint API.\n" .
+                "Sends the existing filesystem root at --fs-root to --push-url. The\n" .
+                "remote Reprint API URL selects the same retained local index used by\n" .
+                "files-pull and files-diff. --push-url defaults to that URL.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
                 "It requires saved preflight data for the remote document root.\n" .
@@ -12756,7 +12790,8 @@ if (
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_push_command_argument, '--fs-root=') === 0
-                || strpos($reprint_files_push_command_argument, '--secret=') === 0;
+                || strpos($reprint_files_push_command_argument, '--secret=') === 0
+                || strpos($reprint_files_push_command_argument, '--push-url=') === 0;
             if (!$reprint_files_push_option_allowed) {
                 $reprint_files_push_option_name = explode('=', $reprint_files_push_command_argument, 2)[0];
                 fwrite(STDERR, "Error: files-push does not accept {$reprint_files_push_option_name}.\n");
