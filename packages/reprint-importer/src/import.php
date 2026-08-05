@@ -182,30 +182,6 @@ class ImportClient
     /** @var resource|null Open file handle for $pull_index_wal_path while writing. */
     private $pull_index_wal_handle;
 
-    /** @var int Number of records written to the open pull index WAL batch. */
-    private $pull_index_wal_record_count = 0;
-
-    /**
-     * Deduplication state for pull index WAL records. Consecutive
-     * upsert_remote_index_entry() or delete_remote_index_entry() calls for the
-     * same path are collapsed into one pull index WAL write.
-     *
-     * @var string|null Last path written to the pull index WAL.
-     */
-    private $last_pull_index_wal_record_remote_absolute_path = null;
-
-    /** @var bool|null Whether the last pull index WAL record was a deletion (true) or upsert (false). */
-    private $last_pull_index_wal_record_is_deletion = null;
-
-    /** @var int|null ctime of the last pull index WAL upsert. */
-    private $last_pull_index_wal_record_ctime = null;
-
-    /** @var int|null Size in bytes of the last pull index WAL upsert. */
-    private $last_pull_index_wal_record_size = null;
-
-    /** @var string|null Type ("file", "link", "dir") of the last pull index WAL upsert. */
-    private $last_pull_index_wal_record_type = null;
-
     /**
      * @var string Next remote index file pull/remote-index.next.jsonl, including
      * directory `empty` fields when available.
@@ -1971,7 +1947,6 @@ class ImportClient
         $this->remove_pull_index_wal();
         $this->reset_state();
         $this->pull_index_wal_handle = null;
-        $this->pull_index_wal_record_count = 0;
 
         if (file_exists($this->next_remote_index_file)) {
             @unlink($this->next_remote_index_file);
@@ -6925,12 +6900,6 @@ class ImportClient
                 "FILE CREATE | {$this->pull_index_wal_path} | pull index WAL",
             );
         }
-        $this->pull_index_wal_record_count = 0;
-        $this->last_pull_index_wal_record_remote_absolute_path = null;
-        $this->last_pull_index_wal_record_is_deletion = null;
-        $this->last_pull_index_wal_record_ctime = null;
-        $this->last_pull_index_wal_record_size = null;
-        $this->last_pull_index_wal_record_type = null;
     }
 
     /**
@@ -6944,15 +6913,6 @@ class ImportClient
     ): void {
         if (!$this->pull_index_wal_handle) {
             $this->open_pull_index_wal();
-        }
-        if (
-            $this->last_pull_index_wal_record_remote_absolute_path === $remote_absolute_path &&
-            $this->last_pull_index_wal_record_is_deletion === false &&
-            $this->last_pull_index_wal_record_ctime === $remote_path_ctime &&
-            $this->last_pull_index_wal_record_size === $remote_path_size &&
-            $this->last_pull_index_wal_record_type === $remote_path_type
-        ) {
-            return;
         }
         $pull_index_wal_json_line = json_encode(
             [
@@ -6971,12 +6931,6 @@ class ImportClient
                 throw new RuntimeException("Failed to write to the pull index WAL (disk full?).");
             }
         }
-        $this->pull_index_wal_record_count++;
-        $this->last_pull_index_wal_record_remote_absolute_path = $remote_absolute_path;
-        $this->last_pull_index_wal_record_is_deletion = false;
-        $this->last_pull_index_wal_record_ctime = $remote_path_ctime;
-        $this->last_pull_index_wal_record_size = $remote_path_size;
-        $this->last_pull_index_wal_record_type = $remote_path_type;
     }
 
     /**
@@ -6986,12 +6940,6 @@ class ImportClient
     {
         if (!$this->pull_index_wal_handle) {
             $this->open_pull_index_wal();
-        }
-        if (
-            $this->last_pull_index_wal_record_remote_absolute_path === $remote_absolute_path &&
-            $this->last_pull_index_wal_record_is_deletion === true
-        ) {
-            return;
         }
         $pull_index_wal_json_line = json_encode(
             [
@@ -7007,12 +6955,6 @@ class ImportClient
                 throw new RuntimeException("Failed to write to the pull index WAL (disk full?).");
             }
         }
-        $this->pull_index_wal_record_count++;
-        $this->last_pull_index_wal_record_remote_absolute_path = $remote_absolute_path;
-        $this->last_pull_index_wal_record_is_deletion = true;
-        $this->last_pull_index_wal_record_ctime = null;
-        $this->last_pull_index_wal_record_size = null;
-        $this->last_pull_index_wal_record_type = null;
     }
 
     /** Applies the current pull index WAL to the remote index. */
@@ -7025,19 +6967,11 @@ class ImportClient
                 throw new RuntimeException("Failed to flush the pull index WAL.");
             }
         }
-        $this->last_pull_index_wal_record_remote_absolute_path = null;
-        $this->last_pull_index_wal_record_is_deletion = null;
-        $this->last_pull_index_wal_record_ctime = null;
-        $this->last_pull_index_wal_record_size = null;
-        $this->last_pull_index_wal_record_type = null;
-
-        $has_pull_index_wal_records =
-            $this->pull_index_wal_record_count > 0 ||
-            (is_file($this->pull_index_wal_path) &&
-                filesize($this->pull_index_wal_path) > 0);
-
-        if (!$has_pull_index_wal_records) {
-            $this->pull_index_wal_record_count = 0;
+        clearstatcache(true, $this->pull_index_wal_path);
+        if (
+            !is_file($this->pull_index_wal_path)
+            || filesize($this->pull_index_wal_path) === 0
+        ) {
             return;
         }
 
@@ -7157,7 +7091,6 @@ class ImportClient
         $this->audit_log(
             "FILE TRUNCATE | {$this->pull_index_wal_path} | pull index WAL batch applied"
         );
-        $this->pull_index_wal_record_count = 0;
     }
 
     /** Removes the pull index WAL marker after files-pull completes or is aborted. */
@@ -7182,7 +7115,6 @@ class ImportClient
         ) {
             throw new RuntimeException("Failed to remove the pull index WAL.");
         }
-        $this->pull_index_wal_record_count = 0;
     }
 
     /**
