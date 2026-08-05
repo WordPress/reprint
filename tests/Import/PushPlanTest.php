@@ -135,7 +135,7 @@ final class PushPlanTest extends TestCase
         $this->assertIsInt($firstPath['ctime']);
     }
 
-    public function testPlanCopiesEveryFreshLocalIndexEntryAndExcludesOnlyPushAndDeletePaths(): void
+    public function testPlanRetainsACompactFreshLocalIndexAndExcludesOnlyPushAndDeletePaths(): void
     {
         $this->saveLocalIndex($this->writeIndex([
             'gone.txt' => [1, 1, 'file'],
@@ -160,13 +160,36 @@ final class PushPlanTest extends TestCase
 
         $freshLocalIndexEntries = $this->indexEntries($this->planPath('fresh_local_index.jsonl'));
         $this->assertSame(
-            ['empty', 'full', 'full/child.txt', 'private', 'private/current.txt', 'public.txt'],
+            ['empty', 'full/child.txt', 'private/current.txt', 'public.txt'],
             array_keys($freshLocalIndexEntries)
         );
         $this->assertTrue($freshLocalIndexEntries['empty']['empty']);
-        $this->assertFalse($freshLocalIndexEntries['full']['empty']);
-        $this->assertFalse($freshLocalIndexEntries['private']['empty']);
+        $this->assertArrayNotHasKey('full', $freshLocalIndexEntries);
+        $this->assertArrayNotHasKey('private', $freshLocalIndexEntries);
         $this->assertArrayNotHasKey('empty', $freshLocalIndexEntries['public.txt']);
+    }
+
+    public function testFullExistingLocalIndexProducesCompactFreshLocalIndex(): void
+    {
+        $current = $this->writeIndex([
+            'full/child.txt' => [2, 5, 'file'],
+        ]);
+        $this->saveLocalIndex($current);
+        $existingLocalIndex = file_get_contents($this->localIndexFile());
+        $this->assertIsString($existingLocalIndex);
+        file_put_contents(
+            $this->localIndexFile(),
+            $this->indexLine('full', 1, 0, 'dir', false) . "\n" . $existingLocalIndex
+        );
+
+        $plan = $this->startPlan($current);
+        $this->planToCompletion($plan);
+
+        $this->assertPathCounts(0, 0);
+        $this->assertSame(
+            ['full/child.txt'],
+            array_keys($this->indexEntries($this->planPath('fresh_local_index.jsonl')))
+        );
     }
 
     public function testUnchangedIndexProducesEmptyPlans(): void
@@ -297,7 +320,6 @@ final class PushPlanTest extends TestCase
         $first_cursor = $this->planCursor();
         $this->assertSame(0, $first_cursor['deleted_directory_stack_top_byte_offset']);
 
-        $this->assertTrue($this->nextPlanStep($plan));
         $this->assertFalse($this->nextPlanStep($plan));
         $complete_cursor = $this->planCursor();
         $this->assertSame(['phase' => 'complete'], $complete_cursor);
@@ -539,6 +561,7 @@ final class PushPlanTest extends TestCase
             'byte_offset_in_local_paths_to_push',
             'byte_offset_in_local_paths_to_delete',
             'deleted_directory_stack_top_byte_offset',
+            'previous_fresh_local_index_entry_path',
         ], array_keys($cursor['position']));
         $this->assertSame(
             filesize($this->planPath('local_paths_to_push.jsonl')),

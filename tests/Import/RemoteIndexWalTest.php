@@ -82,6 +82,36 @@ final class RemoteIndexWalTest extends TestCase
         );
     }
 
+    public function testDeletedFileDerivesTheAbsentDirectoryRoot(): void
+    {
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $remoteAbsolutePathToDelete = $reflection
+            ->getMethod('remote_absolute_path_to_delete')
+            ->invoke(
+                $this->client(),
+                '/srv/site/gone/nested/file.txt',
+                '/srv/site/kept.txt',
+                null
+            );
+
+        $this->assertSame('/srv/site/gone', $remoteAbsolutePathToDelete);
+    }
+
+    public function testDeletedFileKeepsAParentWithAnotherNextIndexEntry(): void
+    {
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        $remoteAbsolutePathToDelete = $reflection
+            ->getMethod('remote_absolute_path_to_delete')
+            ->invoke(
+                $this->client(),
+                '/srv/site/kept/old.txt',
+                '/srv/site/kept/current.txt',
+                null
+            );
+
+        $this->assertSame('/srv/site/kept/old.txt', $remoteAbsolutePathToDelete);
+    }
+
     public function testReplayDiscardsAnUnterminatedFinalRecord(): void
     {
         $completeRecord = json_encode([

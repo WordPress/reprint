@@ -6227,6 +6227,8 @@ class ImportClient
             $file_diff_progress_state->next_remote_index_byte_offset;
         $last_consumed_remote_index_entry_path =
             $file_diff_progress_state->last_consumed_remote_index_entry_path;
+        $previous_next_remote_index_entry_path =
+            $file_diff_progress_state->previous_next_remote_index_entry_path;
         $fetch_list_file_mode = $next_remote_index_byte_offset > 0 ? "a" : "w";
         if ($fetch_list_file_mode === "w") {
             $this->audit_log(
@@ -6306,7 +6308,13 @@ class ImportClient
                             $remote_absolute_path
                         )
                     )) {
-                        $this->apply_remote_deletion_locally($remote_absolute_path);
+                        $this->apply_remote_deletion_locally(
+                            $this->remote_absolute_path_to_delete(
+                                $remote_absolute_path,
+                                $previous_next_remote_index_entry_path,
+                                $next_remote_index_entry["path"],
+                            )
+                        );
                     }
                     $this->delete_remote_index_entry($remote_absolute_path);
                 }
@@ -6361,11 +6369,15 @@ class ImportClient
                 }
             }
 
+            $previous_next_remote_index_entry_path =
+                $next_remote_index_entry["path"];
             $next_remote_index_entries_processed++;
             if ($next_remote_index_entries_processed % 200 === 0) {
                 $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
                 $this->get_state()->diff->last_consumed_remote_index_entry_path =
                     $last_consumed_remote_index_entry_path;
+                $this->get_state()->diff->previous_next_remote_index_entry_path =
+                    $previous_next_remote_index_entry_path;
                 if (
                     $this->remote_index_wal_handle
                     && !fflush($this->remote_index_wal_handle)
@@ -6380,7 +6392,13 @@ class ImportClient
         while ($remote_index_entry !== null) {
             if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
                 $remote_absolute_path = $remote_index_entry["path"];
-                $this->apply_remote_deletion_locally($remote_absolute_path);
+                $this->apply_remote_deletion_locally(
+                    $this->remote_absolute_path_to_delete(
+                        $remote_absolute_path,
+                        $previous_next_remote_index_entry_path,
+                        null,
+                    )
+                );
                 $this->delete_remote_index_entry($remote_absolute_path);
             }
             $last_consumed_remote_index_entry_path =
@@ -6398,6 +6416,8 @@ class ImportClient
         $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
         $this->get_state()->diff->last_consumed_remote_index_entry_path =
             $last_consumed_remote_index_entry_path;
+        $this->get_state()->diff->previous_next_remote_index_entry_path =
+            $previous_next_remote_index_entry_path;
         $this->apply_remote_index_wal();
         $this->save_state();
 
@@ -6744,6 +6764,51 @@ class ImportClient
         }
 
         $this->audit_log("Failed to delete: {$remote_absolute_path}", true);
+    }
+
+    /**
+     * Returns the highest absent remote directory containing a deleted entry.
+     *
+     * The previous and current next-index entries bracket every path in the
+     * sorted stream. A path or descendant beside an ancestor means that
+     * ancestor still exists and deletion must continue below it.
+     */
+    private function remote_absolute_path_to_delete(
+        string $remote_absolute_path,
+        ?string $previous_next_remote_index_entry_path,
+        ?string $next_remote_index_entry_path,
+    ): string {
+        $remote_path_components = explode("/", trim($remote_absolute_path, "/"));
+        $remote_directory_components = [];
+        $remote_path_component_count = count($remote_path_components) - 1;
+        for ($index = 0; $index < $remote_path_component_count; ++$index) {
+            $remote_directory_components[] = $remote_path_components[$index];
+            $remote_absolute_directory = "/" . implode("/", $remote_directory_components);
+            $remote_absolute_directory_prefix = $remote_absolute_directory . "/";
+            $directory_has_next_index_descendant = false;
+            foreach ([
+                $previous_next_remote_index_entry_path,
+                $next_remote_index_entry_path,
+            ] as $adjacent_next_remote_index_entry_path) {
+                if (
+                    $adjacent_next_remote_index_entry_path === $remote_absolute_directory
+                    || (
+                        is_string($adjacent_next_remote_index_entry_path)
+                        && str_starts_with(
+                            $adjacent_next_remote_index_entry_path,
+                            $remote_absolute_directory_prefix,
+                        )
+                    )
+                ) {
+                    $directory_has_next_index_descendant = true;
+                    break;
+                }
+            }
+            if (!$directory_has_next_index_descendant) {
+                return $remote_absolute_directory;
+            }
+        }
+        return $remote_absolute_path;
     }
 
     /**
@@ -10571,6 +10636,9 @@ class ImportClient
         $state["diff"]["last_consumed_remote_index_entry_path"] = $this->encode_state_path_value(
             $state["diff"]["last_consumed_remote_index_entry_path"] ?? null,
         );
+        $state["diff"]["previous_next_remote_index_entry_path"] = $this->encode_state_path_value(
+            $state["diff"]["previous_next_remote_index_entry_path"] ?? null,
+        );
         $state["fetch"]["batch_file"] = $this->encode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );
@@ -10602,6 +10670,9 @@ class ImportClient
     {
         $state["diff"]["last_consumed_remote_index_entry_path"] = $this->decode_state_path_value(
             $state["diff"]["last_consumed_remote_index_entry_path"] ?? null,
+        );
+        $state["diff"]["previous_next_remote_index_entry_path"] = $this->decode_state_path_value(
+            $state["diff"]["previous_next_remote_index_entry_path"] ?? null,
         );
         $state["fetch"]["batch_file"] = $this->decode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
