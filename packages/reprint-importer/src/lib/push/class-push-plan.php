@@ -871,23 +871,20 @@ class PushPlan
      */
     private function fresh_index_contains_path_or_descendant(string $local_relative_path): bool
     {
-        foreach ([
-            $this->previous_fresh_local_index_entry_path,
-            $this->fresh_local_index_entry === null
-                ? null
-                : $this->fresh_local_index_entry["path"],
-        ] as $fresh_local_index_entry_path) {
-            if (
-                is_string($fresh_local_index_entry_path)
-                && path_is_within_root(
-                    $fresh_local_index_entry_path,
-                    $local_relative_path
-                )
-            ) {
-                return true;
-            }
-        }
-        return false;
+        // Use an invalid path that cannot match an indexed local relative path
+        // so both comparisons below always receive strings.
+        $previous_fresh_local_index_entry_path =
+            $this->previous_fresh_local_index_entry_path ?? "\0";
+        $next_fresh_local_index_entry_path =
+            $this->fresh_local_index_entry["path"] ?? "\0";
+
+        return path_is_within_root(
+            $previous_fresh_local_index_entry_path,
+            $local_relative_path
+        ) || path_is_within_root(
+            $next_fresh_local_index_entry_path,
+            $local_relative_path
+        );
     }
 
     /**
