@@ -2866,8 +2866,8 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
-     * Runs files-diff for the same remote Reprint API URL and state directory
-     * a push CLI used.
+     * Runs files-diff with JSONL output for the same remote Reprint API URL
+     * and state directory a push CLI used.
      *
      * @return array{exit:int,stdout:string,stderr:string,output:string}
      */
@@ -2881,6 +2881,7 @@ final class PushEndpointsTest extends TestCase {
                 $this->remote_reprint_api_url,
                 '--state-dir=' . $state_directory,
                 '--fs-root=' . $local_docroot,
+                '--jsonl',
             ],
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
             $pipes,

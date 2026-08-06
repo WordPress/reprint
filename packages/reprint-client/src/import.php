@@ -1364,11 +1364,13 @@ class ImportClient
      *     Parsed files-diff options.
      *
      *     @type string $files_diff_push_state_directory Local push state directory resolved by the CLI entry point.
+     *     @type bool   $jsonl                          Whether to emit machine-readable JSONL instead of the path diff.
      * }
      * @phpstan-param array<string,mixed> $options
      */
     private function run_files_diff(array $options): void
     {
+        $jsonl_output = $options['jsonl'] ?? false;
         $push_state_directory = $options['files_diff_push_state_directory'] ?? self::resolve_push_state_directory(
             $this->remote_reprint_api_url,
             $this->state_dir,
@@ -1425,14 +1427,22 @@ class ImportClient
                 $this->read_planned_local_paths_to_push($plan->get_local_paths_to_push_path())
                 as $entry
             ) {
-                $line = json_encode([
-                    'command' => 'files-diff',
-                    'action' => 'push',
-                    'path_b64' => $entry['path'],
-                    'type' => $type_by_plan_type[$entry['type']],
-                    'size' => $entry['size'],
-                    'ctime' => $entry['ctime'],
-                ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                if ($jsonl_output) {
+                    $line = json_encode([
+                        'command' => 'files-diff',
+                        'action' => 'push',
+                        'path_b64' => $entry['path'],
+                        'type' => $type_by_plan_type[$entry['type']],
+                        'size' => $entry['size'],
+                        'ctime' => $entry['ctime'],
+                    ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                } else {
+                    $local_path_to_push = base64_decode($entry['path'], true);
+                    if ($local_path_to_push === false) {
+                        throw new RuntimeException('Failed to decode a path in the completed local paths-to-push list.');
+                    }
+                    $line = '+ ' . $this->format_files_diff_path($local_path_to_push) . "\n";
+                }
                 if (fwrite($this->progress_fd, $line) !== strlen($line)) {
                     throw new RuntimeException('Failed to write the files-diff result.');
                 }
@@ -1444,25 +1454,29 @@ class ImportClient
                 $this->read_planned_local_paths_to_delete($plan->get_local_paths_to_delete_path())
                 as $local_path_to_delete
             ) {
-                $line = json_encode([
-                    'command' => 'files-diff',
-                    'action' => 'delete',
-                    'path_b64' => base64_encode($local_path_to_delete),
-                ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                $line = $jsonl_output
+                    ? json_encode([
+                        'command' => 'files-diff',
+                        'action' => 'delete',
+                        'path_b64' => base64_encode($local_path_to_delete),
+                    ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
+                    : '- ' . $this->format_files_diff_path($local_path_to_delete) . "\n";
                 if (fwrite($this->progress_fd, $line) !== strlen($line)) {
                     throw new RuntimeException('Failed to write the files-diff result.');
                 }
                 ++$local_paths_to_delete_count;
             }
 
-            $line = json_encode([
-                'command' => 'files-diff',
-                'status' => 'complete',
-                'local_paths_to_push' => $local_paths_to_push_count,
-                'local_paths_to_delete' => $local_paths_to_delete_count,
-            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
-            if (fwrite($this->progress_fd, $line) !== strlen($line)) {
-                throw new RuntimeException('Failed to write the files-diff result.');
+            if ($jsonl_output) {
+                $line = json_encode([
+                    'command' => 'files-diff',
+                    'status' => 'complete',
+                    'local_paths_to_push' => $local_paths_to_push_count,
+                    'local_paths_to_delete' => $local_paths_to_delete_count,
+                ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+                if (fwrite($this->progress_fd, $line) !== strlen($line)) {
+                    throw new RuntimeException('Failed to write the files-diff result.');
+                }
             }
             if (!fflush($this->progress_fd)) {
                 throw new RuntimeException('Failed to flush the files-diff result.');
@@ -1470,6 +1484,43 @@ class ImportClient
         } finally {
             $this->remove_local_plan_directory($plan_directory);
         }
+    }
+
+    /**
+     * Quotes a local path the way Git quotes names containing unsafe bytes.
+     */
+    private function format_files_diff_path(string $local_path): string
+    {
+        $quoted_path = '';
+        $requires_quotes = false;
+        static $escape_sequences = [
+            "\x07" => '\\a',
+            "\x08" => '\\b',
+            "\t" => '\\t',
+            "\n" => '\\n',
+            "\v" => '\\v',
+            "\f" => '\\f',
+            "\r" => '\\r',
+            '"' => '\\"',
+            '\\' => '\\\\',
+        ];
+        $local_path_bytes = strlen($local_path);
+        for ($byte_offset = 0; $byte_offset < $local_path_bytes; ++$byte_offset) {
+            $byte = $local_path[$byte_offset];
+            if (isset($escape_sequences[$byte])) {
+                $quoted_path .= $escape_sequences[$byte];
+                $requires_quotes = true;
+                continue;
+            }
+            $byte_value = ord($byte);
+            if ($byte_value < 32 || $byte_value > 126) {
+                $quoted_path .= sprintf('\\%03o', $byte_value);
+                $requires_quotes = true;
+                continue;
+            }
+            $quoted_path .= $byte;
+        }
+        return $requires_quotes ? '"' . $quoted_path . '"' : $local_path;
     }
 
     /**
@@ -11588,6 +11639,15 @@ if (
             'commands' => [],
         ],
 
+        // ── files-diff options ──────────────────────────────────
+        [
+            'name' => 'jsonl',
+            'type' => 'flag',
+            'target' => 'jsonl',
+            'help' => 'Write machine-readable JSONL instead of the default path diff',
+            'commands' => ['files-diff'],
+        ],
+
         // ── files-pull options ───────────────────────────────────
         [
             'name' => 'filter',
@@ -12415,7 +12475,7 @@ if (
         "files-diff" => [
             "level" => "low",
             "short" => "Compare local files with the local index",
-            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR",
+            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--jsonl]",
             "description" =>
                 "Shows which local paths a files-push would send or delete, comparing\n" .
                 "the filesystem root at --fs-root with the local index for this remote\n" .
@@ -12428,9 +12488,9 @@ if (
                 "default-skipped paths include generated wp-content caches, version-\n" .
                 "control data, node_modules, package-manager caches, OS metadata, and\n" .
                 "editor scratch files.\n" .
-                "Paths remain base64 text in JSONL output so\n" .
-                "arbitrary filesystem names are preserved. No network calls are made\n" .
-                "and no secret is required.\n",
+                "The default path diff marks pushes with + and deletions with -.\n" .
+                "With --jsonl, paths remain base64 text so arbitrary filesystem names\n" .
+                "are preserved. No network calls are made, and no secret is required.\n",
             "extra" =>
                 "Every run reports the complete diff from the beginning; there is\n" .
                 "no partial resume to continue.\n",
@@ -12709,7 +12769,8 @@ if (
     } elseif ($command === 'files-diff') {
         foreach ($reprint_files_command_arguments as $reprint_files_diff_command_argument) {
             $reprint_files_diff_option_allowed =
-                strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
+                $reprint_files_diff_command_argument === '--jsonl'
+                || strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0;
             if (!$reprint_files_diff_option_allowed) {
                 $reprint_files_diff_option_name = explode('=', $reprint_files_diff_command_argument, 2)[0];
@@ -12719,6 +12780,9 @@ if (
         }
     } elseif (!empty($options['force_http'])) {
         fwrite(STDERR, "Error: --force-http is accepted only by files-push.\n");
+        exit(1);
+    } elseif (!empty($options['jsonl'])) {
+        fwrite(STDERR, "Error: --jsonl is accepted only by files-diff.\n");
         exit(1);
     }
 
@@ -12802,8 +12866,8 @@ if (
     } catch (\Throwable $e) {
         $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
         $error_code = isset($client) ? $client->last_error_code : null;
-        if ($is_tty) {
-            fwrite(STDERR, "\nError: " . $e->getMessage() . "\n");
+        if ($command === 'files-diff' ? empty($options['jsonl']) : $is_tty) {
+            fwrite(STDERR, ( $command === 'files-diff' ? '' : "\n" ) . "Error: " . $e->getMessage() . "\n");
         } else {
             $error = [
                 "error" => $e->getMessage(),

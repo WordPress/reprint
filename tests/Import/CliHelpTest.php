@@ -137,11 +137,13 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('Usage: reprint files-diff <remote-reprint-api-url>', $output);
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
+        $this->assertStringContainsString('--jsonl', $output);
         $this->assertStringContainsString('local index', $output);
         $this->assertStringContainsString('files-pull advances', $output);
         $this->assertStringContainsString('target confirms', $output);
         $this->assertStringContainsString('push operation plan', $output);
         $this->assertStringContainsString('default-skipped paths', $output);
+        $this->assertStringContainsString('default path diff', $output);
         $this->assertStringContainsString('No network calls', $output);
         $this->assertStringContainsString('complete diff from the beginning', $output);
         $this->assertStringNotContainsString('--runtime', $output);

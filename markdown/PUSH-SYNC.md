@@ -497,30 +497,34 @@ receiver cursors or tentative upload positions.
 
 ## Local files-diff command
 
-`reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR` reports a local
-minimized push operation plan before target exclusions: the local paths a
-files-push would send or delete, compared against
+`reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--jsonl]`
+reports a local minimized push operation plan before target exclusions: the
+local paths a files-push would send or delete, compared against
 `<remote-state-directory>/local_index.jsonl`. Files-pull advances that local
 index after completed local mutations, and files-push replaces it after the
 target confirms commit. The remote state directory is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`, so another URL
 query cannot reuse the index. A different filesystem root uses a different
-state directory. The command accepts only `--state-dir` and `--fs-root`; it
-needs no secret, performs no preflight, and makes no network request. It runs
-one complete PushPlan against the local index in
+state directory. The command accepts only `--state-dir`, `--fs-root`, and the
+optional `--jsonl`; it needs no secret, performs no preflight, and makes no
+network request. It runs one complete PushPlan against the local index in
 `<remote-state-directory>/push/files-diff-plan/` while the command holds the
 state-directory-wide Reprint process lock.
 
-Output is JSONL. Each selected current file, symlink, or empty directory has
-`action: "push"`, `path_b64`, `type`, `size`, and `ctime`; its type is `file`,
-`dir`, or `link`. Each selected local deletion has `action: "delete"` and
-`path_b64`. Type transitions may emit both actions for one path. This is a
-local minimized push operation plan before target exclusions, not a
-path-for-path filesystem log: descendants represent a new non-empty directory,
-one deleted subtree root covers its descendants, and metadata-only changes to
-non-empty directories select no operation. Base64 keeps arbitrary filesystem
-path bytes representable. The final record carries `status: "complete"` with
-`local_paths_to_push` and `local_paths_to_delete` counts.
+Default output is a path diff: `+` marks each local path to push and `-` marks
+each local path to delete. Paths containing unsafe bytes use C-style quoting
+so one path always occupies one output line. `--jsonl`
+explicitly selects the previous machine-readable contract. Each selected
+current file, symlink, or empty directory then has `action: "push"`,
+`path_b64`, `type`, `size`, and `ctime`; its type is `file`, `dir`, or `link`.
+Each selected local deletion has `action: "delete"` and `path_b64`. Type
+transitions may emit both actions for one path. This is a local minimized push
+operation plan before target exclusions, not a path-for-path filesystem log:
+descendants represent a new non-empty directory, one deleted subtree root
+covers its descendants, and metadata-only changes to non-empty directories
+select no operation. Base64 keeps arbitrary filesystem path bytes
+representable in JSONL. The final JSONL record carries `status: "complete"`
+with `local_paths_to_push` and `local_paths_to_delete` counts.
 
 files-diff persists nothing between runs. The whole plan runs in one process,
 both finished path lists stream from the beginning, and the plan directory is
