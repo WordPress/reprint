@@ -342,6 +342,9 @@ final class PushSessionTest extends TestCase {
             $this->assertStringContainsString('Excluded', $exception->getMessage());
         }
 
+        $this->push_file($push_session, 'private-workshop/allowed.php', 'safe');
+        $this->assertSame('complete', $push_session->get_status('private-workshop/allowed.php')['path']['state']);
+
         $root_session = Site_Export_Push_Session::create($this->reprint_directory, '/', [], str_repeat('b', 32));
         $reopened = Site_Export_Push_Session::open($this->reprint_directory, '/', $root_session->get_push_session_id(), []);
         $this->assertSame($root_session->get_push_directory(), $reopened->get_push_directory());
