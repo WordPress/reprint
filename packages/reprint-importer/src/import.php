@@ -36,6 +36,7 @@ use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_within_root;
 use function WordPress\Reprint\Exporter\path_remainder_under;
+use function WordPress\Reprint\Exporter\relative_path_under;
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\write_local_index_update;
 
@@ -9414,16 +9415,13 @@ class ImportClient
             return;
         }
 
-        if (
-            $dir !== $real_filesystem_root &&
-            !str_starts_with($dir, $real_filesystem_root . "/")
-        ) {
+        $relative = relative_path_under($dir, $real_filesystem_root);
+        if ($relative === null) {
             throw new RuntimeException(
                 "Security: Refusing to create directory outside filesystem root: {$dir}",
             );
         }
 
-        $relative = ltrim(substr($dir, strlen($real_filesystem_root)), "/");
         if ($relative === "") {
             return;
         }
