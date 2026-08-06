@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use function WordPress\Reprint\Exporter\path_is_within_root;
 use function WordPress\Reprint\Exporter\path_remainder_under;
+use function WordPress\Reprint\Exporter\relative_path_under;
 
 require_once __DIR__ . '/../../importer/import.php';
 
@@ -148,6 +149,26 @@ class RemapSeamTest extends TestCase
             'trailing slash on path' => array('', '/home/adam/', '/home/adam'),
             'trailing slash on both' => array('', '/home/adam/', '/home/adam/'),
             'under, prefix has trailing slash' => array('/c', '/a/b/c', '/a/b/'),
+        );
+    }
+
+    /**
+     * @dataProvider provideRelativePathCases
+     */
+    public function testRelativePathUnder(?string $expected, string $path, string $root): void
+    {
+        $this->assertSame($expected, relative_path_under($path, $root));
+    }
+
+    public static function provideRelativePathCases(): array
+    {
+        return array(
+            'filesystem root itself' => array('', '/', '/'),
+            'filesystem root child' => array('child', '/child', '/'),
+            'exact non-root match' => array('', '/a', '/a'),
+            'non-root descendant' => array('b', '/a/b', '/a'),
+            'sibling prefix' => array(null, '/ab', '/a'),
+            'trailing slashes' => array('b', '/a/b/', '/a/'),
         );
     }
 

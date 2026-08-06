@@ -301,6 +301,37 @@ function path_remainder_under(string $path, string $prefix): ?string
 }
 
 /**
+ * Returns a path relative to a slash-delimited root, or null when it is not
+ * equal to or below that root.
+ *
+ * Use this when a caller needs a path for a root-relative field. It performs
+ * the component-boundary test and removes the separating slash in one step,
+ * rather than letting a byte-offset slice treat `/srv/site-old` as below
+ * `/srv/site`.
+ *
+ * Examples:
+ *
+ *     relative_path_under('/srv/site/wp-content', '/srv/site'); // 'wp-content'
+ *     relative_path_under('/srv/site', '/srv/site');            // ''
+ *     relative_path_under('/srv/site-old', '/srv/site');        // null
+ *     relative_path_under('/wp-content', '/');                  // 'wp-content'
+ *
+ * Trailing slashes do not change the result. This is a lexical operation: it
+ * does not resolve dot segments or symlinks, and it also accepts relative
+ * slash-delimited paths.
+ *
+ * @param string $path Candidate path to make relative.
+ * @param string $root Root that must contain the candidate path.
+ * @return string|null A path without a leading slash, an empty string for an
+ *                     exact match, or null when the path is outside the root.
+ */
+function relative_path_under(string $path, string $root): ?string
+{
+    $remainder = path_remainder_under($path, $root);
+    return $remainder === null ? null : ltrim($remainder, "/");
+}
+
+/**
  * Validates that a path is a non-empty absolute string without NUL bytes
  * or dot-segments (. or ..).
  *
