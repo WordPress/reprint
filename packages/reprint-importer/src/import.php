@@ -154,7 +154,7 @@ class ImportClient
     /** @var string Pull state directory for this remote Reprint API URL. */
     public $pull_state_directory;
 
-    /** @var string Filesystem root where the remote filesystem is reconstructed. */
+    /** @var string Resolved filesystem root where the remote filesystem is reconstructed. */
     public $filesystem_root;
 
     /** @var string Pull state file which persists command, cursor, and stage across invocations. */
@@ -419,7 +419,7 @@ class ImportClient
 
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, "?&");
         $this->state_dir = rtrim($state_dir, "/");
-        $this->filesystem_root = rtrim($filesystem_root, "/");
+        $this->filesystem_root = rtrim($filesystem_root, "/") ?: "/";
         $remote_state_directory = self::remote_state_directory_path(
             $this->remote_reprint_api_url,
             $this->state_dir
@@ -456,6 +456,14 @@ class ImportClient
                 throw new RuntimeException("Failed to create directory: {$this->filesystem_root}");
             }
         }
+
+        $resolved_local_filesystem_root = realpath($this->filesystem_root);
+        if ($resolved_local_filesystem_root === false) {
+            throw new RuntimeException(
+                "Failed to resolve filesystem root path: {$this->filesystem_root}",
+            );
+        }
+        $this->filesystem_root = $resolved_local_filesystem_root;
 
         $this->state = new PullState();
     }
@@ -605,7 +613,7 @@ class ImportClient
     ): ?string {
         $local_relative_path = path_remainder_under(
             $local_absolute_path,
-            $this->get_filesystem_root_path()
+            $this->filesystem_root
         );
         if (
             $local_relative_path === null
@@ -3600,7 +3608,7 @@ class ImportClient
             }
 
             // Validate that the symlink target doesn't escape the filesystem root.
-            $root = $this->get_filesystem_root_path();
+            $root = $this->filesystem_root;
             try {
                 $this->assert_symlink_target_within_root(
                     dirname($local_absolute_path),
@@ -5153,7 +5161,7 @@ class ImportClient
                         "--target-sqlite-path option is required but was missing.",
                     );
                 }
-                $target_path = $this->get_filesystem_root_path() . $content_dir . '/database/.ht.sqlite';
+                $target_path = $this->filesystem_root . $content_dir . '/database/.ht.sqlite';
                 $this->audit_log("DB-APPLY | defaulting SQLite path to: {$target_path}");
                 $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
             }
@@ -8622,29 +8630,6 @@ class ImportClient
     }
 
     /**
-     * Return the resolved absolute filesystem root, creating it if it doesn't exist.
-     */
-    private function get_filesystem_root_path(): string
-    {
-        if (!is_dir($this->filesystem_root)) {
-            if (!mkdir($this->filesystem_root, 0755, true) && !is_dir($this->filesystem_root)) {
-                throw new RuntimeException(
-                    "Failed to create filesystem root directory: {$this->filesystem_root}",
-                );
-            }
-        }
-
-        $real = realpath($this->filesystem_root);
-        if ($real === false) {
-            throw new RuntimeException(
-                "Failed to resolve filesystem root path: {$this->filesystem_root}",
-            );
-        }
-
-        return $real;
-    }
-
-    /**
      * Refuse to reuse a remote index with different --remap rules.
      *
      * The remote index stores remote absolute paths. Local writes/deletes derive their
@@ -8773,7 +8758,7 @@ class ImportClient
      */
     private function local_followed_symlinks_root_fingerprint(): string
     {
-        $effective = $this->local_followed_symlinks_root ?? rtrim($this->get_filesystem_root_path(), "/");
+        $effective = $this->local_followed_symlinks_root ?? rtrim($this->filesystem_root, "/");
         return hash("sha256", $effective);
     }
 
@@ -8785,7 +8770,7 @@ class ImportClient
      */
     private function resolve_local_followed_symlinks_root(string $raw): string
     {
-        $filesystem_root = rtrim($this->get_filesystem_root_path(), "/");
+        $filesystem_root = rtrim($this->filesystem_root, "/");
         $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root]);
 
         if (!path_is_within_root($directory, $filesystem_root)) {
@@ -8811,7 +8796,7 @@ class ImportClient
      */
     private function resolve_remap(array $remap_raw): array
     {
-        $filesystem_root = rtrim($this->get_filesystem_root_path(), "/");
+        $filesystem_root = rtrim($this->filesystem_root, "/");
 
         $source_tokens = $this->remote_path_tokens();
         $target_tokens = ["fs-root" => $filesystem_root];
@@ -9110,7 +9095,7 @@ class ImportClient
             return $this->local_followed_symlinks_root . $remote_absolute_path;
         }
 
-        return $this->get_filesystem_root_path() . $remote_absolute_path;
+        return $this->filesystem_root . $remote_absolute_path;
     }
 
 
@@ -9379,7 +9364,7 @@ class ImportClient
 
     private function path_traverses_symlink(string $path): bool
     {
-        $root = $this->get_filesystem_root_path();
+        $root = $this->filesystem_root;
         $relative = ltrim(substr($path, strlen($root)), "/");
         if ($relative === "") {
             return false;
@@ -9410,7 +9395,7 @@ class ImportClient
     private function create_directory_if_missing(string $dir): void
     {
         // Security: Ensure path is under the filesystem root
-        $real_filesystem_root = $this->get_filesystem_root_path();
+        $real_filesystem_root = $this->filesystem_root;
 
         // Resolve the target path (or what it would be)
         // For non-existent paths, resolve the parent and append the final component
@@ -9678,7 +9663,7 @@ class ImportClient
         }
 
         // Validate that the symlink target doesn't escape the filesystem root.
-        $root = $this->get_filesystem_root_path();
+        $root = $this->filesystem_root;
         try {
             $this->assert_symlink_target_within_root(
                 dirname($local_absolute_path),

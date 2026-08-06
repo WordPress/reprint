@@ -80,6 +80,20 @@ class RemapResolveTest extends TestCase
         return $c;
     }
 
+    public function testConstructorNormalizesFilesystemRoot(): void
+    {
+        $symlinkedFilesystemRoot = $this->tempDir . '/fs-root-symlink';
+        symlink($this->fsRoot, $symlinkedFilesystemRoot);
+
+        $client = new \ImportClient(
+            'https://src.example/export.php',
+            $this->stateDir,
+            $symlinkedFilesystemRoot
+        );
+
+        $this->assertSame($this->root, $client->filesystem_root);
+    }
+
     private function resolve($c, array ...$mappings): array
     {
         return $this->call($c, 'resolve_remap', array($mappings));
