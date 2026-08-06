@@ -605,6 +605,15 @@ Both fields are emitted together only when the fetch list exists — they
 are absent during the index and diff phases. `files_done` grows monotonically
 up to `files_total` and survives exit-code-2 restarts.
 
+During `files-push`, terminal output refreshes as the command changes phase and
+shows `Uploading — N / T files` while local paths are sent. Non-interactive
+output emits `push_progress` JSONL records. After planning completes, those
+records, the final result, and `progress.json` include `files_done` and
+`files_total` together. `files_total` is the number of local paths selected by
+the plan; `files_done` advances only after the target confirms the request
+containing each path, and both counts survive exit-code-2 restarts. The fields
+are absent while the plan is still being built.
+
 #### `<remote-state-directory>/pull/state.json` — the pull state store
 
 This is the pull state store. Pull commands read it on startup and write it

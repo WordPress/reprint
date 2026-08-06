@@ -270,6 +270,8 @@ final class FilesPushCommandTest extends TestCase
                 'phase' => 'starting_plan',
                 'push_plan_cursor' => null,
                 'local_paths_to_push_byte_offset' => 0,
+                'local_paths_to_push_count' => null,
+                'local_paths_pushed' => 0,
                 'max_part_bytes' => null,
                 'request_sizer_state' => [
                     'request_body_bytes' => 32 * 1024 * 1024,

@@ -172,6 +172,8 @@ When the export server crashes mid-SQL-stream (`--sql-output=mysql` mode), the i
 
 During the file fetch phase, progress and heartbeat records include `files_done` (cumulative across restarts, derived from fetch list byte offset + current batch count) and `files_total` (total fetch list entries, fixed after the diff phase). Both are emitted together only when the fetch list exists.
 
+During files-push, progress records include `files_done` and `files_total` together after planning. The completed count advances only at target-confirmed request boundaries and survives resume.
+
 ## File Organization
 
 - packages/reprint-exporter/: Packagist exporter package

@@ -61,8 +61,8 @@ use function WordPress\Reprint\Exporter\path_is_within_root;
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
  * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
  * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
- * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_local_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,deleted_directory_stack_top_byte_offset:int|null,previous_fresh_local_index_entry_path:string|null}
- * @phpstan-type CompleteCursor array{phase:'complete'}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_local_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int,deleted_directory_stack_top_byte_offset:int|null,previous_fresh_local_index_entry_path:string|null}
+ * @phpstan-type CompleteCursor array{phase:'complete',local_paths_to_push_count:int}
  * @phpstan-type PushPlanPosition IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
  * @phpstan-type PushPlanCursor array{plan_directory:string,filesystem_root:string,local_index_file:string,position:PushPlanPosition}
  * @phpstan-type DeletedDirectoryStackEntry array{path:string,previous_byte_offset:int|null}
@@ -227,6 +227,18 @@ class PushPlan
     public function get_local_paths_to_push_path(): string
     {
         return $this->local_paths_to_push;
+    }
+
+    /**
+     * Returns the number of local paths in the completed push plan.
+     */
+    public function get_local_paths_to_push_count(): int
+    {
+        $position = $this->cursor["position"];
+        if ($position["phase"] !== "complete") {
+            throw new LogicException("Cannot count local paths to push before the push plan is complete.");
+        }
+        return $position["local_paths_to_push_count"];
     }
 
     /**
@@ -468,6 +480,7 @@ class PushPlan
             "byte_offset_in_local_index" => 0,
             "byte_offset_in_local_paths_to_push" => 0,
             "byte_offset_in_local_paths_to_delete" => 0,
+            "local_paths_to_push_count" => 0,
             "deleted_directory_stack_top_byte_offset" => null,
             "previous_fresh_local_index_entry_path" => null,
         ];
@@ -540,6 +553,7 @@ class PushPlan
 
         $byte_offset_in_fresh_local_index = $cursor["byte_offset_in_fresh_local_index"];
         $byte_offset_in_local_index = $cursor["byte_offset_in_local_index"];
+        $local_paths_to_push_count = $cursor["local_paths_to_push_count"];
         $deleted_directory_stack_top_byte_offset = $cursor["deleted_directory_stack_top_byte_offset"];
         $local_paths_to_push_changed = false;
         $local_paths_to_delete_changed = false;
@@ -626,6 +640,7 @@ class PushPlan
                 }
                 if (!$this->path_conflicts_with_excluded_paths($fresh_local_index_entry["path"])) {
                     $this->append_local_path_to_push($fresh_local_index_entry);
+                    ++$local_paths_to_push_count;
                     $local_paths_to_push_changed = true;
                 }
             } elseif ($path_comparison > 0) {
@@ -691,6 +706,7 @@ class PushPlan
                 }
                 if ($needs_push && !$path_is_excluded) {
                     $this->append_local_path_to_push($fresh_local_index_entry);
+                    ++$local_paths_to_push_count;
                     $local_paths_to_push_changed = true;
                 }
             }
@@ -724,13 +740,17 @@ class PushPlan
             $this->deleted_directory_stack_entry = null;
         }
         $cursor_after_step = $complete
-            ? ["phase" => "complete"]
+            ? [
+                "phase" => "complete",
+                "local_paths_to_push_count" => $local_paths_to_push_count,
+            ]
             : [
                 "phase" => "diffing",
                 "byte_offset_in_fresh_local_index" => $byte_offset_in_fresh_local_index,
                 "byte_offset_in_local_index" => $byte_offset_in_local_index,
                 "byte_offset_in_local_paths_to_push" => ftell($this->local_paths_to_push_handle),
                 "byte_offset_in_local_paths_to_delete" => ftell($this->local_paths_to_delete_handle),
+                "local_paths_to_push_count" => $local_paths_to_push_count,
                 "deleted_directory_stack_top_byte_offset" => $deleted_directory_stack_top_byte_offset,
                 "previous_fresh_local_index_entry_path" =>
                     $this->previous_fresh_local_index_entry_path,

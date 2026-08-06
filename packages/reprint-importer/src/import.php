@@ -1612,6 +1612,7 @@ class ImportClient
         $detail = null;
         $phase = $sender->get_phase();
         $previous_phase = $phase;
+        $reported_progress = $sender->get_progress();
 
         try {
             $this->audit_log(
@@ -1619,6 +1620,7 @@ class ImportClient
                     . " files-push | phase={$phase}",
                 false
             );
+            $this->report_files_push_progress($reported_progress, true);
 
             while ($sender->get_status() === 'continue') {
                 if ($this->files_push_stop_signal !== null) {
@@ -1643,12 +1645,18 @@ class ImportClient
 
                 $has_next_sender_step = $sender->next_step();
                 $phase = $sender->get_phase();
-                if ($phase !== $previous_phase) {
+                $phase_changed = $phase !== $previous_phase;
+                if ($phase_changed) {
                     $this->audit_log(
                         "PHASE files-push | from={$previous_phase} | to={$phase}",
                         false
                     );
                     $previous_phase = $phase;
+                }
+                $sender_progress = $sender->get_progress();
+                if ($sender_progress !== $reported_progress) {
+                    $this->report_files_push_progress($sender_progress, $phase_changed);
+                    $reported_progress = $sender_progress;
                 }
                 if (!$has_next_sender_step) {
                     break;
@@ -1677,6 +1685,7 @@ class ImportClient
                 }
             }
             $phase = $sender->get_phase();
+            $sender_progress = $sender->get_progress();
             try {
                 $sender->close();
             } catch (\Throwable $throwable) {
@@ -1741,6 +1750,11 @@ class ImportClient
         if ($detail !== null) {
             $result['detail'] = $detail;
         }
+        foreach (['files_done', 'files_total'] as $progress_field) {
+            if (isset($sender_progress[$progress_field])) {
+                $result[$progress_field] = $sender_progress[$progress_field];
+            }
+        }
         // Write the flat progress snapshot without consulting pull state.
         $progress_payload = [
             'command' => 'files-push',
@@ -1748,21 +1762,18 @@ class ImportClient
             'phase' => $phase,
             'reason' => $reason,
             'detail' => $detail,
-            'ts' => microtime(true),
         ];
-        $progress_json = json_encode(
-            $progress_payload,
-            JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE
-        );
-        if ($progress_json !== false) {
-            $temporary_progress_path = $this->progress_file . '.tmp';
-            if (file_put_contents($temporary_progress_path, $progress_json) !== false) {
-                rename($temporary_progress_path, $this->progress_file);
+        foreach (['files_done', 'files_total'] as $progress_field) {
+            if (isset($sender_progress[$progress_field])) {
+                $progress_payload[$progress_field] = $sender_progress[$progress_field];
             }
         }
+        $progress_payload['ts'] = microtime(true);
+        $this->write_files_push_progress_file($progress_payload);
 
-        // Emit the sole final JSON line for non-interactive callers.
+        // Emit the final JSON line after any preceding progress records.
         if ($this->is_tty && !$this->verbose_mode) {
+            $this->progress->clear_progress_line();
             $this->progress->show_lifecycle_line($result['message'] . "\n");
             return;
         }
@@ -1772,6 +1783,112 @@ class ImportClient
         }
         @fwrite($this->progress_fd, $result_json . "\n");
         @flush();
+    }
+
+    /**
+     * Reports one files-push progress snapshot.
+     *
+     * @param array $sender_progress {
+     *     Target-confirmed sender progress.
+     *
+     *     @type string $phase       Current sender phase.
+     *     @type int    $files_done  Target-confirmed local paths. Present after planning.
+     *     @type int    $files_total Total local paths selected by the plan. Present after planning.
+     * }
+     * @param bool $force_output Whether to bypass the JSONL progress throttle.
+     * @phpstan-param array{phase:string,files_done?:int,files_total?:int} $sender_progress
+     */
+    private function report_files_push_progress(
+        array $sender_progress,
+        bool $force_output
+    ): void {
+        $phase = $sender_progress['phase'];
+        $fraction = null;
+        switch ($phase) {
+            case 'creating':
+                $message = 'Starting files push';
+                break;
+            case 'starting_plan':
+            case 'planning':
+                $message = 'Planning file changes';
+                break;
+            case 'pushing_paths':
+                $files_done = $sender_progress['files_done'];
+                $files_total = $sender_progress['files_total'];
+                $fraction = $files_total > 0 ? $files_done / $files_total : null;
+                $message = sprintf(
+                    'Uploading — %s / %s files',
+                    number_format($files_done),
+                    number_format($files_total)
+                );
+                break;
+            case 'pushing_deletes':
+                $message = 'Uploading deleted paths';
+                break;
+            case 'committing':
+                $message = 'Applying file changes';
+                break;
+            case 'saving_local_index':
+                $message = 'Saving local index';
+                break;
+            case 'completing':
+                $message = 'Finishing files push';
+                break;
+            case 'removing':
+                $message = 'Removing changed push session';
+                break;
+            case 'discarding_plan':
+                $message = 'Discarding changed push plan';
+                break;
+            default:
+                $message = 'Running files push';
+                break;
+        }
+
+        $this->progress->show_progress_line($message, $fraction);
+        $progress_record = [
+            'type' => 'push_progress',
+            'command' => 'files-push',
+            'status' => 'in_progress',
+            'phase' => $phase,
+            'message' => $message,
+        ];
+        $progress_payload = [
+            'command' => 'files-push',
+            'status' => 'in_progress',
+            'phase' => $phase,
+            'reason' => null,
+            'detail' => null,
+        ];
+        foreach (['files_done', 'files_total'] as $progress_field) {
+            if (isset($sender_progress[$progress_field])) {
+                $progress_record[$progress_field] = $sender_progress[$progress_field];
+                $progress_payload[$progress_field] = $sender_progress[$progress_field];
+            }
+        }
+        $this->output_progress($progress_record, $force_output);
+        $progress_payload['ts'] = microtime(true);
+        $this->write_files_push_progress_file($progress_payload);
+    }
+
+    /**
+     * Atomically writes the flat files-push progress snapshot.
+     *
+     * @param array<string,mixed> $progress_payload Complete progress-file payload.
+     */
+    private function write_files_push_progress_file(array $progress_payload): void
+    {
+        $progress_json = json_encode(
+            $progress_payload,
+            JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE
+        );
+        if ($progress_json === false) {
+            return;
+        }
+        $temporary_progress_path = $this->progress_file . '.tmp';
+        if (file_put_contents($temporary_progress_path, $progress_json) !== false) {
+            rename($temporary_progress_path, $this->progress_file);
+        }
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions are CLI text, not HTML.

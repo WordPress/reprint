@@ -1454,6 +1454,69 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * Reports completed local paths only after the target confirms their request.
+     */
+    public function testHighLevelSenderReportsTargetConfirmedPathProgress(): void
+    {
+        $local_docroot = $this->root . '/progress-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/first.txt', 'first');
+        file_put_contents($local_docroot . '/second.txt', 'second');
+        $push_state_directory = $this->root . '/progress-state';
+        $options = $this->senderOptions($local_docroot, $push_state_directory);
+
+        $sender = $this->startSender($options);
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'pushing_paths');
+            $this->assertSame(
+                [
+                    'phase' => 'pushing_paths',
+                    'files_done' => 0,
+                    'files_total' => 2,
+                ],
+                $sender->get_progress()
+            );
+
+            $this->assertTrue($sender->next_step());
+            $this->assertSame(0, $sender->get_progress()['files_done']);
+            $sender->cancel();
+            $this->assertSame(0, $sender->get_progress()['files_done']);
+
+            $files_done = $sender->get_progress()['files_done'];
+            for ($step = 0; $step < 20 && $files_done === 0; ++$step) {
+                $this->assertTrue($sender->next_step());
+                $files_done = $sender->get_progress()['files_done'];
+            }
+            $confirmed_progress = $sender->get_progress();
+            $this->assertGreaterThan(0, $confirmed_progress['files_done']);
+            $this->assertLessThanOrEqual(2, $confirmed_progress['files_done']);
+        } finally {
+            if ($sender->get_status() === 'continue') {
+                $sender->cancel();
+            }
+            $this->closeSender($sender);
+        }
+
+        $sender = $this->resumeSender($options);
+        try {
+            $this->assertSame($confirmed_progress, $sender->get_progress());
+            while ($sender->next_step()) {
+                continue;
+            }
+            $this->assertSame(
+                [
+                    'phase' => 'completing',
+                    'files_done' => 2,
+                    'files_total' => 2,
+                ],
+                $sender->get_progress()
+            );
+        } finally {
+            $this->closeSender($sender);
+        }
+    }
+
+    /**
      * Continues deleted paths and their completion from successful upload responses.
      */
     public function testHighLevelSenderRetainsReceiverConfirmedDeletedPathsWhileOpen(): void
@@ -2654,6 +2717,25 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame(0, $initial['exit'], $initial['output']);
         $initial_result = $this->lastCliJsonLine($initial['stdout']);
         $this->assertSame('complete', $initial_result['status'] ?? null);
+        $this->assertSame(4, $initial_result['files_done'] ?? null);
+        $this->assertSame(4, $initial_result['files_total'] ?? null);
+        $push_progress_records = array_values(array_filter(
+            $this->cliJsonLines($initial['stdout']),
+            static function (array $record): bool {
+                return ( $record['type'] ?? null ) === 'push_progress';
+            }
+        ));
+        $this->assertNotEmpty($push_progress_records);
+        $upload_progress_records = array_values(array_filter(
+            $push_progress_records,
+            static function (array $record): bool {
+                return ( $record['phase'] ?? null ) === 'pushing_paths';
+            }
+        ));
+        $this->assertNotEmpty($upload_progress_records);
+        $this->assertSame(0, $upload_progress_records[0]['files_done'] ?? null);
+        $this->assertSame(4, $upload_progress_records[0]['files_total'] ?? null);
+        $this->assertSame('Uploading — 0 / 4 files', $upload_progress_records[0]['message'] ?? null);
         $push_state_directory = $this->filesPushStateDirectory($state_directory);
         $this->assertSame($initial_contents, file_get_contents($this->docroot . '/nested/multi-chunk.bin'));
         $this->assertSame('delete me later', file_get_contents($this->docroot . '/delete-later.txt'));
@@ -2675,10 +2757,12 @@ final class PushEndpointsTest extends TestCase {
             JSON_THROW_ON_ERROR
         );
         $this->assertSame(
-            ['command', 'status', 'phase', 'reason', 'detail', 'ts'],
+            ['command', 'status', 'phase', 'reason', 'detail', 'files_done', 'files_total', 'ts'],
             array_keys($progress)
         );
         $this->assertSame('complete', $progress['status']);
+        $this->assertSame(4, $progress['files_done']);
+        $this->assertSame(4, $progress['files_total']);
         $audit = (string) file_get_contents($state_directory . '/audit.log');
         $this->assertStringNotContainsString(self::SECRET, $audit . $initial['output']);
         $this->assertStringNotContainsString('cursor', $audit . json_encode($progress));
@@ -3030,13 +3114,24 @@ final class PushEndpointsTest extends TestCase {
     /** @return array<string,mixed> */
     private function lastCliJsonLine(string $output): array
     {
-        foreach (array_reverse(preg_split('/\R/', trim($output)) ?: []) as $line) {
-            $decoded = json_decode($line, true);
-            if (is_array($decoded)) {
-                return $decoded;
-            }
+        $records = $this->cliJsonLines($output);
+        if ($records !== []) {
+            return $records[count($records) - 1];
         }
         $this->fail('No JSON line was found in CLI output: ' . $output);
+    }
+
+    /** @return list<array<string,mixed>> */
+    private function cliJsonLines(string $output): array
+    {
+        $records = [];
+        foreach (preg_split('/\R/', trim($output)) ?: [] as $line) {
+            $decoded = json_decode($line, true);
+            if (is_array($decoded)) {
+                $records[] = $decoded;
+            }
+        }
+        return $records;
     }
 
     private function filesPushStateDirectory(string $state_directory): string
