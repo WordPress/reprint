@@ -121,7 +121,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--force-http', $output);
         $this->assertStringContainsString('--verbose, -v', $output);
         $this->assertStringContainsString('low-level, files-only command', $output);
-        $this->assertStringContainsString('existing filesystem root at --fs-root', $output);
+        $this->assertStringContainsString("document root's local tree beneath --fs-root", $output);
         $this->assertStringContainsString('requires saved preflight data', $output);
         $this->assertStringContainsString('read or modify', $output);
         $this->assertStringNotContainsString('--abort', $output);

@@ -1516,7 +1516,7 @@ final class PushEndpointsTest extends TestCase {
         }
     }
 
-    public function testHighLevelSenderResumesStateWrittenBeforeProgress(): void
+    public function testHighLevelSenderResumesStateWrittenBeforeDocumentRootMappingAndProgress(): void
     {
         $local_docroot = $this->root . '/old-sender-state-local-docroot';
         mkdir($local_docroot, 0700, true);
@@ -1534,8 +1534,10 @@ final class PushEndpointsTest extends TestCase {
         $state = $this->loadActiveState($push_state_directory);
         $this->assertIsArray($state);
         $this->assertIsArray($state['push_plan_cursor']);
+        unset($state['document_root_local_relative_path']);
         unset($state['local_paths_to_push_count']);
         unset($state['local_paths_pushed']);
+        unset($state['push_plan_cursor']['document_root_local_relative_path']);
         unset($state['push_plan_cursor']['position']['local_paths_to_push_count']);
         file_put_contents(
             $push_state_directory . '/sender.json',
@@ -2550,6 +2552,7 @@ final class PushEndpointsTest extends TestCase {
         mkdir($local_docroot, 0700, true);
         $sender = $this->startSender([
             'filesystem_root' => $local_docroot,
+            'document_root' => '/',
             'push_state_directory' => $push_state_directory,
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
@@ -2734,6 +2737,53 @@ final class PushEndpointsTest extends TestCase {
             'stderr' => $stderr,
             'output' => $stdout . $stderr,
         ];
+    }
+
+    public function testFilesPushCliPushesFromDocumentRootBelowFilesystemRoot(): void
+    {
+        $this->writeDocrootConfiguration([
+            'document_root' => $this->docroot,
+            'maximum_part_bytes' => 64,
+        ]);
+        $filesystem_root = $this->root . '/cli-filesystem-root';
+        $state_directory = $this->root . '/cli-filesystem-root-state';
+        $document_root = (string) realpath($this->docroot);
+        $local_absolute_document_root = $filesystem_root . $document_root;
+        mkdir($local_absolute_document_root, 0700, true);
+        file_put_contents($filesystem_root . '/.filesystem-root-only', 'outside document root');
+        file_put_contents($local_absolute_document_root . '/newfile.php', "<?php echo 'from filesystem root';");
+
+        $created = $this->runFilesPushCli($filesystem_root, $state_directory, [], $document_root);
+
+        $this->assertSame(0, $created['exit'], $created['output']);
+        $this->assertSame(
+            'complete',
+            $this->lastCliJsonLine($created['stdout'])['status'] ?? null
+        );
+        $this->assertSame(
+            "<?php echo 'from filesystem root';",
+            file_get_contents($this->docroot . '/newfile.php')
+        );
+        $this->assertFileDoesNotExist(
+            $this->docroot . $document_root . '/newfile.php'
+        );
+        $this->assertFileDoesNotExist($this->docroot . '/.filesystem-root-only');
+
+        unlink($local_absolute_document_root . '/newfile.php');
+        file_put_contents($local_absolute_document_root . '/replacement.php', "<?php echo 'replacement';");
+
+        $updated = $this->runFilesPushCli($filesystem_root, $state_directory, [], $document_root);
+
+        $this->assertSame(0, $updated['exit'], $updated['output']);
+        $this->assertSame(
+            'complete',
+            $this->lastCliJsonLine($updated['stdout'])['status'] ?? null
+        );
+        $this->assertFileDoesNotExist($this->docroot . '/newfile.php');
+        $this->assertSame(
+            "<?php echo 'replacement';",
+            file_get_contents($this->docroot . '/replacement.php')
+        );
     }
 
     public function testFilesPushCliPushesAndUpdatesACompleteLocalTree(): void
@@ -3081,12 +3131,14 @@ final class PushEndpointsTest extends TestCase {
     private function runFilesPushCli(
         string $filesystem_root,
         string $state_directory,
-        array $ini_settings = []
+        array $ini_settings = [],
+        string $document_root = '/'
     ): array {
         [$process, $pipes] = $this->startFilesPushCli(
             $filesystem_root,
             $state_directory,
-            $ini_settings
+            $ini_settings,
+            $document_root
         );
         return $this->finishFilesPushCli($process, $pipes);
     }
@@ -3100,9 +3152,10 @@ final class PushEndpointsTest extends TestCase {
     private function startFilesPushCli(
         string $filesystem_root,
         string $state_directory,
-        array $ini_settings = []
+        array $ini_settings = [],
+        string $document_root = '/'
     ): array {
-        $this->writeFilesPushPreflight($state_directory);
+        $this->writeFilesPushPreflight($state_directory, $document_root);
 
         $command = [PHP_BINARY];
         foreach ($ini_settings as $name => $value) {
@@ -3130,8 +3183,10 @@ final class PushEndpointsTest extends TestCase {
         return [$process, $pipes];
     }
 
-    private function writeFilesPushPreflight(string $state_directory): void
-    {
+    private function writeFilesPushPreflight(
+        string $state_directory,
+        string $document_root
+    ): void {
         $pull_state_file = dirname($this->filesPushStateDirectory($state_directory))
             . '/pull/state.json';
         if (is_file($pull_state_file)) {
@@ -3147,7 +3202,7 @@ final class PushEndpointsTest extends TestCase {
             'http_code' => 200,
             'data' => [
                 'runtime' => [
-                    'document_root' => 'base64:' . base64_encode($this->docroot),
+                    'document_root' => 'base64:' . base64_encode($document_root),
                 ],
             ],
         ];
@@ -3219,6 +3274,7 @@ final class PushEndpointsTest extends TestCase {
     ): array {
         return [
             'filesystem_root' => $filesystem_root,
+            'document_root' => '/',
             'push_state_directory' => $push_state_directory,
             'remote_reprint_api_url' => $this->remote_reprint_api_url,
             'allow_http' => true,
@@ -3472,6 +3528,7 @@ final class PushEndpointsTest extends TestCase {
         ]);
         return [
             'filesystem_root' => $filesystem_root,
+            'document_root' => '/',
             'push_state_directory' => $push_state_directory,
             'remote_reprint_api_url' => $this->remote_reprint_api_url,
             'allow_http' => true,

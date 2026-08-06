@@ -123,14 +123,17 @@
  *
  * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'directory'|'symlink',size:int,ctime:int}
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
- * @phpstan-type LocalPathToPush array{local_relative_path:string,local_relative_path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
+ * @phpstan-type LocalPathToPush array{local_relative_path:string,document_root_relative_path:string,document_root_relative_path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',document_root_local_relative_path:string,push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
     /** @var string Filesystem root whose local paths to push are sent. */
     private string $filesystem_root;
+
+    /** @var string Document root relative to the local filesystem root. */
+    private string $document_root_local_relative_path;
 
     /** @var string Local push state directory owned by this sender. */
     private string $push_state_directory;
@@ -235,6 +238,7 @@ final class PushFilesSender
      *     Push, push stream client, and local-file options.
      *
      *     @type string                  $filesystem_root         Required filesystem root directory.
+     *     @type string                  $document_root           Required remote absolute document root.
      *     @type string                  $push_state_directory    Required local push state directory.
      *     @type string                  $remote_reprint_api_url  Required remote Reprint API URL.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
@@ -269,6 +273,7 @@ final class PushFilesSender
             $sender->state = [
                 'push_session_id' => bin2hex(random_bytes(16)),
                 'phase' => 'creating',
+                'document_root_local_relative_path' => $sender->document_root_local_relative_path,
                 'push_plan_cursor' => null,
                 'local_paths_to_push_byte_offset' => 0,
                 'local_paths_to_push_count' => null,
@@ -335,6 +340,8 @@ final class PushFilesSender
     private function __construct(array $options, ReprintProcessLock $process_lock)
     {
         $filesystem_root = $options['filesystem_root'] ?? null;
+        /** @var string $document_root */
+        $document_root = $options['document_root'];
         $push_state_directory = $options['push_state_directory'] ?? null;
         if (!is_string($filesystem_root) || !is_dir($filesystem_root) || is_link($filesystem_root)) {
             throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
@@ -366,6 +373,7 @@ final class PushFilesSender
             throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
         }
         $this->filesystem_root = rtrim($resolved_local_filesystem_root, '/');
+        $this->document_root_local_relative_path = trim($document_root, '/');
         $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->plan_directory = $this->push_state_directory . '/plan';
@@ -620,7 +628,8 @@ final class PushFilesSender
             $this->plan_directory,
             $this->filesystem_root,
             $this->local_index_file,
-            $this->excluded_paths_path
+            $this->excluded_paths_path,
+            $this->state['document_root_local_relative_path']
         );
         $this->state['push_plan_cursor'] = $this->plan->get_cursor();
         $this->state['phase'] = 'planning';
@@ -748,7 +757,7 @@ final class PushFilesSender
         } else {
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
                 'push_session_id' => $this->state['push_session_id'],
-                'path_b64' => $local_path_to_push['local_relative_path_b64'],
+                'path_b64' => $local_path_to_push['document_root_relative_path_b64'],
             ], ['accepted']);
             if ($this->handle_request_failure($request_result)) {
                 return;
@@ -807,7 +816,7 @@ final class PushFilesSender
             }
             $upload_part = [
                 'type' => 'directory',
-                'path' => $local_path_to_push['local_relative_path'],
+                'path' => $local_path_to_push['document_root_relative_path'],
                 'payload' => '',
             ];
             $upload_completes_local_path = true;
@@ -830,7 +839,7 @@ final class PushFilesSender
             }
             $upload_part = [
                 'type' => 'symlink',
-                'path' => $local_path_to_push['local_relative_path'],
+                'path' => $local_path_to_push['document_root_relative_path'],
                 'target' => $symlink_target,
                 'payload' => '',
             ];
@@ -840,7 +849,7 @@ final class PushFilesSender
         // A file contributes at most one bounded chunk during this call and remains open for the next.
         if ($local_path_type_size_and_ctime['type'] === 'file') {
             $maximum_file_payload_bytes = $this->push_stream_client->next_file_body_bytes(
-                $local_path_to_push['local_relative_path'],
+                $local_path_to_push['document_root_relative_path'],
                 $local_path_type_size_and_ctime['size'],
                 $file_byte_offset
             );
@@ -908,7 +917,7 @@ final class PushFilesSender
 
             $upload_part = [
                 'type' => 'file',
-                'path' => $local_path_to_push['local_relative_path'],
+                'path' => $local_path_to_push['document_root_relative_path'],
                 'total_bytes' => $local_path_type_size_and_ctime['size'],
                 'offset' => $file_byte_offset,
                 'payload' => $payload,
@@ -1397,14 +1406,22 @@ final class PushFilesSender
             throw new RuntimeException('Failed to decode a local path to push.', 0, $exception);
         }
         /** @var array{path:string,type:'file'|'directory'|'symlink',size:int,ctime:int} $decoded_local_path */
-        $local_relative_path_b64 = $decoded_local_path['path'];
-        $local_relative_path = base64_decode($local_relative_path_b64, true);
+        $local_relative_path = base64_decode($decoded_local_path['path'], true);
         if ($local_relative_path === false) {
             throw new RuntimeException('Failed to decode a path in the local paths-to-push file.');
         }
+        $document_root_local_relative_path = $this->state['document_root_local_relative_path'];
+        if ($document_root_local_relative_path === '') {
+            $document_root_relative_path = $local_relative_path;
+        } else {
+            $document_root_relative_path = $local_relative_path === $document_root_local_relative_path
+                ? ''
+                : substr($local_relative_path, strlen($document_root_local_relative_path) + 1);
+        }
         return [
             'local_relative_path' => $local_relative_path,
-            'local_relative_path_b64' => $local_relative_path_b64,
+            'document_root_relative_path' => $document_root_relative_path,
+            'document_root_relative_path_b64' => base64_encode($document_root_relative_path),
             'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
             'planned_local_path_type_size_and_ctime' => [
                 'type' => $decoded_local_path['type'],
@@ -1560,6 +1577,10 @@ final class PushFilesSender
         }
 
         /** @var array<string,mixed> $state */
+        if (!array_key_exists('document_root_local_relative_path', $state)) {
+            // Older state had no document-root mapping and sent local relative paths unchanged.
+            $state['document_root_local_relative_path'] = '';
+        }
         if (!array_key_exists('local_paths_to_push_count', $state)) {
             // Keep the sender single-pass when older state has no path progress.
             $state['local_paths_to_push_count'] = null;
