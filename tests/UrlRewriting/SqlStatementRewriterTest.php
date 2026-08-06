@@ -228,6 +228,8 @@ class SqlStatementRewriterTest extends TestCase
         $rewriter = $this->createRewriter();
         $markup = '<a href="https://old-site.com/literal">Literal</a>'
             . '<a href="HTTPS://OLD-SITE.COM/case-variant">Case variant</a>';
+        $expected_markup = '<a href="https://new-site.com/literal">Literal</a>'
+            . '<a href="HTTPS://new-site.com/case-variant">Case variant</a>';
         $encoded = base64_encode($markup);
         $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
 
@@ -235,9 +237,7 @@ class SqlStatementRewriterTest extends TestCase
 
         $values = $this->collectValues($result);
         $this->assertCount(1, $values);
-        $this->assertStringContainsString('https://new-site.com/literal', $values[0]);
-        $this->assertStringContainsString('https://new-site.com/case-variant', $values[0]);
-        $this->assertStringNotContainsString('old-site.com', strtolower($values[0]));
+        $this->assertSame($expected_markup, $values[0]);
     }
 
     public function testPostContentUsesStructuredParserForCaseVariantHostWithoutLiteralSourceDomain(): void

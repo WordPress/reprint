@@ -70,6 +70,79 @@ class SafeUrlRewriteDataIntegrityTest extends TestCase {
         $this->assertSame($expected, $this->createRewriter()->rewrite($input));
     }
 
+    public function testJsonRewriteNeverChangesObjectMemberNames(): void
+    {
+        $input = '{"https:\/\/source.example\/same":"https:\/\/source.example\/same"}';
+        $expected = '{"https:\/\/source.example\/same":"https:\/\/destination.example\/same"}';
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testMalformedTopLevelJsonFailsClosed(): void
+    {
+        $input = '{"url":"https://source.example/article",'
+            . '"label":"keep\u0020this",}';
+
+        $this->assertSame($input, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testMalformedJsonChildStaysOpaqueWhileValidSiblingRewrites(): void
+    {
+        $malformed_child = '{"url":"https://source.example/inside",}';
+        $input = json_encode([
+            'payload' => $malformed_child,
+            'url' => self::SOURCE_URL . '/sibling',
+        ], JSON_UNESCAPED_SLASHES);
+        $expected = json_encode([
+            'payload' => $malformed_child,
+            'url' => self::TARGET_URL . '/sibling',
+        ], JSON_UNESCAPED_SLASHES);
+
+        $this->assertIsString($input);
+        $this->assertIsString($expected);
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testMalformedSerializationChildStaysOpaqueWhileValidSiblingRewrites(): void
+    {
+        $malformed_child = 's:999:"' . self::SOURCE_URL . '/inside";';
+        $input = json_encode([
+            'payload' => $malformed_child,
+            'url' => self::SOURCE_URL . '/sibling',
+        ], JSON_UNESCAPED_SLASHES);
+        $expected = json_encode([
+            'payload' => $malformed_child,
+            'url' => self::TARGET_URL . '/sibling',
+        ], JSON_UNESCAPED_SLASHES);
+
+        $this->assertIsString($input);
+        $this->assertIsString($expected);
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testEscapedJsonSchemeAndHostnameReachStructuredRewriter(): void
+    {
+        $input = " \n{\"url\":\"\\u0068\\u0074\\u0074\\u0070\\u0073:\\/\\/"
+            . "sour\\u0063e\\u002eexample\\/article?next=%2f#part=%2E\","
+            . "\"label\":\"keep\\u0020this\"}\t";
+        $expected = " \n{\"url\":\"\\u0068\\u0074\\u0074\\u0070\\u0073:\\/\\/destination.example"
+            . "\\/article?next=%2f#part=%2E\",\"label\":\"keep\\u0020this\"}\t";
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
+    public function testSerializedPhpRewriteNeverChangesStructuralKeys(): void
+    {
+        $input = serialize([
+            self::SOURCE_URL . '/same' => self::SOURCE_URL . '/same',
+        ]);
+        $expected = serialize([
+            self::SOURCE_URL . '/same' => self::TARGET_URL . '/same',
+        ]);
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
     public function testBlockCommentJsonRewritePreservesUnrelatedValues(): void
     {
         $input = '<!-- wp:example '
@@ -78,6 +151,34 @@ class SafeUrlRewriteDataIntegrityTest extends TestCase {
         $expected = '<!-- wp:example '
             . '{"url":"https:\/\/destination.example\/article","settings":{"nested":{}},'
             . '"identifier":18446744073709551615} /-->';
+
+        $this->assertSame(
+            $expected,
+            $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    public function testBlockCommentJsonRewritePreservesChangedStringSuffixEscapes(): void
+    {
+        $input = '<!-- wp:example '
+            . '{"url":"https:\/\/source.example\/caf\u00e9?marker=\u003c"} /-->';
+        $expected = '<!-- wp:example '
+            . '{"url":"https:\/\/destination.example\/caf\u00e9?marker=\u003c"} /-->';
+
+        $this->assertSame(
+            $expected,
+            $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    public function testBlockCommentJsonRewriteNeverChangesMemberNames(): void
+    {
+        $input = '<!-- wp:example '
+            . '{"https:\/\/source.example\/same":'
+            . '"https:\/\/source.example\/same"} /-->';
+        $expected = '<!-- wp:example '
+            . '{"https:\/\/source.example\/same":'
+            . '"https:\/\/destination.example\/same"} /-->';
 
         $this->assertSame(
             $expected,

@@ -197,16 +197,36 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($input, $result, 'Serialized PHP with no matching URLs should be byte-identical');
     }
 
-    public function testMalformedSerializedPhpFallsBackToText(): void
+    /**
+     * @dataProvider malformedSerializationLookingValues
+     */
+    public function testMalformedSerializationLookingValueFailsClosed(string $input): void
     {
         $rewriter = $this->createRewriter();
-        // SerializedPhpFormat::is_serialized() triggers on 's:...' ending with ';'
-        // but this is truncated/malformed — the walker will return false,
-        // falling back to text rewriting
-        $input = 's:999:"https://old-site.com";';
-        $result = $rewriter->rewrite($input);
-        // Should have attempted text rewriting, replacing the URL
-        $this->assertStringContainsString('new-site.com', $result);
+
+        $this->assertSame($input, $rewriter->rewrite($input));
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function malformedSerializationLookingValues(): iterable
+    {
+        yield 'string length exceeds payload' => [
+            's:999:"https://old-site.com/page";',
+        ];
+        yield 'object value length exceeds payload' => [
+            'O:8:"stdClass":1:{s:3:"url";s:999:"https://old-site.com/page";}',
+        ];
+        yield 'custom payload length exceeds payload' => [
+            'C:4:"Demo":999:{https://old-site.com/page}',
+        ];
+
+        $url = 'https://old-site.com/page';
+        yield 'invalid floating-point scalar payload' => [
+            'a:2:{s:3:"bad";d:not-a-number;'
+                . 's:3:"url";s:' . strlen($url) . ':"' . $url . '";}',
+        ];
     }
 
     // --- Base64 ---
@@ -400,12 +420,12 @@ class StructuredDataUrlRewriterTest extends TestCase
         $rewriter = $this->createRewriter();
         $input = '<a href="https://old-site.com/literal">Literal</a>'
             . '<a href="HTTPS://OLD-SITE.COM/case-variant">Case variant</a>';
+        $expected = '<a href="https://new-site.com/literal">Literal</a>'
+            . '<a href="HTTPS://new-site.com/case-variant">Case variant</a>';
 
         $result = $rewriter->rewrite_known_block_markup_value($input);
 
-        $this->assertStringContainsString('https://new-site.com/literal', $result);
-        $this->assertStringContainsString('https://new-site.com/case-variant', $result);
-        $this->assertStringNotContainsString('old-site.com', strtolower($result));
+        $this->assertSame($expected, $result);
     }
 
     public function testKnownBlockMarkupRewritesCaseVariantHostWithoutLiteralSourceDomain(): void
@@ -454,12 +474,13 @@ class StructuredDataUrlRewriterTest extends TestCase
         $input = '<!-- wp:image {"src":"https:\/\/old-site.com\/img.jpg"} -->'
             . '<figure><img src="HTTPS://OLD-SITE.COM/img.jpg"/></figure>'
             . '<!-- /wp:image -->';
+        $expected = '<!-- wp:image {"src":"https:\/\/new-site.com\/img.jpg"} -->'
+            . '<figure><img src="HTTPS://new-site.com/img.jpg"/></figure>'
+            . '<!-- /wp:image -->';
 
         $result = $rewriter->rewrite_known_block_markup_value($input);
 
-        $this->assertStringContainsString('https:\/\/new-site.com\/img.jpg', $result);
-        $this->assertStringContainsString('src="https://new-site.com/img.jpg"', $result);
-        $this->assertStringNotContainsString('old-site.com', strtolower($result));
+        $this->assertSame($expected, $result);
     }
 
     public function testRewriteCacheSeparatesPlainTextAndBlockMarkupSemantics(): void

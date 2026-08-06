@@ -17,7 +17,7 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/loa
  * - percent-encoded and Unicode source paths retain the unmatched suffix bytes;
  * - an outer URL query containing the source URL is not rewritten;
  * - serialized PHP embedded in text is left unchanged;
- * - target paths remain unsupported by the ambiguous-text fallback.
+ * - complete URL tokens support target paths without changing surrounding bytes.
  */
 class SafeUrlRewriteFallbackTest extends TestCase
 {
@@ -273,14 +273,37 @@ class SafeUrlRewriteFallbackTest extends TestCase
         );
     }
 
-    public function testAmbiguousTextLeavesTargetSubpathMappingUnchanged(): void
+    public function testCompletePlainUrlSupportsTargetSubpathMapping(): void
     {
-        $input = 'https://source.example/article';
         $rewriter = $this->createRewriter([
             self::SOURCE_URL => self::TARGET_URL . '/store',
         ]);
 
-        $this->assertSame($input, $rewriter->rewrite($input));
+        $this->assertSame(
+            self::TARGET_URL . '/store/article',
+            $rewriter->rewrite(self::SOURCE_URL . '/article')
+        );
+    }
+
+    public function testCompletePlainUrlPrefersMostSpecificMapping(): void
+    {
+        $rewriter = $this->createRewriter([
+            self::SOURCE_URL => self::TARGET_URL,
+            self::SOURCE_URL . '/blog' => 'https://blog-destination.example/articles',
+        ]);
+
+        $this->assertSame(
+            'https://blog-destination.example/articles/post',
+            $rewriter->rewrite(self::SOURCE_URL . '/blog/post')
+        );
+    }
+
+    public function testPlainProseRewritePreservesEverySurroundingByte(): void
+    {
+        $input = "  Prefix\t([https://source.example/a?next=%2f#part=%2E]),  suffix\r\n";
+        $expected = "  Prefix\t([https://destination.example/a?next=%2f#part=%2E]),  suffix\r\n";
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
     }
 
     public function testStructuredBlockAttributeStillSupportsTargetSubpathMapping(): void

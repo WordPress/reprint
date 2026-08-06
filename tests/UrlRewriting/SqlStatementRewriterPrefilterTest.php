@@ -6,20 +6,19 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/load.php';
 
 /**
- * Adversarial coverage for the base64-prefix fast-reject in
- * SqlStatementRewriter::rewrite().
+ * Adversarial coverage for SQL URL-dispatch quick rejects.
  *
  * The rewriter short-circuits any SQL fragment whose body contains none of
  * `aHR0`, `dHA6`, `dHBz`, `dHRw` — the four base64 substrings produced when
  * "http://" or "https://" is encoded at any byte alignment 0/1/2 mod 3.
  *
- * Most tests here verify the prefilter PROPERTY directly: for every column
- * value that carries a real URL, the encoded SQL must contain at least one
- * of the four substrings. This is a pure base64-arithmetic claim and is
- * independent of how the rewriter recognises safe source-base boundaries.
+ * Most tests here verify the prefilter property directly: for every column
+ * value that carries a lowercase http/https URL, the encoded SQL contains at
+ * least one of the four substrings. This is a pure base64-arithmetic claim and
+ * is independent of how the rewriter recognises safe source-base boundaries.
  *
- * A separate behavioural test then runs the full rewriter to confirm the
- * prefilter doesn't accidentally short-circuit cases that should rewrite.
+ * Behavioural tests run the full rewriter to confirm that lowercase absolute,
+ * uppercase absolute, and relative URL forms all reach structured parsing.
  *
  * The four prefixes were chosen as the minimum set that covers every
  * combination of scheme × byte alignment:
@@ -74,9 +73,8 @@ class SqlStatementRewriterPrefilterTest extends TestCase
     }
 
     // -----------------------------------------------------------------
-    // PREFILTER PROPERTY — for every value with a real URL, the encoded
+    // PREFILTER PROPERTY — for every lowercase http/https URL, the encoded
     // statement must contain at least one of the four prefilter substrings.
-    // This is the critical anti-false-negative test.
     // -----------------------------------------------------------------
 
     /**
@@ -438,20 +436,76 @@ class SqlStatementRewriterPrefilterTest extends TestCase
     }
 
     /**
-     * Uppercase HTTP encodes to `SFRU…` — none of our prefixes match.
-     * The leaf rewriter is also case-sensitive on "http", so this is
-     * preserved-behaviour, not a regression.
+     * @dataProvider uppercaseUrlCases
      */
-    public function testUppercaseHttpIsLeftAlone(): void
+    public function testUppercaseHttpUrlIsRewritten(string $source_url, string $target_url): void
     {
         $rewriter = $this->createRewriter();
-        $value = 'HTTP://old-site.com/page';
+        $sql = $this->buildInsertSql($source_url);
+
+        $this->assertSame($this->buildInsertSql($target_url), $rewriter->rewrite($sql));
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function uppercaseUrlCases(): iterable
+    {
+        yield 'HTTP' => [
+            'HTTP://OLD-SITE.COM/page',
+            'HTTP://new-site.com/page',
+        ];
+        yield 'HTTPS' => [
+            'HTTPS://OLD-SITE.COM/page',
+            'HTTPS://new-site.com/page',
+        ];
+    }
+
+    /**
+     * @dataProvider relativeBlockUrlCases
+     */
+    public function testRelativeBlockUrlReachesStructuredRewriterThroughSql(
+        string $source_reference,
+        string $target_reference
+    ): void {
+        $rewriter = new SqlStatementRewriter(
+            new StructuredDataUrlRewriter([
+                'https://old-site.com/old' => 'https://new-site.com/new',
+            ]),
+            'wp_'
+        );
+        $value = '<a href="' . $source_reference . '">Page</a>';
         $sql = $this->buildInsertSql($value);
-        // Sanity: prefilter does not match.
-        foreach (self::PREFIXES as $prefix) {
-            $this->assertFalse(strpos($sql, $prefix), "Unexpected prefilter hit on '{$prefix}'");
-        }
-        $this->assertSame($sql, $rewriter->rewrite($sql));
+
+        $expected_value = '<a href="' . $target_reference . '">Page</a>';
+
+        $this->assertSame($this->buildInsertSql($expected_value), $rewriter->rewrite($sql));
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function relativeBlockUrlCases(): iterable
+    {
+        yield 'root-relative URL' => ['/old/page', '/new/page'];
+        yield 'network-path URL' => [
+            '//old-site.com/old/page',
+            '//new-site.com/new/page',
+        ];
+    }
+
+    public function testEscapedJsonSchemeAndHostnameReachStructuredRewriterThroughSql(): void
+    {
+        $input = '{"url":"\u0068ttps:\/\/old-\u0073ite.com\/article",'
+            . '"label":"keep\u0020this"}';
+        $expected = '{"url":"\u0068ttps:\/\/new-site.com\/article",'
+            . '"label":"keep\u0020this"}';
+        $sql = $this->buildInsertSql($input);
+
+        $this->assertSame(
+            $this->buildInsertSql($expected),
+            $this->createRewriter()->rewrite($sql)
+        );
     }
 
     /**
