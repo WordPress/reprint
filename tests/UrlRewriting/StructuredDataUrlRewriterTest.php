@@ -367,6 +367,56 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $result);
     }
 
+    public function testKnownBlockMarkupPreservesCustomCssAroundLiteralUrl(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '.page-id-68 .header-title-background {'
+            . ' background: url(https://old-site.com/wp-content/uploads/wanderlust.jpg) no-repeat center center fixed;'
+            . ' font-family: "Rubik";'
+            . ' }';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertSame(
+            str_replace('https://old-site.com', 'https://new-site.com', $input),
+            $result
+        );
+    }
+
+    public function testKnownBlockMarkupPreservesDiviShortcodeQuotesAroundLiteralUrl(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '[et_pb_section header_font="Rubik" header_font_size="64px"'
+            . ' line_height="1.1em" background_image="https://old-site.com/image.jpg" module_id="hero"]';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertSame(
+            str_replace('https://old-site.com', 'https://new-site.com', $input),
+            $result
+        );
+    }
+
+    public function testKnownTextOnlyBlockMarkupDoesNotRewriteEmbeddedQueryUrl(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'Archive: https://webarchive.org?url=https://old-site.com/about';
+
+        $this->assertSame($input, $rewriter->rewrite_known_block_markup_value($input));
+    }
+
+    public function testKnownTextOnlyBlockMarkupStillRewritesCaseVariantUrl(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = 'Literal: https://old-site.com/literal; variant: HTTPS://OLD-SITE.COM/case-variant';
+
+        $result = $rewriter->rewrite_known_block_markup_value($input);
+
+        $this->assertStringContainsString('https://new-site.com/literal', $result);
+        $this->assertStringContainsString('https://new-site.com/case-variant', $result);
+        $this->assertStringNotContainsString('old-site.com', strtolower($result));
+    }
+
     public function testKnownBlockMarkupDoesNotRewriteEmbeddedQueryUrl(): void
     {
         $rewriter = $this->createRewriter();

@@ -193,6 +193,30 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
+    public function testPostContentPreservesCustomCssAndShortcodeFormatting(): void
+    {
+        $rewriter = $this->createRewriter();
+        $custom_css = '.hero { background: url(https://old-site.com/image.jpg) no-repeat; font-family: "Rubik"; }';
+        $shortcode = '[et_pb_section header_font="Rubik" header_font_size="64px"'
+            . ' background_image="https://old-site.com/image.jpg" module_id="hero"]';
+        $sql = sprintf(
+            "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES"
+                . "(1, FROM_BASE64('%s')), (2, FROM_BASE64('%s'));",
+            base64_encode($custom_css),
+            base64_encode($shortcode)
+        );
+
+        $values = $this->collectValues($rewriter->rewrite($sql));
+
+        $this->assertSame(
+            [
+                str_replace('https://old-site.com', 'https://new-site.com', $custom_css),
+                str_replace('https://old-site.com', 'https://new-site.com', $shortcode),
+            ],
+            $values
+        );
+    }
+
     public function testUnknownColumnUsesPlainTextUrlScanning(): void
     {
         $rewriter = $this->createRewriter();
