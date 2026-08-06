@@ -8,7 +8,8 @@ use Reprint\Importer\State\FileDiffProgressState;
 use Reprint\Importer\State\FilesPullSummaryState;
 use Reprint\Importer\State\RemoteFileIndexCursorState;
 
-use function Reprint\Importer\normalize_database_target_engine;
+use Reprint\Importer\DatabaseTargetResolutionPolicy;
+use Reprint\Importer\DatabaseTargetResolver;
 
 require_once __DIR__ . '/class-pull-failure-reported-exception.php';
 
@@ -704,22 +705,12 @@ class Pull
         // MySQL is the engine credentials alone imply. Name it in the options
         // so every stage — including apply-runtime, which otherwise falls back
         // to db-apply state — reads one effective target.
-        $options['target_engine'] = normalize_database_target_engine(
-            !empty($options['target_engine']) ? $options['target_engine'] : 'mysql'
+        $target = DatabaseTargetResolver::resolve(
+            $options,
+            null,
+            DatabaseTargetResolutionPolicy::for_pull(),
         );
-
-        if ($options['target_engine'] === 'mysql') {
-            if (empty($options['target_user'])) {
-                throw new InvalidArgumentException(
-                    "--target-user is required when db-apply targets MySQL."
-                );
-            }
-            if (empty($options['target_db'])) {
-                throw new InvalidArgumentException(
-                    "--target-db is required when db-apply targets MySQL."
-                );
-            }
-        }
+        $options['target_engine'] = $target->engine;
 
         return $options;
     }
