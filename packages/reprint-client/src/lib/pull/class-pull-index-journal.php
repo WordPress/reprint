@@ -200,6 +200,17 @@ class PullIndexJournal
      * Closes the writer, applies complete records to the remote index and
      * then the local index, and truncates the journal only after both
      * replacements succeed.
+     *
+     * Not resumable mid-way, but safe to restart: both indexes are published
+     * by atomic rename() and the journal is truncated only after the second
+     * rename, so a crash anywhere in here leaves the journal intact and the
+     * next apply_pending() reruns the whole merge. Re-applying an
+     * already-applied batch is idempotent — an upsert rewrites an identical
+     * entry and a deletion of an absent path writes nothing. Partial
+     * `.new`/`.local` work files are recreated with mode "w" on rerun. An
+     * unterminated final record is skipped; its work is repeated on resume
+     * because flush() runs before the cursor checkpoint which would have
+     * covered it.
      */
     public function apply_pending(): void
     {
