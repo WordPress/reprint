@@ -3,6 +3,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use function WordPress\Reprint\Exporter\path_is_within_root;
 use function WordPress\Reprint\Exporter\path_remainder_under;
 
 require_once __DIR__ . '/../../importer/import.php';
@@ -148,5 +149,39 @@ class RemapSeamTest extends TestCase
             'trailing slash on both' => array('', '/home/adam/', '/home/adam/'),
             'under, prefix has trailing slash' => array('/c', '/a/b/c', '/a/b/'),
         );
+    }
+
+    /**
+     * @dataProvider providePathWithinRootCases
+     */
+    public function testPathIsWithinRoot(bool $expected, string $path, string $root): void
+    {
+        $this->assertSame($expected, path_is_within_root($path, $root));
+    }
+
+    public static function providePathWithinRootCases(): array
+    {
+        return array(
+            'filesystem root itself' => array(true, '/', '/'),
+            'filesystem root child' => array(true, '/child', '/'),
+            'relative path is outside filesystem root' => array(false, 'child', '/'),
+            'exact non-root match' => array(true, '/a', '/a'),
+            'non-root descendant' => array(true, '/a/b', '/a'),
+            'sibling prefix' => array(false, '/ab', '/a'),
+        );
+    }
+
+    public function testPathIsWithinRootMatchesAnyPathAndRoot(): void
+    {
+        $this->assertTrue(path_is_within_root('/a/b', ['/elsewhere', '/a']));
+        $this->assertTrue(path_is_within_root(['/elsewhere', '/a/b'], '/a'));
+        $this->assertTrue(path_is_within_root(
+            ['/elsewhere', '/a/b'],
+            ['/not-this-one', '/a']
+        ));
+        $this->assertFalse(path_is_within_root(
+            ['/elsewhere', '/other'],
+            ['/not-this-one', '/a']
+        ));
     }
 }

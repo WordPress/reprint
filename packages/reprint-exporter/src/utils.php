@@ -240,10 +240,41 @@ function normalize_excluded_paths(array $excluded_paths): array
 // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
 /**
- * Returns true when $path is equal to $root or strictly under it.
+ * Returns true when one path is equal to or strictly under one root.
+ *
+ * Either argument may be a list. The result is true when any path-and-root
+ * pair matches. The filesystem root contains every absolute path, and cannot
+ * use the normal root-plus-slash prefix because that would produce `//`.
+ *
+ * @param string|list<string> $path Candidate path or paths.
+ * @param string|list<string> $root Containing root or roots.
+ * @return bool Whether a candidate path belongs to a root.
+ * @throws InvalidArgumentException If either scalar value is not a string.
  */
-function path_is_within_root(string $path, string $root): bool
+function path_is_within_root($path, $root): bool
 {
+    if (is_array($path)) {
+        foreach ($path as $candidate_path) {
+            if (path_is_within_root($candidate_path, $root)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (is_array($root)) {
+        foreach ($root as $candidate_root) {
+            if (path_is_within_root($path, $candidate_root)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (!is_string($path) || !is_string($root)) {
+        throw new InvalidArgumentException('Path containment expects strings or lists of strings.');
+    }
+    if ($root === "/") {
+        return str_starts_with($path, "/");
+    }
     return $path === $root || str_starts_with($path, $root . "/");
 }
 
