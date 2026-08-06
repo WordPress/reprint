@@ -7,7 +7,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../client/import.php';
+require_once __DIR__ . '/../../client/cli.php';
 
 final class ReprintProcessLockTest extends TestCase
 {

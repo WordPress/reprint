@@ -26,7 +26,7 @@ class CompatibilityEntryPointsTest extends TestCase
     public function testImporterShimMatchesClientEntryPoint(): void
     {
         $shim = __DIR__ . '/../../importer/import.php';
-        $canonical = __DIR__ . '/../../client/import.php';
+        $canonical = __DIR__ . '/../../client/cli.php';
 
         $this->assertTrue(is_executable($shim), 'importer/import.php must stay executable');
 
@@ -55,7 +55,7 @@ class CompatibilityEntryPointsTest extends TestCase
 
     public function testInstallExporterAliasRendersTheInstallServerGuide(): void
     {
-        $entry = __DIR__ . '/../../client/import.php';
+        $entry = __DIR__ . '/../../client/cli.php';
 
         [$canonical_output, $canonical_exit] = $this->runCli($entry, ['install-server']);
         [$alias_output, $alias_exit] = $this->runCli($entry, ['install-exporter']);
@@ -68,7 +68,7 @@ class CompatibilityEntryPointsTest extends TestCase
 
     public function testMainHelpPresentsInstallServerWithoutTheLegacyAlias(): void
     {
-        [$help_output] = $this->runCli(__DIR__ . '/../../client/import.php', ['--help']);
+        [$help_output] = $this->runCli(__DIR__ . '/../../client/cli.php', ['--help']);
 
         $this->assertStringContainsString('install-server', $help_output);
         $this->assertStringNotContainsString('install-exporter', $help_output);

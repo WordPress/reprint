@@ -107,7 +107,7 @@ Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org
 - `packages/reprint-server` — Source for the `wp-php-toolkit/reprint-server` Composer package.
 - `packages/reprint-client` — Source for the `wp-php-toolkit/reprint-client` Composer package.
 - `reprint-server-wp` — WordPress plugin distribution that bundles `reprint-server`. The release ZIP keeps the legacy `reprint-exporter-wp.zip` name so upgrades land in the existing installed plugin directory.
-- `client/import.php` — thin wrapper for the client package entry point. `importer/import.php` remains as a compatibility shim for the old path.
+- `client/cli.php` — thin wrapper for the client package entry point. `importer/import.php` remains as a compatibility shim for the old path.
 
 ### Technical requirements
 

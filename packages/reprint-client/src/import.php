@@ -11402,7 +11402,7 @@ function get_importer_version(): string {
 // Only run CLI logic if this file is executed directly (not included/required).
 // IMPORTER_PHAR_ENTRY is defined by the phar stub and IMPORTER_WRAPPER_ENTRY is
 // defined by the repo/package wrapper scripts, so the guard also passes when
-// running as `php reprint.phar`, `php client/import.php`, or the Composer bin.
+// running as `php reprint.phar`, `php client/cli.php`, or the Composer bin.
 if (
     PHP_SAPI === "cli" &&
     isset($argv) &&
