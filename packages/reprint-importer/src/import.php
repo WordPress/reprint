@@ -1001,8 +1001,8 @@ class ImportClient
                     "Finish or abort the interrupted files-pull before running files-push."
                 );
             }
-            // files-push reads preflight to locate the remote document root,
-            // but its lifecycle never writes pull state.
+            // files-push requires saved preflight data, but its lifecycle never
+            // writes pull state.
             $this->state = $this->load_state();
             $this->require_preflight();
             $this->run_files_push($options, $process_lock);
@@ -1584,13 +1584,6 @@ class ImportClient
         if (!is_array($context)) {
             throw new InvalidArgumentException('files-push requires its validated command context.');
         }
-        $push_root = $this->get_state()->preflight["data"]["runtime"]["document_root"] ?? null;
-        if (!is_string($push_root) || $push_root === '' || $push_root[0] !== '/') {
-            throw new RuntimeException(
-                "Preflight did not report an absolute document root. Run 'preflight' or 'preflight-assert' again."
-            );
-        }
-
         $this->enable_files_push_signal_handling();
 
         if (!class_exists('Site_Export_HMAC_Client')) {
@@ -1607,7 +1600,6 @@ class ImportClient
             : parse_size($memory_limit_value);
         $sender_options = [
             'filesystem_root' => $context['filesystem_root'],
-            'push_root' => $push_root,
             'push_state_directory' => $context['push_state_directory'],
             'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
@@ -12501,7 +12493,7 @@ if (
                 "Sends the existing filesystem root at --fs-root to the remote Reprint API.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
-                "It requires saved preflight data for the remote document root.\n" .
+                "It requires saved preflight data.\n" .
                 "\n" .
                 "Each process runs one sender until it completes, reaches a caller time or\n" .
                 "memory boundary, or receives a signal handled by this PHP runtime.\n" .

@@ -187,7 +187,6 @@ final class FilesPullLocalIndexTest extends TestCase
         try {
             $sender = \PushFilesSender::start([
                 'filesystem_root' => $this->rawFileRoot,
-                'push_root' => '/',
                 'push_state_directory' => $pushStateDirectory,
                 'remote_reprint_api_url' =>
                     $remoteReprintApiUrl,

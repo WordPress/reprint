@@ -377,9 +377,10 @@ running the command again prints the complete report.
 
 The low-level, files-only command is `files-push`. Its `remote Reprint API URL` is the
 exporter API URL, and its `filesystem root` is the resolved absolute directory supplied by
-`--fs-root`. It requires saved preflight data and uses its remote document
-root as the push root. It also requires `--secret=TOKEN`; `--force-http` is
-the explicit plain-HTTP opt-in.
+`--fs-root` and represents the push root locally. Every local relative path is
+also its push-root-relative path; the target's absolute document root is not a
+local path prefix. It requires saved preflight data and `--secret=TOKEN`;
+`--force-http` is the explicit plain-HTTP opt-in.
 
 The **local push state directory** is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash
