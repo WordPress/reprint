@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "a8c44156f8d4efc3dd86e1beae36386a",
+    "content-hash": "80964e8e850ba630412416ac9eca68da",
     "packages": [
         {
             "name": "wp-php-toolkit/bytestream",
@@ -358,11 +358,11 @@
         },
         {
             "name": "wp-php-toolkit/reprint-exporter",
-            "version": "dev-adamziel/authenticated-push-endpoints",
+            "version": "dev-adamziel/investigate-push-session-failures",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-exporter",
-                "reference": "2050e07227a82c058c6267c5e8b3e77d0cd4dbdc"
+                "reference": "dbc6c2bfd0027b377cf207cf32afe8fcd76a4f30"
             },
             "require": {
                 "php": ">=7.2",
@@ -403,17 +403,16 @@
             ],
             "description": "Streaming export engine used by the Reprint Exporter WordPress plugin",
             "transport-options": {
-                "symlink": false,
                 "relative": true
             }
         },
         {
             "name": "wp-php-toolkit/reprint-importer",
-            "version": "dev-f26d/exporter-php-72-support",
+            "version": "dev-adamziel/investigate-push-session-failures",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-importer",
-                "reference": "d76b96ae7385f7e97eff350bbe1f06c55e48e58b"
+                "reference": "b7ed8b1bc68bcb7294d5e5600daf42efa3062850"
             },
             "require": {
                 "ext-pdo": "*",
@@ -432,7 +431,6 @@
             ],
             "description": "Streaming site importer with CLI and PHAR distribution support",
             "transport-options": {
-                "symlink": false,
                 "relative": true
             }
         },
