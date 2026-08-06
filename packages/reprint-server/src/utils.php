@@ -38,8 +38,8 @@ use RuntimeException;
 
 // Composer's "files" autoload includes this file once per registered
 // path. In a monorepo where the same package is mirrored into vendor/
-// (e.g. tests/ pulls in vendor/wp-php-toolkit/reprint-exporter/src/utils.php
-// AND packages/reprint-exporter/src/utils.php), both copies are loaded.
+// (e.g. tests/ pulls in vendor/wp-php-toolkit/reprint-server/src/utils.php
+// AND packages/reprint-server/src/utils.php), both copies are loaded.
 // `return` from inside a bracketed namespace block does not abort the
 // whole file, so guard the declarations themselves.
 if (!function_exists(__NAMESPACE__ . '\\build_pdo_dsn')) {

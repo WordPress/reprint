@@ -2,7 +2,7 @@
 /**
  * PDO polyfill for hosts without the PDO extension.
  *
- * The reprint-exporter codebase references PDO::* constants, \PDOException,
+ * The reprint-server codebase references PDO::* constants, \PDOException,
  * and \PDOStatement at multiple call sites (see the design spec for an audit).
  * On hosts without ext-pdo, those references would fatal at runtime even
  * though the wpdb adapter is the chosen connection.

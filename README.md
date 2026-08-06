@@ -85,24 +85,24 @@ php reprint.phar pull https://example.com --secret=TOKEN \
 
 The exporter and importer are published as separate Composer packages:
 
-- [`wp-php-toolkit/reprint-exporter`](https://packagist.org/packages/wp-php-toolkit/reprint-exporter) — Streaming export engine (SQL dumps, file trees, cursor-based resumption).
-- [`wp-php-toolkit/reprint-importer`](https://packagist.org/packages/wp-php-toolkit/reprint-importer) — Streaming site importer with CLI and PHAR support.
+- [`wp-php-toolkit/reprint-server`](https://packagist.org/packages/wp-php-toolkit/reprint-server) — Streaming export engine (SQL dumps, file trees, cursor-based resumption).
+- [`wp-php-toolkit/reprint-client`](https://packagist.org/packages/wp-php-toolkit/reprint-client) — Streaming site importer with CLI and PHAR support.
 
 Install whichever you need:
 
 ```bash
-composer require wp-php-toolkit/reprint-exporter
-composer require wp-php-toolkit/reprint-importer
+composer require wp-php-toolkit/reprint-server
+composer require wp-php-toolkit/reprint-client
 ```
 
 Both packages depend on [`wp-php-toolkit/data-liberation`](https://packagist.org/packages/wp-php-toolkit/data-liberation) and [`wp-php-toolkit/html`](https://packagist.org/packages/wp-php-toolkit/html), which Composer pulls in automatically.
 
 ## Repository layout
 
-- `packages/reprint-exporter` — Source for the `wp-php-toolkit/reprint-exporter` Composer package.
-- `packages/reprint-importer` — Source for the `wp-php-toolkit/reprint-importer` Composer package.
-- `reprint-exporter-wp` — WordPress plugin distribution that bundles `reprint-exporter`.
-- `importer/import.php` — thin compatibility wrapper for the importer package entrypoint.
+- `packages/reprint-server` — Source for the `wp-php-toolkit/reprint-server` Composer package.
+- `packages/reprint-client` — Source for the `wp-php-toolkit/reprint-client` Composer package.
+- `reprint-server-wp` — WordPress plugin distribution that bundles `reprint-server`.
+- `client/import.php` — thin compatibility wrapper for the importer package entrypoint.
 
 ### Technical requirements
 

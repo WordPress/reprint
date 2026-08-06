@@ -11404,7 +11404,7 @@ function get_importer_version(): string {
 // Only run CLI logic if this file is executed directly (not included/required).
 // IMPORTER_PHAR_ENTRY is defined by the phar stub and IMPORTER_WRAPPER_ENTRY is
 // defined by the repo/package wrapper scripts, so the guard also passes when
-// running as `php reprint.phar`, `php importer/import.php`, or the Composer bin.
+// running as `php reprint.phar`, `php client/import.php`, or the Composer bin.
 if (
     PHP_SAPI === "cli" &&
     isset($argv) &&
@@ -12159,7 +12159,7 @@ if (
             echo "  {$dim}composer build:exporter-plugin{$reset}\n";
             echo "\n";
             echo "  Then upload reprint-exporter-wp.zip through wp-admin,\n";
-            echo "  or symlink reprint-exporter-wp/ into wp-content/plugins/.\n";
+            echo "  or symlink reprint-server-wp/ into wp-content/plugins/.\n";
         } else {
             echo "  {$cyan}{$zip_url}{$reset}\n";
         }

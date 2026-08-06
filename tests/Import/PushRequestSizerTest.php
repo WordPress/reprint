@@ -5,7 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use PushRequestSizer;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../client/import.php';
 
 class PushRequestSizerTest extends TestCase
 {

@@ -14,8 +14,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class HttpServerServeTest extends TestCase
 {
-    private const CLASS_PATH = __DIR__ . '/../packages/reprint-exporter/src/class-http-server.php';
-    private const EXPORT_PATH = __DIR__ . '/../packages/reprint-exporter/src/export.php';
+    private const CLASS_PATH = __DIR__ . '/../packages/reprint-server/src/class-http-server.php';
+    private const EXPORT_PATH = __DIR__ . '/../packages/reprint-server/src/export.php';
 
     public function testServeLoadsExportPhpWhenNotYetLoaded(): void
     {

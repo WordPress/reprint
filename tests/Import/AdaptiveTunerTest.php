@@ -5,7 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/tuning/class-adaptive-tuner.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/tuning/class-adaptive-tuner.php';
 
 class AdaptiveTunerTest extends TestCase
 {

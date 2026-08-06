@@ -1,7 +1,7 @@
 # Reprint Exporter — WordPress Plugin
 
 When working from this monorepo checkout, run `composer install` in
-`reprint-exporter-wp/` to populate the bundled `vendor/` directory used by the
+`reprint-server-wp/` to populate the bundled `vendor/` directory used by the
 plugin runtime. GitHub release ZIPs already include that vendor tree.
 
 ## API Routing
@@ -88,7 +88,7 @@ The export engine can be embedded in another PHP project without the WordPress p
 // Your project must define ABSPATH before requiring lib.php.
 define('ABSPATH', '/path/to/wordpress/');
 
-require_once '/path/to/reprint-exporter-wp/lib.php';
+require_once '/path/to/reprint-server-wp/lib.php';
 
 // Route however you like — lib.php doesn't check URLs.
 if ($myRouter->matches('/export')) {

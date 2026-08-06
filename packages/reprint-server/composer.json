@@ -1,5 +1,5 @@
 {
-    "name": "wp-php-toolkit/reprint-exporter",
+    "name": "wp-php-toolkit/reprint-server",
     "description": "Streaming export engine used by the Reprint Exporter WordPress plugin",
     "type": "library",
     "license": "GPL-2.0-or-later",

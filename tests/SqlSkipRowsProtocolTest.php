@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../packages/reprint-exporter/src/export.php';
+require_once __DIR__ . '/../packages/reprint-server/src/export.php';
 
 final class SqlSkipRowsProtocolTest extends TestCase
 {

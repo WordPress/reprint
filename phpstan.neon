@@ -9,32 +9,32 @@ parameters:
     phpVersion: 70400
     level: 5
     paths:
-        - packages/reprint-exporter
-        - packages/reprint-importer
-        - reprint-exporter-wp
+        - packages/reprint-server
+        - packages/reprint-client
+        - reprint-server-wp
     excludePaths:
         analyseAndScan:
-            - reprint-exporter-wp/wordpress/
-            - reprint-exporter-wp/index.php
-            - reprint-exporter-wp/vendor/
+            - reprint-server-wp/wordpress/
+            - reprint-server-wp/index.php
+            - reprint-server-wp/vendor/
             - lib/sqlite-database-integration/packages/mysql-on-sqlite/src/mysql/native/
         analyse:
-            - packages/reprint-exporter/src/class-sqlite-driver-pdo.php
-            - packages/reprint-importer/src/lib/mysql-query-stream/
-            - reprint-exporter-wp/vendor/
+            - packages/reprint-server/src/class-sqlite-driver-pdo.php
+            - packages/reprint-client/src/lib/mysql-query-stream/
+            - reprint-server-wp/vendor/
     ignoreErrors:
         -
             message: '#^Call to an undefined method WordPress\\DataLiberation\\BlockMarkup\\BlockMarkupUrlProcessor::get_tag\(\)\.$#'
-            path: packages/reprint-importer/src/lib/url-rewrite/class-domain-collector.php
+            path: packages/reprint-client/src/lib/url-rewrite/class-domain-collector.php
         -
             message: '#^Class WordPress\\DataLiberation\\URL\\URLInTextProcessor does not have a constructor and must be instantiated without any parameters\.$#'
-            path: packages/reprint-importer/src/lib/url-rewrite/class-structured-data-url-rewriter.php
+            path: packages/reprint-client/src/lib/url-rewrite/class-structured-data-url-rewriter.php
         -
             message: '#^Call to an undefined method WordPress\\DataLiberation\\URL\\URLInTextProcessor::(next_url|get_parsed_url|get_raw_url|set_raw_url|get_updated_text)\(\)\.$#'
-            path: packages/reprint-importer/src/lib/url-rewrite/class-structured-data-url-rewriter.php
+            path: packages/reprint-client/src/lib/url-rewrite/class-structured-data-url-rewriter.php
     treatPhpDocTypesAsCertain: false
     scanDirectories:
-        - packages/reprint-exporter/src
+        - packages/reprint-server/src
         - lib/sqlite-database-integration/packages/mysql-on-sqlite/src/parser
         - lib/sqlite-database-integration/packages/mysql-on-sqlite/src/mysql
         - lib/sqlite-database-integration/packages/mysql-on-sqlite/src/sqlite

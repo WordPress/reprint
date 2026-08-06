@@ -299,11 +299,11 @@ Inside a class, omit the class name when context already supplies it: use
   supports it. Tests then run the files under `packages/` without a copied
   `vendor/` tree drifting behind them. The PHAR build temporarily mirrors
   those packages because the archive must be self-contained, then restores
-  the development links. The `reprint-exporter-wp/vendor/` tree remains a
+  the development links. The `reprint-server-wp/vendor/` tree remains a
   physical copy for the same reason; install it afresh or run
-  `composer reinstall wp-php-toolkit/reprint-exporter` in that directory before
+  `composer reinstall wp-php-toolkit/reprint-server` in that directory before
   testing a local plugin bundle.
-- `packages/reprint-importer/src/lib/upload/` must stay PHP 7.4-PARSEABLE:
+- `packages/reprint-client/src/lib/upload/` must stay PHP 7.4-PARSEABLE:
   import.php loads it for pull users on 7.4, and the push client's 8.1
   requirement is a runtime check in its constructor.
   PushClientPhpCompatibilityTest enforces this; do not "clean up" the

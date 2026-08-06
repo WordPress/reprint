@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../importer/import.php';
-require_once __DIR__ . '/../packages/reprint-importer/src/lib/upload/class-multipart-push-stream-client.php';
+require_once __DIR__ . '/../client/import.php';
+require_once __DIR__ . '/../packages/reprint-client/src/lib/upload/class-multipart-push-stream-client.php';
 
 final class PushEndpointsTest extends TestCase {
 
@@ -1235,7 +1235,7 @@ final class PushEndpointsTest extends TestCase {
 
     public function testSymlinkedPluginLogicalPathIsExcludedFromPush(): void
     {
-        $physical_plugin_directory = realpath(dirname(__DIR__) . '/reprint-exporter-wp');
+        $physical_plugin_directory = realpath(dirname(__DIR__) . '/reprint-server-wp');
         $this->assertIsString($physical_plugin_directory);
         $plugins_directory = $this->docroot . '/wp-content/plugins';
         $plugins_directory_alias = $this->root . '/plugins-directory-alias';
@@ -2876,7 +2876,7 @@ final class PushEndpointsTest extends TestCase {
         $process = proc_open(
             [
                 PHP_BINARY,
-                __DIR__ . '/../importer/import.php',
+                __DIR__ . '/../client/import.php',
                 'files-diff',
                 $this->remote_reprint_api_url,
                 '--state-dir=' . $state_directory,
@@ -3327,7 +3327,7 @@ final class PushEndpointsTest extends TestCase {
             $command[] = $name . '=' . $value;
         }
         $command = array_merge($command, [
-            __DIR__ . '/../importer/import.php',
+            __DIR__ . '/../client/import.php',
             'files-push',
             $this->remote_reprint_api_url,
             '--state-dir=' . $state_directory,

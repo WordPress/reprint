@@ -8,7 +8,7 @@ final class CreateDbConnectionTest extends TestCase {
     public function testMysqlSessionUsesStableCharsetAndCollation(): void
     {
         $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
-        $export_path = realpath(__DIR__ . '/../packages/reprint-exporter/src/export.php');
+        $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
         $this->assertIsString($autoload_path);
         $this->assertIsString($export_path);
         $connection_script = <<<'PHP'
@@ -70,7 +70,7 @@ final class CreateDbConnectionTest extends TestCase {
         }
 
         $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
-        $export_path = realpath(__DIR__ . '/../packages/reprint-exporter/src/export.php');
+        $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
         $this->assertIsString($autoload_path);
         $this->assertIsString($export_path);
         $connection_script = <<<'PHP'
@@ -167,7 +167,7 @@ final class CreateDbConnectionTest extends TestCase {
             ? 'localhost:' . $socket_path
             : $socket_path;
         $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
-        $export_path = realpath(__DIR__ . '/../packages/reprint-exporter/src/export.php');
+        $export_path = realpath(__DIR__ . '/../packages/reprint-server/src/export.php');
         $this->assertIsString($autoload_path);
         $this->assertIsString($export_path);
         $connection_script = <<<'PHP'

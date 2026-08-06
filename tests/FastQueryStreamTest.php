@@ -3,7 +3,7 @@
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../vendor/autoload.php';
-require_once __DIR__ . '/../packages/reprint-importer/src/lib/mysql-query-stream/load.php';
+require_once __DIR__ . '/../packages/reprint-client/src/lib/mysql-query-stream/load.php';
 
 class FastQueryStreamTest extends TestCase
 {

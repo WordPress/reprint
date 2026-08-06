@@ -1,5 +1,5 @@
 {
-    "name": "wp-php-toolkit/reprint-exporter-plugin",
+    "name": "wp-php-toolkit/reprint-server-plugin",
     "description": "Reprint Exporter – WordPress plugin wrapper for the streaming exporter package",
     "type": "project",
     "license": "GPL-2.0-or-later",
@@ -8,7 +8,7 @@
     "repositories": [
         {
             "type": "path",
-            "url": "../packages/reprint-exporter",
+            "url": "../packages/reprint-server",
             "options": {
                 "symlink": false
             }
@@ -16,6 +16,6 @@
     ],
     "require": {
         "php": ">=7.4",
-        "wp-php-toolkit/reprint-exporter": "*@dev"
+        "wp-php-toolkit/reprint-server": "*@dev"
     }
 }

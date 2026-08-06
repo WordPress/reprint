@@ -7,7 +7,7 @@ namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../importer/import.php';
+require_once __DIR__ . '/../../client/import.php';
 
 /**
  * The local index used by files-pull, files-push, and files-diff.
@@ -603,7 +603,7 @@ final class FilesPullLocalIndexTest extends TestCase
     private function startCliProcess(array $arguments): array
     {
         $process = proc_open(
-            array_merge([PHP_BINARY, __DIR__ . '/../../importer/import.php'], $arguments),
+            array_merge([PHP_BINARY, __DIR__ . '/../../client/import.php'], $arguments),
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
             $pipes,
             $this->root

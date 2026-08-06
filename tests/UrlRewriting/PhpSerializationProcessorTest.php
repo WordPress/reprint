@@ -2,7 +2,7 @@
 
 use PHPUnit\Framework\TestCase;
 
-require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/load.php';
+require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.php';
 
 class PhpSerializationProcessorTest extends TestCase
 {

@@ -9,8 +9,8 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 if command -v composer &>/dev/null && [ -f "$PROJECT_ROOT/composer.json" ]; then
     composer install --no-dev --no-interaction --prefer-dist --ignore-platform-req=php --working-dir="$PROJECT_ROOT"
 fi
-if command -v composer &>/dev/null && [ -f "$PROJECT_ROOT/reprint-exporter-wp/composer.json" ]; then
-    composer install --no-dev --no-interaction --prefer-dist --ignore-platform-req=php --working-dir="$PROJECT_ROOT/reprint-exporter-wp"
+if command -v composer &>/dev/null && [ -f "$PROJECT_ROOT/reprint-server-wp/composer.json" ]; then
+    composer install --no-dev --no-interaction --prefer-dist --ignore-platform-req=php --working-dir="$PROJECT_ROOT/reprint-server-wp"
 fi
 
 # JavaScript dependencies are installed by the dedicated workflow step after

@@ -847,7 +847,7 @@ final class PushSessionTest extends TestCase {
     }
 
     public function testSourceKeepsOnePathShapedWorkTreeAndSharedInFlightHelpers(): void {
-        $source = file_get_contents(__DIR__ . '/../packages/reprint-exporter/src/class-push-session.php');
+        $source = file_get_contents(__DIR__ . '/../packages/reprint-server/src/class-push-session.php');
         $this->assertIsString($source);
         $this->assertStringNotContainsString('work/partial', $source);
         $this->assertStringNotContainsString('work_partial', $source);
