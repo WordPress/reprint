@@ -176,9 +176,9 @@ During files-push, progress records include `files_done` and `files_total` toget
 
 ## File Organization
 
-- packages/reprint-server/: Packagist exporter package
+- packages/reprint-server/: Packagist server package (previously reprint-exporter)
   - src/: Core export engine (export.php, producers, HMAC client, utilities)
-- packages/reprint-client/: Packagist importer package
+- packages/reprint-client/: Packagist client package (previously reprint-importer)
   - src/: Import client and importer runtime support code
   - src/lib/host/: Host analyzers and RuntimeManifest (WpcloudHostAnalyzer, SitegroundHostAnalyzer, DefaultHostAnalyzer)
   - src/lib/target-runtime/: Runtime appliers (NginxFpmApplier, PhpBuiltinApplier, PlaygroundCliApplier)
@@ -188,7 +188,8 @@ During files-push, progress records include `files_done` and `files_total` toget
   - index.php: WordPress plugin entry point — intercepts `?reprint-api` requests (and the legacy `?site-export-api` alias) during plugin load, requires lib.php
   - lib.php: Standalone library — constants, auth functions, and request handler. Can be required without index.php by projects that want to embed the export engine with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `_site_export_handle_api_request()`)
   - wordpress/: WordPress admin UI (site-export.php)
-- importer/: Thin compatibility wrapper that loads the importer package entry point
+- client/: Thin wrapper that loads the client package entry point
+- importer/: Compatibility shim for the old client/ wrapper path
 - markdown/: Architecture documentation (read these for deep understanding)
 - tests/: PHPUnit test suite organized by component
 - tests/e2e/: End-to-end Docker-based integration tests

@@ -295,7 +295,7 @@ Inside a class, omit the class name when context already supplies it: use
 ## Repo mechanics that will bite you
 
 - The root Composer install uses Composer's default path-repository strategy,
-  which symlinks the local exporter and importer packages when the platform
+  which symlinks the local server and client packages when the platform
   supports it. Tests then run the files under `packages/` without a copied
   `vendor/` tree drifting behind them. The PHAR build temporarily mirrors
   those packages because the archive must be self-contained, then restores

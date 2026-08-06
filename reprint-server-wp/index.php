@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: Reprint Exporter
+ * Plugin Name: Reprint Server
  * Plugin URI: https://github.com/WordPress/playground-tools
- * Description: Reprint Exporter – exposes a site export API with HMAC-authenticated endpoints for database and file synchronization.
+ * Description: Reprint Server – exposes a site export API with HMAC-authenticated endpoints for database and file synchronization.
  * Version: 0.9.3-dev
  * Author: WordPress Contributors
  * License: GPL-2.0-or-later

@@ -25,7 +25,11 @@ const DB_PASS = REGISTRY.dbPass;
 const WP_VERSION = REGISTRY.wpVersion;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const EXPORTER_PROJECT_ROOT = process.env.E2E_EXPORTER_PROJECT_ROOT || PROJECT_ROOT;
-const PLUGIN_SRC = join(EXPORTER_PROJECT_ROOT, 'reprint-server-wp');
+// E2E_EXPORTER_PROJECT_ROOT may point at a historical checkout that predates
+// the reprint-server-wp rename.
+const PLUGIN_SRC = existsSync(join(EXPORTER_PROJECT_ROOT, 'reprint-server-wp'))
+    ? join(EXPORTER_PROJECT_ROOT, 'reprint-server-wp')
+    : join(EXPORTER_PROJECT_ROOT, 'reprint-exporter-wp');
 const WP_TARBALL = `/tmp/wordpress-${WP_VERSION}.tar.gz`;
 const WP_TEMPLATE = '/tmp/wordpress-template';
 const WP_READY = '/tmp/wordpress-template/.wp-ready';

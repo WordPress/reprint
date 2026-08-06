@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Install Composer dependencies (vendor/ is gitignored).
-# Needed for the importer package and the bundled plugin runtime.
+# Needed for the client package and the bundled plugin runtime.
 #
 # `--ignore-platform-req=php` avoids `composer install` errors on PHP 7.2
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

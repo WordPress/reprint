@@ -1,4 +1,4 @@
-# Reprint Exporter — WordPress Plugin
+# Reprint Server — WordPress Plugin
 
 When working from this monorepo checkout, run `composer install` in
 `reprint-server-wp/` to populate the bundled `vendor/` directory used by the
@@ -26,7 +26,7 @@ This gives us a clean execution environment while using WordPress's front contro
 
 The bundled WordPress entry point passes the result of the
 `site_export_api_options` filter to the export handler. A platform must
-register this filter before the regular Reprint Exporter plugin file loads;
+register this filter before the regular Reprint Server plugin file loads;
 registering it on `plugins_loaded` is too late. A must-use plugin is the usual
 place to register it:
 
@@ -49,8 +49,8 @@ The supported options are:
 - `reprint_directory` — the private push storage directory outside `docroot`.
   It defaults to a document-root-specific sibling directory.
 - `excluded_paths` — document-root-relative paths that push must preserve. The
-  exporter plugin directory is also preserved automatically when it is below
-  `docroot`.
+  Reprint Server plugin directory is also preserved automatically when it is
+  below `docroot`.
 - `maximum_part_bytes` — the maximum `Content-Length` accepted for one push
   upload part. It defaults to 4 MiB.
 - `maximum_commit_entries` — the maximum number of bounded entries processed

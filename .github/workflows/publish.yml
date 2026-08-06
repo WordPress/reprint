@@ -55,6 +55,11 @@ jobs:
           git config --global url."https://${GH_LOGIN}:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
           export GIT_TERMINAL_PROMPT=0
 
+          # git subtree split does not follow history across the old
+          # packages/reprint-exporter and packages/reprint-importer prefixes:
+          # the split repositories begin at the directory rename. The old split
+          # repositories keep their tagged history, the full history stays in
+          # the monorepo, and no history grafting is attempted.
           for pkg in reprint-server reprint-client; do
             split_commit="$(git subtree split --prefix="packages/${pkg}" HEAD)"
             remote_url="https://github.com/${GH_ORG}/${pkg}.git"

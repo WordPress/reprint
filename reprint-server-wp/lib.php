@@ -1,6 +1,6 @@
 <?php
 /**
- * Reprint Exporter library – constants and function declarations, no request handling.
+ * Reprint Server library – constants and function declarations, no request handling.
  *
  * Require this file to get access to the export API functions without
  * triggering any HTTP dispatch.
@@ -81,7 +81,7 @@ function _site_export_is_push_endpoint(string $endpoint): bool {
 }
 
 /**
- * Resolve and load the exporter package runtime.
+ * Resolve and load the server package runtime.
  *
  * Supports both plugin release bundles (with reprint-server-wp/vendor/) and
  * the monorepo checkout (root vendor/ + vendor/wp-php-toolkit/reprint-server).
@@ -274,7 +274,7 @@ function _site_export_verify_hmac(string $secret): ?string {
     }
 
     if (!class_exists('Site_Export_HMAC_Server')) {
-        return 'Reprint Exporter runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.';
+        return 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.';
     }
 
     $server = new Site_Export_HMAC_Server($secret, SITE_EXPORT_TIMESTAMP_TOLERANCE);
@@ -299,7 +299,7 @@ function _site_export_default_authenticate(): void {
     }
 
     if (empty($secret) || !is_string($secret)) {
-        _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Reprint Exporter.');
+        _site_export_error(503, 'Export not configured. Please configure the shared secret in WordPress admin under Tools > Reprint Server.');
     }
 
     $auth_error = _site_export_verify_hmac($secret);
@@ -330,9 +330,9 @@ function _site_export_default_authenticate(): void {
  *                                     outside the document root.
  *                                     Defaults to a document-root-specific sibling.
  *     @type string[] $excluded_paths Optional. Document-root-relative paths
- *                                    push must preserve. The exporter plugin
- *                                    directory is always included when it is
- *                                    below the document root.
+ *                                    push must preserve. The Reprint Server
+ *                                    plugin directory is always included when
+ *                                    it is below the document root.
  *     @type int $maximum_part_bytes Optional. Maximum Content-Length for one
  *                                   push upload part. Defaults to 4 MiB.
  *     @type int $maximum_commit_entries Optional. Maximum bounded entries one
@@ -387,7 +387,7 @@ function _site_export_handle_api_request(array $options = []): void {
             'line' => $errline,
             'type' => $errno,
         ];
-        error_log('Reprint Exporter API error: ' . json_encode($error));
+        error_log('Reprint Server API error: ' . json_encode($error));
         http_response_code(500);
         @header('Content-Type: application/json');
         echo json_encode($error);
@@ -400,7 +400,7 @@ function _site_export_handle_api_request(array $options = []): void {
             'file' => $e->getFile(),
             'line' => $e->getLine(),
         ];
-        error_log('Reprint Exporter API exception: ' . json_encode($error));
+        error_log('Reprint Server API exception: ' . json_encode($error));
         http_response_code(500);
         @header('Content-Type: application/json');
         echo json_encode($error);
@@ -429,13 +429,13 @@ function _site_export_handle_api_request(array $options = []): void {
             $secret = _site_export_get_option_secret();
         }
         if (empty($secret) || !is_string($secret)) {
-            _site_export_push_error(503, 'not_configured', 'Configure the shared secret in WordPress admin under Tools > Reprint Exporter.');
+            _site_export_push_error(503, 'not_configured', 'Configure the shared secret in WordPress admin under Tools > Reprint Server.');
         }
         if (!class_exists('Site_Export_HMAC_Server', false)) {
             _site_export_load_exporter_runtime();
         }
         if (!class_exists('Site_Export_HMAC_Server')) {
-            _site_export_push_error(500, 'filesystem_error', 'Reprint Exporter runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.');
+            _site_export_push_error(500, 'filesystem_error', 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.');
         }
         // These exact request-line values are covered by the HMAC; WordPress
         // slashing or sanitization would verify a different target.
@@ -478,7 +478,7 @@ function _site_export_handle_api_request(array $options = []): void {
     if (_site_export_load_exporter_runtime() === null) {
         _site_export_error(
             500,
-            'Reprint Exporter runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.'
+            'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.'
         );
     }
 
@@ -570,7 +570,7 @@ function _site_export_handle_api_request(array $options = []): void {
                         || rtrim($resolved_logical_plugin_directory, '/\\') !== $plugin_directory
                     ) {
                         throw new Site_Export_Push_Configuration_Exception(
-                            'WordPress reports the Reprint Exporter plugin inside the document root at '
+                            'WordPress reports the Reprint Server plugin inside the document root at '
                             . json_encode($logical_plugin_directory_to_verify)
                             . ', but that path does not resolve to SITE_EXPORT_PLUGIN_DIR '
                             . json_encode(SITE_EXPORT_PLUGIN_DIR) . '.'

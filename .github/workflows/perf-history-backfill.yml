@@ -125,7 +125,12 @@ jobs:
               git checkout --force --detach "$SHA"
               git submodule update --init --recursive
               composer install --no-dev --no-interaction --prefer-dist
-              composer install --no-dev --no-interaction --prefer-dist --working-dir=reprint-server-wp
+              # Historical checkouts may predate the reprint-server-wp rename.
+              if [ -d reprint-server-wp ]; then
+                composer install --no-dev --no-interaction --prefer-dist --working-dir=reprint-server-wp
+              else
+                composer install --no-dev --no-interaction --prefer-dist --working-dir=reprint-exporter-wp
+              fi
               ./bin/build-reprint-phar.sh
             )
 

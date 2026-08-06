@@ -1007,9 +1007,9 @@ class Pull
 
             if ($is_not_installed) {
                 $cyan = "\033[36m";
-                $this->progress->print_line("\n{$red}  ✗ The exporter plugin is not installed on this site.{$r}\n\n");
+                $this->progress->print_line("\n{$red}  ✗ The Reprint Server plugin is not installed on this site.{$r}\n\n");
                 $this->progress->print_line("  To set it up, run:\n\n");
-                $this->progress->print_line("    {$cyan}php reprint.phar install-exporter{$r}\n\n");
+                $this->progress->print_line("    {$cyan}php reprint.phar install-server{$r}\n\n");
                 $this->progress->print_line("  {$dim}This will show the download URL and step-by-step instructions.{$r}\n");
             } else {
                 $this->progress->print_line("\n{$red}  ✗ Preflight failed{$r}\n");
