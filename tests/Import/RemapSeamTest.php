@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 use function WordPress\Reprint\Exporter\path_is_within_root;
 use function WordPress\Reprint\Exporter\path_remainder_under;
+use function WordPress\Reprint\Exporter\realpath_with_missing_tail;
 use function WordPress\Reprint\Exporter\relative_path_under;
 
 require_once __DIR__ . '/../../client/cli.php';
@@ -204,5 +205,41 @@ class RemapSeamTest extends TestCase
             ['/elsewhere', '/other'],
             ['/not-this-one', '/a']
         ));
+    }
+
+    public function testRealpathWithMissingTail(): void
+    {
+        $existing_directory = $this->tempDir . '/existing';
+        mkdir($existing_directory);
+        $canonical_existing_directory = realpath($existing_directory);
+        $this->assertIsString($canonical_existing_directory);
+
+        $this->assertSame(
+            $canonical_existing_directory,
+            realpath_with_missing_tail($existing_directory)
+        );
+        $this->assertSame(
+            $canonical_existing_directory . '/missing',
+            realpath_with_missing_tail($existing_directory . '/missing')
+        );
+        $this->assertSame(
+            $canonical_existing_directory . '/missing/child',
+            realpath_with_missing_tail($existing_directory . '/missing/child')
+        );
+        $this->assertSame('/', realpath_with_missing_tail('/'));
+
+        $symlink = $this->tempDir . '/existing-link';
+        symlink($existing_directory, $symlink);
+        $this->assertSame(
+            $canonical_existing_directory . '/missing-through-link',
+            realpath_with_missing_tail($symlink . '/missing-through-link')
+        );
+
+        $broken_symlink = $this->tempDir . '/broken-link';
+        symlink($this->tempDir . '/missing-target', $broken_symlink);
+        $this->assertSame(
+            $broken_symlink . '/child',
+            realpath_with_missing_tail($broken_symlink . '/child')
+        );
     }
 }

@@ -184,6 +184,64 @@ function normalize_path(string $path): string
 }
 
 /**
+ * Canonicalizes an absolute path through the nearest ancestor realpath() can resolve.
+ *
+ * The final components need not exist. The function resolves a real ancestor,
+ * then appends the missing components without creating them. A broken symlink
+ * cannot be resolved safely, so its normalized lexical spelling is retained.
+ *
+ * Examples:
+ *
+ *     realpath_with_missing_tail('/srv/site');
+ *     // '/srv/site' when /srv/site exists
+ *
+ *     realpath_with_missing_tail('/srv/site/state/push');
+ *     // '/srv/site/state/push' when /srv/site exists but state/push do not
+ *
+ *     realpath_with_missing_tail('/links/site/state');
+ *     // '/srv/site/state' when /links/site is a symlink to /srv/site
+ *
+ * This does not create, remove, or otherwise modify filesystem entries.
+ *
+ * @throws InvalidArgumentException When $absolute_path is not absolute.
+ */
+function realpath_with_missing_tail(string $absolute_path): string
+{
+    if ($absolute_path === '' || $absolute_path[0] !== '/') {
+        throw new InvalidArgumentException('Path must be absolute: ' . $absolute_path);
+    }
+
+    $normalized_path = normalize_path($absolute_path);
+    $missing_components = [];
+    $existing_ancestor = $normalized_path;
+    $canonical_existing_ancestor = realpath($existing_ancestor);
+
+    while ($canonical_existing_ancestor === false) {
+        // Keep a broken symlink lexical: resolving past it would change what a
+        // future replacement of that link means.
+        if (is_link($existing_ancestor)) {
+            return $normalized_path;
+        }
+
+        $parent = dirname($existing_ancestor);
+        if ($parent === $existing_ancestor) {
+            return $normalized_path;
+        }
+        array_unshift($missing_components, basename($existing_ancestor));
+        $existing_ancestor = $parent;
+        $canonical_existing_ancestor = realpath($existing_ancestor);
+    }
+
+    if ($missing_components === []) {
+        return normalize_path($canonical_existing_ancestor);
+    }
+
+    return normalize_path(
+        $canonical_existing_ancestor . '/' . implode('/', $missing_components)
+    );
+}
+
+/**
  * Normalizes document-root-relative excluded paths.
  *
  * Rejects non-string, empty, absolute, NUL-containing, backslash-containing,
