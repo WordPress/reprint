@@ -1666,6 +1666,11 @@ final class Site_Export_Push_Session {
      * the document root already contains the committed value. Only same-filesystem
      * renames are allowed; copy fallback would break the direct-install model.
      *
+     * An existing empty directory at a directory destination is accepted:
+     * rename() replaces it atomically, so re-pushing after an interrupted
+     * commit already created the directory succeeds instead of reporting the
+     * commit's own leftover as drift. A non-empty directory still conflicts.
+     *
      * @param array $commit_state {
      *     Commit checkpoint, mutated in place.
      *
@@ -1693,10 +1698,13 @@ final class Site_Export_Push_Session {
         $parent_device = $this->require_docroot_ancestors($path, 'install', $expected_type);
         $docroot_value_path = $this->docroot_path($path);
         $docroot_identity = $this->lstat_path($docroot_value_path);
-        $expected_docroot_types = $expected_type === 'directory' ? ['absent'] : ['absent', 'file', 'symlink'];
+        $expected_docroot_types = $expected_type === 'directory' ? ['absent', 'directory'] : ['absent', 'file', 'symlink'];
         $observed_type = $docroot_identity === null ? 'absent' : $docroot_identity['type'];
         if (!in_array($observed_type, $expected_docroot_types, true)) {
             $this->throw_unexpected_docroot_mutation('install', $path, $path, $expected_type, $expected_docroot_types, $docroot_identity);
+        }
+        if ($expected_type === 'directory' && $observed_type === 'directory' && $this->first_directory_entry($docroot_value_path) !== null) {
+            $this->throw_unexpected_docroot_mutation('install', $path, $path, $expected_type, ['absent'], $docroot_identity);
         }
         if ($parent_device !== $work_identity['dev']) {
             $this->throw_same_device('install', $path, $work_identity['dev'], $parent_device);

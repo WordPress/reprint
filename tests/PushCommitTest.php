@@ -382,6 +382,54 @@ final class PushCommitTest extends TestCase {
         }
     }
 
+    public function testExplicitEmptyDirectoryReplacesAnExistingEmptyDocumentRootDirectory(): void {
+        mkdir($this->docroot . '/empty', 0700);
+
+        $push_session = $this->push_session('05050505050505050505050505050505');
+        $this->push_parts($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'directory',
+                'X-Directory-Path' => base64_encode('empty'),
+            ],
+            'body' => '',
+        ]]);
+        $this->commit_all($push_session);
+
+        $this->assertDirectoryExists($this->docroot . '/empty');
+        $this->assertSame([], $this->directory_entries($this->docroot . '/empty'));
+        $this->assertFileDoesNotExist($this->docroot . '/.maintenance');
+    }
+
+    public function testExplicitEmptyDirectoryOverANonEmptyDocumentRootDirectoryRecordsANonRecoverableCommitFailure(): void {
+        mkdir($this->docroot . '/conflict', 0700);
+        file_put_contents($this->docroot . '/conflict/sentinel', 'safe');
+
+        $push_session = $this->push_session('06060606060606060606060606060606');
+        $this->push_parts($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'directory',
+                'X-Directory-Path' => base64_encode('conflict'),
+            ],
+            'body' => '',
+        ]]);
+
+        try {
+            $this->commit_all($push_session);
+            $this->fail('An explicit empty directory replaced a non-empty docroot directory.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
+            $this->assertSame(['absent'], $exception->get_context()['expected_docroot_types']);
+        }
+
+        $this->assertSame('safe', file_get_contents($this->docroot . '/conflict/sentinel'));
+        try {
+            $push_session->commit(1);
+            $this->fail('A non-recoverable commit failure allowed a forced retry.');
+        } catch (Site_Export_Push_Exception $exception) {
+            $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
+        }
+    }
+
     public function testObservedSymlinkAncestorStopsCommitAndLeavesMaintenanceActive(): void {
         mkdir($this->docroot . '/outside', 0700, true);
         file_put_contents($this->docroot . '/outside/sentinel', 'safe');
