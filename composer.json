@@ -8,17 +8,11 @@
     "repositories": [
         {
             "type": "path",
-            "url": "packages/reprint-exporter",
-            "options": {
-                "symlink": false
-            }
+            "url": "packages/reprint-exporter"
         },
         {
             "type": "path",
-            "url": "packages/reprint-importer",
-            "options": {
-                "symlink": false
-            }
+            "url": "packages/reprint-importer"
         }
     ],
     "require": {
