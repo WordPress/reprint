@@ -17,7 +17,7 @@ use function WordPress\Reprint\Exporter\relative_path_under;
  * or empty directory; a completed local deletion; or a remote invalidation
  * with no local projection. ImportClient appends records as it completes work
  * and calls flush() before saving the cursor which makes that work durable.
- * apply_pending() merges complete records into the remote index and projects
+ * apply_pending_records() merges complete records into the remote index and projects
  * them into the local index, truncating the journal only after both
  * replacements finish, so an interrupted apply replays the batch. An
  * unterminated final record is ignored; the resumed files-pull repeats it
@@ -203,7 +203,7 @@ class PullIndexJournal
      * Not resumable mid-way, but safe to restart: both indexes are published
      * by atomic rename() and the journal is truncated only after the second
      * rename, so a crash anywhere in here leaves the journal intact and the
-     * next apply_pending() reruns the whole merge. Re-applying an
+     * next apply_pending_records() reruns the whole merge. Re-applying an
      * already-applied batch is idempotent — an upsert rewrites an identical
      * entry and a deletion of an absent path writes nothing. Partial
      * `.new`/`.local` work files are recreated with mode "w" on rerun. An
@@ -211,7 +211,7 @@ class PullIndexJournal
      * because flush() runs before the cursor checkpoint which would have
      * covered it.
      */
-    public function apply_pending(): void
+    public function apply_pending_records(): void
     {
         if ($this->pull_index_wal_handle) {
             $pull_index_wal_closed = fclose($this->pull_index_wal_handle);

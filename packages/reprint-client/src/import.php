@@ -2263,7 +2263,7 @@ class ImportClient
             true,
         );
         // Replay the pull index WAL before clearing the cursor which made its records durable.
-        $this->pull_index_journal->apply_pending();
+        $this->pull_index_journal->apply_pending_records();
         $this->pull_index_journal->remove_empty_marker();
         $this->reset_state();
 
@@ -2919,7 +2919,7 @@ class ImportClient
             $current_status !== null &&
             $current_status !== "complete";
 
-        $this->pull_index_journal->apply_pending();
+        $this->pull_index_journal->apply_pending_records();
         $this->assert_files_pull_path_selection_unchanged_while_resuming($has_progress);
         $this->assert_local_followed_symlinks_root_unchanged();
 
@@ -3153,7 +3153,7 @@ class ImportClient
         if ($this->follow_symlinks) {
             $this->recreate_intermediate_symlinks();
         }
-        $this->pull_index_journal->apply_pending();
+        $this->pull_index_journal->apply_pending_records();
 
         $this->ensure_local_index_exists();
         $this->get_state()->active_resumable_command->completion_state = "complete";
@@ -6257,7 +6257,7 @@ class ImportClient
                 fclose($context->file_handle);
                 $context->file_handle = null;
             }
-            $this->pull_index_journal->apply_pending();
+            $this->pull_index_journal->apply_pending_records();
             $this->get_state()->active_resumable_command->completion_state = "partial";
             $this->save_state();
             return false;
@@ -6271,7 +6271,7 @@ class ImportClient
             $context->response_stats ?? [],
         );
         $this->get_state()->fetch->cursor = $cursor;
-        $this->pull_index_journal->apply_pending();
+        $this->pull_index_journal->apply_pending_records();
         // Update file tracking: track in-progress file, or clear if complete/no active file
         if ($context->file_handle && $context->file_path) {
             if (!fflush($context->file_handle)) {
@@ -6748,7 +6748,7 @@ class ImportClient
             $last_consumed_remote_index_entry_path;
         $this->get_state()->diff->last_processed_next_remote_index_entry_path =
             $last_processed_next_remote_index_entry_path;
-        $this->pull_index_journal->apply_pending();
+        $this->pull_index_journal->apply_pending_records();
         $this->save_state();
 
         return !$this->shutdown_requested;
@@ -10913,7 +10913,7 @@ class ImportClient
 
         if ($this->pull_index_journal->is_open()) {
             try {
-                $this->pull_index_journal->apply_pending();
+                $this->pull_index_journal->apply_pending_records();
             } catch (Exception $e) {
                 $this->audit_log(
                     "Failed to apply the pull index WAL on shutdown: " .
