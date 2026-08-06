@@ -324,6 +324,80 @@ final class FilesPushCommandTest extends TestCase
         );
     }
 
+    public function testFilesPushTerminalProgressUsesOneOverallBar(): void
+    {
+        $progressStream = fopen('php://memory', 'w+b');
+        $this->assertIsResource($progressStream);
+        $client = new ImportClient(
+            'https://example.test/?reprint-api=1',
+            $this->stateDirectory,
+            $this->localTree,
+            'files-diff'
+        );
+        $progressProperty = new \ReflectionProperty(ImportClient::class, 'progress');
+        $progressProperty->setValue($client, new \TerminalProgress(true, $progressStream));
+        $isTtyProperty = new \ReflectionProperty(ImportClient::class, 'is_tty');
+        $isTtyProperty->setValue($client, true);
+        $reportProgress = new \ReflectionMethod(
+            ImportClient::class,
+            'report_files_push_progress'
+        );
+
+        foreach ([
+            ['phase' => 'creating'],
+            [
+                'phase' => 'planning',
+                'planning_phase' => 'indexing',
+            ],
+            [
+                'phase' => 'planning',
+                'planning_phase' => 'diffing',
+                'index_bytes_done' => 1,
+                'index_bytes_total' => 2,
+            ],
+            [
+                'phase' => 'pushing_paths',
+                'files_done' => 1,
+                'files_total' => 2,
+                'file_bytes_done' => 14 * 1024 * 1024,
+                'file_bytes_total' => 112 * 1024 * 1024,
+            ],
+            [
+                'phase' => 'pushing_deletes',
+                'files_done' => 2,
+                'files_total' => 2,
+                'deleted_paths_bytes_done' => 1,
+                'deleted_paths_bytes_total' => 2,
+            ],
+            ['phase' => 'committing'],
+            ['phase' => 'saving_local_index'],
+            ['phase' => 'completing'],
+        ] as $senderProgress) {
+            $reportProgress->invoke($client, $senderProgress, false);
+        }
+
+        rewind($progressStream);
+        $output = stream_get_contents($progressStream);
+        fclose($progressStream);
+        $this->assertIsString($output);
+        foreach ([
+            '0% Preparing',
+            '15% Indexing',
+            '30% Indexing',
+            '60% Pushing — 14.0 MB / 112.0 MB',
+            '85% Pushing deletions',
+            '90% Committing',
+            '97% Saving index',
+            '99% Finishing',
+        ] as $progressText) {
+            $this->assertStringContainsString($progressText, $output);
+        }
+        $this->assertStringNotContainsString('Indexing and pushing files', $output);
+        $this->assertStringNotContainsString('Diffing', $output);
+        $this->assertStringNotContainsString('Uploading', $output);
+        $this->assertStringNotContainsString('Applying', $output);
+    }
+
     /** @param list<string> $extraOptions */
     private function runFilesPush(string $remoteReprintApiUrl, array $extraOptions): array
     {

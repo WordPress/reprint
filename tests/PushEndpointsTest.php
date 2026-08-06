@@ -1585,12 +1585,20 @@ final class PushEndpointsTest extends TestCase {
             }
             $this->assertGreaterThan($finished_requests, $this->countEndpointRequests('push_upload'));
             $this->assertSame(1, $this->countEndpointRequests('push_status'));
+            $confirmed_progress = $sender->get_progress();
+            $this->assertSame(6000, $confirmed_progress['file_bytes_total']);
+            $this->assertGreaterThan(0, $confirmed_progress['file_bytes_done']);
+            $this->assertLessThan(6000, $confirmed_progress['file_bytes_done']);
             clearstatcache(true, $state_path);
             $this->assertSame($state_inode_before_upload, fileinode($state_path));
 
             $this->assertTrue($sender->next_step());
 
             $this->assertSame(1, $this->countEndpointRequests('push_status'));
+            $this->assertSame(
+                $confirmed_progress['file_bytes_done'],
+                $sender->get_progress()['file_bytes_done']
+            );
         } finally {
             $sender->cancel();
             $this->closeSender($sender);
@@ -1617,14 +1625,18 @@ final class PushEndpointsTest extends TestCase {
                     'phase' => 'pushing_paths',
                     'files_done' => 0,
                     'files_total' => 2,
+                    'file_bytes_done' => 0,
+                    'file_bytes_total' => 11,
                 ],
                 $sender->get_progress()
             );
 
             $this->assertTrue($sender->next_step());
             $this->assertSame(0, $sender->get_progress()['files_done']);
+            $this->assertSame(0, $sender->get_progress()['file_bytes_done']);
             $sender->cancel();
             $this->assertSame(0, $sender->get_progress()['files_done']);
+            $this->assertSame(0, $sender->get_progress()['file_bytes_done']);
 
             $files_done = $sender->get_progress()['files_done'];
             for ($step = 0; $step < 20 && $files_done === 0; ++$step) {
@@ -1634,6 +1646,11 @@ final class PushEndpointsTest extends TestCase {
             $confirmed_progress = $sender->get_progress();
             $this->assertGreaterThan(0, $confirmed_progress['files_done']);
             $this->assertLessThanOrEqual(2, $confirmed_progress['files_done']);
+            $this->assertSame(11, $confirmed_progress['file_bytes_total']);
+            $this->assertSame(
+                $confirmed_progress['files_done'] === 1 ? 5 : 11,
+                $confirmed_progress['file_bytes_done']
+            );
         } finally {
             if ($sender->get_status() === 'continue') {
                 $sender->cancel();
@@ -1660,7 +1677,7 @@ final class PushEndpointsTest extends TestCase {
         }
     }
 
-    public function testHighLevelSenderResumesStateWrittenBeforeDocumentRootMappingAndProgress(): void
+    public function testHighLevelSenderResumesStateWrittenBeforeDocumentRootMappingAndProgressTotals(): void
     {
         $local_docroot = $this->root . '/old-sender-state-local-docroot';
         mkdir($local_docroot, 0700, true);
@@ -1681,8 +1698,11 @@ final class PushEndpointsTest extends TestCase {
         unset($state['document_root_local_relative_path']);
         unset($state['local_paths_to_push_count']);
         unset($state['local_paths_pushed']);
+        unset($state['local_file_bytes_to_push']);
+        unset($state['local_file_bytes_pushed']);
         unset($state['push_plan_cursor']['document_root_local_relative_path']);
         unset($state['push_plan_cursor']['position']['local_paths_to_push_count']);
+        unset($state['push_plan_cursor']['position']['local_file_bytes_to_push']);
         file_put_contents(
             $push_state_directory . '/sender.json',
             json_encode($state, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)
@@ -1723,6 +1743,12 @@ final class PushEndpointsTest extends TestCase {
         );
         try {
             $this->takeSenderStepsUntilPhase($sender, 'pushing_deletes');
+            $progress = $sender->get_progress();
+            $this->assertSame('pushing_deletes', $progress['phase']);
+            $this->assertSame(0, $progress['files_done']);
+            $this->assertSame(0, $progress['files_total']);
+            $this->assertSame(0, $progress['deleted_paths_bytes_done']);
+            $this->assertGreaterThan(0, $progress['deleted_paths_bytes_total']);
             $this->takeSenderStepsUntilPhase($sender, 'committing');
 
             $this->assertGreaterThan(1, $this->countEndpointRequests('push_upload'));
@@ -1980,6 +2006,11 @@ final class PushEndpointsTest extends TestCase {
             $plan_cursor = $this->loadPlanPosition($push_state_directory);
             $this->assertSame('diffing', $plan_cursor['phase']);
             $this->assertFileExists($fresh_local_index_path);
+            $progress = $sender->get_progress();
+            $this->assertSame('planning', $progress['phase']);
+            $this->assertSame('diffing', $progress['planning_phase']);
+            $this->assertSame(0, $progress['index_bytes_done']);
+            $this->assertGreaterThan(0, $progress['index_bytes_total']);
             $state = $this->loadActiveState($push_state_directory);
             $this->assertIsArray($state);
             $this->assertArrayNotHasKey('file_index_cursor', $state);

@@ -1704,9 +1704,9 @@ class ImportClient
         $status = null;
         $reason = null;
         $detail = null;
-        $phase = $sender->get_phase();
-        $previous_phase = $phase;
         $reported_progress = $sender->get_progress();
+        $phase = $reported_progress['phase'];
+        $previous_phase = $phase;
 
         try {
             $this->audit_log(
@@ -1738,7 +1738,8 @@ class ImportClient
                 }
 
                 $has_next_sender_step = $sender->next_step();
-                $phase = $sender->get_phase();
+                $sender_progress = $sender->get_progress();
+                $phase = $sender_progress['phase'];
                 $phase_changed = $phase !== $previous_phase;
                 if ($phase_changed) {
                     $this->audit_log(
@@ -1747,7 +1748,6 @@ class ImportClient
                     );
                     $previous_phase = $phase;
                 }
-                $sender_progress = $sender->get_progress();
                 if ($sender_progress !== $reported_progress) {
                     $this->report_files_push_progress($sender_progress, $phase_changed);
                     $reported_progress = $sender_progress;
@@ -1778,8 +1778,8 @@ class ImportClient
                         . $throwable->getMessage();
                 }
             }
-            $phase = $sender->get_phase();
             $sender_progress = $sender->get_progress();
+            $phase = $sender_progress['phase'];
             try {
                 $sender->close();
             } catch (\Throwable $throwable) {
@@ -1883,21 +1883,70 @@ class ImportClient
      * Reports one files-push progress snapshot.
      *
      * @param array $sender_progress {
-     *     Target-confirmed sender progress.
+     *     Progress through the sender lifecycle.
      *
-     *     @type string $phase       Current sender phase.
-     *     @type int    $files_done  Target-confirmed local paths. Present after planning.
-     *     @type int    $files_total Total local paths selected by the plan. Present after planning.
+     *     @type string $phase                     Current sender phase.
+     *     @type string $planning_phase            Current PushPlan phase. Present while planning.
+     *     @type int    $index_bytes_done          Index bytes consumed. Present while diffing indexes.
+     *     @type int    $index_bytes_total         Combined index size. Present while diffing indexes.
+     *     @type int    $files_done                Target-confirmed local paths. Present after planning.
+     *     @type int    $files_total               Total local paths selected by the plan. Present after planning.
+     *     @type int    $file_bytes_done           Target-confirmed file bytes. Present while pushing local paths.
+     *     @type int    $file_bytes_total          File bytes selected by the plan. Present while pushing local paths.
+     *     @type int    $deleted_paths_bytes_done  Target-confirmed deletion-list bytes. Present while pushing deletions.
+     *     @type int    $deleted_paths_bytes_total Total deletion-list bytes. Present while pushing deletions.
      * }
      * @param bool $force_output Whether to bypass the JSONL progress throttle.
-     * @phpstan-param array{phase:string,files_done?:int,files_total?:int} $sender_progress
+     * @phpstan-param array{phase:string,planning_phase?:string,index_bytes_done?:int,index_bytes_total?:int,files_done?:int,files_total?:int,file_bytes_done?:int,file_bytes_total?:int,deleted_paths_bytes_done?:int,deleted_paths_bytes_total?:int} $sender_progress
      */
     private function report_files_push_progress(
         array $sender_progress,
         bool $force_output
     ): void {
+        if ($this->is_tty && !$this->verbose_mode) {
+            switch ($sender_progress['phase']) {
+                case 'starting_plan':
+                case 'planning':
+                    $terminal_label = 'Indexing';
+                    break;
+                case 'pushing_paths':
+                    $terminal_label = 'Pushing';
+                    if (
+                        isset($sender_progress['file_bytes_done'], $sender_progress['file_bytes_total'])
+                        && $sender_progress['file_bytes_total'] > 0
+                    ) {
+                        $terminal_label .= ' — ' . $this->format_bytes($sender_progress['file_bytes_done'])
+                            . ' / ' . $this->format_bytes($sender_progress['file_bytes_total']);
+                    }
+                    break;
+                case 'pushing_deletes':
+                    $terminal_label = 'Pushing deletions';
+                    break;
+                case 'committing':
+                    $terminal_label = 'Committing';
+                    break;
+                case 'saving_local_index':
+                    $terminal_label = 'Saving index';
+                    break;
+                case 'completing':
+                case 'removing':
+                case 'discarding_plan':
+                    $terminal_label = 'Finishing';
+                    break;
+                case 'creating':
+                case 'finishing_previous_commit':
+                default:
+                    $terminal_label = 'Preparing';
+                    break;
+            }
+            $terminal_message = $this->progress->render_progress_bar(
+                $terminal_label,
+                $this->files_push_terminal_fraction($sender_progress)
+            );
+            $this->progress->show_progress_line($terminal_message);
+        }
+
         $phase = $sender_progress['phase'];
-        $fraction = null;
         switch ($phase) {
             case 'creating':
                 $message = 'Starting files push';
@@ -1909,7 +1958,6 @@ class ImportClient
             case 'pushing_paths':
                 $files_done = $sender_progress['files_done'];
                 $files_total = $sender_progress['files_total'];
-                $fraction = $files_total > 0 ? $files_done / $files_total : null;
                 $message = sprintf(
                     'Uploading — %s / %s files',
                     number_format($files_done),
@@ -1942,7 +1990,6 @@ class ImportClient
                 break;
         }
 
-        $this->progress->show_progress_line($message, $fraction);
         $progress_record = [
             'type' => 'push_progress',
             'command' => 'files-push',
@@ -1966,6 +2013,101 @@ class ImportClient
         $this->output_progress($progress_record, $force_output);
         $progress_payload['ts'] = microtime(true);
         $this->write_files_push_progress_file($progress_payload);
+    }
+
+    /**
+     * Maps durable push phases onto one monotonic terminal fraction.
+     *
+     * Indexing and commit have no bounded total. Their milestones divide the
+     * bar around the byte-bounded diff and deletion stages and the exact
+     * target-confirmed local-path stage.
+     *
+     * @param array $sender_progress {
+     *     Progress through the sender lifecycle.
+     *
+     *     @type string $phase                     Current sender phase.
+     *     @type string $planning_phase            Current PushPlan phase. Present while planning.
+     *     @type int    $index_bytes_done          Index bytes consumed. Present while diffing indexes.
+     *     @type int    $index_bytes_total         Combined index size. Present while diffing indexes.
+     *     @type int    $files_done                Target-confirmed local paths. Present after planning.
+     *     @type int    $files_total               Total local paths selected by the plan. Present after planning.
+     *     @type int    $file_bytes_done           Target-confirmed file bytes. Present while pushing local paths.
+     *     @type int    $file_bytes_total          File bytes selected by the plan. Present while pushing local paths.
+     *     @type int    $deleted_paths_bytes_done  Target-confirmed deletion-list bytes. Present while pushing deletions.
+     *     @type int    $deleted_paths_bytes_total Total deletion-list bytes. Present while pushing deletions.
+     * }
+     * @phpstan-param array{phase:string,planning_phase?:string,index_bytes_done?:int,index_bytes_total?:int,files_done?:int,files_total?:int,file_bytes_done?:int,file_bytes_total?:int,deleted_paths_bytes_done?:int,deleted_paths_bytes_total?:int} $sender_progress
+     */
+    private function files_push_terminal_fraction(array $sender_progress): float
+    {
+        switch ($sender_progress['phase']) {
+            case 'creating':
+            case 'finishing_previous_commit':
+                return 0.0;
+            case 'starting_plan':
+                return 0.15;
+            case 'planning':
+                switch ($sender_progress['planning_phase'] ?? null) {
+                    case 'starting_diff':
+                        return 0.2;
+                    case 'diffing':
+                        $stage_fraction = isset(
+                            $sender_progress['index_bytes_done'],
+                            $sender_progress['index_bytes_total']
+                        )
+                            ? $this->files_push_stage_fraction(
+                                $sender_progress['index_bytes_done'],
+                                $sender_progress['index_bytes_total']
+                            )
+                            : 0.0;
+                        return 0.2 + 0.2 * $stage_fraction;
+                    case 'complete':
+                        return 0.4;
+                    case 'indexing':
+                    default:
+                        return 0.15;
+                }
+            case 'pushing_paths':
+                $stage_fraction = isset($sender_progress['files_done'], $sender_progress['files_total'])
+                    ? $this->files_push_stage_fraction(
+                        $sender_progress['files_done'],
+                        $sender_progress['files_total']
+                    )
+                    : 0.0;
+                return 0.4 + 0.4 * $stage_fraction;
+            case 'pushing_deletes':
+                $stage_fraction = isset(
+                    $sender_progress['deleted_paths_bytes_done'],
+                    $sender_progress['deleted_paths_bytes_total']
+                )
+                    ? $this->files_push_stage_fraction(
+                        $sender_progress['deleted_paths_bytes_done'],
+                        $sender_progress['deleted_paths_bytes_total']
+                    )
+                    : 0.0;
+                return 0.8 + 0.1 * $stage_fraction;
+            case 'committing':
+                return 0.9;
+            case 'saving_local_index':
+                return 0.97;
+            case 'completing':
+            case 'removing':
+            case 'discarding_plan':
+                return 0.99;
+            default:
+                return 0.0;
+        }
+    }
+
+    /**
+     * Returns a bounded fraction for one files-push stage.
+     */
+    private function files_push_stage_fraction(int $done, int $total): float
+    {
+        if ($total === 0) {
+            return 1.0;
+        }
+        return max(0.0, min(1.0, $done / $total));
     }
 
     /**
