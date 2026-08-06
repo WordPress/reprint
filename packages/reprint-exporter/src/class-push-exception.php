@@ -50,7 +50,8 @@ final class Site_Export_Push_Exception extends RuntimeException {
      * @param array<string,mixed> $context Structured observations. Common keys
      *     are operation, path_b64, conflict_path_b64,
      *     expected_docroot_types, observed_docroot_identity, work_device,
-     *     docroot_device, work_type, and observed_request_body_bytes.
+     *     docroot_device, work_type, blocking_push_session_id, and
+     *     observed_request_body_bytes.
      */
     public function __construct(string $error_code, string $message, array $context = []) {
         parent::__construct($message);
@@ -78,7 +79,7 @@ final class Site_Export_Push_Exception extends RuntimeException {
      * @return array<string,mixed> Structured observations. Common keys are
      *     operation, path_b64, conflict_path_b64, expected_docroot_types,
      *     observed_docroot_identity, work_device, docroot_device, work_type,
-     *     and observed_request_body_bytes.
+     *     blocking_push_session_id, and observed_request_body_bytes.
      */
     public function get_context(): array {
         return $this->context;

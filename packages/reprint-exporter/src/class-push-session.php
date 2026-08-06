@@ -75,6 +75,10 @@ final class Site_Export_Push_Session {
     /** @var list<string> */
     private $excluded_paths;
     /** @var string */
+    private $commit_state_path;
+    /** @var string */
+    private $commit_state_lock_path;
+    /** @var string */
     private $push_directory;
     /** @var string */
     private $work_dir;
@@ -140,7 +144,10 @@ final class Site_Export_Push_Session {
             }
         }
         $this->excluded_paths = normalize_excluded_paths($excluded_paths);
-        $this->push_directory = $this->reprint_directory . '/.reprint/push/' . $push_session_id;
+        $push_sessions_directory = $this->reprint_directory . '/.reprint/push';
+        $this->commit_state_path = $push_sessions_directory . '/commit-state';
+        $this->commit_state_lock_path = $push_sessions_directory . '/commit-state.lock';
+        $this->push_directory = $push_sessions_directory . '/' . $push_session_id;
         $this->push_json_path = $this->push_directory . '/push.json';
         $this->commit_json_path = $this->push_directory . '/commit.json';
         $this->push_lock_path = $this->push_directory . '/push.lock';
@@ -181,6 +188,16 @@ final class Site_Export_Push_Session {
         $push_sessions_directory = self::create_push_sessions_directory($reprint_directory);
         $create_remove_lock = self::acquire_create_remove_lock($push_sessions_directory, 'create');
         try {
+            $push_session->with_commit_state_lock(function () use ($push_session): void {
+                $active_owner = $push_session->read_commit_owner();
+                if ($active_owner !== null && $active_owner !== $push_session->push_session_id) {
+                    throw new Site_Export_Push_Exception(
+                        self::ERROR_COMMIT_REQUIRED,
+                        'Push session ' . $active_owner . ' must finish committing this document root before another push session can start.',
+                        ['blocking_push_session_id' => $active_owner]
+                    );
+                }
+            });
             $removing_push_directory = $push_sessions_directory . '/.removing-' . $push_session_id;
             if (file_exists($removing_push_directory) || is_link($removing_push_directory)) {
                 throw new Site_Export_Push_Exception(
@@ -678,12 +695,11 @@ final class Site_Export_Push_Session {
                 ];
             }
             $this->with_commit_state_lock(function (): void {
-                $active_path = $this->reprint_directory . '/.reprint/push/commit-state';
-                $active_owner = @file_get_contents($active_path);
-                if (is_string($active_owner) && trim($active_owner) !== '' && trim($active_owner) !== $this->push_session_id) {
-                    throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'Another push session is already committing this document root: ' . trim($active_owner) . '.');
+                $active_owner = $this->read_commit_owner();
+                if ($active_owner !== null && $active_owner !== $this->push_session_id) {
+                    throw new Site_Export_Push_Exception(self::ERROR_LOCK_ACQUISITION_FAILURE, 'Another push session is already committing this document root: ' . $active_owner . '.');
                 }
-                $this->write_atomic_file($active_path, $this->push_session_id . "\n", 0600);
+                $this->write_atomic_file($this->commit_state_path, $this->push_session_id . "\n", 0600);
             });
             $maintenance_docroot_path = $this->docroot_path('.maintenance');
             $maintenance_identity = $this->lstat_path($maintenance_docroot_path);
@@ -1954,18 +1970,17 @@ final class Site_Export_Push_Session {
     /**
      * Releases this push session's document-root-wide commit claim if it still owns it.
      *
-     * The active marker is advisory state excluded by the commit-state lock. Missing
-     * or foreign contents are left untouched so cleanup cannot erase another
-     * push session's claim after an operator or retry changed document-root ownership.
+     * The active marker is advisory state excluded by the commit-state lock. A
+     * missing marker or another session's valid claim is left untouched so cleanup
+     * cannot erase document-root ownership which changed after this commit.
      */
     private function release_commit_state(): void {
         $this->with_commit_state_lock(function (): void {
-            $active_path = $this->reprint_directory . '/.reprint/push/commit-state';
-            $active_owner = @file_get_contents($active_path);
-            if (!is_string($active_owner) || trim($active_owner) !== $this->push_session_id) {
+            $active_owner = $this->read_commit_owner();
+            if ($active_owner !== $this->push_session_id) {
                 return;
             }
-            if (!@unlink($active_path)) {
+            if (!@unlink($this->commit_state_path)) {
                 throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not release the commit-state owner.');
             }
         });
@@ -1982,7 +1997,7 @@ final class Site_Export_Push_Session {
      * @param callable $callback Critical section to execute while locked.
      */
     private function with_commit_state_lock(callable $callback): void {
-        $lock = @fopen($this->reprint_directory . '/.reprint/push/commit-state.lock', 'c+b');
+        $lock = @fopen($this->commit_state_lock_path, 'c+b');
         if ($lock === false) {
             throw new Site_Export_Push_Exception(self::ERROR_FILESYSTEM, 'Could not open the commit-state lock.');
         }
@@ -1995,6 +2010,43 @@ final class Site_Export_Push_Session {
             flock($lock, LOCK_UN);
             fclose($lock);
         }
+    }
+
+    /**
+     * Reads the validated push session ID which owns the document-root commit.
+     *
+     * This method is called only while the commit-state lock is held. A missing
+     * marker means no commit owns the document root. Existing state must be a
+     * readable regular file containing one valid push session ID.
+     */
+    private function read_commit_owner(): ?string {
+        $identity = $this->lstat_path($this->commit_state_path);
+        if ($identity === null) {
+            return null;
+        }
+        if ($identity['type'] !== 'file') {
+            throw new Site_Export_Push_Exception(
+                self::ERROR_CORRUPTED_PUSH_STATE,
+                'Reprint cannot identify the active push commit because its commit-state marker is not a regular file.'
+            );
+        }
+        $active_owner = @file_get_contents($this->commit_state_path);
+        if (!is_string($active_owner)) {
+            throw new Site_Export_Push_Exception(
+                self::ERROR_FILESYSTEM,
+                'Reprint could not read the active push commit from its commit-state marker.'
+            );
+        }
+        $active_owner = trim($active_owner);
+        try {
+            self::require_push_session_id($active_owner);
+        } catch (InvalidArgumentException $exception) {
+            throw new Site_Export_Push_Exception(
+                self::ERROR_CORRUPTED_PUSH_STATE,
+                'Reprint cannot identify the active push commit because its commit-state marker is malformed.'
+            );
+        }
+        return $active_owner;
     }
 
     /**

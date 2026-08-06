@@ -128,8 +128,12 @@ A push plan is an internal part of the sender lifecycle:
 1. Before `PushFilesSender::start()`, `files-push` loads the mandatory
    preflight document root. The sender enters `creating`, stores the document
    root's local relative path in `sender.json`, and requests
-   at most 100 target exclusions from `push_create`. It stores the exclusions
-   in `excluded_paths.json` after creating the active `plan/` directory.
+   at most 100 target exclusions from `push_create`. If another push session
+   has an active commit, the sender stores its `blocking_push_session_id`, enters
+   `finishing_previous_commit`, and sends one bounded `push_commit` request per
+   step until that commit finishes. It then returns to `creating`. A successful
+   create stores the exclusions in `excluded_paths.json` after creating the
+   active `plan/` directory.
 2. The sender starts one internal `PushPlan`. The plan copies the exclusions to
    `plan/excluded_paths.json`, then opens
    `plan/fresh_local_index.jsonl` and a `FileIndexProcessor`. Each `indexing`
@@ -242,7 +246,9 @@ complete request for authentication.
   sorted, immutable server policy stored for the push session; base64 preserves
   arbitrary path bytes which JSON cannot represent directly. A sender
   consuming this field must omit indexed paths equal to, below, or ancestors
-  of any advertised exclusion.
+  of any advertised exclusion. When another push session has an active commit,
+  the endpoint returns `commit_required` with its `blocking_push_session_id`
+  before creating the requested push session.
 - `POST push_upload` accepts `multipart/mixed`. A successful response contains
   `status`, `push_session_id`, `changes_accepted`, and `last_change`. The last
   change is null for an empty request. Otherwise it contains `state`, `type`,
@@ -358,15 +364,16 @@ deleted-directory ranges. `sender.json` stores the complete cursor. No
 upload begins until both indexes have been consumed and the two path lists are
 stable.
 
-`sender.json` contains no copied receiver cursor. It stores the push session
-and phase, the document root's local relative path, the PushPlan cursor, the next
-byte offset in `local_paths_to_push.jsonl`, the receiver part limit, and
-learned request-body sizing state. Its phases are `creating`, `starting_plan`,
-`planning`, `pushing_paths`, `pushing_deletes`, `committing`,
-`saving_local_index`, `completing`, `removing`, and
-`discarding_plan`.
-The separate start, local-index-save, completion, removal, and discard phases ensure
-that a process stop between durable actions repeats only the current action.
+`sender.json` contains no copied receiver cursor. It stores the current push
+session, an optional blocking push session, the phase, the document root's local
+relative path, the PushPlan cursor, the next byte offset in
+`local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
+sizing state. Its phases are `creating`, `finishing_previous_commit`,
+`starting_plan`, `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
+`saving_local_index`, `completing`, `removing`, and `discarding_plan`.
+The separate previous-commit, start, local-index-save, completion, removal,
+and discard phases ensure that a process stop between durable actions repeats
+only the current action.
 During `planning`, the PushPlan cursor in `sender.json` contains the
 plan's internal phase and continuation offsets. A completed cursor remains until
 the local index is saved, or until the target confirms removal. The sender then

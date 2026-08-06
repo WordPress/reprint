@@ -660,6 +660,150 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame($expected_excluded_paths_b64, $push_metadata['excluded_paths_b64']);
     }
 
+    public function testPushCreateReportsTheActiveCommitBeforeCreatingAnotherSession(): void
+    {
+        $client = $this->newClient(self::SECRET);
+        $committing_push_session_id = str_repeat('3', 32);
+        $next_push_session_id = str_repeat('4', 32);
+
+        $create = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $committing_push_session_id,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+        $upload = $this->sendUploadRequest($client, $committing_push_session_id, [
+            [
+                'type' => 'file',
+                'path' => 'installed.txt',
+                'total_bytes' => 4,
+                'offset' => 0,
+                'payload' => 'new!',
+            ],
+            [
+                'type' => 'delete-list',
+                'offset' => 0,
+                'complete' => true,
+                'payload' => '',
+            ],
+        ]);
+        $this->assertSame('complete', $upload['status'], (string) json_encode($upload));
+        $commit = $client->send_push_request('POST', 'push_commit', [
+            'push_session_id' => $committing_push_session_id,
+        ], ['accepted']);
+        $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
+        $this->assertTrue($commit['response']['send_next_request']);
+
+        $create_while_committing = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $next_push_session_id,
+        ], ['created']);
+
+        $this->assertSame('failed', $create_while_committing['status'], (string) json_encode($create_while_committing));
+        $this->assertSame('commit_required', $create_while_committing['reason']);
+        $this->assertSame(
+            $committing_push_session_id,
+            $create_while_committing['response']['blocking_push_session_id']
+        );
+        $this->assertSame(
+            'Push session ' . $committing_push_session_id . ' must finish committing this document root before another push session can start.',
+            $create_while_committing['detail']
+        );
+        $this->assertSame(409, $create_while_committing['response']['http_code']);
+        $this->assertDirectoryDoesNotExist(
+            $this->reprint_directory . '/.reprint/push/' . $next_push_session_id
+        );
+    }
+
+    public function testPushCreateRejectsCorruptCommitOwnerState(): void
+    {
+        $push_sessions_directory = $this->reprint_directory . '/.reprint/push';
+        mkdir($push_sessions_directory, 0700, true);
+        file_put_contents($push_sessions_directory . '/commit-state', "not-a-push-session\n");
+
+        $client = $this->newClient(self::SECRET);
+        $push_session_id = str_repeat('4', 32);
+        $result = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $push_session_id,
+        ], ['created']);
+
+        $this->assertSame('failed', $result['status'], (string) json_encode($result));
+        $this->assertSame('corrupted_push_state', $result['reason']);
+        $this->assertSame(
+            'Reprint cannot identify the active push commit because its commit-state marker is malformed.',
+            $result['detail']
+        );
+        $this->assertDirectoryDoesNotExist($push_sessions_directory . '/' . $push_session_id);
+    }
+
+    public function testHighLevelSenderFinishesPreviousCommitBeforeCreatingItsPushSession(): void
+    {
+        $client = $this->newClient(self::SECRET);
+        $blocking_push_session_id = str_repeat('5', 32);
+
+        $create = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $blocking_push_session_id,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+        $upload = $this->sendUploadRequest($client, $blocking_push_session_id, [
+            [
+                'type' => 'file',
+                'path' => 'blocking.txt',
+                'total_bytes' => 4,
+                'offset' => 0,
+                'payload' => 'hold',
+            ],
+            [
+                'type' => 'delete-list',
+                'offset' => 0,
+                'complete' => true,
+                'payload' => '',
+            ],
+        ]);
+        $this->assertSame('complete', $upload['status'], (string) json_encode($upload));
+        $commit = $client->send_push_request('POST', 'push_commit', [
+            'push_session_id' => $blocking_push_session_id,
+        ], ['accepted']);
+        $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
+        $this->assertTrue($commit['response']['send_next_request']);
+
+        $local_docroot = $this->root . '/next-local-docroot';
+        $push_state_directory = $this->root . '/next-sender-state';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/next.txt', 'next');
+        $options = $this->senderOptions($local_docroot, $push_state_directory);
+
+        $sender = $this->startSender($options);
+        $initial_state = $this->loadActiveState($push_state_directory);
+        $this->assertIsArray($initial_state);
+        $current_push_session_id = $initial_state['push_session_id'];
+        try {
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('finishing_previous_commit', $sender->get_phase());
+            $state = $this->loadActiveState($push_state_directory);
+            $this->assertIsArray($state);
+            $this->assertSame($current_push_session_id, $state['push_session_id']);
+            $this->assertSame($blocking_push_session_id, $state['blocking_push_session_id']);
+        } finally {
+            $this->closeSender($sender);
+        }
+
+        $resumed_sender = $this->resumeSender($options);
+        try {
+            $this->assertTrue($resumed_sender->next_step());
+            $this->assertSame('finishing_previous_commit', $resumed_sender->get_phase());
+        } finally {
+            $this->closeSender($resumed_sender);
+        }
+
+        $state = $this->loadActiveState($push_state_directory);
+        $this->assertIsArray($state);
+        $this->assertSame($blocking_push_session_id, $state['blocking_push_session_id']);
+        $result = $this->runSender($local_docroot, $push_state_directory);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertSame('hold', file_get_contents($this->docroot . '/blocking.txt'));
+        $this->assertSame('next', file_get_contents($this->docroot . '/next.txt'));
+        $this->assertNull($this->loadActiveState($push_state_directory));
+    }
+
     public function testUploadAndMissingPathStatusExposeOnlyDocumentedFields(): void
     {
         $client = $this->newClient(self::SECRET);

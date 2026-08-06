@@ -1837,6 +1837,9 @@ class ImportClient
             case 'pushing_deletes':
                 $message = 'Uploading deleted paths';
                 break;
+            case 'finishing_previous_commit':
+                $message = 'Finishing previous push commit';
+                break;
             case 'committing':
                 $message = 'Applying file changes';
                 break;
