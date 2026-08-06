@@ -2565,7 +2565,7 @@ final class Site_Export_Push_Session {
      */
     private function ensure_private_parent(string $path, bool $create_missing = true): void {
         $parent = dirname($path);
-        $relative = path_remainder_under($parent, $this->work_files_directory);
+        $relative = relative_path_under($parent, $this->work_files_directory);
         if ($relative === null) {
             throw new LogicException('Private work path escaped work/files.');
         }
@@ -2573,7 +2573,7 @@ final class Site_Export_Push_Session {
             return;
         }
         $current = $this->work_files_directory;
-        foreach (explode('/', ltrim($relative, '/')) as $segment) {
+        foreach (explode('/', $relative) as $segment) {
             $current .= '/' . $segment;
             $identity = $this->lstat_path($current);
             if ($identity === null) {
