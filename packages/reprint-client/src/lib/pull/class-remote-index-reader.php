@@ -7,11 +7,44 @@ use function WordPress\Reprint\Exporter\assert_valid_path;
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
 
 /**
- * Reads one sorted remote JSONL index sequentially.
+ * Reads one path-sorted remote JSONL index through a retained file handle.
  *
- * A missing index is an empty reader because the first pull has no accounted
- * remote index. The byte offset follows the open handle so a caller can store
- * the position after a consumed entry and resume there in a new process.
+ * Remote indexes describe source absolute paths. Paths are base64-encoded on
+ * disk because Unix path bytes are not necessarily valid UTF-8. For example,
+ * this JSONL entry describes `/srv/site/wp-content/index.php`:
+ *
+ *     {"path":"L3Nydi9zaXRlL3dwLWNvbnRlbnQvaW5kZXgucGhw","ctime":1722864000,"size":1234,"type":"file"}
+ *
+ * next_entry() validates and decodes the path, casts the scalar fields, and
+ * returns:
+ *
+ *     [
+ *         "path"  => "/srv/site/wp-content/index.php",
+ *         "ctime" => 1722864000,
+ *         "size"  => 1234,
+ *         "type"  => "file",
+ *     ]
+ *
+ * Extra raw-record fields such as `target` and `intermediate` are deliberately
+ * omitted from the returned entry. Callers which need those fields read the
+ * raw symlink records instead. This reader also does not read
+ * `local_index.jsonl`: that relative-path format has an optional `empty`
+ * field and remains owned by PushPlan and the local-index merge helpers.
+ *
+ * ## Lifecycle and resume
+ *
+ * Call open() once, read forward with next_entry(), retain byte_offset() only
+ * after the returned entry has been processed, and call close() when the scan
+ * ends. seek_to_byte_offset() positions a newly opened reader at such a saved
+ * boundary. The reader assumes the file is already sorted and never sorts or
+ * writes it.
+ *
+ * A missing file opens as an empty reader because the first pull has no prior
+ * remote index. Blank lines are consumed and skipped. A malformed non-blank
+ * line is consumed before next_entry() throws, so a caller which deliberately
+ * tolerates malformed records can catch the exception and continue with the
+ * following line. byte_offset() includes every line consumed by the preceding
+ * call, including skipped blank or rejected lines.
  */
 class RemoteIndexReader
 {
@@ -21,12 +54,23 @@ class RemoteIndexReader
     /** @var resource|null Open remote index handle, or null for a missing index. */
     private $remote_index_file_handle = null;
 
+    /**
+     * Configures the remote index path without opening it.
+     *
+     * @param string $remote_index_path Path to one remote JSONL index.
+     */
     public function __construct(string $remote_index_path)
     {
         $this->remote_index_path = $remote_index_path;
     }
 
-    /** Opens the remote index, treating a missing file as an empty index. */
+    /**
+     * Opens the remote index, treating a missing file as an empty index.
+     *
+     * Repeated calls retain the current handle and byte offset.
+     *
+     * @throws RuntimeException When the path exists but cannot be opened.
+     */
     public function open(): void
     {
         if (is_resource($this->remote_index_file_handle)) {
@@ -45,16 +89,24 @@ class RemoteIndexReader
     }
 
     /**
-     * Reads the next index entry, skipping blank lines.
+     * Reads and decodes the next index entry, skipping blank lines.
+     *
+     * A malformed line has already advanced the handle when this method
+     * throws. Calling next_entry() again therefore starts at the following
+     * line rather than retrying the rejected bytes.
      *
      * @return array|null {
-     *     Decoded index entry, or null at EOF.
+     *     Decoded index entry, or null for a missing index or at EOF.
      *
      *     @type string $path  Decoded absolute path.
      *     @type int    $ctime Change time reported by the exporter.
      *     @type int    $size  Size in bytes.
      *     @type string $type  `file`, `dir`, or `link`.
      * }
+     * @throws RuntimeException When a non-blank line is not a decodable index
+     *                          entry.
+     * @throws InvalidArgumentException When the decoded path is not a valid
+     *                                  remote absolute path.
      */
     public function next_entry(): ?array
     {
@@ -70,7 +122,14 @@ class RemoteIndexReader
         return null;
     }
 
-    /** Returns the byte offset after the input consumed by next_entry(). */
+    /**
+     * Returns the byte offset after the input consumed by next_entry().
+     *
+     * Returns zero for a missing file or before the first read. Blank and
+     * malformed lines consumed by next_entry() count toward the offset.
+     *
+     * @throws RuntimeException When the open handle cannot report its offset.
+     */
     public function byte_offset(): int
     {
         if (!is_resource($this->remote_index_file_handle)) {
@@ -85,7 +144,16 @@ class RemoteIndexReader
         return $byte_offset;
     }
 
-    /** Positions the open index at a previously stored byte offset. */
+    /**
+     * Positions the open index at a previously stored byte offset.
+     *
+     * Use offsets returned by byte_offset(); an arbitrary offset may point
+     * into the middle of a JSONL record. A missing-file reader remains empty
+     * and treats the seek as a no-op.
+     *
+     * @param int $byte_offset Byte offset at the start of the next record.
+     * @throws RuntimeException When the open handle cannot seek to the offset.
+     */
     public function seek_to_byte_offset(int $byte_offset): void
     {
         if (!is_resource($this->remote_index_file_handle)) {
@@ -98,7 +166,11 @@ class RemoteIndexReader
         }
     }
 
-    /** Closes the remote index handle. Repeated calls have no effect. */
+    /**
+     * Closes the retained remote index handle.
+     *
+     * Repeated calls have no effect.
+     */
     public function close(): void
     {
         if (!is_resource($this->remote_index_file_handle)) {
@@ -109,7 +181,10 @@ class RemoteIndexReader
     }
 
     /**
-     * Parses one JSON index line into an entry.
+     * Parses one JSON index line into a validated entry.
+     *
+     * Missing ctime and size values become zero, and a missing type becomes
+     * `file`, preserving the historical remote-index parsing contract.
      *
      * @param string $line One JSONL line from a remote index file.
      * @return array|null {
@@ -120,6 +195,9 @@ class RemoteIndexReader
      *     @type int    $size  Size in bytes.
      *     @type string $type  `file`, `dir`, or `link`.
      * }
+     * @throws RuntimeException When the line or base64 path is malformed.
+     * @throws InvalidArgumentException When the decoded path is not a valid
+     *                                  remote absolute path.
      */
     private function parse_index_line(string $line): ?array
     {

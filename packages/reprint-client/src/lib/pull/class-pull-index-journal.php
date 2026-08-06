@@ -10,22 +10,77 @@ use function WordPress\Reprint\Exporter\relative_path_under;
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
 
 /**
- * Owns pull/index.wal — the append-only journal of completed files-pull
- * mutations — and publishes its records into the accounted indexes.
+ * Publishes completed files-pull mutations from `pull/index.wal` into the
+ * remote and local indexes.
  *
- * Each record describes one completed local mutation: a pulled file, symlink,
- * or empty directory; a completed local deletion; or a remote invalidation
- * with no local projection. ImportClient appends records as it completes work
- * and calls flush() before saving the cursor which makes that work durable.
- * apply_pending_records() merges complete records into the remote index and projects
- * them into the local index, truncating the journal only after both
- * replacements finish, so an interrupted apply replays the batch. An
- * unterminated final record is ignored; the resumed files-pull repeats it
- * from the preceding durable cursor.
+ * The journal records work only after ImportClient has completed the
+ * corresponding file, symlink, empty-directory, or deletion operation. It
+ * does not perform those filesystem mutations. ImportClient owns the pull
+ * cursor, selection and preserve-local policy, progress, and command status;
+ * this class owns the append-only record format and index publication.
  *
- * The journal file doubles as the unfinished files-pull lifecycle marker:
- * open() creates it, applied batches leave the empty file in place, and
- * remove_empty_marker() removes it once files-pull completes or aborts.
+ * ## Record format
+ *
+ * Paths are base64-encoded because Unix path bytes are not necessarily valid
+ * UTF-8. For a filesystem root of `/var/www`, a completed pull from
+ * `/srv/site/file.txt` to `/var/www/file.txt` appends this JSON object as one
+ * line (wrapped here for readability):
+ *
+ *     {
+ *         "op": "+",
+ *         "remote_absolute_path_b64": "L3Nydi9zaXRlL2ZpbGUudHh0",
+ *         "remote_path_ctime": 10,
+ *         "remote_path_size": 4,
+ *         "remote_path_type": "file",
+ *         "local_relative_path_b64": "ZmlsZS50eHQ=",
+ *         "local_path_ctime": 12,
+ *         "local_path_size": 4,
+ *         "local_path_type": "file"
+ *     }
+ *
+ * The remote fields describe the source state which files-pull accounted for.
+ * For an upsert, lstat() supplies the local type, size, and ctime after the
+ * local mutation completes. A skipped path, a path outside the filesystem
+ * root, or a remote invalidation has no local fields. For example,
+ * invalidating the same remote path appends:
+ *
+ *     {
+ *         "op": "-",
+ *         "remote_absolute_path_b64": "L3Nydi9zaXRlL2ZpbGUudHh0"
+ *     }
+ *
+ * A completed selected deletion beneath the filesystem root uses the same `-`
+ * operation and includes only `local_relative_path_b64`, so publication
+ * removes the local index entry without inspecting a path which is already
+ * gone. Publishing the upsert example produces these one-line index entries:
+ *
+ *     remote index:
+ *     {"path":"L3Nydi9zaXRlL2ZpbGUudHh0","ctime":10,"size":4,"type":"file"}
+ *
+ *     local index:
+ *     {"path":"ZmlsZS50eHQ=","ctime":12,"size":4,"type":"file"}
+ *
+ * ## Publication and interruption
+ *
+ * ImportClient calls flush() immediately before saving a cursor which covers
+ * the appended records. apply_pending_records() closes the writer, merges all
+ * complete records into the remote index, projects records with local fields
+ * into the local index, and truncates the WAL only after the remote replacement
+ * and any required local replacement have been published by rename().
+ *
+ * Publication is not resumable within the method, but it is safe to restart.
+ * If the process stops before WAL truncation, the next call recreates the work
+ * files and replays the complete batch. Upserts replace the same entry and
+ * deletions of absent entries write nothing, so replay is idempotent. An
+ * unterminated final JSONL record is ignored; files-pull resumes from the
+ * preceding durable cursor and repeats that mutation.
+ *
+ * ## Lifecycle marker
+ *
+ * The WAL also marks an unfinished files-pull lifecycle. open() creates or
+ * retains it, successful publication leaves an empty file in place, and
+ * remove_empty_marker() removes that empty file only after files-pull
+ * completes or aborts.
  */
 class PullIndexJournal
 {
@@ -46,6 +101,19 @@ class PullIndexJournal
     /** @var string Resolved absolute filesystem root local paths project under. */
     private string $filesystem_root;
 
+    /**
+     * Configures the journal, index paths, and local projection root.
+     *
+     * Construction does not create or open the WAL. ImportClient may therefore
+     * construct the journal for commands which never begin a files-pull
+     * lifecycle.
+     *
+     * @param ImportClient $client              Owner used for audit logging.
+     * @param string       $pull_index_wal_path Path to `pull/index.wal`.
+     * @param string       $remote_index_path   Published remote index path.
+     * @param string       $local_index_path    Published local index path.
+     * @param string       $filesystem_root     Resolved local projection root.
+     */
     public function __construct(
         ImportClient $client,
         string $pull_index_wal_path,
@@ -60,7 +128,15 @@ class PullIndexJournal
         $this->filesystem_root = $filesystem_root;
     }
 
-    /** Creates or retains the journal file and opens it for appending. */
+    /**
+     * Creates or retains the WAL and opens it for appending.
+     *
+     * Repeated calls retain the existing writer. Creating a new WAL also
+     * creates the unfinished files-pull lifecycle marker and writes its audit
+     * record.
+     *
+     * @throws RuntimeException When the WAL cannot be opened.
+     */
     public function open(): void
     {
         if ($this->pull_index_wal_handle) {
@@ -78,7 +154,11 @@ class PullIndexJournal
         }
     }
 
-    /** Whether the journal is open for appending. */
+    /**
+     * Indicates whether the WAL is open for appending.
+     *
+     * @return bool True while this object retains the writer handle.
+     */
     public function is_open(): bool
     {
         return is_resource($this->pull_index_wal_handle);
@@ -106,6 +186,15 @@ class PullIndexJournal
      * the pulled path with the older local index and select it as a local
      * change. A null local absolute path, a path outside the filesystem root,
      * or a default-skipped path updates only the remote index.
+     *
+     * @param string      $remote_absolute_path Source absolute path.
+     * @param int         $remote_path_ctime     Source change timestamp.
+     * @param int         $remote_path_size      Source size in bytes.
+     * @param string      $remote_path_type      `file`, `link`, or `dir`.
+     * @param string|null $local_absolute_path   Resulting local absolute path,
+     *                                           or null for no local projection.
+     * @throws RuntimeException When the resulting local path cannot be
+     *                          inspected or the record cannot be appended.
      */
     public function record_remote_upsert(
         string $remote_absolute_path,
@@ -156,7 +245,18 @@ class PullIndexJournal
         $this->write_record($pull_index_wal_record);
     }
 
-    /** Records a completed local deletion. Call only after the local path is gone. */
+    /**
+     * Records a remote deletion after its selected local path is gone.
+     *
+     * The remote path is always removed from the accounted remote index. A
+     * local path beneath the filesystem root also removes its relative path
+     * from the local index. Paths outside the root and default-skipped paths
+     * have no local projection.
+     *
+     * @param string $remote_absolute_path Deleted source absolute path.
+     * @param string $local_absolute_path  Local path already removed.
+     * @throws RuntimeException When the record cannot be appended.
+     */
     public function record_successful_deletion(
         string $remote_absolute_path,
         string $local_absolute_path
@@ -175,7 +275,16 @@ class PullIndexJournal
         $this->write_record($pull_index_wal_record);
     }
 
-    /** Records remote state which this pull did not account for locally. */
+    /**
+     * Invalidates remote state without changing the local index.
+     *
+     * The `-` record omits `local_relative_path_b64`, so publication removes
+     * only the remote index entry. Use this after files-pull intentionally
+     * leaves no local path which it can account for.
+     *
+     * @param string $remote_absolute_path Source absolute path to invalidate.
+     * @throws RuntimeException When the record cannot be appended.
+     */
     public function record_remote_invalidation(string $remote_absolute_path): void
     {
         $this->write_record([
@@ -184,7 +293,15 @@ class PullIndexJournal
         ]);
     }
 
-    /** Flushes appended records. Call immediately before saving a cursor checkpoint. */
+    /**
+     * Flushes appended records before ImportClient saves their cursor.
+     *
+     * A closed journal has nothing to flush. This ordering ensures a saved
+     * cursor never claims a completed mutation whose record remains only in a
+     * PHP stream buffer.
+     *
+     * @throws RuntimeException When the open WAL cannot be flushed.
+     */
     public function flush(): void
     {
         if (
@@ -196,20 +313,27 @@ class PullIndexJournal
     }
 
     /**
-     * Closes the writer, applies complete records to the remote index and
-     * then the local index, and truncates the journal only after both
-     * replacements succeed.
+     * Publishes all complete pending records into the accounted indexes.
      *
-     * Not resumable mid-way, but safe to restart: both indexes are published
-     * by atomic rename() and the journal is truncated only after the second
-     * rename, so a crash anywhere in here leaves the journal intact and the
-     * next apply_pending_records() reruns the whole merge. Re-applying an
-     * already-applied batch is idempotent — an upsert rewrites an identical
-     * entry and a deletion of an absent path writes nothing. Partial
-     * `.new`/`.local` work files are recreated with mode "w" on rerun. An
-     * unterminated final record is skipped; its work is repeated on resume
-     * because flush() runs before the cursor checkpoint which would have
-     * covered it.
+     * Applying a record here means folding its `+` or `-` projection into the
+     * remote index and, when local fields are present, the local index. The
+     * corresponding filesystem mutation has already completed. This method
+     * closes the writer before reading and truncates the WAL only after the
+     * remote replacement and any required local replacement succeed.
+     *
+     * Not resumable mid-way, but safe to restart: the remote index and any
+     * changed local index are published by atomic rename(), and the journal is
+     * truncated only after the final required rename. A crash anywhere before
+     * that leaves the journal intact, so the next apply_pending_records()
+     * reruns the whole merge. Re-applying an already-applied batch is
+     * idempotent — an upsert rewrites an identical entry and a deletion of an
+     * absent path writes nothing. Partial `.new`/`.local` work files are
+     * recreated with mode "w" on rerun. An unterminated final record is
+     * skipped; its work is repeated on resume because flush() runs before the
+     * cursor checkpoint which would have covered it.
+     *
+     * @throws RuntimeException When the WAL or an index cannot be read,
+     *                          published, or cleared.
      */
     public function apply_pending_records(): void
     {
@@ -406,7 +530,17 @@ class PullIndexJournal
         );
     }
 
-    /** Removes the marker after files-pull completes or is aborted. Refuses a non-empty journal. */
+    /**
+     * Removes the empty WAL which marks an unfinished files-pull lifecycle.
+     *
+     * The writer is closed first. A non-empty WAL is refused because removing
+     * it would discard completed mutations which have not reached their
+     * required indexes. A missing marker already represents the requested
+     * result.
+     *
+     * @throws RuntimeException When pending records remain or the marker
+     *                          cannot be closed or removed.
+     */
     public function remove_empty_marker(): void
     {
         if (is_resource($this->pull_index_wal_handle)) {
@@ -435,22 +569,31 @@ class PullIndexJournal
     /**
      * Appends one complete record to the pull index WAL.
      *
+     * The JSON object and terminating newline are written together. If a
+     * process stops after only part of that string reaches the file, readers
+     * treat the unterminated final bytes as incomplete and leave the cursor's
+     * mutation to be repeated.
+     *
      * @param array $pull_index_wal_record {
      *     One completed pull mutation, with local fields when files-pull
      *     changed a non-skipped path beneath the filesystem root.
      *
      *     @type string $op                       `+` upsert or `-` deletion.
      *     @type string $remote_absolute_path_b64 Base64 remote absolute path.
-     *     @type int    $remote_path_ctime        Remote ctime for `+`.
-     *     @type int    $remote_path_size         Remote size for `+`.
-     *     @type string $remote_path_type         Remote type for `+`.
+     *     @type int    $remote_path_ctime        Remote ctime. Present for `+`.
+     *     @type int    $remote_path_size         Remote size. Present for `+`.
+     *     @type string $remote_path_type         Remote type. Present for `+`.
      *     @type string $local_relative_path_b64  Base64 local relative path
      *                                             when the completed mutation
      *                                             belongs in the local index.
-     *     @type int    $local_path_ctime         Local ctime for a local `+`.
-     *     @type int    $local_path_size          Local size for a local `+`.
-     *     @type string $local_path_type          Local type for a local `+`.
+     *     @type int    $local_path_ctime         Local ctime. Present for a
+     *                                             projected `+`.
+     *     @type int    $local_path_size          Local size. Present for a
+     *                                             projected `+`.
+     *     @type string $local_path_type          Local type. Present for a
+     *                                             projected `+`.
      * }
+     * @throws RuntimeException When the complete record cannot be appended.
      */
     private function write_record(
         array $pull_index_wal_record
@@ -473,7 +616,16 @@ class PullIndexJournal
         }
     }
 
-    /** Returns the local relative path stored in the local index. */
+    /**
+     * Returns the filesystem-root-relative path used by the local index.
+     *
+     * Paths outside the root, the root itself, and default-skipped paths have
+     * no local projection and return null.
+     *
+     * @param string $local_absolute_path Local absolute path to project.
+     * @return string|null Relative path, or null when it must not enter the
+     *                     local index.
+     */
     private function local_relative_path_from_local_absolute_path(
         string $local_absolute_path
     ): ?string {
@@ -494,7 +646,26 @@ class PullIndexJournal
             : $local_relative_path;
     }
 
-    /** Reads one raw remote index projection from the pull index WAL. */
+    /**
+     * Reads one remote-index projection from the next complete WAL record.
+     *
+     * Blank lines are skipped. An unterminated final record returns null so
+     * the mutation is repeated from the preceding durable cursor. Local
+     * projection fields are intentionally ignored by this pass.
+     *
+     * @param resource|null $pull_index_wal_file_handle Open WAL reader.
+     * @return array|null {
+     *     Remote-index update, or null at EOF or an incomplete final record.
+     *
+     *     @type string      $path   Decoded remote absolute path.
+     *     @type bool        $delete Whether to remove the remote index entry.
+     *     @type int         $ctime  Remote ctime, or zero for a deletion.
+     *     @type int         $size   Remote size, or zero for a deletion.
+     *     @type string|null $type   Remote type, or null for a deletion.
+     * }
+     * @throws RuntimeException When a complete record or its remote path is
+     *                          malformed.
+     */
     private function read_raw_remote_index_update(
         $pull_index_wal_file_handle
     ): ?array {
@@ -556,8 +727,23 @@ class PullIndexJournal
      * Reads one remote index update, keeping the last consecutive update for
      * the same remote absolute path.
      *
-     * @param mixed      $pull_index_wal_file_handle Open WAL handle.
-     * @param array|null $remote_index_update_lookahead Retained lookahead.
+     * The first update for another path becomes lookahead for the next call,
+     * so the merge retains at most two decoded WAL entries in memory.
+     *
+     * @param resource|null $pull_index_wal_file_handle Open WAL reader.
+     * @param array|null    $remote_index_update_lookahead Retained first
+     *                                                       update for the
+     *                                                       following path.
+     * @return array|null {
+     *     Last consecutive update for one path, or null at EOF.
+     *
+     *     @type string      $path   Decoded remote absolute path.
+     *     @type bool        $delete Whether to remove the remote index entry.
+     *     @type int         $ctime  Remote ctime, or zero for a deletion.
+     *     @type int         $size   Remote size, or zero for a deletion.
+     *     @type string|null $type   Remote type, or null for a deletion.
+     * }
+     * @throws RuntimeException When a complete WAL record is malformed.
      */
     private function read_remote_index_update(
         $pull_index_wal_file_handle,
