@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use function WordPress\Reprint\Exporter\relative_path_under;
 
 /**
  * Coverage for the default deny-list applied by endpoint_file_index().
@@ -460,12 +461,11 @@ final class FileIndexSkipDefaultsTest extends TestCase
         // endpoint_file_index() reports canonical paths. macOS exposes /tmp
         // and /var through /private symlinks, so compare against the same form.
         $siteRoot = realpath($siteDir) ?: $siteDir;
-        $prefix = rtrim($siteRoot, '/') . '/';
         $out = [];
         foreach ($entries as $e) {
-            $p = $e['path'];
-            if (strpos($p, $prefix) === 0) {
-                $out[substr($p, strlen($prefix))] = $e;
+            $relativePath = relative_path_under($e['path'], $siteRoot);
+            if ($relativePath !== null && $relativePath !== '') {
+                $out[$relativePath] = $e;
             }
         }
         ksort($out);

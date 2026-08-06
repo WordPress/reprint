@@ -530,18 +530,17 @@ function _site_export_handle_api_request(array $options = []): void {
                     . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                 );
                 $logical_plugin_directory_to_verify = $logical_plugin_directory;
-                $logical_plugin_relative_path = null;
-                if (\WordPress\Reprint\Exporter\path_is_within_root($logical_plugin_directory, $lexical_docroot)) {
-                    $logical_plugin_relative_path = relative_path_under(
-                        $logical_plugin_directory,
-                        $lexical_docroot
-                    );
-                } elseif (\WordPress\Reprint\Exporter\path_is_within_root($logical_plugin_directory, $docroot)) {
+                $logical_plugin_relative_path = relative_path_under(
+                    $logical_plugin_directory,
+                    $lexical_docroot
+                );
+                if ($logical_plugin_relative_path === null) {
                     $logical_plugin_relative_path = relative_path_under(
                         $logical_plugin_directory,
                         $docroot
                     );
-                } else {
+                }
+                if ($logical_plugin_relative_path === null) {
                     // WP_PLUGIN_DIR may itself be a symlink alias into the
                     // document root. Resolve that parent, but keep the
                     // registered plugin subdirectory lexical so its installed
@@ -552,11 +551,11 @@ function _site_export_handle_api_request(array $options = []): void {
                             str_replace('\\', '/', $canonical_wordpress_plugin_directory)
                             . ( $registered_plugin_directory === '.' ? '' : '/' . $registered_plugin_directory )
                         );
-                        if (\WordPress\Reprint\Exporter\path_is_within_root($logical_plugin_directory_from_canonical_parent, $docroot)) {
-                            $logical_plugin_relative_path = relative_path_under(
-                                $logical_plugin_directory_from_canonical_parent,
-                                $docroot
-                            );
+                        $logical_plugin_relative_path = relative_path_under(
+                            $logical_plugin_directory_from_canonical_parent,
+                            $docroot
+                        );
+                        if ($logical_plugin_relative_path !== null) {
                             $logical_plugin_directory_to_verify = $logical_plugin_directory_from_canonical_parent;
                         }
                     }

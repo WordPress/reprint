@@ -617,7 +617,7 @@ class ImportClient
     private function local_relative_path_from_local_absolute_path(
         string $local_absolute_path
     ): ?string {
-        $local_relative_path = path_remainder_under(
+        $local_relative_path = relative_path_under(
             $local_absolute_path,
             $this->filesystem_root
         );
@@ -627,7 +627,6 @@ class ImportClient
         ) {
             return null;
         }
-        $local_relative_path = ltrim($local_relative_path, "/");
         return FileIndexProcessor::path_is_default_skipped(
             $local_relative_path
         )
