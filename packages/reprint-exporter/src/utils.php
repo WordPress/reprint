@@ -248,6 +248,28 @@ function path_is_within_root(string $path, string $root): bool
 }
 
 /**
+ * Returns the remainder of $path underneath $prefix.
+ *
+ * An exact match returns an empty string. A descendant returns the remainder
+ * beginning with "/". A path outside $prefix returns null.
+ */
+function path_remainder_under(string $path, string $prefix): ?string
+{
+    $path = rtrim($path, "/");
+    $prefix = rtrim($prefix, "/");
+
+    if ($path === $prefix) {
+        return "";
+    }
+
+    if (str_starts_with($path, $prefix . "/")) {
+        return substr($path, strlen($prefix));
+    }
+
+    return null;
+}
+
+/**
  * Validates that a path is a non-empty absolute string without NUL bytes
  * or dot-segments (. or ..).
  *

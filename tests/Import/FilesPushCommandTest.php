@@ -234,10 +234,22 @@ final class FilesPushCommandTest extends TestCase
         );
     }
 
+    public function testFilesPushRequiresPreflightBeforeStartingSender(): void
+    {
+        $remoteReprintApiUrl = 'https://127.0.0.1:1/?reprint-api=1';
+
+        $result = $this->runFilesPush($remoteReprintApiUrl, ['--secret=token']);
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertStringContainsString('No preflight data found', $result['output']);
+        $this->assertNoSenderState($remoteReprintApiUrl);
+    }
+
     public function testFilesPushMasksTheSharedSecretInOutputAndStateFiles(): void
     {
         $secret = 'shared-secret-' . bin2hex(random_bytes(6));
         $remoteReprintApiUrl = 'https://127.0.0.1:1/?reprint-api=1';
+        $this->writePreflightState($remoteReprintApiUrl);
         $result = $this->runFilesPush($remoteReprintApiUrl, ['--secret=' . $secret]);
 
         $this->assertSame(1, $result['exit'], $result['output']);
@@ -248,7 +260,7 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame('files-push', $finalLine['command'] ?? null);
         $this->assertSame('failed', $finalLine['status'] ?? null);
         $this->assertSame(1, $result['exit']);
-        $this->assertFileDoesNotExist(
+        $this->assertFileExists(
             $this->pullStateFileForRemoteReprintApiUrl($remoteReprintApiUrl)
         );
     }
@@ -256,6 +268,7 @@ final class FilesPushCommandTest extends TestCase
     public function testCorruptSenderStateUsesTheStructuredWorkflowErrorResult(): void
     {
         $remoteReprintApiUrl = 'https://127.0.0.1:1/?reprint-api=1';
+        $this->writePreflightState($remoteReprintApiUrl);
         $context = ImportClient::prepare_files_push_context(
             $remoteReprintApiUrl,
             $this->stateDirectory,
@@ -268,6 +281,7 @@ final class FilesPushCommandTest extends TestCase
             json_encode([
                 'push_session_id' => str_repeat('1', 32),
                 'phase' => 'starting_plan',
+                'push_root_local_relative_path' => '',
                 'push_plan_cursor' => null,
                 'local_paths_to_push_byte_offset' => 0,
                 'local_paths_to_push_count' => null,
@@ -319,6 +333,30 @@ final class FilesPushCommandTest extends TestCase
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->localTree,
         ], $extraOptions));
+    }
+
+    private function writePreflightState(
+        string $remoteReprintApiUrl,
+        string $pushRoot = '/'
+    ): void {
+        $pullStateFile = $this->pullStateFileForRemoteReprintApiUrl($remoteReprintApiUrl);
+        $pullStateDirectory = dirname($pullStateFile);
+        if (!is_dir($pullStateDirectory)) {
+            mkdir($pullStateDirectory, 0700, true);
+        }
+        $pullState = new \PullState();
+        $pullState->preflight = [
+            'http_code' => 200,
+            'data' => [
+                'runtime' => [
+                    'document_root' => 'base64:' . base64_encode($pushRoot),
+                ],
+            ],
+        ];
+        file_put_contents(
+            $pullStateFile,
+            json_encode($pullState->to_array(), JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR)
+        );
     }
 
     /** @param list<string> $arguments

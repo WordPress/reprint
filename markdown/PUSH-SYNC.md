@@ -125,9 +125,11 @@ the push plan.
 
 A push plan is an internal part of the sender lifecycle:
 
-1. `PushFilesSender::start()` enters `creating`. `push_create` returns at most
-   100 target exclusions, which the sender stores once in
-   `excluded_paths.json` after creating the active `plan/` directory.
+1. Before `PushFilesSender::start()`, `files-push` loads the mandatory
+   preflight document root as the push root. The sender enters `creating`,
+   stores the push root's local relative path in `sender.json`, and requests
+   at most 100 target exclusions from `push_create`. It stores the exclusions
+   in `excluded_paths.json` after creating the active `plan/` directory.
 2. The sender starts one internal `PushPlan`. The plan copies the exclusions to
    `plan/excluded_paths.json`, then opens
    `plan/fresh_local_index.jsonl` and a `FileIndexProcessor`. Each `indexing`
@@ -140,9 +142,9 @@ A push plan is an internal part of the sender lifecycle:
 4. Each later `next_step()` compares at most one path represented by either
    index. It returns true while another planning step remains and false when
    both indexes reach EOF. It
-   writes files, symlinks, and empty directories with their planned type, size,
-   and ctime to
-   `plan/local_paths_to_push.jsonl`, and writes raw NUL-delimited paths to
+   writes files, symlinks, and empty directories with their local relative
+   path, planned type, size, and ctime to `plan/local_paths_to_push.jsonl`,
+   and writes raw NUL-delimited push-root-relative paths to
    `plan/local_paths_to_delete`.
 5. The sender closes the plan before consuming those two files.
 6. After the target confirms commit, the sender saves the retained fresh local
@@ -168,11 +170,11 @@ sender run. Keeping another cursor and retained handle for this post-commit copy
 is not justified until measurements from materially larger installations show
 that it matters.
 
-The cursor contains the plan directory, filesystem root, local index file, and
-current planning position. During indexing, that
-position contains the `FileIndexProcessor` cursor and committed fresh-index byte
-offset. During diffing, each step flushes only the path list or append-only
-deleted-directory stack changed by that step before updating the two index
+The cursor contains the plan directory, filesystem root, local index file,
+push root's local relative path, and current planning position. During
+indexing, that position contains the `FileIndexProcessor` cursor and committed
+fresh-index byte offset. During diffing, each step flushes only the path list or
+append-only deleted-directory stack changed by that step before updating the two index
 offsets, two output byte offsets, and active stack byte offset. Each stack entry
 links to the preceding active directory, so continuation reads only the top
 entry. A later process passes the stored cursor to `PushPlan::resume()`. The
@@ -316,7 +318,7 @@ state:
       excluded_paths.json               target exclusions for the active push
       fresh_local_index.jsonl           plan-owned fresh local index
       local_paths_to_push.jsonl         local paths to push
-      local_paths_to_delete             raw NUL-delimited local paths to delete
+      local_paths_to_delete             raw NUL-delimited push-root-relative paths
       deleted_directories_stack.jsonl   append-only planning stack
 ```
 
@@ -346,8 +348,9 @@ with the work, and seeks only when a newly opened or receiver-confirmed offset
 differs. It closes each handle when its phase or file ends and closes any
 remaining handles before `close()` returns.
 
-The sender creates the push session and stores its exclusion policy before it
-starts PushPlan. Each internal `indexing` step completes one traversal event,
+The sender stores the mandatory preflight push root, creates the push session,
+and stores its exclusion policy before it starts PushPlan. Each internal
+`indexing` step completes one traversal event,
 and `starting_diff` initializes the index diff. Each internal `diffing` step
 compares at most one path and updates the path lists. PushPlan owns the
 meaning of its file-index cursor, index offsets, output lengths, and
@@ -356,10 +359,10 @@ upload begins until both indexes have been consumed and the two path lists are
 stable.
 
 `sender.json` contains no copied receiver cursor. It stores the push session
-and phase, the PushPlan cursor, the next byte offset in
-`local_paths_to_push.jsonl`, the receiver part limit, and learned request-body
-sizing state. Its phases are `creating`, `starting_plan`, `planning`,
-`pushing_paths`, `pushing_deletes`, `committing`,
+and phase, the push root's local relative path, the PushPlan cursor, the next
+byte offset in `local_paths_to_push.jsonl`, the receiver part limit, and
+learned request-body sizing state. Its phases are `creating`, `starting_plan`,
+`planning`, `pushing_paths`, `pushing_deletes`, `committing`,
 `saving_local_index`, `completing`, `removing`, and
 `discarding_plan`.
 The separate start, local-index-save, completion, removal, and discard phases ensure
@@ -384,7 +387,8 @@ After all local paths are pushed, a newly opened sender reads
 `work_deletes_bytes` and `work_deletes_complete` from `push_status`. Successful
 uploads retain those values in memory for later deletion steps. Those
 receiver-owned values are the only work-delete cursor; `sender.json` does not
-duplicate it. Each uploaded deletion-list part contains one complete local path.
+duplicate it. Each uploaded deletion-list part contains one complete
+push-root-relative path.
 The sender trusts this completed, immutable plan without consulting the fresh
 local index or live filesystem root again. If a deleted path reappears after planning,
 the current push may delete it on the target and the next push will send it.
@@ -432,11 +436,12 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 
 `reprint files-push <remote-reprint-api-url>` is the production CLI caller for one
 `PushFilesSender`. It sends only the resolved filesystem root named by `--fs-root`.
-It requires `--state-dir`, `--fs-root`, and `--secret`; HTTPS is required unless
-the operator passes `--force-http`. It does not run pull preflight, read or
-write `<remote-state-directory>/pull/state.json`, show a plan, ask for
-confirmation, transfer a database, retry a failed request, or start a
-replacement sender after a `restart` outcome.
+It requires `--state-dir`, `--fs-root`, `--secret`, and saved preflight
+data for the remote document root; HTTPS is required unless the operator passes
+`--force-http`. It reads but never writes
+`<remote-state-directory>/pull/state.json`. It does not run preflight itself,
+show a plan, ask for confirmation, transfer a database, retry a failed request,
+or start a replacement sender after a `restart` outcome.
 
 The local push state directory is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash

@@ -35,6 +35,7 @@ use function WordPress\Reprint\Exporter\assert_valid_path;
 use function WordPress\Reprint\Exporter\normalize_path;
 use function WordPress\Reprint\Exporter\parse_size;
 use function WordPress\Reprint\Exporter\path_is_within_root;
+use function WordPress\Reprint\Exporter\path_remainder_under;
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\write_local_index_update;
 
@@ -602,7 +603,7 @@ class ImportClient
     private function local_relative_path_from_local_absolute_path(
         string $local_absolute_path
     ): ?string {
-        $local_relative_path = self::path_remainder_under(
+        $local_relative_path = path_remainder_under(
             $local_absolute_path,
             $this->get_filesystem_root_path()
         );
@@ -983,8 +984,8 @@ class ImportClient
             );
         }
 
-        // files-diff and files-push use local push state and must not load
-        // or write the pull command's pull/state.json file.
+        // files-diff uses local push state and must not load or write the
+        // pull command's pull/state.json file.
         if ($command === "files-diff") {
             if (is_file($this->pull_index_wal_path)) {
                 throw new RuntimeException(
@@ -1000,6 +1001,10 @@ class ImportClient
                     "Finish or abort the interrupted files-pull before running files-push."
                 );
             }
+            // files-push reads preflight to locate the remote document root,
+            // but its lifecycle never writes pull state.
+            $this->state = $this->load_state();
+            $this->require_preflight();
             $this->run_files_push($options, $process_lock);
             return;
         }
@@ -1579,6 +1584,12 @@ class ImportClient
         if (!is_array($context)) {
             throw new InvalidArgumentException('files-push requires its validated command context.');
         }
+        $push_root = $this->get_state()->preflight["data"]["runtime"]["document_root"] ?? null;
+        if (!is_string($push_root) || $push_root === '' || $push_root[0] !== '/') {
+            throw new RuntimeException(
+                "Preflight did not report an absolute document root. Run 'preflight' or 'preflight-assert' again."
+            );
+        }
 
         $this->enable_files_push_signal_handling();
 
@@ -1596,6 +1607,7 @@ class ImportClient
             : parse_size($memory_limit_value);
         $sender_options = [
             'filesystem_root' => $context['filesystem_root'],
+            'push_root' => $push_root,
             'push_state_directory' => $context['push_state_directory'],
             'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
@@ -8963,7 +8975,7 @@ class ImportClient
             $selected = empty($this->pull_only_files_with_path_prefixes);
 
             foreach ($this->pull_only_files_with_path_prefixes as $prefix) {
-                $remainder = self::path_remainder_under($path, $prefix);
+                $remainder = path_remainder_under($path, $prefix);
                 if ($remainder === "") {
                     return false;
                 }
@@ -8979,7 +8991,7 @@ class ImportClient
         }
 
         foreach ($this->pull_excluded_files_with_path_prefixes as $prefix) {
-            if (self::path_remainder_under($path, $prefix) !== null) {
+            if (path_remainder_under($path, $prefix) !== null) {
                 return false;
             }
         }
@@ -9089,7 +9101,7 @@ class ImportClient
         $local_absolute_path = null;
         $longest_remote_prefix_length = -1;
         foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
-            $remainder = self::path_remainder_under($remote_absolute_path, $remote_prefix);
+            $remainder = path_remainder_under($remote_absolute_path, $remote_prefix);
             if ($remainder !== null && strlen($remote_prefix) > $longest_remote_prefix_length) {
                 $local_absolute_path = wp_join_unix_paths($local_prefix, $remainder);
                 $longest_remote_prefix_length = strlen($remote_prefix);
@@ -9109,27 +9121,6 @@ class ImportClient
         return $this->get_filesystem_root_path() . $remote_absolute_path;
     }
 
-
-    /**
-     * Returns the remainder of $path underneath $prefix,
-     * empty string if $path === $prefix,
-     * or null if $path is not under $prefix.
-     */
-    private static function path_remainder_under(string $path, string $prefix): ?string
-    {
-        $path = rtrim($path, "/");
-        $prefix = rtrim($prefix, "/");
-
-        if ($path === $prefix) {
-            return "";
-        }
-
-        if (str_starts_with($path, $prefix . "/")) {
-            return substr($path, strlen($prefix));
-        }
-
-        return null;
-    }
 
     /**
      * Handle a metadata chunk from multipart response.
@@ -12510,7 +12501,7 @@ if (
                 "Sends the existing filesystem root at --fs-root to the remote Reprint API.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
-                "It does not require pull preflight.\n" .
+                "It requires saved preflight data for the remote document root.\n" .
                 "\n" .
                 "Each process runs one sender until it completes, reaches a caller time or\n" .
                 "memory boundary, or receives a signal handled by this PHP runtime.\n" .
