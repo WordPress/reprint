@@ -117,6 +117,7 @@ final class PushPlanTest extends TestCase
         $this->planToCompletion($plan);
 
         $this->assertPathCounts(2, 0);
+        $this->assertSame(2, $plan->get_local_paths_to_push_count());
         $this->assertSame(
             ['index.php', 'wp-content/themes/foo/style.css'],
             $this->listPaths($this->planPath('local_paths_to_push.jsonl'))
@@ -283,7 +284,13 @@ final class PushPlanTest extends TestCase
 
         $this->assertFalse($this->nextPlanStep($plan));
         $complete_cursor = $this->planCursor();
-        $this->assertSame(['phase' => 'complete'], $complete_cursor);
+        $this->assertSame(
+            [
+                'phase' => 'complete',
+                'local_paths_to_push_count' => 0,
+            ],
+            $complete_cursor
+        );
         $this->assertSame($stack_bytes, filesize($this->planPath('deleted_directories_stack.jsonl')));
         $plan->close();
 
@@ -519,9 +526,11 @@ final class PushPlanTest extends TestCase
             'byte_offset_in_local_index',
             'byte_offset_in_local_paths_to_push',
             'byte_offset_in_local_paths_to_delete',
+            'local_paths_to_push_count',
             'deleted_directory_stack_top_byte_offset',
             'previous_fresh_local_index_entry_path',
         ], array_keys($cursor['position']));
+        $this->assertSame(1, $cursor['position']['local_paths_to_push_count']);
         $this->assertSame(
             filesize($this->planPath('local_paths_to_push.jsonl')),
             $cursor['position']['byte_offset_in_local_paths_to_push']
@@ -567,6 +576,7 @@ final class PushPlanTest extends TestCase
         $this->planToCompletion($reopened);
 
         $this->assertPathCounts(3, 3);
+        $this->assertSame(3, $reopened->get_local_paths_to_push_count());
         $this->assertSame(array_keys($currentEntries), $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
         $this->assertSame(array_keys($localIndexEntries), $this->localPathsToDelete($this->planPath('local_paths_to_delete')));
         $this->assertCount(3, $this->indexEntries($this->planPath('fresh_local_index.jsonl')));

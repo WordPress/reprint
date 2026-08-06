@@ -282,6 +282,8 @@ Use these names verbatim:
 | Deleted-directory stack | `deleted_directories_stack.jsonl`, `$deleted_directories_stack` |
 | Active state | `sender.json`, `$state_path` |
 | Selected path-list cursor | `$local_paths_to_push_byte_offset` |
+| Selected local-path count | `local_paths_to_push_count`, `$local_paths_to_push_count`, `get_local_paths_to_push_count()` |
+| Target-confirmed local-path count | `local_paths_pushed`, `$local_paths_pushed` |
 | Local path type, size, and ctime | `local_path_type_size_and_ctime`, `$local_path_type_size_and_ctime`, `stat_local_path()` |
 
 `sender.json` and `excluded_paths.json` live directly under the local push
@@ -310,8 +312,11 @@ paths. The `sender.json` phases are `creating`, `starting_plan`,
 `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
 `saving_local_index`, `completing`,
 `removing`, and `discarding_plan`. It stores the push session ID, selected
-path-list cursor, receiver part limit, and request-sizing state. The index diff
-completes before local paths are sent. The index copy after a target-confirmed commit
+path-list cursor, selected local-path count, target-confirmed local-path count,
+receiver part limit, and request-sizing state. The index diff cursor retains
+the selected local-path count as it builds the path list, and its complete
+cursor retains the final count. The index diff completes before local paths
+are sent. The index copy after a target-confirmed commit
 has no separate copy cursor and is repeated after interruption. After the index
 is saved or the remote confirms removal, the sender clears the PushPlan
 cursor, then removes the entire plan directory and its exclusions file. It
@@ -391,6 +396,14 @@ positions remain receiver-owned; they are not a files-push cursor and are not
 copied into `<remote-state-directory>/pull/state.json` or the state-directory-wide
 `progress.json`.
 
+Terminal output names the active phase and uses `Uploading — N / T files`
+while local paths are sent. Non-interactive output emits `push_progress` JSONL
+records. `files_done` and `files_total` appear together after planning in those
+records, the final result, and `progress.json`; they are absent while the plan
+is still being built. `files_total` is the selected local-path count.
+`files_done` is the target-confirmed local-path count, so an open, failed, or
+canceled request does not advance it. Both counts survive resume.
+
 Files-push lifecycle lines use these command-first names verbatim: `START
 files-push`, `RESUME files-push`, `PHASE files-push`, `PARTIAL files-push`,
 `INTERRUPTED files-push`, `COMPLETE files-push`, `RESTART files-push`, `FAILED
@@ -424,6 +437,7 @@ Use these names verbatim inside `PushFilesSender`:
 | Plan result | `$plan_result` |
 | Sender status | `$status`, `get_status()` |
 | Sender phase | `get_phase()` |
+| Sender progress | `get_progress()` |
 | Sender outcome classification | `$reason`, `get_reason()` |
 | Sender outcome explanation | `$detail`, `get_detail()` |
 | Receiver path status | `$receiver_path_status` |

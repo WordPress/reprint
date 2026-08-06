@@ -13,8 +13,9 @@
  * push, and saves the completed fresh local index as the local index for this
  * remote Reprint API URL. The target owns the
  * upload cursor for every path and for the deletion list. Durable sender state
- * retains the top-level phase, the selected path-list cursor, and learned
- * request limits and the PushPlan cursor needed after a process restart.
+ * retains the top-level phase, the selected path-list cursor, the planned and
+ * target-confirmed local-path counts, learned request limits, and the PushPlan
+ * cursor needed after a process restart.
  *
  * ## Usage
  *
@@ -124,7 +125,7 @@
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
@@ -270,6 +271,8 @@ final class PushFilesSender
                 'phase' => 'creating',
                 'push_plan_cursor' => null,
                 'local_paths_to_push_byte_offset' => 0,
+                'local_paths_to_push_count' => null,
+                'local_paths_pushed' => 0,
                 'max_part_bytes' => null,
                 'request_sizer_state' => $sender->push_stream_client->get_request_sizer_state(),
             ];
@@ -457,6 +460,32 @@ final class PushFilesSender
     }
 
     /**
+     * Returns target-confirmed local-path progress for the open sender.
+     *
+     * @return array {
+     *     Current files-push progress.
+     *
+     *     @type string $phase       Current sender phase.
+     *     @type int    $files_done  Target-confirmed local paths. Present after planning.
+     *     @type int    $files_total Total local paths selected by the plan. Present after planning.
+     * }
+     * @phpstan-return array{phase:string,files_done?:int,files_total?:int}
+     */
+    public function get_progress(): array
+    {
+        $progress_state = $this->upload_request_stage === 'closed'
+            ? $this->state
+            : $this->state_before_upload_request;
+        /** @var State $progress_state */
+        $progress = ['phase' => $progress_state['phase']];
+        if ($progress_state['local_paths_to_push_count'] !== null) {
+            $progress['files_done'] = $progress_state['local_paths_pushed'];
+            $progress['files_total'] = $progress_state['local_paths_to_push_count'];
+        }
+        return $progress;
+    }
+
+    /**
      * Returns the machine-readable classification for the current outcome.
      *
      * @return string|null Current classification, or null when none applies.
@@ -613,6 +642,7 @@ final class PushFilesSender
         }
         $this->state['push_plan_cursor'] = $this->plan->get_cursor();
         if (!$has_next_step) {
+            $this->state['local_paths_to_push_count'] = $this->plan->get_local_paths_to_push_count();
             $this->plan->close();
             $this->state['phase'] = 'pushing_paths';
         }
@@ -735,6 +765,7 @@ final class PushFilesSender
             ) {
                 $this->close_local_file_handle();
                 $this->state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
+                ++$this->state['local_paths_pushed'];
                 $this->local_path_to_push = null;
                 $this->store_state($this->state);
                 return;
@@ -920,6 +951,7 @@ final class PushFilesSender
         if ($upload_completes_local_path) {
             $this->close_local_file_handle();
             $this->state['local_paths_to_push_byte_offset'] = $local_path_to_push['next_local_paths_to_push_byte_offset'];
+            ++$this->state['local_paths_pushed'];
             $this->next_file_byte_offset = null;
             $this->local_path_to_push = null;
         } else {

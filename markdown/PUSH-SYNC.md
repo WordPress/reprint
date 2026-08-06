@@ -471,8 +471,14 @@ The stable CLI mapping is `complete`/0, `partial`/2, `interrupted`/2,
 `restart`/2, `failed`/1, and `error`/1. Exit 2 asks the operator to run the
 same command again. After `restart`, that next run builds a fresh plan. The
 state-directory-wide audit log records opening mode, phase changes, planned pauses, handled
-interruptions, and terminal outcomes. The flat progress file records only
-`command`, `status`, `phase`, `reason`, `detail`, and `ts`; neither file copies
+interruptions, and terminal outcomes. Terminal output names the active phase
+and shows `Uploading — N / T files` while local paths are sent.
+Non-interactive output emits throttled `push_progress` JSONL records.
+After planning, those records, the final result, and the flat progress file
+include `files_done` and `files_total` together. The total comes from the
+completed plan; the completed count advances only when the target confirms the
+request containing a local path, and both counts survive resume. They are
+absent while planning. Neither the audit log nor the progress file copies
 receiver cursors or tentative upload positions.
 
 ## Local files-diff command
