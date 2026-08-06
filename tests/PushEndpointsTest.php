@@ -2881,7 +2881,7 @@ final class PushEndpointsTest extends TestCase {
                 $this->remote_reprint_api_url,
                 '--state-dir=' . $state_directory,
                 '--fs-root=' . $local_docroot,
-                '--jsonl',
+                '--progress=jsonl',
             ],
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
             $pipes,

@@ -497,7 +497,7 @@ receiver cursors or tentative upload positions.
 
 ## Local files-diff command
 
-`reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--jsonl]`
+`reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl]`
 reports a local minimized push operation plan before target exclusions: the
 local paths a files-push would send or delete, compared against
 `<remote-state-directory>/local_index.jsonl`. Files-pull advances that local
@@ -506,17 +506,17 @@ target confirms commit. The remote state directory is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`, so another URL
 query cannot reuse the index. A different filesystem root uses a different
 state directory. The command accepts only `--state-dir`, `--fs-root`, and the
-optional `--jsonl`; it needs no secret, performs no preflight, and makes no
+optional `--progress`; it needs no secret, performs no preflight, and makes no
 network request. It runs one complete PushPlan against the local index in
 `<remote-state-directory>/push/files-diff-plan/` while the command holds the
 state-directory-wide Reprint process lock.
 
-Default output uses `modified: PATH` for each local path to push and
-`deleted: PATH` for each local path to delete. Both use Git's red status color
-on a TTY and plain text when redirected. Paths containing unsafe bytes use
-C-style quoting so one path always occupies one output line. `--jsonl`
-explicitly selects the previous uncolored machine-readable contract. Each
-selected
+`--progress` accepts `auto`, `tty`, or `jsonl`. `auto` is the default: it
+selects `tty` when stdout is a TTY and `jsonl` otherwise. `tty` uses
+`modified: PATH` for each local path to push and `deleted: PATH` for each local
+path to delete, both in Git's red status color. Paths containing unsafe bytes
+use C-style quoting so one path always occupies one output line. `jsonl`
+selects the previous uncolored machine-readable contract. Each selected
 current file, symlink, or empty directory then has `action: "push"`,
 `path_b64`, `type`, `size`, and `ctime`; its type is `file`, `dir`, or `link`.
 Each selected local deletion has `action: "delete"` and `path_b64`. Type

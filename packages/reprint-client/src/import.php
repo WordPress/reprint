@@ -1368,13 +1368,21 @@ class ImportClient
      *     Parsed files-diff options.
      *
      *     @type string $files_diff_push_state_directory Local push state directory resolved by the CLI entry point.
-     *     @type bool   $jsonl                          Whether to emit machine-readable JSONL instead of the path diff.
+     *     @type string $progress                       Effective output mode: `tty` or `jsonl`.
      * }
      * @phpstan-param array<string,mixed> $options
      */
     private function run_files_diff(array $options): void
     {
-        $jsonl_output = $options['jsonl'] ?? false;
+        $progress_mode = $options['progress'] ?? ( $this->is_tty ? 'tty' : 'jsonl' );
+        if ($progress_mode === 'auto') {
+            $progress_mode = $this->is_tty ? 'tty' : 'jsonl';
+        }
+        if (!in_array($progress_mode, ['tty', 'jsonl'], true)) {
+            throw new InvalidArgumentException(
+                'Invalid files-diff progress mode: ' . $progress_mode . '. Valid modes: auto, tty, jsonl.'
+            );
+        }
         $push_state_directory = $options['files_diff_push_state_directory'] ?? self::resolve_push_state_directory(
             $this->remote_reprint_api_url,
             $this->state_dir,
@@ -1426,14 +1434,14 @@ class ImportClient
                 'directory' => 'dir',
                 'symlink' => 'link',
             ];
-            $red = !$jsonl_output && $this->is_tty ? "\033[31m" : '';
+            $red = $progress_mode === 'tty' ? "\033[31m" : '';
             $reset = $red === '' ? '' : "\033[0m";
             $local_paths_to_push_count = 0;
             foreach (
                 $this->read_planned_local_paths_to_push($plan->get_local_paths_to_push_path())
                 as $entry
             ) {
-                if ($jsonl_output) {
+                if ($progress_mode === 'jsonl') {
                     $line = json_encode([
                         'command' => 'files-diff',
                         'action' => 'push',
@@ -1464,7 +1472,7 @@ class ImportClient
                 $this->read_planned_local_paths_to_delete($plan->get_local_paths_to_delete_path())
                 as $local_path_to_delete
             ) {
-                $line = $jsonl_output
+                $line = $progress_mode === 'jsonl'
                     ? json_encode([
                         'command' => 'files-diff',
                         'action' => 'delete',
@@ -1481,7 +1489,7 @@ class ImportClient
                 ++$local_paths_to_delete_count;
             }
 
-            if ($jsonl_output) {
+            if ($progress_mode === 'jsonl') {
                 $line = json_encode([
                     'command' => 'files-diff',
                     'status' => 'complete',
@@ -11655,10 +11663,12 @@ if (
 
         // ── files-diff options ──────────────────────────────────
         [
-            'name' => 'jsonl',
-            'type' => 'flag',
-            'target' => 'jsonl',
-            'help' => 'Write machine-readable JSONL instead of the default status lines',
+            'name' => 'progress',
+            'type' => 'value',
+            'target' => 'progress',
+            'placeholder' => 'MODE',
+            'valid_values' => ['auto', 'tty', 'jsonl'],
+            'help' => 'Output mode (auto|tty|jsonl); auto selects from stdout',
             'commands' => ['files-diff'],
         ],
 
@@ -12489,7 +12499,7 @@ if (
         "files-diff" => [
             "level" => "low",
             "short" => "Compare local files with the local index",
-            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--jsonl]",
+            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl]",
             "description" =>
                 "Shows which local paths a files-push would send or delete, comparing\n" .
                 "the filesystem root at --fs-root with the local index for this remote\n" .
@@ -12502,11 +12512,12 @@ if (
                 "default-skipped paths include generated wp-content caches, version-\n" .
                 "control data, node_modules, package-manager caches, OS metadata, and\n" .
                 "editor scratch files.\n" .
-                "Default status lines label paths to push as modified and paths to\n" .
-                "delete as deleted. They use color on a terminal and plain text when\n" .
-                "redirected.\n" .
-                "With --jsonl, paths remain base64 text so arbitrary filesystem names\n" .
-                "are preserved. No network calls are made, and no secret is required.\n",
+                "With --progress=auto (the default), a terminal gets red status lines\n" .
+                "that label paths to push as modified and paths to delete as deleted;\n" .
+                "redirected stdout gets JSONL. --progress=tty forces status lines and\n" .
+                "--progress=jsonl forces JSONL. JSONL paths remain base64 text so\n" .
+                "arbitrary filesystem names are preserved. No network calls are made,\n" .
+                "and no secret is required.\n",
             "extra" =>
                 "Every run reports the complete diff from the beginning; there is\n" .
                 "no partial resume to continue.\n",
@@ -12785,7 +12796,7 @@ if (
     } elseif ($command === 'files-diff') {
         foreach ($reprint_files_command_arguments as $reprint_files_diff_command_argument) {
             $reprint_files_diff_option_allowed =
-                $reprint_files_diff_command_argument === '--jsonl'
+                strpos($reprint_files_diff_command_argument, '--progress=') === 0
                 || strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0;
             if (!$reprint_files_diff_option_allowed) {
@@ -12794,11 +12805,18 @@ if (
                 exit(1);
             }
         }
+        $reprint_files_diff_progress_mode = $options['progress'] ?? 'auto';
+        if ($reprint_files_diff_progress_mode === 'auto') {
+            $reprint_stdout_is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
+            $reprint_files_diff_progress_mode = $reprint_stdout_is_tty ? 'tty' : 'jsonl';
+        }
+        // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound -- Existing parsed option hash.
+        $options['progress'] = $reprint_files_diff_progress_mode;
     } elseif (!empty($options['force_http'])) {
         fwrite(STDERR, "Error: --force-http is accepted only by files-push.\n");
         exit(1);
-    } elseif (!empty($options['jsonl'])) {
-        fwrite(STDERR, "Error: --jsonl is accepted only by files-diff.\n");
+    } elseif (isset($options['progress'])) {
+        fwrite(STDERR, "Error: --progress is accepted only by files-diff.\n");
         exit(1);
     }
 
@@ -12882,7 +12900,7 @@ if (
     } catch (\Throwable $e) {
         $is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
         $error_code = isset($client) ? $client->last_error_code : null;
-        if ($command === 'files-diff' ? empty($options['jsonl']) : $is_tty) {
+        if ($command === 'files-diff' ? ( $options['progress'] ?? 'tty' ) !== 'jsonl' : $is_tty) {
             fwrite(STDERR, ( $command === 'files-diff' ? '' : "\n" ) . "Error: " . $e->getMessage() . "\n");
         } else {
             $error = [

@@ -577,7 +577,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
-            '--jsonl',
+            '--progress=jsonl',
         ]);
     }
 

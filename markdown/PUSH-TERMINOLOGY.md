@@ -355,12 +355,12 @@ The local-only command is `files-diff`. Its `remote Reprint API URL` and
 completed local mutations and files-push writes after the target confirms
 commit. Files-diff never changes it.
 
-Default output uses `modified: PATH` for each local path to push and
-`deleted: PATH` for each local path to delete. Both use Git's red status color
-on a TTY and plain text when redirected. Paths containing unsafe bytes use
-C-style quoting so one path always occupies one output line. `--jsonl`
-explicitly selects uncolored machine-readable output. Each JSONL change record
-has
+`--progress` accepts `auto`, `tty`, or `jsonl`. `auto` is the default: it
+selects `tty` when stdout is a TTY and `jsonl` otherwise. `tty` uses
+`modified: PATH` for each local path to push and `deleted: PATH` for each local
+path to delete, both in Git's red status color. Paths containing unsafe bytes
+use C-style quoting so one path always occupies one output line. `jsonl`
+selects uncolored machine-readable output. Each JSONL change record has
 `command: "files-diff"`, an `action` of `push` or `delete`, and `path_b64`. A
 push record also has the local path `type`, `size`, and `ctime`; its type is
 `file`, `dir`, or `link`. These records form a local minimized push operation

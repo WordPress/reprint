@@ -15,10 +15,10 @@ require_once __DIR__ . '/../../client/cli.php';
  * files-diff compares the filesystem root with the local index for the remote
  * Reprint API URL — the index a completed files-push writes —
  * without contacting the target, and reports the complete diff on every run.
- * These tests pin that contract: local-only operation, the default status lines,
- * explicit JSONL records, arbitrary path bytes, the local-index requirement,
- * no mutation of the local index, and a complete report after an interrupted
- * run.
+ * These tests pin that contract: local-only operation, automatic terminal or
+ * JSONL output, explicit progress modes, arbitrary path bytes, the local-index
+ * requirement, no mutation of the local index, and a complete report after an
+ * interrupted run.
  */
 final class FilesDiffCommandTest extends TestCase
 {
@@ -80,39 +80,15 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertSame('', $result['stderr']);
     }
 
-    public function testFilesDiffPrintsStatusLinesByDefault(): void
-    {
-        $this->writeLocalIndex(array_keys($this->initialFiles));
-        file_put_contents($this->filesystemRoot . '/added.txt', 'new file');
-        file_put_contents($this->filesystemRoot . "/bell-\x07.txt", 'control path byte');
-        file_put_contents($this->filesystemRoot . "/line\nbreak.txt", 'raw path byte');
-        unlink($this->filesystemRoot . '/deleted.txt');
-
-        $result = $this->runCli([
-            'files-diff',
-            $this->remoteReprintApiUrl,
-            '--state-dir=' . $this->stateDirectory,
-            '--fs-root=' . $this->filesystemRoot,
-        ]);
-
-        $this->assertSame(0, $result['exit'], $result['output']);
-        $this->assertSame(
-            "modified: added.txt\n"
-            . "modified: \"bell-\\a.txt\"\n"
-            . "modified: \"line\\nbreak.txt\"\n"
-            . "deleted: deleted.txt\n",
-            $result['stdout']
-        );
-        $this->assertSame('', $result['stderr']);
-    }
-
-    public function testFilesDiffColorsOnlyStatusLinesOnATerminal(): void
+    public function testFilesDiffSelectsStatusLinesInAutoModeOnATerminal(): void
     {
         if (!function_exists('posix_isatty') || PHP_OS_FAMILY === 'Windows') {
             $this->markTestSkipped('This test requires POSIX pseudoterminal support.');
         }
         $this->writeLocalIndex(array_keys($this->initialFiles));
         file_put_contents($this->filesystemRoot . '/added.txt', 'new file');
+        file_put_contents($this->filesystemRoot . "/bell-\x07.txt", 'control path byte');
+        file_put_contents($this->filesystemRoot . "/line\nbreak.txt", 'raw path byte');
         unlink($this->filesystemRoot . '/deleted.txt');
 
         $result = $this->runCli([
@@ -125,6 +101,8 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertSame(0, $result['exit'], $result['output']);
         $this->assertSame(
             "\033[31mmodified: added.txt\033[0m\n"
+            . "\033[31mmodified: \"bell-\\a.txt\"\033[0m\n"
+            . "\033[31mmodified: \"line\\nbreak.txt\"\033[0m\n"
             . "\033[31mdeleted: deleted.txt\033[0m\n",
             str_replace("\r\n", "\n", $result['stdout'])
         );
@@ -135,7 +113,7 @@ final class FilesDiffCommandTest extends TestCase
             $this->remoteReprintApiUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->filesystemRoot,
-            '--jsonl',
+            '--progress=jsonl',
         ], true);
 
         $this->assertSame(0, $jsonlResult['exit'], $jsonlResult['output']);
@@ -143,6 +121,42 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertStringContainsString('"action":"push"', $jsonlResult['stdout']);
         $this->assertStringContainsString('"action":"delete"', $jsonlResult['stdout']);
         $this->assertSame('', $jsonlResult['stderr']);
+    }
+
+    public function testFilesDiffSelectsJsonlInAutoModeWhenRedirected(): void
+    {
+        $this->writeLocalIndex(array_keys($this->initialFiles));
+        file_put_contents($this->filesystemRoot . '/added.txt', 'new file');
+        unlink($this->filesystemRoot . '/deleted.txt');
+
+        $result = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+        ]);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertStringNotContainsString("\033[", $result['stdout']);
+        $this->assertStringContainsString('"action":"push"', $result['stdout']);
+        $this->assertStringContainsString('"action":"delete"', $result['stdout']);
+        $this->assertSame('', $result['stderr']);
+
+        $ttyResult = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+            '--progress=tty',
+        ]);
+
+        $this->assertSame(0, $ttyResult['exit'], $ttyResult['output']);
+        $this->assertSame(
+            "\033[31mmodified: added.txt\033[0m\n"
+            . "\033[31mdeleted: deleted.txt\033[0m\n",
+            $ttyResult['stdout']
+        );
+        $this->assertSame('', $ttyResult['stderr']);
     }
 
     public function testFilesDiffReportsAddedEditedDeletedAndTypeChangedPaths(): void
@@ -289,7 +303,12 @@ final class FilesDiffCommandTest extends TestCase
 
     public function testFilesDiffWithoutALocalIndexFailsWithPointedGuidance(): void
     {
-        $result = $this->runFilesDiff();
+        $result = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+        ]);
 
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertSame('', $result['stdout']);
@@ -305,13 +324,14 @@ final class FilesDiffCommandTest extends TestCase
         );
     }
 
-    public function testFilesDiffPrintsHumanReadableErrorsByDefault(): void
+    public function testFilesDiffPrintsHumanReadableErrorsWithProgressTty(): void
     {
         $result = $this->runCli([
             'files-diff',
             $this->remoteReprintApiUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->filesystemRoot,
+            '--progress=tty',
         ]);
 
         $this->assertSame(1, $result['exit'], $result['output']);
@@ -355,19 +375,37 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertDirectoryDoesNotExist($this->pushStateDirectory());
     }
 
-    public function testOtherCommandsRejectTheFilesDiffJsonlOption(): void
+    public function testFilesDiffRejectsInvalidProgressMode(): void
+    {
+        $result = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+            '--progress=pretty',
+        ]);
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertSame('', $result['stdout']);
+        $this->assertSame(
+            "Invalid --progress value: pretty. Valid values: auto, tty, jsonl\n",
+            $result['stderr']
+        );
+    }
+
+    public function testOtherCommandsRejectTheFilesDiffProgressOption(): void
     {
         $result = $this->runCli([
             'files-pull',
             $this->remoteReprintApiUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->filesystemRoot,
-            '--jsonl',
+            '--progress=jsonl',
         ]);
 
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertSame('', $result['stdout']);
-        $this->assertSame("Error: --jsonl is accepted only by files-diff.\n", $result['stderr']);
+        $this->assertSame("Error: --progress is accepted only by files-diff.\n", $result['stderr']);
     }
 
     public function testInterruptedFilesDiffReportsTheCompleteDiffWhenItIsRunAgain(): void
@@ -385,7 +423,7 @@ final class FilesDiffCommandTest extends TestCase
             $this->remoteReprintApiUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->filesystemRoot,
-            '--jsonl',
+            '--progress=jsonl',
         ]);
         stream_set_blocking($pipes[1], false);
         $firstOutput = '';
@@ -533,7 +571,7 @@ final class FilesDiffCommandTest extends TestCase
             $remoteReprintApiUrl ?? $this->remoteReprintApiUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->filesystemRoot,
-            '--jsonl',
+            '--progress=jsonl',
         ], $extraArguments));
     }
 
