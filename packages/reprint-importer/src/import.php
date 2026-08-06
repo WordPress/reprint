@@ -3327,14 +3327,7 @@ class ImportClient
             }
             // Skip if this directory is a subdirectory of an already-visited path,
             // since those files were already included in the parent's index.
-            $already_covered = false;
-            foreach ($visited as $v => $_) {
-                if (str_starts_with($dir, $v . "/")) {
-                    $already_covered = true;
-                    break;
-                }
-            }
-            if ($already_covered) {
+            if (path_is_within_root($dir, array_keys($visited))) {
                 $this->audit_log(
                     "FOLLOW SYMLINK SKIP | {$dir} already covered by a visited parent",
                     true,
@@ -3478,14 +3471,7 @@ class ImportClient
             }
 
             // Check containment: skip if already under a visited root
-            $contained = false;
-            foreach ($visited as $root => $_) {
-                if (str_starts_with($symlink_target, $root . "/")) {
-                    $contained = true;
-                    break;
-                }
-            }
-            if ($contained) {
+            if (path_is_within_root($symlink_target, array_keys($visited))) {
                 continue;
             }
 
