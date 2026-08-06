@@ -135,6 +135,71 @@ final class FilesPushCommandTest extends TestCase
         );
     }
 
+    public function testFilesPushRejectsAnInvalidProgressMode(): void
+    {
+        $result = $this->runFilesPush(
+            'https://example.test/?reprint-api=1',
+            ['--secret=token', '--progress=rich']
+        );
+
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertSame(
+            "Invalid --progress value: rich. Valid values: auto, tty, jsonl\n",
+            $result['stderr']
+        );
+        $this->assertNoSenderState($this->stateDirectory);
+    }
+
+    public function testDirectFilesPushRejectsAnInvalidProgressModeBeforePreflight(): void
+    {
+        $client = new ImportClient(
+            'https://example.test/?reprint-api=1',
+            $this->stateDirectory,
+            $this->localTree,
+            'files-push'
+        );
+        $processLock = new \ReprintProcessLock($this->stateDirectory);
+        try {
+            $client->run(
+                ['command' => 'files-push', 'progress' => 'rich'],
+                $processLock
+            );
+            $this->fail('The invalid progress mode was accepted.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertSame(
+                'Invalid --progress value: rich. Valid values: auto, tty, jsonl',
+                $exception->getMessage()
+            );
+        } finally {
+            $processLock->close();
+        }
+
+        $this->assertNoSenderState($this->stateDirectory);
+        $this->assertFileDoesNotExist(
+            $this->pullStateFileForRemoteReprintApiUrl(
+                'https://example.test/?reprint-api=1'
+            )
+        );
+    }
+
+    public function testFilesPushRejectsVerboseWithAnExplicitProgressMode(): void
+    {
+        foreach (['tty', 'jsonl'] as $progressMode) {
+            $result = $this->runFilesPush(
+                'https://example.test/?reprint-api=1',
+                ['--secret=token', '--progress=' . $progressMode, '--verbose']
+            );
+
+            $this->assertSame(1, $result['exit'], $progressMode . ': ' . $result['output']);
+            $this->assertStringContainsString(
+                'files-push does not accept --verbose with --progress=' . $progressMode . '.',
+                $result['output']
+            );
+        }
+
+        $this->assertNoSenderState($this->stateDirectory);
+    }
+
     public function testFilesPushRejectsInvalidInputsBeforeStartingSender(): void
     {
         $missingSecret = $this->runFilesPush('https://example.test/?reprint-api=1', []);
@@ -396,6 +461,40 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringNotContainsString('Diffing', $output);
         $this->assertStringNotContainsString('Uploading', $output);
         $this->assertStringNotContainsString('Applying', $output);
+    }
+
+    public function testFilesPushProgressModeCanOverrideTtyDetection(): void
+    {
+        $client = new ImportClient(
+            'https://example.test/?reprint-api=1',
+            $this->stateDirectory,
+            $this->localTree,
+            'files-diff'
+        );
+        $isTty = new \ReflectionProperty(ImportClient::class, 'is_tty');
+        $progressOutputMode = new \ReflectionProperty(
+            ImportClient::class,
+            'progress_output_mode'
+        );
+        $usesTerminalProgress = new \ReflectionMethod(
+            ImportClient::class,
+            'uses_terminal_progress'
+        );
+
+        foreach ([
+            ['auto', false, false],
+            ['auto', true, true],
+            ['tty', false, true],
+            ['jsonl', true, false],
+        ] as [$mode, $stdoutIsTty, $expected]) {
+            $progressOutputMode->setValue($client, $mode);
+            $isTty->setValue($client, $stdoutIsTty);
+            $this->assertSame(
+                $expected,
+                $usesTerminalProgress->invoke($client),
+                $mode . ' with is_tty=' . ( $stdoutIsTty ? 'true' : 'false' )
+            );
+        }
     }
 
     /** @param list<string> $extraOptions */

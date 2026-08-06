@@ -3089,6 +3089,56 @@ final class PushEndpointsTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
     }
 
+    public function testFilesPushCliCanSelectTerminalOrJsonlProgress(): void
+    {
+        $this->writeDocrootConfiguration([
+            'document_root' => $this->docroot,
+            'maximum_part_bytes' => 64,
+        ]);
+        $local_docroot = $this->root . '/cli-progress-local-docroot';
+        $state_directory = $this->root . '/cli-progress-state';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.txt', str_repeat('value-', 40));
+
+        $terminal = $this->runFilesPushCli(
+            $local_docroot,
+            $state_directory,
+            [],
+            '/',
+            ['--progress=tty']
+        );
+
+        $this->assertSame(0, $terminal['exit'], $terminal['output']);
+        $this->assertStringContainsString("\r\033[K", $terminal['stdout']);
+        $this->assertStringContainsString('15% Indexing', $terminal['stdout']);
+        $this->assertStringContainsString('40% Pushing', $terminal['stdout']);
+        $this->assertStringContainsString('90% Committing', $terminal['stdout']);
+        $this->assertStringContainsString('Files push complete.', $terminal['stdout']);
+        $this->assertSame([], $this->cliJsonLines($terminal['stdout']));
+        $this->assertSame('', $terminal['stderr']);
+
+        $jsonl = $this->runFilesPushCli(
+            $local_docroot,
+            $state_directory,
+            [],
+            '/',
+            ['--progress=jsonl']
+        );
+
+        $this->assertSame(0, $jsonl['exit'], $jsonl['output']);
+        $this->assertStringNotContainsString("\033", $jsonl['stdout']);
+        $this->assertStringNotContainsString("\r", $jsonl['stdout']);
+        $jsonl_records = [];
+        foreach (preg_split('/\R/', trim($jsonl['stdout'])) ?: [] as $line) {
+            $record = json_decode($line, true);
+            $this->assertIsArray($record, $line);
+            $jsonl_records[] = $record;
+        }
+        $this->assertNotEmpty($jsonl_records);
+        $this->assertSame('complete', $jsonl_records[count($jsonl_records) - 1]['status'] ?? null);
+        $this->assertSame('', $jsonl['stderr']);
+    }
+
     public function testFilesPushCliStopsAtTheCallerDeadlineAndAnotherProcessCompletes(): void
     {
         $local_docroot = $this->root . '/cli-partial-local-docroot';
@@ -3322,19 +3372,22 @@ final class PushEndpointsTest extends TestCase {
      * Runs the production CLI against the production endpoint router.
      *
      * @param array<string,string> $ini_settings PHP ini values for the subprocess.
+     * @param list<string> $extra_options Additional files-push CLI options.
      * @return array{exit:int,stdout:string,stderr:string,output:string}
      */
     private function runFilesPushCli(
         string $filesystem_root,
         string $state_directory,
         array $ini_settings = [],
-        string $document_root = '/'
+        string $document_root = '/',
+        array $extra_options = []
     ): array {
         [$process, $pipes] = $this->startFilesPushCli(
             $filesystem_root,
             $state_directory,
             $ini_settings,
-            $document_root
+            $document_root,
+            $extra_options
         );
         return $this->finishFilesPushCli($process, $pipes);
     }
@@ -3343,13 +3396,15 @@ final class PushEndpointsTest extends TestCase {
      * Starts a production files-push CLI subprocess.
      *
      * @param array<string,string> $ini_settings PHP ini values for the subprocess.
+     * @param list<string> $extra_options Additional files-push CLI options.
      * @return array{0:resource,1:array<int,resource>}
      */
     private function startFilesPushCli(
         string $filesystem_root,
         string $state_directory,
         array $ini_settings = [],
-        string $document_root = '/'
+        string $document_root = '/',
+        array $extra_options = []
     ): array {
         $this->writeFilesPushPreflight($state_directory, $document_root);
 
@@ -3366,7 +3421,7 @@ final class PushEndpointsTest extends TestCase {
             '--fs-root=' . $filesystem_root,
             '--secret=' . self::SECRET,
             '--force-http',
-        ]);
+        ], $extra_options);
         $process = proc_open(
             $command,
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],

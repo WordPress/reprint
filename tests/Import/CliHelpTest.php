@@ -119,6 +119,8 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('--secret=TOKEN', $output);
         $this->assertStringContainsString('--force-http', $output);
+        $this->assertStringContainsString('--progress=MODE', $output);
+        $this->assertStringContainsString('auto, tty, or jsonl', $output);
         $this->assertStringContainsString('--verbose, -v', $output);
         $this->assertStringContainsString('low-level, files-only command', $output);
         $this->assertStringContainsString("document root's local tree beneath --fs-root", $output);

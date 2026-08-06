@@ -136,6 +136,9 @@ register_shutdown_function(function () {
 class ImportClient
 {
 
+    /** Progress output modes accepted by files-diff and files-push. */
+    public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl'];
+
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const SQLITE_PREPARED_INSERT_CACHE_MAX = 128;
@@ -205,11 +208,11 @@ class ImportClient
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
 
-    /**
-     * @var bool Whether the progress stream is a TTY, enabling interactive
-     *           progress and terminal colors.
-     */
+    /** @var bool Whether the current progress stream is a TTY. */
     private $is_tty;
+
+    /** @var string Progress output mode for this invocation: auto, tty, or jsonl. */
+    private $progress_output_mode = 'auto';
 
     /** @var int Running count of files pulled in the current invocation. */
     private $files_pulled = 0;
@@ -919,6 +922,7 @@ class ImportClient
      *   - command: Required. One of the entries in $valid_commands below.
      *   - abort: Optional. Clear state for the command and exit immediately
      *   - verbose: Optional. Enable verbose output
+     *   - progress: Optional files-diff or files-push progress output mode: auto, tty, or jsonl
      * @param ReprintProcessLock|null $process_lock Optional lock already held
      *                                               for this state directory.
      */
@@ -935,6 +939,10 @@ class ImportClient
         }
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
+        if ($this->progress_output_mode !== 'auto') {
+            $this->progress_output_mode = 'auto';
+            $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
+        }
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
         $this->include_caches = $options["include_caches"] ?? false;
         $this->extra_directory = $options["extra_directory"] ?? null;
@@ -1009,6 +1017,29 @@ class ImportClient
             return;
         }
         if ($command === "files-push") {
+            $progress_output_mode = $options['progress'] ?? 'auto';
+            if (
+                !is_string($progress_output_mode)
+                || !in_array($progress_output_mode, self::PROGRESS_OUTPUT_MODES, true)
+            ) {
+                $invalid_progress_output_mode = is_string($progress_output_mode)
+                    ? $progress_output_mode
+                    : gettype($progress_output_mode);
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option errors are not HTML.
+                throw new InvalidArgumentException(
+                    "Invalid --progress value: {$invalid_progress_output_mode}. Valid values: "
+                    . implode(', ', self::PROGRESS_OUTPUT_MODES)
+                );
+            }
+            if ($this->verbose_mode && $progress_output_mode !== 'auto') {
+                throw new InvalidArgumentException(
+                    "files-push does not accept --verbose with --progress={$progress_output_mode}. "
+                    . 'Use --progress=auto with --verbose.'
+                );
+            }
+            // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            $this->progress_output_mode = $progress_output_mode;
+            $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
             if (is_file($this->pull_index_wal_path)) {
                 throw new RuntimeException(
                     "Finish or abort the interrupted files-pull before running files-push."
@@ -1143,7 +1174,7 @@ class ImportClient
             $this->progress_fd = STDERR;
             $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
             $this->progress->set_progress_fd($this->progress_fd);
-            $this->progress->set_is_tty($this->is_tty);
+            $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
         }
 
         // MySQL connection parameters for --sql-output=mysql.
@@ -1375,13 +1406,20 @@ class ImportClient
     private function run_files_diff(array $options): void
     {
         $progress_mode = $options['progress'] ?? ( $this->is_tty ? 'tty' : 'jsonl' );
+        if (
+            !is_string($progress_mode)
+            || !in_array($progress_mode, self::PROGRESS_OUTPUT_MODES, true)
+        ) {
+            $invalid_progress_mode = is_string($progress_mode)
+                ? $progress_mode
+                : gettype($progress_mode);
+            throw new InvalidArgumentException(
+                'Invalid files-diff progress mode: ' . $invalid_progress_mode . '. Valid modes: '
+                . implode(', ', self::PROGRESS_OUTPUT_MODES) . '.'
+            );
+        }
         if ($progress_mode === 'auto') {
             $progress_mode = $this->is_tty ? 'tty' : 'jsonl';
-        }
-        if (!in_array($progress_mode, ['tty', 'jsonl'], true)) {
-            throw new InvalidArgumentException(
-                'Invalid files-diff progress mode: ' . $progress_mode . '. Valid modes: auto, tty, jsonl.'
-            );
         }
         $push_state_directory = $options['files_diff_push_state_directory'] ?? self::resolve_push_state_directory(
             $this->remote_reprint_api_url,
@@ -1646,6 +1684,7 @@ class ImportClient
      *
      *     @type string $secret             HMAC shared secret.
      *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
+     *     @type string $progress           Progress output mode: auto, tty, or jsonl.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
      * }
      * @param ReprintProcessLock $process_lock Lock held for the command's state directory.
@@ -1866,7 +1905,7 @@ class ImportClient
         $this->write_files_push_progress_file($progress_payload);
 
         // Emit the final JSON line after any preceding progress records.
-        if ($this->is_tty && !$this->verbose_mode) {
+        if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             $this->progress->clear_progress_line();
             $this->progress->show_lifecycle_line($result['message'] . "\n");
             return;
@@ -1877,6 +1916,13 @@ class ImportClient
         }
         @fwrite($this->progress_fd, $result_json . "\n");
         @flush();
+    }
+
+    /** Returns whether progress uses the interactive terminal presentation. */
+    private function uses_terminal_progress(): bool
+    {
+        return $this->progress_output_mode === 'tty'
+            || ( $this->progress_output_mode === 'auto' && $this->is_tty );
     }
 
     /**
@@ -1903,7 +1949,7 @@ class ImportClient
         array $sender_progress,
         bool $force_output
     ): void {
-        if ($this->is_tty && !$this->verbose_mode) {
+        if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             switch ($sender_progress['phase']) {
                 case 'starting_plan':
                 case 'planning':
@@ -11529,16 +11575,16 @@ class ImportClient
     }
 
     /**
-     * Output progress as JSON line.
-     * Only outputs in verbose mode or non-TTY mode (for programmatic consumption).
+     * Output progress as a JSON line.
+     * Suppressed when the terminal presentation is active without verbose logs.
      *
      * @param array $data Progress data to output
      * @param bool $force Force output regardless of throttle
      */
     public function output_progress(array $data, bool $force = false): void
     {
-        // In TTY non-verbose mode, suppress JSON output (use show_progress_line instead)
-        if ($this->is_tty && !$this->verbose_mode) {
+        // The non-verbose terminal presentation uses show_progress_line() instead.
+        if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             return;
         }
 
@@ -11678,6 +11724,15 @@ if (
             'commands' => ['files-push'],
         ],
         [
+            'name' => 'progress',
+            'type' => 'value',
+            'target' => 'progress',
+            'placeholder' => 'MODE',
+            'help' => 'Progress output: auto, tty, or jsonl (default: auto)',
+            'commands' => ['files-diff', 'files-push'],
+            'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
+        ],
+        [
             'name' => 'abort',
             'type' => 'flag',
             'target' => 'abort',
@@ -11776,17 +11831,6 @@ if (
             'help' => 'Total pipeline steps (for progress file)',
             'help_section' => 'global',
             'commands' => [],
-        ],
-
-        // ── files-diff options ──────────────────────────────────
-        [
-            'name' => 'progress',
-            'type' => 'value',
-            'target' => 'progress',
-            'placeholder' => 'MODE',
-            'valid_values' => ['auto', 'tty', 'jsonl'],
-            'help' => 'Output mode (auto|tty|jsonl); auto selects from stdout',
-            'commands' => ['files-diff'],
         ],
 
         // ── files-pull options ───────────────────────────────────
@@ -12642,7 +12686,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--progress=MODE] [--verbose]",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
@@ -12654,6 +12698,12 @@ if (
                 "Re-run the same command after exit 2.\n" .
                 "After a restart result, the next run starts a fresh plan.\n",
             "extra" =>
+                "Progress output:\n" .
+                "  auto   Use tty on a terminal and jsonl otherwise (default)\n" .
+                "  tty    Force the single interactive progress bar\n" .
+                "  jsonl  Force one JSON object per line\n" .
+                "Explicit tty and jsonl modes cannot be combined with --verbose.\n" .
+                "\n" .
                 "Exit outcomes:\n" .
                 "  0  File push complete\n" .
                 "  2  Partial, interrupted, or restart; run the command again\n" .
@@ -12903,7 +12953,8 @@ if (
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_push_command_argument, '--fs-root=') === 0
-                || strpos($reprint_files_push_command_argument, '--secret=') === 0;
+                || strpos($reprint_files_push_command_argument, '--secret=') === 0
+                || strpos($reprint_files_push_command_argument, '--progress=') === 0;
             if (!$reprint_files_push_option_allowed) {
                 $reprint_files_push_option_name = explode('=', $reprint_files_push_command_argument, 2)[0];
                 fwrite(STDERR, "Error: files-push does not accept {$reprint_files_push_option_name}.\n");
@@ -12933,7 +12984,7 @@ if (
         fwrite(STDERR, "Error: --force-http is accepted only by files-push.\n");
         exit(1);
     } elseif (isset($options['progress'])) {
-        fwrite(STDERR, "Error: --progress is accepted only by files-diff.\n");
+        fwrite(STDERR, "Error: --progress is accepted only by files-diff and files-push.\n");
         exit(1);
     }
 

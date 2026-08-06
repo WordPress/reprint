@@ -393,6 +393,13 @@ root as a path beneath that filesystem root. Local relative paths beneath the do
 become push or delete work. It also requires `--secret=TOKEN`; `--force-http`
 is the explicit plain-HTTP opt-in.
 
+The **progress output mode** is the invocation-only `--progress` value for
+`files-push`: `auto`, `tty`, or `jsonl`. `auto` selects the terminal
+presentation when the current progress stream is a TTY and the JSONL
+presentation otherwise. `tty` and `jsonl` force those presentations. Never
+store the progress output mode in sender state. Explicit `tty` and `jsonl`
+modes do not combine with `--verbose`.
+
 The **local push state directory** is
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash
 directory name is:
@@ -409,8 +416,8 @@ positions remain receiver-owned; they are not a files-push cursor and are not
 copied into `<remote-state-directory>/pull/state.json` or the state-directory-wide
 `progress.json`.
 
-Interactive non-verbose output uses one stage-weighted progress bar. The
-percentage precedes a label which changes only between `Preparing`, `Indexing`,
+The terminal presentation uses one stage-weighted progress bar. The percentage
+precedes a label which changes only between `Preparing`, `Indexing`,
 `Pushing`, `Pushing deletions`, `Committing`, `Saving index`, and `Finishing`.
 Durable index byte offsets and target-confirmed upload boundaries advance the
 bounded parts of the bar; indexing and commit advance at phase milestones
@@ -425,7 +432,7 @@ snapshot alongside target-confirmed path, file-byte, and deletion-list-byte
 counts. The CLI maps that snapshot onto labels and stage weights. PushPlan and
 PushFilesSender do not calculate terminal percentages or choose output format.
 
-Non-interactive output emits `push_progress` JSONL records. `files_done` and
+The JSONL presentation emits `push_progress` records. `files_done` and
 `files_total` appear together after planning in those records, the final
 result, and `progress.json`; they are absent while the plan is still being
 built. `files_total` is the selected local-path count.

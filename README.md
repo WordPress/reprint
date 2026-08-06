@@ -613,16 +613,29 @@ Both fields are emitted together only when the fetch list exists — they
 are absent during the index and diff phases. `files_done` grows monotonically
 up to `files_total` and survives exit-code-2 restarts.
 
-During `files-push`, interactive non-verbose terminal output uses one
-stage-weighted progress bar. The percentage comes first, followed by a major
-stage such as `Indexing`, `Pushing`, or `Committing`. While pushing local paths,
-the line also shows target-confirmed file bytes against the file byte total
-collected by the plan. Durable index byte offsets, target-confirmed counts and
-byte offsets, and phase milestones advance the bar. The percentage describes
-lifecycle progress, not elapsed time or an estimated completion time.
+`files-push` accepts `--progress=auto|tty|jsonl`. The default `auto` mode uses
+terminal progress when its output stream is a TTY and JSONL otherwise. Use
+`--progress=tty` to force the single progress bar when output is captured, or
+`--progress=jsonl` to force structured output in a terminal:
 
-These terminal-only details do not change machine output. Non-interactive
-output emits `push_progress` JSONL records. After planning completes, those
+```bash
+php reprint.phar files-push "$URL" --state-dir="$STATE_DIR" \
+    --fs-root="$FS_ROOT" --secret="$SECRET" --progress=jsonl
+```
+
+The selected mode applies only to that invocation and is not retained in push
+state. Explicit `tty` and `jsonl` modes cannot be combined with `--verbose`.
+
+The terminal presentation uses one stage-weighted progress bar. The percentage
+comes first, followed by a major stage such as `Indexing`, `Pushing`, or
+`Committing`. While pushing local paths, the line also shows target-confirmed
+file bytes against the file byte total collected by the plan. Durable index
+byte offsets, target-confirmed counts and byte offsets, and phase milestones
+advance the bar. The percentage describes lifecycle progress, not elapsed time
+or an estimated completion time.
+
+These terminal-only details do not change machine output. The JSONL
+presentation emits `push_progress` records. After planning completes, those
 records, the final result, and `progress.json` include `files_done` and
 `files_total` together. `files_total` is the number of local paths selected by
 the plan; `files_done` advances only after the target confirms the request

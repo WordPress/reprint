@@ -470,6 +470,11 @@ participate in the directory name. Fragments, URL user-info, and `SECRET_KEY`
 target parameters are rejected. The local push state directory must be outside
 the filesystem root so planning cannot index its own changing files.
 
+`--progress=auto|tty|jsonl` selects progress output for one invocation. The
+default `auto` mode uses terminal progress when its output stream is a TTY and
+JSONL otherwise. `tty` and `jsonl` force the corresponding presentation; they
+are not stored in sender state and cannot be combined with `--verbose`.
+
 One process starts or resumes exactly one sender. Before every `next_step()` it
 checks whether another step may begin. The wall-clock admission deadline is 80
 percent of PHP's finite `max_execution_time`; zero is unlimited. With a finite
@@ -489,7 +494,7 @@ The stable CLI mapping is `complete`/0, `partial`/2, `interrupted`/2,
 `restart`/2, `failed`/1, and `error`/1. Exit 2 asks the operator to run the
 same command again. After `restart`, that next run builds a fresh plan. The
 state-directory-wide audit log records opening mode, phase changes, planned pauses, handled
-interruptions, and terminal outcomes. Interactive non-verbose output uses one
+interruptions, and terminal outcomes. The terminal presentation uses one
 stage-weighted progress bar. The percentage precedes a label which changes only
 at the major `Preparing`, `Indexing`, `Pushing`, `Pushing deletions`,
 `Committing`, `Saving index`, and `Finishing` stages. The index diff advances
@@ -506,8 +511,8 @@ PushFilesSender combines those with target-confirmed upload counts in one
 progress snapshot. The CLI alone maps that snapshot onto stage weights and
 terminal labels.
 
-The overall bar is terminal-only. Non-interactive output emits the same
-throttled `push_progress` JSONL records as before.
+The overall bar is terminal-only. The JSONL presentation emits the same
+throttled `push_progress` records as before.
 After planning, those records, the final result, and the flat progress file
 include `files_done` and `files_total` together. The total comes from the
 completed plan; the completed count advances only when the target confirms the

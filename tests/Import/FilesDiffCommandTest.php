@@ -393,7 +393,7 @@ final class FilesDiffCommandTest extends TestCase
         );
     }
 
-    public function testOtherCommandsRejectTheFilesDiffProgressOption(): void
+    public function testOtherCommandsRejectTheProgressOption(): void
     {
         $result = $this->runCli([
             'files-pull',
@@ -405,7 +405,10 @@ final class FilesDiffCommandTest extends TestCase
 
         $this->assertSame(1, $result['exit'], $result['output']);
         $this->assertSame('', $result['stdout']);
-        $this->assertSame("Error: --progress is accepted only by files-diff.\n", $result['stderr']);
+        $this->assertSame(
+            "Error: --progress is accepted only by files-diff and files-push.\n",
+            $result['stderr']
+        );
     }
 
     public function testInterruptedFilesDiffReportsTheCompleteDiffWhenItIsRunAgain(): void

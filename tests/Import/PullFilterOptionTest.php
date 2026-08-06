@@ -46,7 +46,7 @@ class PullFilterFakeClient extends \ImportClient
         $progress = $property->getValue($this);
 
         $this->terminal_progress_stream = fopen('php://temp', 'w+');
-        $progress->set_is_tty(true);
+        $progress->set_terminal_output_enabled(true);
         $progress->set_progress_fd($this->terminal_progress_stream);
     }
 
