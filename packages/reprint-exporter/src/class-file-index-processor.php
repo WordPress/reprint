@@ -111,7 +111,7 @@ final class FileIndexProcessor {
         // An ordinary traversal must begin inside a configured root. Following
         // links deliberately relaxes that boundary because a link target may
         // be outside every configured root and still belong in the index.
-        if (!$follow_symlinks && !self::path_is_within_directories($canonical_index_directory, $directories)) {
+        if (!$follow_symlinks && !\WordPress\Reprint\Exporter\path_is_within_root($canonical_index_directory, $directories)) {
             throw new InvalidArgumentException(
                 "list_dir is outside of allowed roots: {$canonical_index_directory}"
             );
@@ -407,13 +407,14 @@ final class FileIndexProcessor {
         $this->step_status = self::STATUS_INDEXED;
 
         // Depth-first traversal enters a new directory before returning to the
-        // remaining names in its parent. Configured roots are scheduled
-        // independently and must not be entered again through an ancestor.
+        // remaining names in its parent. An exact scheduled root is already
+        // on the stack, and traversing an ancestor would expose paths outside
+        // the requested tree before entering that root again.
         if ($type === "dir") {
             $canonical_directory = realpath($path);
             if (
                 $canonical_directory === false
-                || !self::should_skip_index_root($canonical_directory, $this->directories)
+                || !\WordPress\Reprint\Exporter\path_is_within_root($this->directories, $canonical_directory)
             ) {
                 $this->directory_stack[] = [
                     "dir" => $path,
@@ -650,7 +651,7 @@ final class FileIndexProcessor {
         // boundary, then continue with the remaining stack.
         if (
             !$this->follow_symlinks
-            && !self::path_is_within_directories($canonical_directory, $this->directories)
+            && !\WordPress\Reprint\Exporter\path_is_within_root($canonical_directory, $this->directories)
         ) {
             array_pop($this->directory_stack);
             $this->directory_error = [
@@ -738,46 +739,6 @@ final class FileIndexProcessor {
         }
         $canonical_storage_path = realpath($storage_path);
         return $canonical_storage_path !== false ? $canonical_storage_path : $storage_path;
-    }
-
-    /**
-     * Reports whether a path is inside one of the allowed directories.
-     *
-     * @param string   $path        Canonical filesystem path.
-     * @param string[] $directories Canonical allowed directories.
-     * @return bool Whether the path belongs to an allowed directory.
-     */
-    private static function path_is_within_directories(string $path, array $directories): bool
-    {
-        foreach ($directories as $directory) {
-            if ($path === $directory || strpos($path, $directory . "/") === 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Reports whether traversing a directory would duplicate a scheduled root.
-     *
-     * An exact root is already scheduled. A parent of a scheduled root would
-     * expose paths outside the requested tree before entering that root again.
-     *
-     * @param string   $candidate Canonical directory considered for traversal.
-     * @param string[] $roots     Canonical scheduled roots.
-     * @return bool Whether traversal should omit this directory.
-     */
-    private static function should_skip_index_root(string $candidate, array $roots): bool
-    {
-        foreach ($roots as $root) {
-            if ($candidate === $root) {
-                return true;
-            }
-            if ($candidate === "/" || strpos($root . "/", $candidate . "/") === 0) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**

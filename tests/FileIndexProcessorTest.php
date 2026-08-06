@@ -129,6 +129,25 @@ final class FileIndexProcessorTest extends TestCase {
         $processor->close();
     }
 
+    public function testFilesystemRootCanAuthorizeAnIndexedDirectory(): void
+    {
+        $docroot = $this->tempDir . '/site';
+        mkdir($docroot, 0755, true);
+        file_put_contents($docroot . '/index.php', '<?php');
+
+        $processor = FileIndexProcessor::start(
+            ['/'],
+            $docroot,
+            false,
+            true,
+            ''
+        );
+
+        $this->assertTrue($processor->next_index_step());
+        $this->assertSame(FileIndexProcessor::STATUS_INDEXED, $processor->get_step_status());
+        $processor->close();
+    }
+
     public function testResumeWithACompletedCursorRemainsComplete(): void
     {
         $docroot = $this->tempDir . '/site';
