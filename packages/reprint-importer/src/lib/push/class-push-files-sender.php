@@ -1575,6 +1575,18 @@ final class PushFilesSender
         } catch (JsonException $exception) {
             throw new RuntimeException('Failed to decode active state: ' . $this->state_path, 0, $exception);
         }
+
+        /** @var array<string,mixed> $state */
+        if (!array_key_exists('push_root_local_relative_path', $state)) {
+            // Older state used local relative paths as push-root-relative paths.
+            $state['push_root_local_relative_path'] = '';
+        }
+        if (!array_key_exists('local_paths_to_push_count', $state)) {
+            // Keep the sender single-pass when older state has no path progress.
+            $state['local_paths_to_push_count'] = null;
+            $state['local_paths_pushed'] = 0;
+        }
+
         /** @var State $state */
         return $state;
     }

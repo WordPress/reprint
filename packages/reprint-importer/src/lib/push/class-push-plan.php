@@ -62,8 +62,8 @@ use function WordPress\Reprint\Exporter\path_remainder_under;
  * @phpstan-type FileIndexCursor array{stack:list<array{dir:string,after:string|null}>}
  * @phpstan-type IndexingCursor array{phase:'indexing',file_index_cursor:FileIndexCursor,fresh_local_index_byte_offset:int}
  * @phpstan-type StartingDiffCursor array{phase:'starting_diff'}
- * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_local_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int,deleted_directory_stack_top_byte_offset:int|null,previous_fresh_local_index_entry_path:string|null}
- * @phpstan-type CompleteCursor array{phase:'complete',local_paths_to_push_count:int}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',byte_offset_in_fresh_local_index:int,byte_offset_in_local_index:int,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,local_paths_to_push_count:int|null,deleted_directory_stack_top_byte_offset:int|null,previous_fresh_local_index_entry_path:string|null}
+ * @phpstan-type CompleteCursor array{phase:'complete',local_paths_to_push_count:int|null}
  * @phpstan-type PushPlanPosition IndexingCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
  * @phpstan-type PushPlanCursor array{plan_directory:string,filesystem_root:string,local_index_file:string,push_root_local_relative_path:string,position:PushPlanPosition}
  * @phpstan-type DeletedDirectoryStackEntry array{path:string,previous_byte_offset:int|null}
@@ -205,6 +205,20 @@ class PushPlan
      */
     public static function resume(array $cursor): self
     {
+        if (!array_key_exists("push_root_local_relative_path", $cursor)) {
+            // Older cursors used local relative paths as push-root-relative paths.
+            $cursor["push_root_local_relative_path"] = "";
+        }
+        $position = $cursor["position"];
+        if (
+            ($position["phase"] === "diffing" || $position["phase"] === "complete")
+            && !array_key_exists("local_paths_to_push_count", $position)
+        ) {
+            // Keep the plan single-pass when an older cursor has no path count.
+            $position["local_paths_to_push_count"] = null;
+            $cursor["position"] = $position;
+        }
+
         $plan = new self(
             $cursor["plan_directory"],
             $cursor["filesystem_root"],
@@ -244,8 +258,10 @@ class PushPlan
 
     /**
      * Returns the number of local paths in the completed push plan.
+     *
+     * Null means the plan resumed from an older cursor without a saved count.
      */
-    public function get_local_paths_to_push_count(): int
+    public function get_local_paths_to_push_count(): ?int
     {
         $position = $this->cursor["position"];
         if ($position["phase"] !== "complete") {
@@ -657,7 +673,9 @@ class PushPlan
                 }
                 if (!$this->path_conflicts_with_excluded_paths($fresh_local_index_entry["path"])) {
                     $this->append_local_path_to_push($fresh_local_index_entry);
-                    ++$local_paths_to_push_count;
+                    if ($local_paths_to_push_count !== null) {
+                        ++$local_paths_to_push_count;
+                    }
                     $local_paths_to_push_changed = true;
                 }
             } elseif ($path_comparison > 0) {
@@ -723,7 +741,9 @@ class PushPlan
                 }
                 if ($needs_push && !$path_is_excluded) {
                     $this->append_local_path_to_push($fresh_local_index_entry);
-                    ++$local_paths_to_push_count;
+                    if ($local_paths_to_push_count !== null) {
+                        ++$local_paths_to_push_count;
+                    }
                     $local_paths_to_push_changed = true;
                 }
             }

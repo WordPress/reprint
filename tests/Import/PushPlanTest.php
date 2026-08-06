@@ -448,6 +448,25 @@ final class PushPlanTest extends TestCase
         $this->assertCount(2, $this->indexEntries($this->planPath('fresh_local_index.jsonl')));
     }
 
+    public function testResumesCursorWrittenBeforePushRootMappingAndProgressCount(): void
+    {
+        $entries = $this->manyFileEntries(2);
+        $current = $this->writeIndex($entries);
+        $plan = $this->startPlan($current);
+
+        $this->assertTrue($this->nextPlanStep($plan));
+        $plan->close();
+
+        unset($this->cursor['push_root_local_relative_path']);
+        unset($this->cursor['position']['local_paths_to_push_count']);
+
+        $resumedPlan = $this->resumePlan();
+        $this->planToCompletion($resumedPlan);
+
+        $this->assertCount(2, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
+        $this->assertNull($resumedPlan->get_local_paths_to_push_count());
+    }
+
     public function testResumeDiscardsACompletedStepWhoseCursorWasNotStored(): void
     {
         $plan = $this->startPlan($this->writeIndex($this->manyFileEntries(2)));

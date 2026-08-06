@@ -1516,6 +1516,49 @@ final class PushEndpointsTest extends TestCase {
         }
     }
 
+    public function testHighLevelSenderResumesStateWrittenBeforePushRootMappingAndProgress(): void
+    {
+        $local_docroot = $this->root . '/old-sender-state-local-docroot';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/value.txt', 'value');
+        $push_state_directory = $this->root . '/old-sender-state';
+        $options = $this->senderOptions($local_docroot, $push_state_directory);
+
+        $sender = $this->startSender($options);
+        try {
+            $this->takeSenderStepsUntilPhase($sender, 'committing');
+        } finally {
+            $this->closeSender($sender);
+        }
+
+        $state = $this->loadActiveState($push_state_directory);
+        $this->assertIsArray($state);
+        $this->assertIsArray($state['push_plan_cursor']);
+        unset($state['push_root_local_relative_path']);
+        unset($state['local_paths_to_push_count']);
+        unset($state['local_paths_pushed']);
+        unset($state['push_plan_cursor']['push_root_local_relative_path']);
+        unset($state['push_plan_cursor']['position']['local_paths_to_push_count']);
+        file_put_contents(
+            $push_state_directory . '/sender.json',
+            json_encode($state, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)
+        );
+
+        $sender = $this->resumeSender($options);
+        try {
+            $this->assertSame(['phase' => 'committing'], $sender->get_progress());
+            while ($sender->next_step()) {
+                continue;
+            }
+            $this->assertSame('complete', $sender->get_status());
+        } finally {
+            $this->closeSender($sender);
+        }
+
+        $this->assertSame('value', file_get_contents($this->docroot . '/value.txt'));
+        $this->assertNull($this->loadActiveState($push_state_directory));
+    }
+
     /**
      * Continues deleted paths and their completion from successful upload responses.
      */
