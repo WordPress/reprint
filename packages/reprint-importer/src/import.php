@@ -1592,8 +1592,8 @@ class ImportClient
         if (!is_array($context)) {
             throw new InvalidArgumentException('files-push requires its validated command context.');
         }
-        $document_root = $this->get_state()->preflight["data"]["runtime"]["document_root"] ?? null;
-        if (!is_string($document_root) || $document_root === '' || $document_root[0] !== '/') {
+        $document_root = $this->get_state()->get('preflight.runtime.document_root');
+        if ($document_root === '' || $document_root[0] !== '/') {
             throw new RuntimeException(
                 "Preflight did not report an absolute document root. Run 'preflight' or 'preflight-assert' again."
             );
@@ -2324,7 +2324,7 @@ class ImportClient
                 : null,
         ];
 
-        $this->get_state()->preflight = $entry;
+        $this->get_state()->set_preflight_record($entry);
 
         // Store WordPress version at the top level for easy access
         $wp_version = $payload["database"]["wp"]["wp_version"] ?? null;
@@ -2410,7 +2410,7 @@ class ImportClient
             $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
         }
 
-        $ini_all = $this->get_state()->preflight["data"]["runtime"]["ini_get_all"] ?? [];
+        $ini_all = $this->get_state()->get('preflight.runtime.ini_get_all');
         $files = [];
         foreach (["auto_prepend_file", "auto_append_file"] as $key) {
             $path = $ini_all[$key] ?? "";
@@ -2573,7 +2573,7 @@ class ImportClient
      */
     private function require_preflight(): void
     {
-        $entry = $this->get_state()->preflight ?? null;
+        $entry = $this->get_state()->preflight_record();
         if (!is_array($entry) || empty($entry["data"])) {
             throw new RuntimeException(
                 "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
@@ -2590,7 +2590,7 @@ class ImportClient
      */
     private function run_preflight_report(): void
     {
-        $entry = $this->get_state()->preflight ?? null;
+        $entry = $this->get_state()->preflight_record();
         if ($entry === null) {
             echo "No preflight data available.\n";
             exit(1);
@@ -2611,7 +2611,7 @@ class ImportClient
      */
     private function run_preflight_assert(): void
     {
-        $entry = $this->get_state()->preflight ?? null;
+        $entry = $this->get_state()->preflight_record();
         $data = $entry["data"] ?? null;
         $checks = [];
         $all_pass = true;
@@ -4035,7 +4035,7 @@ class ImportClient
     {
         $state = $this->get_state();
         $pull = $state->pull_pipeline;
-        $database = $state->preflight["data"]["database"] ?? [];
+        $database = $state->preflight_record()["data"]["database"] ?? [];
         $wordpress = $database["wp"] ?? [];
 
         return [
@@ -4102,7 +4102,7 @@ class ImportClient
         }
 
         // Load state to get preflight data and detected webhost.
-        $entry = $this->get_state()->preflight ?? null;
+        $entry = $this->get_state()->preflight_record();
         if (!is_array($entry) || empty($entry["data"])) {
             throw new RuntimeException(
                 "apply-runtime requires a prior preflight run. " .
@@ -4475,33 +4475,20 @@ class ImportClient
 
         // Require preflight data so we know where WP components live
         $this->require_preflight();
-        $preflight = $this->get_state()->preflight["data"] ?? [];
+        $state = $this->get_state();
 
         // Extract WordPress directory paths from preflight
-        $paths_urls = $preflight["database"]["wp"]["paths_urls"] ?? null;
-        $abspath = null;
-        $wp_admin_path = null;
-        $wp_includes_path = null;
-        $content_dir = null;
-        $plugins_dir = null;
-        $mu_plugins_dir = null;
-        $uploads_basedir = null;
-
-        if (is_array($paths_urls)) {
-            $abspath = $this->clean_preflight_path( $paths_urls["abspath"] ?? null);
-            $wp_admin_path = $this->clean_preflight_path( $paths_urls["wp_admin_path"] ?? null);
-            $wp_includes_path = $this->clean_preflight_path( $paths_urls["wp_includes_path"] ?? null);
-            $content_dir = $this->clean_preflight_path( $paths_urls["content_dir"] ?? null);
-            $plugins_dir = $this->clean_preflight_path( $paths_urls["plugins_dir"] ?? null);
-            $mu_plugins_dir = $this->clean_preflight_path( $paths_urls["mu_plugins_dir"] ?? null);
-            $uploads_basedir = $this->clean_preflight_path(
-                $paths_urls["uploads"]["basedir"] ?? null,
-            );
-        }
+        $abspath = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.abspath'));
+        $wp_admin_path = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.wp_admin_path'));
+        $wp_includes_path = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.wp_includes_path'));
+        $content_dir = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.content_dir'));
+        $plugins_dir = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.plugins_dir'));
+        $mu_plugins_dir = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.mu_plugins_dir'));
+        $uploads_basedir = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.uploads.basedir'));
 
         // Fall back to wp_detect roots if abspath not available
         if ($abspath === null) {
-            $roots = $preflight["wp_detect"]["roots"] ?? [];
+            $roots = $state->get('preflight.wp_detect.roots');
             if (!empty($roots)) {
                 $abspath = $this->clean_preflight_path( $roots[0]["path"] ?? null);
             }
@@ -5164,7 +5151,7 @@ class ImportClient
 
             if (!$target_path) {
                 $content_dir = rtrim(
-                    $this->get_state()->preflight["data"]["database"]["wp"]["paths_urls"]["content_dir"] ?? "",
+                    $this->get_state()->get('preflight.database.wp.paths_urls.content_dir') ?? "",
                     "/",
                 );
                 if(!$content_dir) {
@@ -5349,7 +5336,7 @@ class ImportClient
         // Set up SQL statement rewriter if we have URL mappings
         $stmt_rewriter = null;
         if (!empty($url_mapping)) {
-            $table_prefix = $this->get_state()->preflight["data"]["database"]["wp"]["table_prefix"] ?? 'wp_';
+            $table_prefix = $this->get_state()->get('preflight.database.wp.table_prefix');
             $stmt_rewriter = new SqlStatementRewriter(
                 new StructuredDataUrlRewriter($url_mapping),
                 $table_prefix,
@@ -5752,7 +5739,7 @@ class ImportClient
     {
         $webhost = $this->get_state()->webhost ?? "other";
         $analyzer = host_analyzer_for($webhost);
-        $preflight_data = $this->get_state()->preflight["data"] ?? [];
+        $preflight_data = $this->get_state()->preflight_record()["data"] ?? [];
         $manifest = $analyzer->analyze($preflight_data);
 
         $plugin_dirs = [];
@@ -5818,8 +5805,7 @@ class ImportClient
             return [];
         }
 
-        $preflight_data = $this->get_state()->preflight["data"] ?? [];
-        $table_prefix = $preflight_data["database"]["wp"]["table_prefix"] ?? 'wp_';
+        $table_prefix = $this->get_state()->get('preflight.database.wp.table_prefix');
         // Quote the table name to prevent SQL injection from a crafted prefix.
         $options_table = '`' . str_replace('`', '``', $table_prefix . 'options') . '`';
 
@@ -6888,7 +6874,7 @@ class ImportClient
         // Cap the batch at 80% of the server's max request size so the
         // multipart envelope and headers still fit.  Floor at 256 KB so
         // tiny max_request values don't produce degenerate single-file batches.
-        $max_request = $this->get_max_request_bytes();
+        $max_request = $this->get_state()->get('preflight.limits.max_request_bytes');
         $limit = (int) max(256 * 1024, $max_request * 0.8);
 
         // Open the fetch list and seek to where the previous batch left off.
@@ -7004,24 +6990,6 @@ class ImportClient
             "next_offset" => $next_offset,
             "entries" => $entries,
         ];
-    }
-
-    /**
-     * Determine maximum request size for file_fetch uploads.
-     */
-    private function get_max_request_bytes(): int
-    {
-        $preflight = $this->get_state()->preflight["data"]["limits"] ?? null;
-        $max_request = null;
-        if (is_array($preflight) && isset($preflight["max_request_bytes"])) {
-            $max_request = (int) $preflight["max_request_bytes"];
-        }
-
-        if ($max_request === null || $max_request <= 0) {
-            return 4 * 1024 * 1024;
-        }
-
-        return $max_request;
     }
 
     /**
@@ -8999,19 +8967,19 @@ class ImportClient
      */
     private function remote_path_tokens(): array
     {
-        $preflight = $this->get_state()->preflight["data"] ?? [];
-        $paths = $preflight["database"]["wp"]["paths_urls"] ?? [];
+        $state = $this->get_state();
 
-        $content_dir = $this->clean_preflight_path( $paths["content_dir"] ?? null);
+        $content_dir = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.content_dir'));
 
-        $abspath = $this->clean_preflight_path( $paths["abspath"] ?? null);
+        $abspath = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.abspath'));
         if ($abspath === null) {
-            $abspath = $this->clean_preflight_path( $preflight["wp_detect"]["roots"][0]["path"] ?? null);
+            $roots = $state->get('preflight.wp_detect.roots');
+            $abspath = $this->clean_preflight_path( $roots[0]["path"] ?? null);
         }
 
-        $plugins_dir = $this->clean_preflight_path( $paths["plugins_dir"] ?? null);
-        $mu_plugins_dir = $this->clean_preflight_path( $paths["mu_plugins_dir"] ?? null);
-        $uploads_dir = $this->clean_preflight_path( $paths["uploads"]["basedir"] ?? null);
+        $plugins_dir = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.plugins_dir'));
+        $mu_plugins_dir = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.mu_plugins_dir'));
+        $uploads_dir = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.uploads.basedir'));
 
         // If preflight did not report a directory path, use its conventional
         // location under WP_CONTENT_DIR when WP_CONTENT_DIR is known.
@@ -9891,8 +9859,8 @@ class ImportClient
      */
     private function get_root_directories_from_preflight(): array
     {
-        $roots = $this->get_state()->preflight["data"]["wp_detect"]["roots"] ?? [];
-        if (!is_array($roots) || empty($roots)) {
+        $roots = $this->get_state()->get('preflight.wp_detect.roots');
+        if (empty($roots)) {
             return [];
         }
         $dirs = [];
@@ -9960,12 +9928,12 @@ class ImportClient
             return $this->export_directories_cache;
         }
 
-        $preflight = $this->get_state()->preflight["data"] ?? [];
+        $state = $this->get_state();
 
         // Collect extra paths that may live outside the wp_detect roots.
         $extra_paths = [
-            "document_root" => rtrim($preflight["runtime"]["document_root"] ?? "", "/"),
-            "content_dir" => rtrim($preflight["database"]["wp"]["paths_urls"]["content_dir"] ?? "", "/"),
+            "document_root" => rtrim($state->get('preflight.runtime.document_root'), "/"),
+            "content_dir" => rtrim($state->get('preflight.database.wp.paths_urls.content_dir') ?? "", "/"),
         ];
 
         if ($this->extra_directory !== null && $this->extra_directory !== "") {
@@ -9984,7 +9952,7 @@ class ImportClient
         // auto_prepend_file / auto_append_file may point to directories
         // outside the WordPress roots (e.g. /scripts/env.php on Atomic).
         // Include those directories so the remote exporter traverses them.
-        $ini_all = $preflight["runtime"]["ini_get_all"] ?? [];
+        $ini_all = $state->get('preflight.runtime.ini_get_all');
         foreach (["auto_prepend_file", "auto_append_file"] as $ini_key) {
             $ini_path = $ini_all[$ini_key] ?? "";
             if (is_string($ini_path) && $ini_path !== "" && $ini_path[0] === "/") {
@@ -10917,7 +10885,7 @@ class ImportClient
     {
         $previous_state = $this->state;
         $this->state = new PullState();
-        $this->state->preflight = $previous_state->preflight;
+        $this->state->set_preflight_record($previous_state->preflight_record());
         $this->state->version = $previous_state->version;
         $this->state->webhost = $previous_state->webhost;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;

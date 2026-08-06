@@ -73,7 +73,7 @@ class OnlyFilesPathPrefixTest extends TestCase
     private function client(array $preflightData): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
-        $c->get_state()->preflight = array('data' => $preflightData);
+        $c->get_state()->set_preflight_record(array('data' => $preflightData));
         $this->set($c, 'audit_log_file', $this->tempDir . '/audit.log');
         return $c;
     }

@@ -412,7 +412,7 @@ class Pull
         switch ($stage) {
             case 'preflight':
                 $this->client->run_preflight();
-                $preflight = $this->client->get_state()->preflight;
+                $preflight = $this->client->get_state()->preflight_record();
                 $ok = ($preflight["http_code"] ?? 0) === 200 && !empty($preflight["data"]["ok"]);
                 if (!$ok) {
                     $this->client->exit_code = 1;

@@ -60,6 +60,43 @@ class PullStateTest extends TestCase
         $this->assertSame(99, $array['sql_statements_counted']);
     }
 
+    public function testGetAppliesDefaultsOverVerbatimPreflight(): void
+    {
+        $state = new \PullState();
+
+        // Preflight has not run yet.
+        $this->assertSame(4 * 1024 * 1024, $state->get('preflight.limits.max_request_bytes'));
+
+        // Server reported a usable limit.
+        $state->set_preflight_record(['data' => ['limits' => ['max_request_bytes' => 8 * 1024 * 1024]]]);
+        $this->assertSame(8 * 1024 * 1024, $state->get('preflight.limits.max_request_bytes'));
+
+        // Server reported 0 (host without a request-size limit): the effective
+        // value falls back to the default while the record keeps the 0.
+        $state->set_preflight_record(['data' => ['limits' => ['max_request_bytes' => 0]]]);
+        $this->assertSame(4 * 1024 * 1024, $state->get('preflight.limits.max_request_bytes'));
+        $this->assertSame(0, $state->preflight_record()['data']['limits']['max_request_bytes']);
+
+        // String and array paths default the same way; null-default paths
+        // report absence as null for the caller to handle.
+        $state = new \PullState();
+        $this->assertSame('wp_', $state->get('preflight.database.wp.table_prefix'));
+        $this->assertSame([], $state->get('preflight.wp_detect.roots'));
+        $this->assertNull($state->get('preflight.database.wp.paths_urls.abspath'));
+
+        // A value of the wrong type is as unusable as a missing one.
+        $state->set_preflight_record(['data' => ['database' => ['wp' => ['table_prefix' => 123]]]]);
+        $this->assertSame('wp_', $state->get('preflight.database.wp.table_prefix'));
+    }
+
+    public function testGetRejectsUnregisteredConfigPaths(): void
+    {
+        $state = new \PullState();
+
+        $this->expectException(\UnexpectedValueException::class);
+        $state->get('preflight.limits.max_request_bytez');
+    }
+
     public function testStateObjectsDoNotExposeArrayOffsetMutation(): void
     {
         $state = new \PullState();

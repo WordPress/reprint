@@ -74,9 +74,9 @@ class RemapResolveTest extends TestCase
     private function client(array $pathsUrls): \ImportClient
     {
         $c = new \ImportClient('https://src.example/export.php', $this->stateDir, $this->fsRoot);
-        $c->get_state()->preflight = array('data' => array(
+        $c->get_state()->set_preflight_record(array('data' => array(
             'database' => array('wp' => array('paths_urls' => $pathsUrls)),
-        ));
+        )));
         return $c;
     }
 
