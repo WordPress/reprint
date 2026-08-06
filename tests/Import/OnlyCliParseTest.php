@@ -64,7 +64,7 @@ class OnlyCliParseTest extends TestCase
     private function runCli(array $args): string
     {
         $entry = __DIR__ . '/../../importer/import.php';
-        $cmd = 'php ' . escapeshellarg($entry);
+        $cmd = escapeshellarg(PHP_BINARY) . ' -d display_startup_errors=0 ' . escapeshellarg($entry);
         foreach ($args as $a) {
             $cmd .= ' ' . escapeshellarg($a);
         }
