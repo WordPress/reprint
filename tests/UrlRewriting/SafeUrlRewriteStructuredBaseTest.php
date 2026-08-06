@@ -84,52 +84,55 @@ class SafeUrlRewriteStructuredBaseTest extends TestCase {
     public function testStructuredUnicodeSourceSubpathPreservesUnmatchedSuffix(): void
     {
         $input = '<!-- wp:image {"url":"https://source.example/żółć/article"} /-->';
-        $result = $this->rewriteBlockMarkup(
-            $input,
-            [self::SOURCE_ORIGIN . '/żółć' => self::TARGET_ORIGIN]
-        );
-        $processor = new BlockMarkupProcessor($result);
+        $expected = '<!-- wp:image {"url":"https://destination.example/article"} /-->';
 
-        $this->assertTrue($processor->next_block_delimiter());
         $this->assertSame(
-            self::TARGET_ORIGIN . '/article',
-            $processor->get_block_attribute('url')
+            $expected,
+            $this->rewriteBlockMarkup(
+                $input,
+                [self::SOURCE_ORIGIN . '/żółć' => self::TARGET_ORIGIN]
+            )
         );
     }
 
     public function testStructuredReplacementUsesTheMatchedMappingsSourceBase(): void
     {
         $input = '<!-- wp:image {"url":"https://assets.example/files/image.jpg"} /-->';
-        $result = $this->rewriteBlockMarkup(
-            $input,
-            [
-                self::SOURCE_ORIGIN => self::TARGET_ORIGIN,
-                'https://assets.example/files' => 'https://cdn.example/static',
-            ]
-        );
-        $processor = new BlockMarkupProcessor($result);
+        $expected = '<!-- wp:image {"url":"https://cdn.example/static/image.jpg"} /-->';
 
-        $this->assertTrue($processor->next_block_delimiter());
         $this->assertSame(
-            'https://cdn.example/static/image.jpg',
-            $processor->get_block_attribute('url')
+            $expected,
+            $this->rewriteBlockMarkup(
+                $input,
+                [
+                    self::SOURCE_ORIGIN => self::TARGET_ORIGIN,
+                    'https://assets.example/files' => 'https://cdn.example/static',
+                ]
+            )
         );
     }
 
     public function testStructuredReplacementPrefersMostSpecificOverlappingSourceBase(): void
     {
         $input = '<a href="https://source.example/blog/post">Post</a>';
+        $expected = '<a href="https://blog-destination.example/articles/post">Post</a>';
+        $mappings = [
+            self::SOURCE_ORIGIN => self::TARGET_ORIGIN,
+            self::SOURCE_ORIGIN . '/blog' => 'https://blog-destination.example/articles',
+        ];
 
-        $this->assertSame(
-            '<a href="https://blog-destination.example/articles/post">Post</a>',
-            $this->rewriteBlockMarkup(
-                $input,
-                [
-                    self::SOURCE_ORIGIN => self::TARGET_ORIGIN,
-                    self::SOURCE_ORIGIN . '/blog' => 'https://blog-destination.example/articles',
-                ]
-            )
-        );
+        foreach (
+            [
+                'broad mapping first' => $mappings,
+                'specific mapping first' => array_reverse($mappings, true),
+            ] as $label => $mapping
+        ) {
+            $this->assertSame(
+                $expected,
+                $this->rewriteBlockMarkup($input, $mapping),
+                $label
+            );
+        }
     }
 
     /**
@@ -334,6 +337,22 @@ class SafeUrlRewriteStructuredBaseTest extends TestCase {
             '/a\\b',
             '/a\\b',
         ];
+        yield 'tab byte' => [
+            "/a\tb",
+            "/a\tb",
+        ];
+        yield 'CRLF bytes' => [
+            "/a\r\nb",
+            "/a\r\nb",
+        ];
+        yield 'NUL byte' => [
+            "/a\0b",
+            "/a\0b",
+        ];
+        yield 'invalid high byte' => [
+            "/a\xFFb",
+            "/a\xFFb",
+        ];
     }
 
     public function testProtocolRelativeAuthorityIsPreservedAcrossStructuredContainers(): void
@@ -367,6 +386,41 @@ class SafeUrlRewriteStructuredBaseTest extends TestCase {
         );
 
         $this->assertSame($expected, $result);
+    }
+
+    /**
+     * @dataProvider rootRelativeKnownHtmlUrlAttributeCases
+     */
+    public function testRootRelativeKnownHtmlUrlAttributeWithoutRawSourceDomainIsRewritten(
+        string $input,
+        string $expected
+    ): void {
+        $this->assertSame(
+            $expected,
+            $this->rewriteBlockMarkup(
+                $input,
+                [self::SOURCE_ORIGIN . '/base' => self::TARGET_ORIGIN . '/target']
+            )
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function rootRelativeKnownHtmlUrlAttributeCases(): iterable
+    {
+        yield 'form action' => [
+            '<form action="/base/submit">Submit</form>',
+            '<form action="/target/submit">Submit</form>',
+        ];
+        yield 'video poster' => [
+            '<video poster="/base/poster.jpg"></video>',
+            '<video poster="/target/poster.jpg"></video>',
+        ];
+        yield 'blockquote cite' => [
+            '<blockquote cite="/base/source">Quote</blockquote>',
+            '<blockquote cite="/target/source">Quote</blockquote>',
+        ];
     }
 
     public function testStructuredSourceProtocolMustMatchExactly(): void
@@ -431,23 +485,39 @@ class SafeUrlRewriteStructuredBaseTest extends TestCase {
             '<a href="https://source.example:443/base/article">Article</a>',
             '<a href="https://destination.example/target/article">Article</a>',
         ];
+        yield 'HTTP mapping has explicit default port' => [
+            'http://source.example:80/base',
+            '<a href="http://source.example/base/article">Article</a>',
+            '<a href="https://destination.example/target/article">Article</a>',
+        ];
+        yield 'HTTP input has explicit default port' => [
+            'http://source.example/base',
+            '<a href="http://source.example:80/base/article">Article</a>',
+            '<a href="https://destination.example/target/article">Article</a>',
+        ];
     }
 
     public function testMostSpecificMappingWinsAfterDefaultPortNormalization(): void
     {
         $input = '<a href="https://source.example/a/post">Post</a>';
         $expected = '<a href="https://specific.example/post">Post</a>';
+        $mappings = [
+            self::SOURCE_ORIGIN . ':443' => 'https://broad.example',
+            self::SOURCE_ORIGIN . '/a' => 'https://specific.example',
+        ];
 
-        $this->assertSame(
-            $expected,
-            $this->rewriteBlockMarkup(
-                $input,
-                [
-                    self::SOURCE_ORIGIN . ':443' => 'https://broad.example',
-                    self::SOURCE_ORIGIN . '/a' => 'https://specific.example',
-                ]
-            )
-        );
+        foreach (
+            [
+                'normalized broad mapping first' => $mappings,
+                'specific mapping first' => array_reverse($mappings, true),
+            ] as $label => $mapping
+        ) {
+            $this->assertSame(
+                $expected,
+                $this->rewriteBlockMarkup($input, $mapping),
+                $label
+            );
+        }
     }
 
     public function testStructuredSourcePathMatchingIsCaseSensitive(): void
@@ -660,6 +730,22 @@ class SafeUrlRewriteStructuredBaseTest extends TestCase {
         );
     }
 
+    public function testHtmlCharacterReferenceEscapedSourceHostPreservesWrapperBytes(): void
+    {
+        $input = "<A  HREF = 'https://sour&#x63;e&#46;example/base/a?x=&#x31;&#38;y=%2f' "
+            . "DATA-X=Keep>x</A>";
+        $expected = "<A  HREF = 'https://destination.example/target/a?x=&#x31;&#38;y=%2f' "
+            . "DATA-X=Keep>x</A>";
+
+        $this->assertSame(
+            $expected,
+            $this->rewriteBlockMarkup(
+                $input,
+                [self::SOURCE_ORIGIN . '/base' => self::TARGET_ORIGIN . '/target']
+            )
+        );
+    }
+
     public function testSuccessfulInlineStyleRewritePreservesAttributeRepresentation(): void
     {
         $input = '<DIV  STYLE = \'color:red; background:url(&quot;'
@@ -749,7 +835,7 @@ class SafeUrlRewriteStructuredBaseTest extends TestCase {
         ];
     }
 
-    public function testCacheEvictionDoesNotChangeRewriteSemantics(): void
+    public function testLargeCachePopulationDoesNotChangeRewriteSemantics(): void
     {
         $rewriter = new StructuredDataUrlRewriter([
             self::SOURCE_ORIGIN . '/base' => self::TARGET_ORIGIN . '/target',
@@ -762,15 +848,16 @@ class SafeUrlRewriteStructuredBaseTest extends TestCase {
             $rewriter->rewrite_known_block_markup_value($first_input)
         );
 
-        // Both rewrite caches hold 4096 entries, so one more unique value
-        // exercises their eviction rings before the first value is repeated.
-        for ($index = 1; $index <= 4096; ++$index) {
-            $result = $rewriter->rewrite_known_block_markup_value(
-                '<a href="/base/' . $index . '">Page</a>'
+        // Populate the rewriter with many unique values and verify each result.
+        for ($index = 1; $index <= 5000; ++$index) {
+            $input = '<a href="/base/' . $index . '">Page</a>';
+            $expected = '<a href="/target/' . $index . '">Page</a>';
+
+            $this->assertSame(
+                $expected,
+                $rewriter->rewrite_known_block_markup_value($input),
+                'Unique value ' . $index
             );
-            if ($index === 4096) {
-                $this->assertSame('<a href="/target/4096">Page</a>', $result);
-            }
         }
 
         $this->assertSame(

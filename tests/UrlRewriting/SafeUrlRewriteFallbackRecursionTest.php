@@ -397,6 +397,14 @@ class SafeUrlRewriteFallbackRecursionTest extends TestCase {
         $this->assertSame($expected, $rewriter->rewrite($input));
     }
 
+    public function testStandaloneCssEscapedSourceHostIsRewrittenExactly(): void
+    {
+        $input = '.x{background:url("https://sour\63 e.example/image.png?next=%2f")}';
+        $expected = '.x{background:url("https://destination.example/image.png?next=%2f")}';
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
+    }
+
     /**
      * @dataProvider malformedCssCases
      */
@@ -487,17 +495,30 @@ class SafeUrlRewriteFallbackRecursionTest extends TestCase {
     /**
      * @dataProvider mostSpecificMappingContainerCases
      */
-    public function testMostSpecificMappingWinsInEveryRecursiveContainer(
+    public function testMostSpecificMappingWinsInCoveredRecursiveContainersRegardlessOfInsertionOrder(
         string $input,
         string $expected,
         ?string $content_type
     ): void {
-        $rewriter = new StructuredDataUrlRewriter([
-            self::SOURCE_URL => self::TARGET_URL,
-            self::SOURCE_URL . '/blog' => 'https://blog-destination.example/articles',
-        ]);
+        $mappings = [
+            'broad mapping first' => [
+                self::SOURCE_URL => self::TARGET_URL,
+                self::SOURCE_URL . '/blog' => 'https://blog-destination.example/articles',
+            ],
+            'specific mapping first' => [
+                self::SOURCE_URL . '/blog' => 'https://blog-destination.example/articles',
+                self::SOURCE_URL => self::TARGET_URL,
+            ],
+        ];
 
-        $this->assertSame($expected, $rewriter->rewrite($input, $content_type));
+        foreach ($mappings as $label => $mapping) {
+            $rewriter = new StructuredDataUrlRewriter($mapping);
+            $this->assertSame(
+                $expected,
+                $rewriter->rewrite($input, $content_type),
+                $label
+            );
+        }
     }
 
     /**
@@ -546,17 +567,74 @@ class SafeUrlRewriteFallbackRecursionTest extends TestCase {
         );
     }
 
-    public function testScriptTextStaysOpaqueWhileAdjacentAnchorRewrites(): void
+    /**
+     * @dataProvider opaqueHtmlRawTextElementCases
+     */
+    public function testOpaqueHtmlRawTextStaysExactWhileAdjacentUrlAttributesRewrite(
+        string $element_name
+    ): void
     {
-        $input = '<script>const endpoint = "https://source.example/api";</script>'
+        $input = '<img src="https://source.example/before.png">'
+            . '<' . $element_name . '>https://source.example/opaque</' . $element_name . '>'
             . '<a href="https://source.example/article">Article</a>';
-        $expected = '<script>const endpoint = "https://source.example/api";</script>'
+        $expected = '<img src="https://destination.example/before.png">'
+            . '<' . $element_name . '>https://source.example/opaque</' . $element_name . '>'
             . '<a href="https://destination.example/article">Article</a>';
 
         $this->assertSame(
             $expected,
             $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
         );
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function opaqueHtmlRawTextElementCases(): iterable
+    {
+        yield 'script' => ['script'];
+        yield 'textarea' => ['textarea'];
+        yield 'title' => ['title'];
+        yield 'xmp' => ['xmp'];
+        yield 'iframe' => ['iframe'];
+        yield 'noembed' => ['noembed'];
+        yield 'noframes' => ['noframes'];
+    }
+
+    public function testDeepMixedPhpJsonPhpCssRecursionPreservesExactBytes(): void
+    {
+        $source_css = '/* https://source.example/comment */'
+            . '.hero{content:"https://source.example/opaque";'
+            . 'background:url("https://source.example/blog/image.png?next=%2f")}';
+        $target_css = '/* https://source.example/comment */'
+            . '.hero{content:"https://source.example/opaque";'
+            . 'background:url("https://destination.example/blog/image.png?next=%2f")}';
+        $source_inner_php = serialize([
+            'css' => $source_css,
+            'label' => 'unchanged',
+        ]);
+        $target_inner_php = serialize([
+            'css' => $target_css,
+            'label' => 'unchanged',
+        ]);
+        $source_json = json_encode([
+            'payload' => $source_inner_php,
+            'label' => 'keep',
+        ]);
+        $target_json = json_encode([
+            'payload' => $target_inner_php,
+            'label' => 'keep',
+        ]);
+        $input = serialize([
+            'document' => $source_json,
+            'tail' => 'unchanged',
+        ]);
+        $expected = serialize([
+            'document' => $target_json,
+            'tail' => 'unchanged',
+        ]);
+
+        $this->assertSame($expected, $this->createRewriter()->rewrite($input));
     }
 
     /**

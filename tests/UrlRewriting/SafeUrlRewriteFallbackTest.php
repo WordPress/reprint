@@ -11,7 +11,8 @@ require_once __DIR__ . '/../../packages/reprint-importer/src/lib/url-rewrite/loa
  *
  * Failure taxonomy:
  * - structured PHP, JSON, and known block attributes keep using their parsers;
- * - ambiguous CSS and shortcode bytes change only at the literal source base;
+ * - recognized URL occurrences in CSS and shortcode-shaped text change without
+ *   altering surrounding bytes;
  * - an exact source path matches, while a longer path segment does not;
  * - a trailing slash in a source base retains the path separator;
  * - percent-encoded and Unicode source paths retain the unmatched suffix bytes;
@@ -67,31 +68,24 @@ class SafeUrlRewriteFallbackTest extends TestCase
             'url' => self::SOURCE_URL . '/image.png',
             'label' => 'unchanged',
         ]);
+        $expected = serialize([
+            'url' => self::TARGET_URL . '/image.png',
+            'label' => 'unchanged',
+        ]);
 
         $result = $this->createRewriter()->rewrite($input);
 
-        $this->assertSame(
-            [
-                'url' => self::TARGET_URL . '/image.png',
-                'label' => 'unchanged',
-            ],
-            unserialize($result)
-        );
+        $this->assertSame($expected, $result);
     }
 
     public function testTopLevelJsonContinuesToRewriteEscapedUrlStringValues(): void
     {
         $input = '{"url":"https:\/\/source.example\/image.png","label":"unchanged"}';
+        $expected = '{"url":"https:\/\/destination.example\/image.png","label":"unchanged"}';
 
         $result = $this->createRewriter()->rewrite($input);
 
-        $this->assertSame(
-            [
-                'url' => self::TARGET_URL . '/image.png',
-                'label' => 'unchanged',
-            ],
-            json_decode($result, true)
-        );
+        $this->assertSame($expected, $result);
     }
 
     public function testKnownBlockAttributeContinuesToUseStructuredUrlReplacement(): void
@@ -99,12 +93,13 @@ class SafeUrlRewriteFallbackTest extends TestCase
         $input = '<!-- wp:image {"url":"https:\/\/source.example\/image.png"} -->'
             . '<img src="https://source.example/image.png">'
             . '<!-- /wp:image -->';
+        $expected = '<!-- wp:image {"url":"https:\/\/destination.example\/image.png"} -->'
+            . '<img src="https://destination.example/image.png">'
+            . '<!-- /wp:image -->';
 
         $result = $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
 
-        $this->assertStringContainsString('"url":"https:\/\/destination.example\/image.png"', $result);
-        $this->assertStringContainsString('src="https://destination.example/image.png"', $result);
-        $this->assertStringNotContainsString('source.example', $result);
+        $this->assertSame($expected, $result);
     }
 
     public function testOuterUrlQueryContainingSourceUrlRemainsUnchanged(): void
@@ -117,43 +112,51 @@ class SafeUrlRewriteFallbackTest extends TestCase
     /**
      * @dataProvider ambiguousTextCases
      */
-    public function testAmbiguousTextChangesOnlyAtLiteralSourceBase(string $input): void
+    public function testRecognizedUrlOccurrencesInAmbiguousTextPreserveOtherBytes(
+        string $input,
+        string $expected
+    ): void
     {
-        $expected = str_replace(self::SOURCE_URL, self::TARGET_URL, $input);
-
         $this->assertSame($expected, $this->createRewriter()->rewrite($input));
     }
 
     /**
-     * @return iterable<string, array{string}>
+     * @return iterable<string, array{string, string}>
      */
     public static function ambiguousTextCases(): iterable
     {
         yield 'unquoted minified CSS URL' => [
             '.hero{background:url(https://source.example/image.png);font-size:64px}',
+            '.hero{background:url(https://destination.example/image.png);font-size:64px}',
         ];
         yield 'quoted minified CSS URL' => [
             '.hero{background:url("https://source.example/image.png");font-size:64px}',
+            '.hero{background:url("https://destination.example/image.png");font-size:64px}',
         ];
         yield 'HTML-entity quoted CSS URL' => [
             '.hero{background:url(&quot;https://source.example/image.png&quot;);font-size:64px}',
+            '.hero{background:url(&quot;https://destination.example/image.png&quot;);font-size:64px}',
         ];
         yield 'two minified CSS URLs' => [
             '.first{background:url(https://source.example/first.png)}'
                 . '.second{background:url(https://source.example/second.png)}',
+            '.first{background:url(https://destination.example/first.png)}'
+                . '.second{background:url(https://destination.example/second.png)}',
         ];
         yield 'shortcode attributes' => [
             '[builder image="https://source.example/image.png";font="64px"]',
+            '[builder image="https://destination.example/image.png";font="64px"]',
         ];
     }
 
     /**
      * @dataProvider ambiguousPostContentCases
      */
-    public function testAmbiguousPostContentChangesOnlyAtLiteralSourceBase(string $input): void
+    public function testRecognizedUrlOccurrencesInAmbiguousPostContentPreserveOtherBytes(
+        string $input,
+        string $expected
+    ): void
     {
-        $expected = str_replace(self::SOURCE_URL, self::TARGET_URL, $input);
-
         $this->assertSame(
             $expected,
             $this->rewriteSqlValue($input, 'wp_posts', 'post_content')
@@ -161,18 +164,21 @@ class SafeUrlRewriteFallbackTest extends TestCase
     }
 
     /**
-     * @return iterable<string, array{string}>
+     * @return iterable<string, array{string, string}>
      */
     public static function ambiguousPostContentCases(): iterable
     {
         yield 'quoted minified CSS' => [
             '.hero{background:url("https://source.example/image.png");font-size:64px}',
+            '.hero{background:url("https://destination.example/image.png");font-size:64px}',
         ];
         yield 'HTML-entity quoted minified CSS' => [
             '.hero{background:url(&quot;https://source.example/image.png&quot;);font-size:64px}',
+            '.hero{background:url(&quot;https://destination.example/image.png&quot;);font-size:64px}',
         ];
         yield 'shortcode' => [
             '[builder image="https://source.example/image.png";font="64px"]',
+            '[builder image="https://destination.example/image.png";font="64px"]',
         ];
     }
 
@@ -287,15 +293,24 @@ class SafeUrlRewriteFallbackTest extends TestCase
 
     public function testCompletePlainUrlPrefersMostSpecificMapping(): void
     {
-        $rewriter = $this->createRewriter([
-            self::SOURCE_URL => self::TARGET_URL,
-            self::SOURCE_URL . '/blog' => 'https://blog-destination.example/articles',
-        ]);
+        $mappings = [
+            'broad mapping first' => [
+                self::SOURCE_URL => self::TARGET_URL,
+                self::SOURCE_URL . '/blog' => 'https://blog-destination.example/articles',
+            ],
+            'specific mapping first' => [
+                self::SOURCE_URL . '/blog' => 'https://blog-destination.example/articles',
+                self::SOURCE_URL => self::TARGET_URL,
+            ],
+        ];
 
-        $this->assertSame(
-            'https://blog-destination.example/articles/post',
-            $rewriter->rewrite(self::SOURCE_URL . '/blog/post')
-        );
+        foreach ($mappings as $label => $mapping) {
+            $this->assertSame(
+                'https://blog-destination.example/articles/post',
+                $this->createRewriter($mapping)->rewrite(self::SOURCE_URL . '/blog/post'),
+                $label
+            );
+        }
     }
 
     public function testPlainProseRewritePreservesEverySurroundingByte(): void
@@ -358,11 +373,18 @@ class SafeUrlRewriteFallbackTest extends TestCase
         $serialized = serialize([
             'url' => self::SOURCE_URL . '/image.png',
         ]);
+        $target_serialized = serialize([
+            'url' => self::TARGET_URL . '/image.png',
+        ]);
         $input = '<!-- wp:example ' . json_encode(['payload' => $serialized]) . ' /-->';
+        $expected = '<!-- wp:example '
+            . json_encode(['payload' => $target_serialized])
+            . ' /-->';
 
         $result = $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
         $processor = new BlockMarkupProcessor($result);
 
+        $this->assertSame($expected, $result);
         $this->assertTrue($processor->next_block_delimiter());
         $this->assertSame(
             ['url' => self::TARGET_URL . '/image.png'],
@@ -375,13 +397,20 @@ class SafeUrlRewriteFallbackTest extends TestCase
         $serialized = serialize([
             'url' => self::SOURCE_URL . '/image.png',
         ]);
+        $target_serialized = serialize([
+            'url' => self::TARGET_URL . '/image.png',
+        ]);
         $input = '<!-- wp:example '
             . json_encode(['settings' => ['payload' => $serialized]])
+            . ' /-->';
+        $expected = '<!-- wp:example '
+            . json_encode(['settings' => ['payload' => $target_serialized]])
             . ' /-->';
 
         $result = $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
         $processor = new BlockMarkupProcessor($result);
 
+        $this->assertSame($expected, $result);
         $this->assertTrue($processor->next_block_delimiter());
         $settings = $processor->get_block_attribute('settings');
         $this->assertIsArray($settings);

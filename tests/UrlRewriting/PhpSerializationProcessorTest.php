@@ -486,6 +486,33 @@ class PhpSerializationProcessorTest extends TestCase
         $this->assertSame($input, $p->get_updated_serialization());
     }
 
+    /**
+     * @dataProvider structurallyInvalidSerializations
+     */
+    public function testStructurallyInvalidSerializationIsMalformed(string $input): void
+    {
+        $processor = new PhpSerializationProcessor($input);
+
+        $this->assertTrue($processor->is_malformed());
+        $this->assertFalse($processor->next_value());
+        $this->assertSame($input, $processor->get_updated_serialization());
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function structurallyInvalidSerializations(): iterable
+    {
+        $url = 'https://old-site.com/page';
+
+        yield 'boolean array key' => [
+            'a:1:{b:1;s:' . strlen($url) . ':"' . $url . '";}',
+        ];
+        yield 'reference to a nonexistent value' => [
+            'a:2:{i:0;R:999;i:1;s:' . strlen($url) . ':"' . $url . '";}',
+        ];
+    }
+
     // ---------------------------------------------------------------
     // Strings containing quotes, semicolons, null bytes
     // ---------------------------------------------------------------

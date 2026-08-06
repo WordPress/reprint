@@ -227,6 +227,12 @@ class StructuredDataUrlRewriterTest extends TestCase
             'a:2:{s:3:"bad";d:not-a-number;'
                 . 's:3:"url";s:' . strlen($url) . ':"' . $url . '";}',
         ];
+        yield 'boolean array key' => [
+            'a:1:{b:1;s:' . strlen($url) . ':"' . $url . '";}',
+        ];
+        yield 'reference to a nonexistent value' => [
+            'a:2:{i:0;R:999;i:1;s:' . strlen($url) . ':"' . $url . '";}',
+        ];
     }
 
     // --- Base64 ---
@@ -391,7 +397,7 @@ class StructuredDataUrlRewriterTest extends TestCase
     {
         $rewriter = $this->createRewriter();
         $input = '<!-- wp:example ["https://old-site.com/article"] -->';
-        $expected = '<!-- wp:example ["https:\/\/new-site.com\/article"] -->';
+        $expected = '<!-- wp:example ["https://new-site.com/article"] -->';
 
         $this->assertSame($expected, $rewriter->rewrite_known_block_markup_value($input));
     }
@@ -402,7 +408,7 @@ class StructuredDataUrlRewriterTest extends TestCase
             'sftp://old-site.com' => 'sftp://new-site.com',
         ]);
         $input = '<!-- wp:example {"url":"sftp://old-site.com/article"} -->';
-        $expected = '<!-- wp:example {"url":"sftp:\/\/new-site.com\/article"} -->';
+        $expected = '<!-- wp:example {"url":"sftp://new-site.com/article"} -->';
 
         $this->assertSame($expected, $rewriter->rewrite_known_block_markup_value($input));
     }
@@ -461,11 +467,11 @@ class StructuredDataUrlRewriterTest extends TestCase
             'https://xn--bcher-kva.example' => 'https://new.example',
         ]);
         $input = '<!-- wp:image {"src":"https://bücher.example/unicode"} -->';
+        $expected = '<!-- wp:image {"src":"https://new.example/unicode"} -->';
 
         $result = $rewriter->rewrite_known_block_markup_value($input);
 
-        $this->assertStringContainsString('https:\/\/new.example\/unicode', $result);
-        $this->assertStringNotContainsString('bücher.example', $result);
+        $this->assertSame($expected, $result);
     }
 
     public function testKnownBlockMarkupRewritesEscapedJsonAndCaseVariantHtmlTogether(): void
@@ -483,16 +489,32 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($expected, $result);
     }
 
-    public function testRewriteCacheSeparatesPlainTextAndBlockMarkupSemantics(): void
+    /**
+     * @dataProvider rewriteCacheCallOrders
+     */
+    public function testRewriteCacheSeparatesPlainTextAndBlockMarkupSemantics(bool $plain_first): void
     {
         $rewriter = $this->createRewriter();
         $input = '<div data-note="https://old-site.com/not-a-url-attribute">Content</div>';
+        $expected_plain = '<div data-note="https://new-site.com/not-a-url-attribute">Content</div>';
 
-        $plain_result = $rewriter->rewrite($input);
-        $block_result = $rewriter->rewrite($input, 'block_markup');
+        if ($plain_first) {
+            $this->assertSame($expected_plain, $rewriter->rewrite($input));
+            $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
+            return;
+        }
 
-        $this->assertStringContainsString('https://new-site.com/not-a-url-attribute', $plain_result);
-        $this->assertSame($input, $block_result);
+        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
+        $this->assertSame($expected_plain, $rewriter->rewrite($input));
+    }
+
+    /**
+     * @return iterable<string, array{bool}>
+     */
+    public static function rewriteCacheCallOrders(): iterable
+    {
+        yield 'plain text first' => [true];
+        yield 'block markup first' => [false];
     }
 
     // --- Content type hint: null (default) uses byte-literal source-base rewriting ---

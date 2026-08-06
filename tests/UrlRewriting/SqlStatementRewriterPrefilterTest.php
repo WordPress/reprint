@@ -268,16 +268,9 @@ class SqlStatementRewriterPrefilterTest extends TestCase
         $rewriter = $this->createRewriter();
         $value = $padding . $scheme . '://old-site.com/marker';
         $sql = $this->buildInsertSql($value);
+        $expected = $padding . $scheme . '://new-site.com/marker';
 
-        $rewritten = $rewriter->rewrite($sql);
-        $decoded = $this->decodeFirstValue($rewritten);
-
-        $this->assertStringContainsString('new-site.com/marker', $decoded);
-        $this->assertStringNotContainsString('old-site.com', $decoded);
-        // Padding bytes survive verbatim.
-        if ($padding !== '') {
-            $this->assertStringStartsWith($padding, $decoded);
-        }
+        $this->assertSame($this->buildInsertSql($expected), $rewriter->rewrite($sql));
     }
 
     public static function cleanBoundaryAlignmentProvider(): array
@@ -308,25 +301,20 @@ class SqlStatementRewriterPrefilterTest extends TestCase
     {
         $rewriter = $this->createRewriter();
         $rows = [];
+        $expected_rows = [];
         for ($alignment = 0; $alignment < 3; $alignment++) {
             $padding = str_repeat(' ', $alignment);
             $value = $padding . 'https://old-site.com/row-' . $alignment;
             $rows[] = "($alignment, FROM_BASE64('" . base64_encode($value) . "'))";
+            $expected_value = $padding . 'https://new-site.com/row-' . $alignment;
+            $expected_rows[] = "($alignment, FROM_BASE64('" . base64_encode($expected_value) . "'))";
         }
         $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES " . implode(',', $rows) . ";";
+        $expected_sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES "
+            . implode(',', $expected_rows)
+            . ";";
 
-        $rewritten = $rewriter->rewrite($sql);
-
-        $scanner = new Base64ValueScanner($rewritten);
-        $found = [];
-        while ($scanner->next_value()) {
-            $found[] = $scanner->get_value();
-        }
-        $this->assertCount(3, $found);
-        for ($i = 0; $i < 3; $i++) {
-            $this->assertStringContainsString("new-site.com/row-{$i}", $found[$i]);
-            $this->assertStringNotContainsString('old-site.com', $found[$i]);
-        }
+        $this->assertSame($expected_sql, $rewriter->rewrite($sql));
     }
 
     /**
@@ -342,14 +330,13 @@ class SqlStatementRewriterPrefilterTest extends TestCase
             $url     = 'https://old-site.com/seg-' . $pad_len;
             $blob    = serialize(['k' => $padding . $url]);
             $sql     = $this->buildInsertSql($blob);
+            $expected_blob = serialize([
+                'k' => $padding . 'https://new-site.com/seg-' . $pad_len,
+            ]);
 
-            $rewritten = $rewriter->rewrite($sql);
-            $decoded   = $this->decodeFirstValue($rewritten);
-            $unser     = unserialize($decoded);
-            $this->assertIsArray($unser, "pad_len={$pad_len} produced invalid serialized output");
             $this->assertSame(
-                $padding . 'https://new-site.com/seg-' . $pad_len,
-                $unser['k'],
+                $this->buildInsertSql($expected_blob),
+                $rewriter->rewrite($sql),
                 "pad_len={$pad_len} did not rewrite URL inside serialized PHP"
             );
         }
@@ -363,14 +350,13 @@ class SqlStatementRewriterPrefilterTest extends TestCase
             $url     = 'https://old-site.com/json-' . $pad_len;
             $blob    = json_encode(['k' => $padding . $url]);
             $sql     = $this->buildInsertSql($blob);
+            $expected_blob = json_encode([
+                'k' => $padding . 'https://new-site.com/json-' . $pad_len,
+            ]);
 
-            $rewritten = $rewriter->rewrite($sql);
-            $decoded   = $this->decodeFirstValue($rewritten);
-            $obj       = json_decode($decoded, true);
-            $this->assertIsArray($obj, "pad_len={$pad_len} produced invalid JSON output");
             $this->assertSame(
-                $padding . 'https://new-site.com/json-' . $pad_len,
-                $obj['k'],
+                $this->buildInsertSql($expected_blob),
+                $rewriter->rewrite($sql),
                 "pad_len={$pad_len} did not rewrite URL inside JSON"
             );
         }
@@ -384,15 +370,14 @@ class SqlStatementRewriterPrefilterTest extends TestCase
             $value   = $padding . '<!-- wp:paragraph --><p><a href="https://old-site.com/p-'
                 . $pad_len . '">L</a></p><!-- /wp:paragraph -->';
             $sql = $this->buildInsertSql($value);
+            $expected_value = $padding . '<!-- wp:paragraph --><p><a href="https://new-site.com/p-'
+                . $pad_len . '">L</a></p><!-- /wp:paragraph -->';
 
-            $rewritten = $rewriter->rewrite($sql);
-            $decoded   = $this->decodeFirstValue($rewritten);
-            $this->assertStringContainsString(
-                'new-site.com/p-' . $pad_len,
-                $decoded,
+            $this->assertSame(
+                $this->buildInsertSql($expected_value),
+                $rewriter->rewrite($sql),
                 "pad_len={$pad_len} did not rewrite URL inside block markup"
             );
-            $this->assertStringNotContainsString('old-site.com', $decoded);
         }
     }
 

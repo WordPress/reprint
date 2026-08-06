@@ -281,15 +281,14 @@ class SqlStatementRewriterTest extends TestCase
             'https://xn--bcher-kva.example' => 'https://new.example',
         ]);
         $markup = '<!-- wp:image {"src":"https://bücher.example/unicode"} -->';
+        $expected_markup = '<!-- wp:image {"src":"https://new.example/unicode"} -->';
         $encoded = base64_encode($markup);
         $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
+        $expected_sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('"
+            . base64_encode($expected_markup)
+            . "'));";
 
-        $result = $rewriter->rewrite($sql);
-
-        $values = $this->collectValues($result);
-        $this->assertCount(1, $values);
-        $this->assertStringContainsString('https:\/\/new.example\/unicode', $values[0]);
-        $this->assertStringNotContainsString('bücher.example', $values[0]);
+        $this->assertSame($expected_sql, $rewriter->rewrite($sql));
     }
 
     public function testCommentContentUsesBlockMarkup(): void
@@ -555,33 +554,37 @@ class SqlStatementRewriterTest extends TestCase
         ]);
 
         $block = '<!-- wp:image {"url":"https://old-site.com/img.jpg"} -->'
-               . '<img src="https://old-site.com/img.jpg"/>'
-               . '<!-- /wp:image -->';
+            . '<div data-note="https://old-site.com/opaque">'
+            . '<img src="https://old-site.com/img.jpg"/>'
+            . '</div><!-- /wp:image -->';
         $encoded = base64_encode($block);
 
         // wp_posts.post_content → block_markup: rewrites both the JSON
-        // attribute and the <img> src correctly.
+        // attribute and the <img> src, but not the opaque data attribute.
         $sql_real = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-        $result_real = $rewriter->rewrite($sql_real);
-        $values_real = $this->collectValues($result_real);
-        $this->assertStringContainsString('new-longer-domain-site.com/img.jpg', $values_real[0]);
-        // The JSON attribute should still be valid inside the block comment.
-        // The block parser JSON-encodes attribute values, so slashes are escaped.
-        $this->assertStringContainsString(
-            '"url":"https:\/\/new-longer-domain-site.com\/img.jpg"',
-            $values_real[0],
-            'block_markup should correctly rewrite the JSON attribute inside the block comment'
-        );
+        $expected_real = '<!-- wp:image {"url":"https://new-longer-domain-site.com/img.jpg"} -->'
+            . '<div data-note="https://old-site.com/opaque">'
+            . '<img src="https://new-longer-domain-site.com/img.jpg"/>'
+            . '</div><!-- /wp:image -->';
+        $expected_sql_real = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('"
+            . base64_encode($expected_real)
+            . "'));";
+
+        $this->assertSame($expected_sql_real, $rewriter->rewrite($sql_real));
 
         // spoofed_posts.post_content → auto-detect (not block_markup): the
         // column name matches but the table doesn't, so it falls through to
         // literal source-base rewriting.
         $sql_spoof = "INSERT INTO `spoofed_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
-        $result_spoof = $rewriter->rewrite($sql_spoof);
-        $values_spoof = $this->collectValues($result_spoof);
-        // The URL is still rewritten (auto-detect handles it). The key point:
-        // the spoofed table was NOT given the block_markup hint.
-        $this->assertStringContainsString('new-longer-domain-site.com', $values_spoof[0]);
+        $expected_spoof = '<!-- wp:image {"url":"https://new-longer-domain-site.com/img.jpg"} -->'
+            . '<div data-note="https://new-longer-domain-site.com/opaque">'
+            . '<img src="https://new-longer-domain-site.com/img.jpg"/>'
+            . '</div><!-- /wp:image -->';
+        $expected_sql_spoof = "INSERT INTO `spoofed_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('"
+            . base64_encode($expected_spoof)
+            . "'));";
+
+        $this->assertSame($expected_sql_spoof, $rewriter->rewrite($sql_spoof));
     }
 
     public function testConsumerHintForUnprefixedPluginTable(): void
