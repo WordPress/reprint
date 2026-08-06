@@ -204,7 +204,10 @@ class ImportClient
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
 
-    /** @var bool Whether stdout is a TTY (enables interactive progress display). */
+    /**
+     * @var bool Whether the progress stream is a TTY, enabling interactive
+     *           progress and terminal colors.
+     */
     private $is_tty;
 
     /** @var int Running count of files pulled in the current invocation. */
@@ -439,8 +442,9 @@ class ImportClient
         $this->volatile_files_file = $this->pull_state_directory . "/volatile-files.json";
         $this->progress_file = $this->state_dir . "/progress.json";
 
-        // Detect TTY for progress display. In stdout mode this is re-evaluated
-        // against STDERR in run() once we know the output mode.
+        // Detect TTY for progress display and terminal colors. In stdout mode
+        // this is re-evaluated against STDERR in run() once the output mode is
+        // known.
         $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
         $this->progress_fd = STDOUT;
         $this->progress = new TerminalProgress($this->is_tty, $this->progress_fd);
@@ -1422,6 +1426,8 @@ class ImportClient
                 'directory' => 'dir',
                 'symlink' => 'link',
             ];
+            $red = !$jsonl_output && $this->is_tty ? "\033[31m" : '';
+            $reset = $red === '' ? '' : "\033[0m";
             $local_paths_to_push_count = 0;
             foreach (
                 $this->read_planned_local_paths_to_push($plan->get_local_paths_to_push_path())
@@ -1441,7 +1447,11 @@ class ImportClient
                     if ($local_path_to_push === false) {
                         throw new RuntimeException('Failed to decode a path in the completed local paths-to-push list.');
                     }
-                    $line = '+ ' . $this->format_files_diff_path($local_path_to_push) . "\n";
+                    $line = $red
+                        . 'modified: '
+                        . $this->format_files_diff_path($local_path_to_push)
+                        . $reset
+                        . "\n";
                 }
                 if (fwrite($this->progress_fd, $line) !== strlen($line)) {
                     throw new RuntimeException('Failed to write the files-diff result.');
@@ -1460,7 +1470,11 @@ class ImportClient
                         'action' => 'delete',
                         'path_b64' => base64_encode($local_path_to_delete),
                     ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
-                    : '- ' . $this->format_files_diff_path($local_path_to_delete) . "\n";
+                    : $red
+                        . 'deleted: '
+                        . $this->format_files_diff_path($local_path_to_delete)
+                        . $reset
+                        . "\n";
                 if (fwrite($this->progress_fd, $line) !== strlen($line)) {
                     throw new RuntimeException('Failed to write the files-diff result.');
                 }
@@ -11644,7 +11658,7 @@ if (
             'name' => 'jsonl',
             'type' => 'flag',
             'target' => 'jsonl',
-            'help' => 'Write machine-readable JSONL instead of the default path diff',
+            'help' => 'Write machine-readable JSONL instead of the default status lines',
             'commands' => ['files-diff'],
         ],
 
@@ -12488,7 +12502,9 @@ if (
                 "default-skipped paths include generated wp-content caches, version-\n" .
                 "control data, node_modules, package-manager caches, OS metadata, and\n" .
                 "editor scratch files.\n" .
-                "The default path diff marks pushes with + and deletions with -.\n" .
+                "Default status lines label paths to push as modified and paths to\n" .
+                "delete as deleted. They use color on a terminal and plain text when\n" .
+                "redirected.\n" .
                 "With --jsonl, paths remain base64 text so arbitrary filesystem names\n" .
                 "are preserved. No network calls are made, and no secret is required.\n",
             "extra" =>

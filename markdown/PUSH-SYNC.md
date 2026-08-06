@@ -511,10 +511,12 @@ network request. It runs one complete PushPlan against the local index in
 `<remote-state-directory>/push/files-diff-plan/` while the command holds the
 state-directory-wide Reprint process lock.
 
-Default output is a path diff: `+` marks each local path to push and `-` marks
-each local path to delete. Paths containing unsafe bytes use C-style quoting
-so one path always occupies one output line. `--jsonl`
-explicitly selects the previous machine-readable contract. Each selected
+Default output uses `modified: PATH` for each local path to push and
+`deleted: PATH` for each local path to delete. Both use Git's red status color
+on a TTY and plain text when redirected. Paths containing unsafe bytes use
+C-style quoting so one path always occupies one output line. `--jsonl`
+explicitly selects the previous uncolored machine-readable contract. Each
+selected
 current file, symlink, or empty directory then has `action: "push"`,
 `path_b64`, `type`, `size`, and `ctime`; its type is `file`, `dir`, or `link`.
 Each selected local deletion has `action: "delete"` and `path_b64`. Type

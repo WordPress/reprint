@@ -15,7 +15,7 @@ require_once __DIR__ . '/../../client/cli.php';
  * files-diff compares the filesystem root with the local index for the remote
  * Reprint API URL — the index a completed files-push writes —
  * without contacting the target, and reports the complete diff on every run.
- * These tests pin that contract: local-only operation, the default path diff,
+ * These tests pin that contract: local-only operation, the default status lines,
  * explicit JSONL records, arbitrary path bytes, the local-index requirement,
  * no mutation of the local index, and a complete report after an interrupted
  * run.
@@ -80,7 +80,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertSame('', $result['stderr']);
     }
 
-    public function testFilesDiffPrintsGitLikePathChangesByDefault(): void
+    public function testFilesDiffPrintsStatusLinesByDefault(): void
     {
         $this->writeLocalIndex(array_keys($this->initialFiles));
         file_put_contents($this->filesystemRoot . '/added.txt', 'new file');
@@ -97,10 +97,52 @@ final class FilesDiffCommandTest extends TestCase
 
         $this->assertSame(0, $result['exit'], $result['output']);
         $this->assertSame(
-            "+ added.txt\n+ \"bell-\\a.txt\"\n+ \"line\\nbreak.txt\"\n- deleted.txt\n",
+            "modified: added.txt\n"
+            . "modified: \"bell-\\a.txt\"\n"
+            . "modified: \"line\\nbreak.txt\"\n"
+            . "deleted: deleted.txt\n",
             $result['stdout']
         );
         $this->assertSame('', $result['stderr']);
+    }
+
+    public function testFilesDiffColorsOnlyStatusLinesOnATerminal(): void
+    {
+        if (!function_exists('posix_isatty') || PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('This test requires POSIX pseudoterminal support.');
+        }
+        $this->writeLocalIndex(array_keys($this->initialFiles));
+        file_put_contents($this->filesystemRoot . '/added.txt', 'new file');
+        unlink($this->filesystemRoot . '/deleted.txt');
+
+        $result = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+        ], true);
+
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertSame(
+            "\033[31mmodified: added.txt\033[0m\n"
+            . "\033[31mdeleted: deleted.txt\033[0m\n",
+            str_replace("\r\n", "\n", $result['stdout'])
+        );
+        $this->assertSame('', $result['stderr']);
+
+        $jsonlResult = $this->runCli([
+            'files-diff',
+            $this->remoteReprintApiUrl,
+            '--state-dir=' . $this->stateDirectory,
+            '--fs-root=' . $this->filesystemRoot,
+            '--jsonl',
+        ], true);
+
+        $this->assertSame(0, $jsonlResult['exit'], $jsonlResult['output']);
+        $this->assertStringNotContainsString("\033[", $jsonlResult['stdout']);
+        $this->assertStringContainsString('"action":"push"', $jsonlResult['stdout']);
+        $this->assertStringContainsString('"action":"delete"', $jsonlResult['stdout']);
+        $this->assertSame('', $jsonlResult['stderr']);
     }
 
     public function testFilesDiffReportsAddedEditedDeletedAndTypeChangedPaths(): void
@@ -495,12 +537,14 @@ final class FilesDiffCommandTest extends TestCase
         ], $extraArguments));
     }
 
-    /** @param list<string> $arguments
-     *  @return array{exit:int,stdout:string,stderr:string,output:string}
+    /**
+     * @param list<string> $arguments CLI arguments.
+     * @param bool         $stdoutIsTty Whether stdout uses a pseudoterminal.
+     * @return array{exit:int,stdout:string,stderr:string,output:string}
      */
-    private function runCli(array $arguments): array
+    private function runCli(array $arguments, bool $stdoutIsTty = false): array
     {
-        [$process, $pipes] = $this->startCliProcess($arguments);
+        [$process, $pipes] = $this->startCliProcess($arguments, $stdoutIsTty);
         $stdout = stream_get_contents($pipes[1]);
         $stderr = stream_get_contents($pipes[2]);
         fclose($pipes[1]);
@@ -516,14 +560,20 @@ final class FilesDiffCommandTest extends TestCase
         ];
     }
 
-    /** @param list<string> $arguments
-     *  @return array{0:resource,1:array<int,resource>}
+    /**
+     * @param list<string> $arguments CLI arguments.
+     * @param bool         $stdoutIsTty Whether stdout uses a pseudoterminal.
+     * @return array{0:resource,1:array<int,resource>}
      */
-    private function startCliProcess(array $arguments): array
+    private function startCliProcess(array $arguments, bool $stdoutIsTty = false): array
     {
         $process = proc_open(
             array_merge([PHP_BINARY, __DIR__ . '/../../client/cli.php'], $arguments),
-            [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+            [
+                ['pipe', 'r'],
+                $stdoutIsTty ? ['pty'] : ['pipe', 'w'],
+                ['pipe', 'w'],
+            ],
             $pipes,
             $this->root
         );

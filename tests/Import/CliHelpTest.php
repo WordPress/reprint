@@ -143,7 +143,8 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('target confirms', $output);
         $this->assertStringContainsString('push operation plan', $output);
         $this->assertStringContainsString('default-skipped paths', $output);
-        $this->assertStringContainsString('default path diff', $output);
+        $this->assertStringContainsString('Default status lines', $output);
+        $this->assertStringContainsString('color on a terminal', $output);
         $this->assertStringContainsString('No network calls', $output);
         $this->assertStringContainsString('complete diff from the beginning', $output);
         $this->assertStringNotContainsString('--runtime', $output);
