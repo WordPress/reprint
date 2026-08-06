@@ -515,11 +515,13 @@ final class PushPlanTest extends TestCase
             'plan_directory',
             'filesystem_root',
             'local_index_file',
+            'push_root_local_relative_path',
             'position',
         ], array_keys($cursor));
         $this->assertSame($this->planDirectory(), $cursor['plan_directory']);
         $this->assertSame(realpath($this->filesystemRoot()), $cursor['filesystem_root']);
         $this->assertSame($this->localIndexFile(), $cursor['local_index_file']);
+        $this->assertSame('', $cursor['push_root_local_relative_path']);
         $this->assertSame([
             'phase',
             'byte_offset_in_fresh_local_index',
@@ -631,13 +633,45 @@ final class PushPlanTest extends TestCase
         );
     }
 
+    public function testPlanAppliesPushRootToDeletionPathsAndTargetExclusions(): void
+    {
+        $this->saveLocalIndex($this->writeIndex([
+            'var/www/html/deleted.txt' => [100, 5, 'file'],
+        ]));
+        $current = $this->writeIndex([
+            'var/www/html/added.txt' => [300, 3, 'file'],
+            'var/www/html/preserved/value.txt' => [300, 3, 'file'],
+        ]);
+
+        $plan = $this->startPlan(
+            $current,
+            ['preserved'],
+            'var/www/html'
+        );
+        $plan->close();
+        $plan = $this->resumePlan();
+        $this->planToCompletion($plan);
+
+        $this->assertSame(
+            ['var/www/html/added.txt'],
+            $this->listPaths($this->planPath('local_paths_to_push.jsonl'))
+        );
+        $this->assertSame(
+            "deleted.txt\0",
+            file_get_contents($this->planPath('local_paths_to_delete'))
+        );
+    }
+
     // ------------------------------------------------------------------
     //  Helpers
     // ------------------------------------------------------------------
 
     /** @param list<string> $excludedPaths */
-    private function startPlan(?string $filesystemRootDescriptionFile = null, array $excludedPaths = []): PushPlan
-    {
+    private function startPlan(
+        ?string $filesystemRootDescriptionFile = null,
+        array $excludedPaths = [],
+        string $pushRootLocalRelativePath = ''
+    ): PushPlan {
         if ($filesystemRootDescriptionFile === null) {
             $filesystemRootDescriptionFile = $this->tempDir . '/empty-filesystem-root.jsonl';
             if (!is_file($filesystemRootDescriptionFile)) {
@@ -659,7 +693,8 @@ final class PushPlanTest extends TestCase
             $this->planDirectory(),
             $this->filesystemRoot(),
             $this->localIndexFile(),
-            $this->excludedPathsPath()
+            $this->excludedPathsPath(),
+            $pushRootLocalRelativePath
         );
         $this->cursor = $plan->get_cursor();
         for ($step = 0; $step < 100; ++$step) {

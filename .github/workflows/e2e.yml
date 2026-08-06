@@ -150,8 +150,13 @@ jobs:
             PUSH_PROBE="files-push-version-${{ matrix.importer_php }}"
             rm -rf "$PUSH_STATE_DIR" "$PUSH_FS_ROOT"
             mkdir -p "$PUSH_FS_ROOT"
+            PUSH_REMOTE_URL="${BASE}&directory=${DIR}&version_gate_probe=${PUSH_PROBE}"
+            # Seed the mandatory preflight, then clear that setup request so the
+            # access-log assertion below covers only files-push.
+            "$IMPORTER_PHP" "$IMPORTER_PATH" preflight "$PUSH_REMOTE_URL" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --secret="${SECRET}" >/dev/null
+            sudo truncate -s 0 /var/log/nginx/access.log
             set +e
-            files_push_version_output="$("$IMPORTER_PHP" "$IMPORTER_PATH" files-push "${BASE}&directory=${DIR}&version_gate_probe=${PUSH_PROBE}" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --secret="${SECRET}" --force-http 2>&1)"
+            files_push_version_output="$("$IMPORTER_PHP" "$IMPORTER_PATH" files-push "$PUSH_REMOTE_URL" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --secret="${SECRET}" --force-http 2>&1)"
             files_push_version_status=$?
             set -e
             if [ "$files_push_version_status" -ne 1 ]; then

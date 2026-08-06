@@ -123,14 +123,17 @@
  *
  * @phpstan-type LocalPathTypeSizeAndCtime array{type:'file'|'directory'|'symlink',size:int,ctime:int}
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
- * @phpstan-type LocalPathToPush array{path:string,path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
+ * @phpstan-type LocalPathToPush array{local_relative_path:string,push_root_relative_path:string,push_root_relative_path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',push_root_local_relative_path:string,push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
     /** @var string Filesystem root whose local paths to push are sent. */
     private string $filesystem_root;
+
+    /** @var string Push root relative to the local filesystem root. */
+    private string $push_root_local_relative_path;
 
     /** @var string Local push state directory owned by this sender. */
     private string $push_state_directory;
@@ -234,7 +237,8 @@ final class PushFilesSender
      * @param array $options {
      *     Push, push stream client, and local-file options.
      *
-     *     @type string                  $filesystem_root                Required filesystem root directory.
+     *     @type string                  $filesystem_root         Required filesystem root directory.
+     *     @type string                  $push_root               Required remote absolute push root.
      *     @type string                  $push_state_directory    Required local push state directory.
      *     @type string                  $remote_reprint_api_url  Required remote Reprint API URL.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
@@ -269,6 +273,7 @@ final class PushFilesSender
             $sender->state = [
                 'push_session_id' => bin2hex(random_bytes(16)),
                 'phase' => 'creating',
+                'push_root_local_relative_path' => $sender->push_root_local_relative_path,
                 'push_plan_cursor' => null,
                 'local_paths_to_push_byte_offset' => 0,
                 'local_paths_to_push_count' => null,
@@ -335,6 +340,8 @@ final class PushFilesSender
     private function __construct(array $options, ReprintProcessLock $process_lock)
     {
         $filesystem_root = $options['filesystem_root'] ?? null;
+        /** @var string $push_root */
+        $push_root = $options['push_root'];
         $push_state_directory = $options['push_state_directory'] ?? null;
         if (!is_string($filesystem_root) || !is_dir($filesystem_root) || is_link($filesystem_root)) {
             throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
@@ -366,6 +373,7 @@ final class PushFilesSender
             throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
         }
         $this->filesystem_root = rtrim($resolved_local_filesystem_root, '/');
+        $this->push_root_local_relative_path = trim($push_root, '/');
         $this->process_lock = $process_lock;
         $this->push_state_directory = rtrim($push_state_directory, '/');
         $this->plan_directory = $this->push_state_directory . '/plan';
@@ -620,7 +628,8 @@ final class PushFilesSender
             $this->plan_directory,
             $this->filesystem_root,
             $this->local_index_file,
-            $this->excluded_paths_path
+            $this->excluded_paths_path,
+            $this->state['push_root_local_relative_path']
         );
         $this->state['push_plan_cursor'] = $this->plan->get_cursor();
         $this->state['phase'] = 'planning';
@@ -710,7 +719,7 @@ final class PushFilesSender
         }
 
         $planned_local_path_type_size_and_ctime = $local_path_to_push['planned_local_path_type_size_and_ctime'];
-        $local_path_type_size_and_ctime = $this->stat_local_path($local_path_to_push['path']);
+        $local_path_type_size_and_ctime = $this->stat_local_path($local_path_to_push['local_relative_path']);
 
         // A path which disappeared belongs in a newly generated plan, not this upload-only session.
         if ($local_path_type_size_and_ctime === null) {
@@ -748,7 +757,7 @@ final class PushFilesSender
         } else {
             $request_result = $this->push_stream_client->send_push_request('GET', 'push_status', [
                 'push_session_id' => $this->state['push_session_id'],
-                'path_b64' => $local_path_to_push['path_b64'],
+                'path_b64' => $local_path_to_push['push_root_relative_path_b64'],
             ], ['accepted']);
             if ($this->handle_request_failure($request_result)) {
                 return;
@@ -784,12 +793,12 @@ final class PushFilesSender
 
         // Directory and symlink values each fit in one MIME part and need no byte cursor.
         if ($local_path_type_size_and_ctime['type'] === 'directory') {
-            $directory_is_empty = $this->directory_is_empty($local_path_to_push['path']);
+            $directory_is_empty = $this->directory_is_empty($local_path_to_push['local_relative_path']);
             if ($directory_is_empty === null) {
-                $this->fail('local_io_error', 'Could not read the local directory to push: ' . base64_encode($local_path_to_push['path']) . '.');
+                $this->fail('local_io_error', 'Could not read the local directory to push: ' . base64_encode($local_path_to_push['local_relative_path']) . '.');
                 return;
             }
-            $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
+            $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['local_relative_path']);
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
                 $this->start_removing_push_session_after_local_change();
@@ -807,13 +816,13 @@ final class PushFilesSender
             }
             $upload_part = [
                 'type' => 'directory',
-                'path' => $local_path_to_push['path'],
+                'path' => $local_path_to_push['push_root_relative_path'],
                 'payload' => '',
             ];
             $upload_completes_local_path = true;
         } elseif ($local_path_type_size_and_ctime['type'] === 'symlink') {
-            $symlink_target = @readlink($this->filesystem_root . '/' . $local_path_to_push['path']);
-            $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
+            $symlink_target = @readlink($this->filesystem_root . '/' . $local_path_to_push['local_relative_path']);
+            $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['local_relative_path']);
             if ($local_path_type_size_and_ctime_after_read === null) {
                 $this->close_local_paths_to_push_handle();
                 $this->start_removing_push_session_after_local_change();
@@ -825,12 +834,12 @@ final class PushFilesSender
                 return;
             }
             if ($symlink_target === false) {
-                $this->fail('local_io_error', 'Could not read the local symlink target to push: ' . base64_encode($local_path_to_push['path']) . '.');
+                $this->fail('local_io_error', 'Could not read the local symlink target to push: ' . base64_encode($local_path_to_push['local_relative_path']) . '.');
                 return;
             }
             $upload_part = [
                 'type' => 'symlink',
-                'path' => $local_path_to_push['path'],
+                'path' => $local_path_to_push['push_root_relative_path'],
                 'target' => $symlink_target,
                 'payload' => '',
             ];
@@ -840,7 +849,7 @@ final class PushFilesSender
         // A file contributes at most one bounded chunk during this call and remains open for the next.
         if ($local_path_type_size_and_ctime['type'] === 'file') {
             $maximum_file_payload_bytes = $this->push_stream_client->next_file_body_bytes(
-                $local_path_to_push['path'],
+                $local_path_to_push['push_root_relative_path'],
                 $local_path_type_size_and_ctime['size'],
                 $file_byte_offset
             );
@@ -849,7 +858,7 @@ final class PushFilesSender
                     $this->upload_request_stage = 'finishing';
                     return;
                 }
-                $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.');
+                $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['local_relative_path']) . '.');
                 return;
             }
 
@@ -858,18 +867,18 @@ final class PushFilesSender
                 $local_io_failure_detail = null;
                 if (!is_resource($this->local_file_handle)) {
                     $this->local_file_handle = fopen(
-                        $this->filesystem_root . '/' . $local_path_to_push['path'],
+                        $this->filesystem_root . '/' . $local_path_to_push['local_relative_path'],
                         'rb'
                     );
                 }
 
                 if (!is_resource($this->local_file_handle)) {
-                    $local_io_failure_detail = 'Could not open the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
+                    $local_io_failure_detail = 'Could not open the local file to push: ' . base64_encode($local_path_to_push['local_relative_path']) . '.';
                 } else {
                     if ($this->local_file_byte_offset !== $file_byte_offset) {
                         if (fseek($this->local_file_handle, $file_byte_offset) !== 0) {
                             $this->close_local_file_handle();
-                            $local_io_failure_detail = 'Could not seek to the receiver-confirmed cursor in the local file to push: ' . base64_encode($local_path_to_push['path']) . '.';
+                            $local_io_failure_detail = 'Could not seek to the receiver-confirmed cursor in the local file to push: ' . base64_encode($local_path_to_push['local_relative_path']) . '.';
                         } else {
                             $this->local_file_byte_offset = $file_byte_offset;
                         }
@@ -882,7 +891,7 @@ final class PushFilesSender
                     }
                 }
 
-                $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['path']);
+                $local_path_type_size_and_ctime_after_read = $this->stat_local_path($local_path_to_push['local_relative_path']);
                 if ($local_path_type_size_and_ctime_after_read === null) {
                     $this->close_local_file_handle();
                     $this->close_local_paths_to_push_handle();
@@ -901,14 +910,14 @@ final class PushFilesSender
                 }
                 if (!is_string($payload) || ( $payload === '' && $file_byte_offset < $local_path_type_size_and_ctime['size'] )) {
                     $this->close_local_file_handle();
-                    $this->fail('local_io_error', 'Could not read the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['path']) . '.');
+                    $this->fail('local_io_error', 'Could not read the local file to push at its receiver-confirmed cursor: ' . base64_encode($local_path_to_push['local_relative_path']) . '.');
                     return;
                 }
             }
 
             $upload_part = [
                 'type' => 'file',
-                'path' => $local_path_to_push['path'],
+                'path' => $local_path_to_push['push_root_relative_path'],
                 'total_bytes' => $local_path_type_size_and_ctime['size'],
                 'offset' => $file_byte_offset,
                 'payload' => $payload,
@@ -942,7 +951,7 @@ final class PushFilesSender
             if ($this->status !== 'continue') {
                 return;
             }
-            $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['path']) . '.');
+            $this->fail('request_size_exhausted', 'The current request-body budget cannot fit one MIME part for path ' . base64_encode($local_path_to_push['local_relative_path']) . '.');
             return;
         }
 
@@ -1397,14 +1406,22 @@ final class PushFilesSender
             throw new RuntimeException('Failed to decode a local path to push.', 0, $exception);
         }
         /** @var array{path:string,type:'file'|'directory'|'symlink',size:int,ctime:int} $decoded_local_path */
-        $path_b64 = $decoded_local_path['path'];
-        $path = base64_decode($path_b64, true);
-        if ($path === false) {
+        $local_relative_path = base64_decode($decoded_local_path['path'], true);
+        if ($local_relative_path === false) {
             throw new RuntimeException('Failed to decode a path in the local paths-to-push file.');
         }
+        $push_root_local_relative_path = $this->state['push_root_local_relative_path'];
+        if ($push_root_local_relative_path === '') {
+            $push_root_relative_path = $local_relative_path;
+        } else {
+            $push_root_relative_path = $local_relative_path === $push_root_local_relative_path
+                ? ''
+                : substr($local_relative_path, strlen($push_root_local_relative_path) + 1);
+        }
         return [
-            'path' => $path,
-            'path_b64' => $path_b64,
+            'local_relative_path' => $local_relative_path,
+            'push_root_relative_path' => $push_root_relative_path,
+            'push_root_relative_path_b64' => base64_encode($push_root_relative_path),
             'next_local_paths_to_push_byte_offset' => $next_local_paths_to_push_byte_offset,
             'planned_local_path_type_size_and_ctime' => [
                 'type' => $decoded_local_path['type'],
