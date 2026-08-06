@@ -305,10 +305,10 @@ FileIndexProcessor cursor and the committed byte offset in
 output offsets, and the active byte offset in
 `deleted_directories_stack.jsonl`. The stack file is append-only; each entry
 links to the preceding active directory. The exclusions have a maximum of 100
-paths. The `sender.json` phases are `creating`, `starting_plan`,
-`planning`, `pushing_paths`, `pushing_deletes`, `committing`,
-`saving_local_index`, `completing`,
-`removing`, and `discarding_plan`. It stores the push session ID, selected
+paths. The `sender.json` phases are `creating`, `finishing_previous_commit`,
+`starting_plan`, `planning`, `pushing_paths`, `pushing_deletes`, `committing`,
+`saving_local_index`, `completing`, `removing`, and `discarding_plan`. It stores
+both the current and blocking push session IDs, selected
 path-list cursor, selected local-path count, target-confirmed local-path count,
 receiver part limit, and request-sizing state. The index diff cursor retains
 the selected local-path count as it builds the path list, and its complete
@@ -429,6 +429,8 @@ Use these names verbatim inside `PushFilesSender`:
 | Open upload request stage | `$upload_request_stage`: `closed`, `sending_parts`, or `finishing` |
 | Whether the open request has sent parts | `MultipartPushStreamClient::has_sent_parts()` |
 | Create push session | `create_push_session()` |
+| Blocking push session ID | `blocking_push_session_id`, `$blocking_push_session_id` |
+| Finish previous commit | `finishing_previous_commit`, `finish_previous_commit()` |
 | Remove push session | `remove_push_session()` |
 | Upload next file chunk | `upload_next_file_chunk()` |
 | Upload next chunk of deleted paths | `upload_next_chunk_of_deleted_paths()` |
@@ -486,8 +488,8 @@ Use these names verbatim inside `PushPlan`:
 
 The work-upload endpoint is `push_upload` and its push-session parameter is
 `push_session_id`. Endpoint names and endpoint prefixes begin with `push_`.
-JSON responses use `push_session_id`, `receiving_work`, and
-`work_deletes_bytes`. Push-session failures are
+JSON responses use `push_session_id`, `blocking_push_session_id`,
+`receiving_work`, and `work_deletes_bytes`. Push-session failures are
 `lock_acquisition_failure`, `offset_gap`, `push_not_found`, `filesystem_error`,
 `commit_required`, `unexpected_docroot_mutation`, `corrupted_push_state`, and
 `same_device`. Authentication, authorization, and request-boundary failures

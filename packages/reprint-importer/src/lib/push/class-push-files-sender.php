@@ -125,7 +125,7 @@
  * @phpstan-type LocalPathStat array{type:'file'|'directory'|'symlink'|'unsupported',size:int,ctime:int}
  * @phpstan-type LocalPathToPush array{local_relative_path:string,document_root_relative_path:string,document_root_relative_path_b64:string,next_local_paths_to_push_byte_offset:int,planned_local_path_type_size_and_ctime:LocalPathTypeSizeAndCtime}
  * @phpstan-type LocalPathToDelete array{path:string,delete_list_byte_offset:int,next_delete_list_byte_offset:int}
- * @phpstan-type State array{push_session_id:string,phase:'creating'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',document_root_local_relative_path:string,push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
+ * @phpstan-type State array{push_session_id:string,blocking_push_session_id:string|null,phase:'creating'|'finishing_previous_commit'|'starting_plan'|'planning'|'pushing_paths'|'pushing_deletes'|'committing'|'saving_local_index'|'completing'|'removing'|'discarding_plan',document_root_local_relative_path:string,push_plan_cursor:array<string,mixed>|null,local_paths_to_push_byte_offset:int,local_paths_to_push_count:int|null,local_paths_pushed:int,max_part_bytes:int|null,request_sizer_state:array{request_body_bytes:int,ceiling_bytes:int|null}}
  */
 final class PushFilesSender
 {
@@ -272,6 +272,7 @@ final class PushFilesSender
             $sender->push_stream_client = $sender->create_push_stream_client(null);
             $sender->state = [
                 'push_session_id' => bin2hex(random_bytes(16)),
+                'blocking_push_session_id' => null,
                 'phase' => 'creating',
                 'document_root_local_relative_path' => $sender->document_root_local_relative_path,
                 'push_plan_cursor' => null,
@@ -411,6 +412,9 @@ final class PushFilesSender
         switch ($this->state['phase']) {
             case 'creating':
                 $this->create_push_session();
+                break;
+            case 'finishing_previous_commit':
+                $this->finish_previous_commit();
                 break;
             case 'starting_plan':
                 $this->start_plan();
@@ -575,6 +579,14 @@ final class PushFilesSender
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_create', [
             'push_session_id' => $this->state['push_session_id'],
         ], ['created']);
+        if ($request_result['reason'] === 'commit_required') {
+            /** @var array{blocking_push_session_id:string} $response */
+            $response = $request_result['response'];
+            $this->state['blocking_push_session_id'] = $response['blocking_push_session_id'];
+            $this->state['phase'] = 'finishing_previous_commit';
+            $this->store_state($this->state);
+            return;
+        }
         if ($this->handle_request_failure($request_result)) {
             return;
         }
@@ -603,6 +615,37 @@ final class PushFilesSender
         $this->state['max_part_bytes'] = $response['max_part_bytes'];
         $this->state['request_sizer_state'] = $this->push_stream_client->get_request_sizer_state();
         $this->state['phase'] = 'starting_plan';
+        $this->store_state($this->state);
+    }
+
+    /**
+     * Advances the commit which prevents this sender from creating its push session.
+     *
+     * One step sends one commit request. The target owns that commit checkpoint,
+     * so a later process can continue it from the saved blocking push session ID.
+     */
+    private function finish_previous_commit(): void
+    {
+        $blocking_push_session_id = $this->state['blocking_push_session_id'];
+        if ($blocking_push_session_id === null) {
+            throw new LogicException(
+                'The finishing_previous_commit phase requires a blocking_push_session_id.'
+            );
+        }
+        $request_result = $this->push_stream_client->send_push_request('POST', 'push_commit', [
+            'push_session_id' => $blocking_push_session_id,
+        ], ['accepted']);
+        if ($this->handle_request_failure($request_result)) {
+            return;
+        }
+        /** @var array{send_next_request:bool} $response */
+        $response = $request_result['response'];
+
+        if ($response['send_next_request']) {
+            return;
+        }
+        $this->state['blocking_push_session_id'] = null;
+        $this->state['phase'] = 'creating';
         $this->store_state($this->state);
     }
 

@@ -187,6 +187,9 @@ final class Site_Export_Push_Endpoints {
      * - `post_max_bytes`: the decoded request-body limit, or null.
      * - `excluded_paths_b64`: the stored excluded paths in base64.
      *
+     * An HTTP 409 `commit_required` response also contains
+     * `blocking_push_session_id`, which names the commit that must finish first.
+     *
      * @param array $config {
      *     Create request parameters.
      *
@@ -563,6 +566,12 @@ final class Site_Export_Push_Endpoints {
                 'reason' => $reason,
                 'detail' => $exception->getMessage(),
             ];
+            if ($reason === Site_Export_Push_Session::ERROR_COMMIT_REQUIRED) {
+                $context = $exception->get_context();
+                if (is_string($context['blocking_push_session_id'] ?? null)) {
+                    $response['blocking_push_session_id'] = $context['blocking_push_session_id'];
+                }
+            }
             if ($reason === Site_Export_Push_Session::ERROR_REQUEST_TOO_LARGE) {
                 $context = $exception->get_context();
                 if (is_int($context['observed_request_body_bytes'] ?? null)) {
