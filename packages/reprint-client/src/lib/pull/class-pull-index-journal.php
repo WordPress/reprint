@@ -1,7 +1,6 @@
 <?php
 
 use function Reprint\Importer\merge_local_index_mutations;
-use function Reprint\Importer\read_remote_index_entry;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\write_local_index_update;
 use function WordPress\Reprint\Exporter\relative_path_under;
@@ -235,9 +234,8 @@ class PullIndexJournal
             "INDEX MERGE START | merging pull index WAL into {$this->remote_index_path}",
         );
 
-        $remote_index_file_handle = file_exists($this->remote_index_path)
-            ? fopen($this->remote_index_path, "r")
-            : null;
+        $remote_index_reader = new RemoteIndexReader($this->remote_index_path);
+        $remote_index_reader->open();
         $pull_index_wal_file_handle = fopen($this->pull_index_wal_path, "r");
         $remote_index_replacement_file_handle = fopen($remote_index_replacement_file, "w");
 
@@ -260,7 +258,7 @@ class PullIndexJournal
             }
         };
 
-        $remote_index_entry = read_remote_index_entry($remote_index_file_handle);
+        $remote_index_entry = $remote_index_reader->next_entry();
         $remote_index_update_lookahead = null;
         $remote_index_update = $this->read_remote_index_update(
             $pull_index_wal_file_handle,
@@ -274,7 +272,7 @@ class PullIndexJournal
                     $write_remote_index_entry($remote_index_replacement_file_handle, $remote_index_entry);
                     $last_written_remote_index_entry_path = $remote_index_entry["path"];
                 }
-                $remote_index_entry = read_remote_index_entry($remote_index_file_handle);
+                $remote_index_entry = $remote_index_reader->next_entry();
                 continue;
             }
 
@@ -302,7 +300,7 @@ class PullIndexJournal
                     $write_remote_index_entry($remote_index_replacement_file_handle, $remote_index_update);
                     $last_written_remote_index_entry_path = $remote_index_update["path"];
                 }
-                $remote_index_entry = read_remote_index_entry($remote_index_file_handle);
+                $remote_index_entry = $remote_index_reader->next_entry();
                 $remote_index_update = $this->read_remote_index_update(
                     $pull_index_wal_file_handle,
                     $remote_index_update_lookahead
@@ -312,7 +310,7 @@ class PullIndexJournal
                     $write_remote_index_entry($remote_index_replacement_file_handle, $remote_index_entry);
                     $last_written_remote_index_entry_path = $remote_index_entry["path"];
                 }
-                $remote_index_entry = read_remote_index_entry($remote_index_file_handle);
+                $remote_index_entry = $remote_index_reader->next_entry();
             } else {
                 if (
                     !$remote_index_update["delete"] &&
@@ -328,9 +326,7 @@ class PullIndexJournal
             }
         }
 
-        if ($remote_index_file_handle) {
-            fclose($remote_index_file_handle);
-        }
+        $remote_index_reader->close();
         fclose($pull_index_wal_file_handle);
         fclose($remote_index_replacement_file_handle);
 

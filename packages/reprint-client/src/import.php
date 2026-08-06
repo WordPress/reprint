@@ -25,8 +25,6 @@ use Reprint\Importer\Tuning\AdaptiveTuner;
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
-use function Reprint\Importer\parse_index_line;
-use function Reprint\Importer\read_remote_index_entry;
 use function Reprint\Importer\register_sqlite_function;
 use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
@@ -103,8 +101,8 @@ require_once __DIR__ . '/lib/import/load.php';
 // High-level pull commands — orchestrate lower-level commands into pipelines
 require_once __DIR__ . '/lib/pull/class-pull.php';
 
-// Pull index journal — the WAL for completed files-pull mutations.
-require_once __DIR__ . '/lib/pull/remote-index-functions.php';
+// Pull index reader and the WAL for completed files-pull mutations.
+require_once __DIR__ . '/lib/pull/class-remote-index-reader.php';
 require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
 
 /**
@@ -3934,18 +3932,17 @@ class ImportClient
         // the map, so the counts we derive are always deduplicated.
         $size_by_path = [];
 
-        if (is_file($next_remote_index_file)) {
-            $next_remote_index_file_handle = fopen($next_remote_index_file, "r");
-            if ($next_remote_index_file_handle) {
-                while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
-                    $next_remote_index_entry = parse_index_line($next_remote_index_json_line);
-                    if ($next_remote_index_entry === null) {
-                        continue;
-                    }
-                    $size_by_path[$next_remote_index_entry["path"]] = $next_remote_index_entry["size"];
-                }
-                fclose($next_remote_index_file_handle);
+        $next_remote_index_reader = new RemoteIndexReader($next_remote_index_file);
+        try {
+            $next_remote_index_reader->open();
+        } catch (RuntimeException $exception) {
+            $next_remote_index_reader = null;
+        }
+        if ($next_remote_index_reader !== null) {
+            while (($next_remote_index_entry = $next_remote_index_reader->next_entry()) !== null) {
+                $size_by_path[$next_remote_index_entry["path"]] = $next_remote_index_entry["size"];
             }
+            $next_remote_index_reader->close();
         }
 
         $indexed_count = count($size_by_path);
@@ -6574,20 +6571,31 @@ class ImportClient
             throw new RuntimeException("Failed to open fetch list file");
         }
 
-        $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
-        if (!$next_remote_index_file_handle) {
+        $next_remote_index_reader = new RemoteIndexReader(
+            $this->next_remote_index_file
+        );
+        try {
+            $next_remote_index_reader->open();
+            if ($next_remote_index_byte_offset > 0) {
+                $next_remote_index_reader->seek_to_byte_offset(
+                    $next_remote_index_byte_offset
+                );
+            }
+        } catch (RuntimeException $exception) {
+            $next_remote_index_reader->close();
             fclose($fetch_list_file_handle);
-            throw new RuntimeException("Failed to open next remote index file");
-        }
-        if ($next_remote_index_byte_offset > 0) {
-            fseek($next_remote_index_file_handle, $next_remote_index_byte_offset);
+            throw $exception;
         }
 
-        $remote_index_file_handle = file_exists($this->remote_index_file)
-            ? fopen($this->remote_index_file, "r")
-            : null;
-        $remote_index_entry =
-            read_remote_index_entry($remote_index_file_handle);
+        $remote_index_reader = new RemoteIndexReader($this->remote_index_file);
+        try {
+            $remote_index_reader->open();
+        } catch (RuntimeException $exception) {
+            $next_remote_index_reader->close();
+            fclose($fetch_list_file_handle);
+            throw $exception;
+        }
+        $remote_index_entry = $remote_index_reader->next_entry();
         if ($last_consumed_remote_index_entry_path) {
             while (
                 $remote_index_entry !== null &&
@@ -6596,14 +6604,13 @@ class ImportClient
                     $last_consumed_remote_index_entry_path,
                 ) <= 0
             ) {
-                $remote_index_entry =
-                    read_remote_index_entry($remote_index_file_handle);
+                $remote_index_entry = $remote_index_reader->next_entry();
             }
         }
         $this->pull_index_journal->open();
         $next_remote_index_entries_processed = 0;
 
-        while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
+        while (($next_remote_index_entry = $next_remote_index_reader->next_entry()) !== null) {
             if ($this->shutdown_requested) {
                 break;
             }
@@ -6612,11 +6619,7 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $next_remote_index_byte_offset = ftell($next_remote_index_file_handle);
-            $next_remote_index_entry = parse_index_line($next_remote_index_json_line);
-            if (!$next_remote_index_entry) {
-                continue;
-            }
+            $next_remote_index_byte_offset = $next_remote_index_reader->byte_offset();
 
             while (
                 $remote_index_entry !== null &&
@@ -6647,8 +6650,7 @@ class ImportClient
                 }
                 $last_consumed_remote_index_entry_path =
                     $remote_index_entry["path"];
-                $remote_index_entry =
-                    read_remote_index_entry($remote_index_file_handle);
+                $remote_index_entry = $remote_index_reader->next_entry();
             }
 
             if (
@@ -6672,8 +6674,7 @@ class ImportClient
                 }
                 $last_consumed_remote_index_entry_path =
                     $remote_index_entry["path"];
-                $remote_index_entry =
-                    read_remote_index_entry($remote_index_file_handle);
+                $remote_index_entry = $remote_index_reader->next_entry();
             } elseif (
                 $this->is_selected_for_pulling($next_remote_index_entry["path"], true) &&
                 (
@@ -6735,14 +6736,11 @@ class ImportClient
             }
             $last_consumed_remote_index_entry_path =
                 $remote_index_entry["path"];
-            $remote_index_entry =
-                read_remote_index_entry($remote_index_file_handle);
+            $remote_index_entry = $remote_index_reader->next_entry();
         }
 
-        if ($remote_index_file_handle) {
-            fclose($remote_index_file_handle);
-        }
-        fclose($next_remote_index_file_handle);
+        $remote_index_reader->close();
+        $next_remote_index_reader->close();
         fclose($fetch_list_file_handle);
 
         $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
@@ -8211,26 +8209,25 @@ class ImportClient
             return $this->next_remote_index_prefix_cache[$remote_absolute_path];
         }
 
-        if (!file_exists($this->next_remote_index_file)) {
-            $this->next_remote_index_prefix_cache[$remote_absolute_path] = false;
-            return false;
-        }
-
-        $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
-        if (!$next_remote_index_file_handle) {
+        $next_remote_index_reader = new RemoteIndexReader(
+            $this->next_remote_index_file
+        );
+        try {
+            $next_remote_index_reader->open();
+        } catch (RuntimeException $exception) {
             $this->next_remote_index_prefix_cache[$remote_absolute_path] = false;
             return false;
         }
 
         $path_prefix_found = false;
-        while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
+        while (true) {
             try {
-                $next_remote_index_entry = parse_index_line($next_remote_index_json_line);
+                $next_remote_index_entry = $next_remote_index_reader->next_entry();
             } catch (RuntimeException $e) {
                 continue;
             }
             if ($next_remote_index_entry === null) {
-                continue;
+                break;
             }
             $next_remote_index_entry_path = $next_remote_index_entry["path"];
             if (path_is_within_root($next_remote_index_entry_path, $remote_absolute_path)) {
@@ -8238,7 +8235,7 @@ class ImportClient
                 break;
             }
         }
-        fclose($next_remote_index_file_handle);
+        $next_remote_index_reader->close();
 
         $this->next_remote_index_prefix_cache[$remote_absolute_path] = $path_prefix_found;
         return $path_prefix_found;
